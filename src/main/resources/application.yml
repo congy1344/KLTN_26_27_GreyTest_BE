@@ -2,7 +2,7 @@ spring:
   application:
     name: greytest
   datasource:
-    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/greytest}
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5433/greytest}
     username: ${SPRING_DATASOURCE_USERNAME:greytest}
     password: ${SPRING_DATASOURCE_PASSWORD:greytest_password}
   jpa:

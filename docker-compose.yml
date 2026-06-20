@@ -6,7 +6,8 @@ services:
       POSTGRES_USER: greytest
       POSTGRES_PASSWORD: greytest_password
     ports:
-      - "5432:5432"
+      # Host 5433 để tránh đụng Postgres native (nếu có) đang chiếm 5432
+      - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
