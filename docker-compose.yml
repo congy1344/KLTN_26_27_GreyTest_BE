@@ -1,0 +1,29 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: greytest
+      POSTGRES_USER: greytest
+      POSTGRES_PASSWORD: greytest_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  backend:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/greytest
+      SPRING_DATASOURCE_USERNAME: greytest
+      SPRING_DATASOURCE_PASSWORD: greytest_password
+      LLM_API_KEY: ${LLM_API_KEY:-}
+    depends_on:
+      - postgres
+
+  # ponytail: FE chạy local bằng `npm run dev` (proxy /api -> :8080) cho tới khi cần deploy.
+  # Thêm service frontend + Dockerfile khi build production.
+
+volumes:
+  postgres_data:

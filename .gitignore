@@ -1,0 +1,12 @@
+target/
+*.class
+.env
+*.log
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# CodeGraph index (local)
+.codegraph/
