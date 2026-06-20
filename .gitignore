@@ -3,6 +3,9 @@ target/
 .env
 *.log
 
+# Source code upload/clone của user (không commit)
+storage/
+
 # IDE
 .idea/
 *.iml
