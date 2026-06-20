@@ -16,6 +16,10 @@ spring:
   flyway:
     enabled: true
     baseline-on-migrate: true
+  servlet:
+    multipart:
+      max-file-size: 50MB
+      max-request-size: 50MB
 
 server:
   port: 8080
@@ -23,6 +27,11 @@ server:
 springdoc:
   swagger-ui:
     path: /swagger-ui.html
+
+# Thư mục lưu source code đã upload/clone
+greytest:
+  storage:
+    path: ${GREYTEST_STORAGE_PATH:./storage}
 
 # API key LLM lấy từ env, KHÔNG commit (xem .env.example)
 llm:
