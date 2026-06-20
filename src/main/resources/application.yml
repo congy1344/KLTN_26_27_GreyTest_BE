@@ -7,12 +7,15 @@ spring:
     password: ${SPRING_DATASOURCE_PASSWORD:greytest_password}
   jpa:
     hibernate:
-      # ponytail: update đủ cho giai đoạn dev; chuyển sang Flyway khi schema ổn định
-      ddl-auto: update
+      # Flyway quản lý schema; JPA chỉ validate entity khớp với DB
+      ddl-auto: validate
     open-in-view: false
     properties:
       hibernate:
         format_sql: true
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
 
 server:
   port: 8080
