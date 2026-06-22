@@ -66,6 +66,7 @@ class DataLayerIntegrationTest {
         JavaClass javaClass = new JavaClass();
         javaClass.setProjectId(project.getId());
         javaClass.setClassName("UserService");
+        javaClass.setQualifiedName("com.example.UserService");
         javaClass = javaClassRepository.save(javaClass);
 
         JavaMethod method = new JavaMethod();

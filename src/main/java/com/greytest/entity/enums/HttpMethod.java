@@ -1,9 +1,13 @@
 package com.greytest.entity.enums;
 
 public enum HttpMethod {
+    ANY,
     GET,
+    HEAD,
     POST,
     PUT,
     DELETE,
-    PATCH
+    PATCH,
+    OPTIONS,
+    TRACE
 }

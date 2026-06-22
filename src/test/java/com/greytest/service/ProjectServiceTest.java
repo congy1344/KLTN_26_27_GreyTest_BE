@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.doThrow;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -24,10 +25,12 @@ import com.greytest.entity.enums.ProjectStatus;
 import com.greytest.entity.enums.SourceType;
 import com.greytest.exception.InvalidProjectSourceException;
 import com.greytest.exception.ProjectNotFoundException;
+import com.greytest.exception.SourceAnalysisException;
 import com.greytest.mapper.ProjectMapper;
 import com.greytest.repository.ProjectRepository;
 import com.greytest.service.storage.FileStorageService;
 import com.greytest.service.storage.GithubService;
+import com.greytest.service.analysis.AnalysisService;
 
 @ExtendWith(MockitoExtension.class)
 class ProjectServiceTest {
@@ -38,9 +41,12 @@ class ProjectServiceTest {
     private FileStorageService fileStorageService;
     @Mock
     private GithubService githubService;
+    @Mock
+    private AnalysisService analysisService;
 
     private ProjectService service() {
-        return new ProjectService(projectRepository, fileStorageService, githubService, new ProjectMapper());
+        return new ProjectService(
+                projectRepository, fileStorageService, githubService, new ProjectMapper(), analysisService);
     }
 
     @Test
@@ -59,7 +65,8 @@ class ProjectServiceTest {
         assertThat(dto.id()).isEqualTo(1L);
         assertThat(dto.name()).isEqualTo("demo");
         assertThat(dto.sourceType()).isEqualTo(SourceType.ZIP);
-        assertThat(dto.status()).isEqualTo(ProjectStatus.UPLOADED);
+        assertThat(dto.status()).isEqualTo(ProjectStatus.ANALYZED);
+        verify(analysisService).analyze(1L);
     }
 
     @Test
@@ -69,6 +76,25 @@ class ProjectServiceTest {
         assertThatThrownBy(() -> service().createFromZip(
                 new MockMultipartFile("file", "x.zip", "application/zip", new byte[] {1})))
                 .isInstanceOf(InvalidProjectSourceException.class);
+
+        verify(fileStorageService).delete(dir);
+    }
+
+    @Test
+    void removesStoredSourceWhenAutomaticAnalysisFails(@TempDir Path dir) throws IOException {
+        Files.writeString(dir.resolve("pom.xml"), "<project/>");
+        when(fileStorageService.storeZip(any())).thenReturn(dir);
+        when(projectRepository.save(any())).thenAnswer(invocation -> {
+            Project project = invocation.getArgument(0);
+            project.setId(1L);
+            return project;
+        });
+        doThrow(new SourceAnalysisException("Source lỗi"))
+                .when(analysisService).analyze(1L);
+
+        assertThatThrownBy(() -> service().createFromZip(
+                new MockMultipartFile("file", "demo.zip", "application/zip", new byte[] {1})))
+                .isInstanceOf(SourceAnalysisException.class);
 
         verify(fileStorageService).delete(dir);
     }

@@ -34,7 +34,7 @@ class ProjectControllerTest {
     private ProjectService projectService;
 
     private ProjectDto sampleDto() {
-        return new ProjectDto(1L, "demo", SourceType.ZIP, null, ProjectStatus.UPLOADED, LocalDateTime.now());
+        return new ProjectDto(1L, "demo", SourceType.ZIP, null, ProjectStatus.ANALYZED, LocalDateTime.now());
     }
 
     @Test
@@ -45,7 +45,7 @@ class ProjectControllerTest {
                         .file(new MockMultipartFile("file", "demo.zip", "application/zip", new byte[] {1})))
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.id").value(1))
-                .andExpect(jsonPath("$.status").value("UPLOADED"));
+                .andExpect(jsonPath("$.status").value("ANALYZED"));
     }
 
     @Test

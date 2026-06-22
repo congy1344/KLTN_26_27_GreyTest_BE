@@ -20,6 +20,7 @@ import com.greytest.exception.ProjectNotFoundException;
 import com.greytest.exception.StorageException;
 import com.greytest.mapper.ProjectMapper;
 import com.greytest.repository.ProjectRepository;
+import com.greytest.service.analysis.AnalysisService;
 import com.greytest.service.storage.FileStorageService;
 import com.greytest.service.storage.GithubService;
 
@@ -39,16 +40,19 @@ public class ProjectService {
     private final FileStorageService fileStorageService;
     private final GithubService githubService;
     private final ProjectMapper projectMapper;
+    private final AnalysisService analysisService;
 
     public ProjectService(
             ProjectRepository projectRepository,
             FileStorageService fileStorageService,
             GithubService githubService,
-            ProjectMapper projectMapper) {
+            ProjectMapper projectMapper,
+            AnalysisService analysisService) {
         this.projectRepository = projectRepository;
         this.fileStorageService = fileStorageService;
         this.githubService = githubService;
         this.projectMapper = projectMapper;
+        this.analysisService = analysisService;
     }
 
     @Transactional
@@ -56,8 +60,7 @@ public class ProjectService {
         Path dir = fileStorageService.storeZip(file);
         requireSpringBootProject(dir);
         Project project = save(stripZipExtension(file.getOriginalFilename()), SourceType.ZIP, null, dir);
-        log.info("Tạo project {} từ ZIP tại {}", project.getId(), dir);
-        return projectMapper.toDto(project);
+        return analyzeImportedProject(project, dir, "ZIP");
     }
 
     @Transactional
@@ -65,8 +68,7 @@ public class ProjectService {
         Path dir = githubService.clone(url);
         requireSpringBootProject(dir);
         Project project = save(repoName(url), SourceType.GITHUB, url, dir);
-        log.info("Tạo project {} từ GitHub {} tại {}", project.getId(), url, dir);
-        return projectMapper.toDto(project);
+        return analyzeImportedProject(project, dir, "GitHub " + url);
     }
 
     @Transactional(readOnly = true)
@@ -97,6 +99,19 @@ public class ProjectService {
         project.setStoragePath(dir.toString());
         project.setStatus(ProjectStatus.UPLOADED);
         return projectRepository.save(project);
+    }
+
+    private ProjectDto analyzeImportedProject(Project project, Path dir, String sourceDescription) {
+        try {
+            analysisService.analyze(project.getId());
+            project.setStatus(ProjectStatus.ANALYZED);
+            log.info("Tạo và phân tích project {} từ {} tại {}", project.getId(), sourceDescription, dir);
+            return projectMapper.toDto(project);
+        } catch (RuntimeException exception) {
+            // DB transaction sẽ rollback; source trên filesystem cần được dọn riêng.
+            fileStorageService.delete(dir);
+            throw exception;
+        }
     }
 
     private Project findOrThrow(Long id) {

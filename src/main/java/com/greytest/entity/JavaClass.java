@@ -33,6 +33,9 @@ public class JavaClass {
 
     private String className;
 
+    @Column(length = 1000, nullable = false)
+    private String qualifiedName;
+
     private String filePath;
 
     @Enumerated(EnumType.STRING)

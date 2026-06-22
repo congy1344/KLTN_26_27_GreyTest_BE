@@ -5,5 +5,7 @@ public enum ClassType {
     CONTROLLER,
     REPOSITORY,
     ENTITY,
+    ENUM,
+    RECORD,
     OTHER
 }

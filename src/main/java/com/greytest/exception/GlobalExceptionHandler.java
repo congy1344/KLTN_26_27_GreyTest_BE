@@ -43,6 +43,19 @@ public class GlobalExceptionHandler {
                 .body(new ErrorResponse("FILE_TOO_LARGE", "File upload vượt quá giới hạn cho phép"));
     }
 
+    @ExceptionHandler(InvalidProjectStatusException.class)
+    public ResponseEntity<ErrorResponse> handleInvalidStatus(InvalidProjectStatusException e) {
+        return ResponseEntity.status(HttpStatus.CONFLICT)
+                .body(new ErrorResponse("INVALID_STATUS", e.getMessage()));
+    }
+
+    @ExceptionHandler(SourceAnalysisException.class)
+    public ResponseEntity<ErrorResponse> handleSourceAnalysis(SourceAnalysisException e) {
+        log.warn("Không thể phân tích source: {}", e.getMessage());
+        return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY)
+                .body(new ErrorResponse("ANALYSIS_ERROR", e.getMessage()));
+    }
+
     @ExceptionHandler(StorageException.class)
     public ResponseEntity<ErrorResponse> handleStorage(StorageException e) {
         log.error("Lỗi lưu trữ file", e);
