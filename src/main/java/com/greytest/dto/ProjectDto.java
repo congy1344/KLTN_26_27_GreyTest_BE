@@ -11,5 +11,6 @@ public record ProjectDto(
         SourceType sourceType,
         String sourceUrl,
         ProjectStatus status,
-        LocalDateTime createdAt) {
+        LocalDateTime createdAt,
+        boolean sourceAvailable) {
 }

@@ -1,5 +1,6 @@
 package com.greytest.service.analysis;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -22,6 +23,7 @@ import com.greytest.entity.Project;
 import com.greytest.entity.ServiceRepositoryRelation;
 import com.greytest.entity.enums.ClassType;
 import com.greytest.entity.enums.ProjectStatus;
+import com.greytest.exception.InvalidProjectSourceException;
 import com.greytest.exception.InvalidProjectStatusException;
 import com.greytest.exception.ProjectNotFoundException;
 import com.greytest.repository.EndpointRepository;
@@ -83,6 +85,7 @@ public class AnalysisService {
     public AnalysisResultDto analyze(Long projectId) {
         Project project = findOrThrow(projectId);
         validateStatus(project);
+        Path sourceDir = resolveSourceDir(project);
 
         log.info("Bắt đầu phân tích project: {} (id={})", project.getName(), projectId);
 
@@ -92,7 +95,6 @@ public class AnalysisService {
             cleanupOldData(projectId);
         }
 
-        Path sourceDir = Path.of(project.getStoragePath());
         SourceScanResult sourceScan = parserHelper.scanProject(sourceDir);
         List<ParsedFile> parsedFiles = sourceScan.productionFiles();
         log.info("Đã parse {} production file .java, loại {} existing test files",
@@ -237,7 +239,7 @@ public class AnalysisService {
     @Transactional(readOnly = true)
     public AnalysisResultDto getAnalysisResult(Long projectId) {
         Project project = findOrThrow(projectId);
-        int existingTestFileCount = parserHelper.countExistingTestFiles(Path.of(project.getStoragePath()));
+        int existingTestFileCount = countExistingTestFilesIfSourceExists(project);
         return resultBuilder.build(project, existingTestFileCount);
     }
 
@@ -257,10 +259,37 @@ public class AnalysisService {
         }
     }
 
+    private Path resolveSourceDir(Project project) {
+        if (project.getStoragePath() == null || project.getStoragePath().isBlank()) {
+            throw new InvalidProjectSourceException(
+                    "Project khong con duong dan source. Hay upload ZIP hoac clone GitHub lai de phan tich.");
+        }
+        Path sourceDir = Path.of(project.getStoragePath());
+        if (!Files.isDirectory(sourceDir)) {
+            throw new InvalidProjectSourceException(
+                    "Thu muc source khong con ton tai: " + sourceDir
+                            + ". Hay upload ZIP hoac clone GitHub lai de phan tich lai.");
+        }
+        return sourceDir;
+    }
+
     private void cleanupOldData(Long projectId) {
         // Cascade sẽ xóa methods, endpoints, relations liên quan tại DB level
         classRepository.deleteByProjectId(projectId);
         classRepository.flush();
+    }
+
+    private int countExistingTestFilesIfSourceExists(Project project) {
+        if (project.getStoragePath() == null || project.getStoragePath().isBlank()) {
+            return 0;
+        }
+        Path sourceDir = Path.of(project.getStoragePath());
+        if (!Files.isDirectory(sourceDir)) {
+            log.warn("Bo qua dem existing tests vi khong con thu muc source cua project {} tai {}",
+                    project.getId(), sourceDir);
+            return 0;
+        }
+        return parserHelper.countExistingTestFiles(sourceDir);
     }
 
     private String qualifiedTypeName(String packageName, TypeDeclaration<?> typeDecl) {
