@@ -67,11 +67,12 @@ class AnalysisControllerTest {
     @Test
     void exportsAnalysisManifest() throws Exception {
         when(manifestService.exportManifest(1L)).thenReturn(new AnalysisManifestDto(
-                1L, "demo", "1.0", List.of("demo.User"), List.of(), List.of(), List.of()));
+                1L, "demo", "1.1", List.of("demo.User"), List.of(), List.of(),
+                List.of(), List.of(), List.of()));
 
         mockMvc.perform(get("/api/projects/1/analysis/manifest"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.manifestVersion").value("1.0"))
+                .andExpect(jsonPath("$.manifestVersion").value("1.1"))
                 .andExpect(jsonPath("$.classes[0]").value("demo.User"));
     }
 
@@ -82,7 +83,7 @@ class AnalysisControllerTest {
         ManifestCategoryDiffDto match = new ManifestCategoryDiffDto(0, 0, true, List.of(), List.of());
         when(manifestService.validateManifest(org.mockito.ArgumentMatchers.eq(1L),
                 org.mockito.ArgumentMatchers.any())).thenReturn(new AnalysisManifestValidationDto(
-                        1L, "demo", false, mismatch, match, match, match));
+                        1L, "demo", false, mismatch, match, match, match, match, match));
 
         mockMvc.perform(post("/api/projects/1/analysis/manifest/validate")
                         .contentType("application/json")
@@ -91,6 +92,8 @@ class AnalysisControllerTest {
                                   "classes": ["demo.Expected"],
                                   "methods": [],
                                   "endpoints": [],
+                                  "annotations": [],
+                                  "controllerServiceRelations": [],
                                   "serviceRepositoryRelations": []
                                 }
                                 """))
@@ -101,6 +104,8 @@ class AnalysisControllerTest {
     }
 
     private AnalysisResultDto result() {
-        return new AnalysisResultDto(1L, "demo", "ANALYZED", 0, 0, 0, 0, 0, List.of(), List.of());
+        return new AnalysisResultDto(1L, "demo", "ANALYZED", 0, 0, 0, 0, 0, 0,
+                0, 0, 0, List.of(),
+                List.of(), List.of(), List.of());
     }
 }

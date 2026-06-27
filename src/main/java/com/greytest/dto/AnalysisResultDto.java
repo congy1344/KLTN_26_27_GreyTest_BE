@@ -10,8 +10,14 @@ public record AnalysisResultDto(
         int totalMethods,
         int totalEndpoints,
         int totalRelations,
+        int totalControllerServiceRelations,
         int existingTestFiles,
+        int totalProductionFiles,
+        int parsedProductionFiles,
+        int failedParseFiles,
+        List<String> failedParseFilePaths,
         List<JavaClassDto> classes,
-        List<ServiceRelationDto> relations
+        List<ServiceRelationDto> relations,
+        List<ControllerServiceRelationDto> controllerServiceRelations
 ) {
 }

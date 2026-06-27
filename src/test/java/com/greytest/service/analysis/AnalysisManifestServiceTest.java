@@ -12,10 +12,12 @@ import com.greytest.dto.AnalysisManifestDto;
 import com.greytest.dto.AnalysisManifestInput;
 import com.greytest.dto.AnalysisManifestValidationDto;
 import com.greytest.dto.AnalysisResultDto;
+import com.greytest.dto.ControllerServiceRelationDto;
 import com.greytest.dto.EndpointDto;
 import com.greytest.dto.JavaClassDto;
 import com.greytest.dto.JavaMethodDto;
 import com.greytest.dto.MethodParamDto;
+import com.greytest.dto.RelevantAnnotationDto;
 import com.greytest.dto.ServiceRelationDto;
 
 class AnalysisManifestServiceTest {
@@ -32,8 +34,13 @@ class AnalysisManifestServiceTest {
                 "demo.UserController#find(Long):User");
         assertThat(manifest.endpoints()).containsExactly(
                 "GET /users/{id} -> demo.UserController#find(Long):User");
+        assertThat(manifest.annotations()).containsExactly(
+                "CLASS demo.UserController COMPONENT @RestController",
+                "METHOD demo.UserController#find(Long):User ENDPOINT @GetMapping(\"/users/{id}\")");
         assertThat(manifest.serviceRepositoryRelations()).containsExactly(
                 "demo.UserController -> demo.UserRepository");
+        assertThat(manifest.controllerServiceRelations()).containsExactly(
+                "demo.UserController#find -> demo.UserRepository#findById via userRepository");
     }
 
     @Test
@@ -44,7 +51,9 @@ class AnalysisManifestServiceTest {
                 List.of("demo.Expected", "demo.UserRepository"),
                 actual.methods(),
                 List.of(),
-                actual.serviceRepositoryRelations());
+                actual.annotations(),
+                actual.serviceRepositoryRelations(),
+                actual.controllerServiceRelations());
 
         AnalysisManifestValidationDto validation = service.validateManifest(1L, expected);
 
@@ -68,6 +77,8 @@ class AnalysisManifestServiceTest {
                 "User find(Long id) { return null; }",
                 10,
                 12,
+                List.of(new RelevantAnnotationDto(
+                        7L, "METHOD", "ENDPOINT", "GetMapping", "@GetMapping(\"/users/{id}\")")),
                 List.of(endpoint));
         JavaClassDto controller = new JavaClassDto(
                 1L,
@@ -76,6 +87,7 @@ class AnalysisManifestServiceTest {
                 "demo.UserController",
                 "CONTROLLER",
                 "src/main/java/demo/UserController.java",
+                List.of(new RelevantAnnotationDto(6L, "CLASS", "COMPONENT", "RestController", "@RestController")),
                 List.of(method));
         JavaClassDto repository = new JavaClassDto(
                 4L,
@@ -84,6 +96,7 @@ class AnalysisManifestServiceTest {
                 "demo.UserRepository",
                 "REPOSITORY",
                 "src/main/java/demo/UserRepository.java",
+                List.of(),
                 List.of());
         ServiceRelationDto relation = new ServiceRelationDto(
                 5L,
@@ -91,8 +104,19 @@ class AnalysisManifestServiceTest {
                 "demo.UserController",
                 "UserRepository",
                 "demo.UserRepository");
+        ControllerServiceRelationDto controllerServiceRelation = new ControllerServiceRelationDto(
+                8L,
+                "UserController",
+                "demo.UserController",
+                "find",
+                "UserRepository",
+                "demo.UserRepository",
+                "findById",
+                "userRepository",
+                "UserRepository");
         return new AnalysisResultDto(
-                1L, "demo", "ANALYZED", 2, 1, 1, 1, 0,
-                List.of(repository, controller), List.of(relation));
+                1L, "demo", "ANALYZED", 2, 1, 1, 1, 1, 0,
+                2, 2, 0, List.of(),
+                List.of(repository, controller), List.of(relation), List.of(controllerServiceRelation));
     }
 }

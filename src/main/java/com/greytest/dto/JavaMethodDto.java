@@ -12,6 +12,7 @@ public record JavaMethodDto(
         String sourceCode,
         Integer lineStart,
         Integer lineEnd,
+        List<RelevantAnnotationDto> annotations,
         List<EndpointDto> endpoints
 ) {
 }

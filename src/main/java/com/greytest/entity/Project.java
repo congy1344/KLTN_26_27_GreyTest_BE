@@ -1,9 +1,12 @@
 package com.greytest.entity;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 import org.hibernate.annotations.CreationTimestamp;
+import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.annotations.UpdateTimestamp;
+import org.hibernate.type.SqlTypes;
 
 import com.greytest.entity.enums.ProjectStatus;
 import com.greytest.entity.enums.SourceType;
@@ -40,6 +43,15 @@ public class Project {
 
     @Enumerated(EnumType.STRING)
     private ProjectStatus status;
+
+    private Integer totalProductionFiles;
+
+    private Integer parsedProductionFiles;
+
+    private Integer failedParseFiles;
+
+    @JdbcTypeCode(SqlTypes.JSON)
+    private List<String> failedParseFilePaths;
 
     @CreationTimestamp
     @Column(updatable = false)

@@ -65,17 +65,19 @@ class JavaParserHelperTest {
     void rejectsProjectWithoutJavaSource(@TempDir Path sourceDir) {
         assertThatThrownBy(() -> parser.parseDirectory(sourceDir))
                 .isInstanceOf(SourceAnalysisException.class)
-                .hasMessageContaining("Không tìm thấy file .java");
+                .hasMessageContaining("Khong tim thay file .java");
     }
 
     @Test
-    void parsesJava17InstanceofPatternUsedBySpringPetClinic(@TempDir Path sourceDir) throws IOException {
-        Files.writeString(sourceDir.resolve("PostgresIntegrationTests.java"), """
-                class PostgresIntegrationTests {
-                    void inspect(Object source) {
-                        if (source instanceof Iterable<?> enumerable) {
-                            enumerable.iterator();
-                        }
+    void parsesJava21PatternSwitch(@TempDir Path sourceDir) throws IOException {
+        Files.writeString(sourceDir.resolve("PatternSwitchSample.java"), """
+                class PatternSwitchSample {
+                    String inspect(Object source) {
+                        return switch (source) {
+                            case String text -> text;
+                            case Integer number -> number.toString();
+                            default -> "";
+                        };
                     }
                 }
                 """);
@@ -85,7 +87,7 @@ class JavaParserHelperTest {
         assertThat(parsedFiles).hasSize(1);
         assertThat(parser.findClasses(parsedFiles.get(0).compilationUnit()))
                 .extracting(ClassOrInterfaceDeclaration::getNameAsString)
-                .containsExactly("PostgresIntegrationTests");
+                .containsExactly("PatternSwitchSample");
     }
 
     @Test
@@ -107,6 +109,25 @@ class JavaParserHelperTest {
         assertThat(result.productionFiles()).singleElement()
                 .extracting(ParsedFile::relativePath)
                 .isEqualTo("module-a/src/main/java/demo/App.java");
+        assertThat(result.failedParseFiles()).isEmpty();
+        assertThat(result.totalProductionFileCount()).isEqualTo(1);
+    }
+
+    @Test
+    void scanProjectSkipsBrokenProductionFilesAndReportsThem(@TempDir Path projectDir) throws IOException {
+        Path validSource = projectDir.resolve("src/main/java/demo/Valid.java");
+        Path brokenSource = projectDir.resolve("src/main/java/demo/Broken.java");
+        Files.createDirectories(validSource.getParent());
+        Files.writeString(validSource, "package demo; class Valid { void run() {} }");
+        Files.writeString(brokenSource, "package demo; class Broken {");
+
+        SourceScanResult result = parser.scanProject(projectDir);
+
+        assertThat(result.productionFiles()).singleElement()
+                .extracting(ParsedFile::relativePath)
+                .isEqualTo("src/main/java/demo/Valid.java");
+        assertThat(result.failedParseFiles()).containsExactly("src/main/java/demo/Broken.java");
+        assertThat(result.totalProductionFileCount()).isEqualTo(2);
     }
 
     @Test

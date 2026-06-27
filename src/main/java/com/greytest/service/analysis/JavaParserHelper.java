@@ -11,13 +11,19 @@ import com.github.javaparser.ast.CompilationUnit;
 import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration;
 import com.github.javaparser.ast.body.EnumDeclaration;
 import com.github.javaparser.ast.body.FieldDeclaration;
+import com.github.javaparser.ast.body.VariableDeclarator;
 import com.github.javaparser.ast.body.MethodDeclaration;
 import com.github.javaparser.ast.body.Parameter;
 import com.github.javaparser.ast.body.RecordDeclaration;
 import com.github.javaparser.ast.body.TypeDeclaration;
 import com.github.javaparser.ast.expr.AnnotationExpr;
+import com.github.javaparser.ast.expr.Expression;
+import com.github.javaparser.ast.expr.FieldAccessExpr;
+import com.github.javaparser.ast.expr.MethodCallExpr;
+import com.github.javaparser.ast.expr.NameExpr;
 import com.greytest.entity.enums.ClassType;
 import com.greytest.entity.enums.HttpMethod;
+import com.greytest.entity.enums.AnnotationCategory;
 import com.greytest.entity.enums.Visibility;
 
 /**
@@ -38,6 +44,51 @@ public class JavaParserHelper {
             "Repository", "org.springframework.stereotype.Repository");
     private static final Set<String> ENTITY_ANNOTATIONS = Set.of(
             "Entity", "jakarta.persistence.Entity", "javax.persistence.Entity");
+    private static final Set<String> COMPONENT_ANNOTATIONS = Set.of(
+            "Service", "Component", "Controller", "RestController", "Repository",
+            "org.springframework.stereotype.Service",
+            "org.springframework.stereotype.Component",
+            "org.springframework.stereotype.Controller",
+            "org.springframework.web.bind.annotation.RestController",
+            "org.springframework.stereotype.Repository");
+    private static final Set<String> ENDPOINT_ANNOTATIONS = Set.of(
+            "RequestMapping", "GetMapping", "PostMapping", "PutMapping", "DeleteMapping", "PatchMapping",
+            "org.springframework.web.bind.annotation.RequestMapping",
+            "org.springframework.web.bind.annotation.GetMapping",
+            "org.springframework.web.bind.annotation.PostMapping",
+            "org.springframework.web.bind.annotation.PutMapping",
+            "org.springframework.web.bind.annotation.DeleteMapping",
+            "org.springframework.web.bind.annotation.PatchMapping");
+    private static final Set<String> VALIDATION_ANNOTATIONS = Set.of(
+            "Valid", "Validated", "NotNull", "NotBlank", "NotEmpty", "Size", "Min", "Max",
+            "Positive", "PositiveOrZero", "Negative", "NegativeOrZero", "Email", "Pattern",
+            "jakarta.validation.Valid", "jakarta.validation.constraints.NotNull",
+            "jakarta.validation.constraints.NotBlank", "jakarta.validation.constraints.NotEmpty",
+            "jakarta.validation.constraints.Size", "jakarta.validation.constraints.Min",
+            "jakarta.validation.constraints.Max", "jakarta.validation.constraints.Positive",
+            "jakarta.validation.constraints.PositiveOrZero", "jakarta.validation.constraints.Negative",
+            "jakarta.validation.constraints.NegativeOrZero", "jakarta.validation.constraints.Email",
+            "jakarta.validation.constraints.Pattern");
+    private static final Set<String> SECURITY_ANNOTATIONS = Set.of(
+            "PreAuthorize", "PostAuthorize", "Secured", "RolesAllowed",
+            "org.springframework.security.access.prepost.PreAuthorize",
+            "org.springframework.security.access.prepost.PostAuthorize",
+            "org.springframework.security.access.annotation.Secured",
+            "jakarta.annotation.security.RolesAllowed");
+    private static final Set<String> TRANSACTION_ANNOTATIONS = Set.of(
+            "Transactional", "org.springframework.transaction.annotation.Transactional",
+            "jakarta.transaction.Transactional");
+    private static final Set<String> PERSISTENCE_ANNOTATIONS = Set.of(
+            "Entity", "Table", "Id", "Column", "GeneratedValue", "ManyToOne", "OneToMany",
+            "OneToOne", "ManyToMany", "Embedded", "Embeddable",
+            "jakarta.persistence.Entity", "jakarta.persistence.Table", "jakarta.persistence.Id",
+            "jakarta.persistence.Column", "jakarta.persistence.GeneratedValue");
+    private static final Set<String> INJECTION_ANNOTATIONS = Set.of(
+            "Autowired", "Qualifier", "Value", "Resource",
+            "org.springframework.beans.factory.annotation.Autowired",
+            "org.springframework.beans.factory.annotation.Qualifier",
+            "org.springframework.beans.factory.annotation.Value",
+            "jakarta.annotation.Resource");
 
     private final JavaSourceScanner sourceScanner = new JavaSourceScanner();
     private final SpringEndpointExtractor endpointExtractor = new SpringEndpointExtractor();
@@ -139,12 +190,53 @@ public class JavaParserHelper {
      * Trả các field dependency để AnalysisService resolve tới repository type thực tế.
      */
     public List<String> extractRepositoryDependencies(ClassOrInterfaceDeclaration classDecl) {
-        Set<String> repoNames = new java.util.LinkedHashSet<>();
+        return extractFieldDependencies(classDecl).stream()
+                .map(FieldDependency::type)
+                .distinct()
+                .toList();
+    }
+
+    /** Tráº£ vá» field dependency káº»m tÃªn field Ä‘á»ƒ resolve Controllerâ†’Service calls. */
+    public List<FieldDependency> extractFieldDependencies(ClassOrInterfaceDeclaration classDecl) {
+        List<FieldDependency> dependencies = new ArrayList<>();
         for (FieldDeclaration field : classDecl.getFields()) {
-            String typeName = field.getElementType().asString();
-            repoNames.add(typeName);
+            String typeName = normalizeTypeName(field.getElementType().asString());
+            for (VariableDeclarator variable : field.getVariables()) {
+                dependencies.add(new FieldDependency(variable.getNameAsString(), typeName));
+            }
         }
-        return new ArrayList<>(repoNames);
+        return dependencies;
+    }
+
+    /** Tráº£ cÃ¡c call trá»±c tiáº¿p dáº¡ng field.method(...) trong controller method. */
+    public List<ControllerServiceCall> extractControllerServiceCalls(MethodDeclaration method) {
+        List<ControllerServiceCall> calls = new ArrayList<>();
+        for (MethodCallExpr call : method.findAll(MethodCallExpr.class)) {
+            String scopeName = call.getScope()
+                    .flatMap(this::fieldScopeName)
+                    .orElse(null);
+            if (scopeName != null) {
+                calls.add(new ControllerServiceCall(
+                        methodKey(method),
+                        scopeName,
+                        call.getNameAsString(),
+                        call.getArguments().size()));
+            }
+        }
+        return calls;
+    }
+
+    /** Chỉ giữ annotation liên quan tới phân loại, endpoint, validation, security và test context. */
+    public List<ExtractedAnnotation> extractRelevantAnnotations(TypeDeclaration<?> typeDecl) {
+        return extractRelevantAnnotations(typeDecl.getAnnotations());
+    }
+
+    public List<ExtractedAnnotation> extractRelevantAnnotations(MethodDeclaration method) {
+        List<ExtractedAnnotation> annotations = new ArrayList<>(extractRelevantAnnotations(method.getAnnotations()));
+        for (Parameter parameter : method.getParameters()) {
+            annotations.addAll(extractRelevantAnnotations(parameter.getAnnotations()));
+        }
+        return annotations.stream().distinct().toList();
     }
 
     /**
@@ -196,12 +288,58 @@ public class JavaParserHelper {
         return method.getNameAsString() + "(" + parameterTypes + ")";
     }
 
+    private List<ExtractedAnnotation> extractRelevantAnnotations(List<AnnotationExpr> annotations) {
+        return annotations.stream()
+                .map(this::toExtractedAnnotation)
+                .flatMap(java.util.Optional::stream)
+                .distinct()
+                .toList();
+    }
+
+    private java.util.Optional<ExtractedAnnotation> toExtractedAnnotation(AnnotationExpr annotation) {
+        String name = annotation.getNameAsString();
+        AnnotationCategory category = annotationCategory(name);
+        if (category == null) return java.util.Optional.empty();
+        return java.util.Optional.of(new ExtractedAnnotation(category, name, annotation.toString()));
+    }
+
+    private AnnotationCategory annotationCategory(String name) {
+        if (COMPONENT_ANNOTATIONS.contains(name)) return AnnotationCategory.COMPONENT;
+        if (ENDPOINT_ANNOTATIONS.contains(name)) return AnnotationCategory.ENDPOINT;
+        if (VALIDATION_ANNOTATIONS.contains(name)) return AnnotationCategory.VALIDATION;
+        if (SECURITY_ANNOTATIONS.contains(name)) return AnnotationCategory.SECURITY;
+        if (TRANSACTION_ANNOTATIONS.contains(name)) return AnnotationCategory.TRANSACTION;
+        if (PERSISTENCE_ANNOTATIONS.contains(name)) return AnnotationCategory.PERSISTENCE;
+        if (INJECTION_ANNOTATIONS.contains(name)) return AnnotationCategory.INJECTION;
+        return null;
+    }
+
+    private java.util.Optional<String> fieldScopeName(Expression expression) {
+        if (expression instanceof NameExpr nameExpr) {
+            return java.util.Optional.of(nameExpr.getNameAsString());
+        }
+        if (expression instanceof FieldAccessExpr fieldAccess
+                && fieldAccess.getScope().isThisExpr()) {
+            return java.util.Optional.of(fieldAccess.getNameAsString());
+        }
+        return java.util.Optional.empty();
+    }
+
+    private String normalizeTypeName(String typeName) {
+        int genericStart = typeName.indexOf('<');
+        return genericStart >= 0 ? typeName.substring(0, genericStart) : typeName;
+    }
+
     // ─── Record types cho kết quả extract ──────────────────────
 
     public record ParsedFile(CompilationUnit compilationUnit, String relativePath) {
     }
 
-    public record SourceScanResult(List<ParsedFile> productionFiles, int existingTestFileCount) {
+    public record SourceScanResult(
+            List<ParsedFile> productionFiles,
+            int existingTestFileCount,
+            int totalProductionFileCount,
+            List<String> failedParseFiles) {
     }
 
     public record ExtractedMethod(
@@ -217,6 +355,22 @@ public class JavaParserHelper {
     }
 
     public record ParamInfo(String name, String type) {
+    }
+
+    public record FieldDependency(String name, String type) {
+    }
+
+    public record ControllerServiceCall(
+            String controllerMethodKey,
+            String fieldName,
+            String calledMethodName,
+            int argumentCount) {
+    }
+
+    public record ExtractedAnnotation(
+            AnnotationCategory category,
+            String name,
+            String attributes) {
     }
 
     public record ExtractedEndpoint(

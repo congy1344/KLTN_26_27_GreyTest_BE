@@ -19,18 +19,18 @@ import com.greytest.service.analysis.JavaParserHelper.SourceScanResult;
 
 import lombok.extern.slf4j.Slf4j;
 
-/** Phát hiện source root, loại test/build output và parse production files bằng Java 17. */
+/** Detects source roots, excludes tests/build output, and parses production Java files. */
 @Slf4j
 class JavaSourceScanner {
 
     private static final ParserConfiguration PARSER_CONFIGURATION = new ParserConfiguration()
-            .setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_17);
+            .setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_21);
     private static final Set<String> IGNORED_DIRECTORY_NAMES = Set.of(
             ".git", ".gradle", "target", "build", "out", "node_modules",
             "generated-sources", "generated-test-sources");
 
     List<ParsedFile> parseDirectory(Path dir) {
-        return parseFiles(dir, findJavaFiles(dir));
+        return parseFiles(dir, findJavaFiles(dir), true).parsedFiles();
     }
 
     SourceScanResult scanProject(Path projectDir) {
@@ -47,10 +47,15 @@ class JavaSourceScanner {
                     .toList();
         }
 
-        List<ParsedFile> parsedFiles = parseFiles(projectDir, productionFiles);
-        log.info("Phân loại source: {} production files, {} existing test files",
-                productionFiles.size(), testFiles.size());
-        return new SourceScanResult(parsedFiles, testFiles.size());
+        ParseFilesResult parseResult = parseFiles(projectDir, productionFiles, false);
+        log.info("Classified source: {} production files, {} parsed, {} failed, {} existing test files",
+                productionFiles.size(), parseResult.parsedFiles().size(), parseResult.failedFiles().size(),
+                testFiles.size());
+        return new SourceScanResult(
+                parseResult.parsedFiles(),
+                testFiles.size(),
+                productionFiles.size(),
+                parseResult.failedFiles());
     }
 
     int countExistingTestFiles(Path projectDir) {
@@ -66,14 +71,14 @@ class JavaSourceScanner {
                     .filter(path -> !isIgnoredPath(dir, path))
                     .toList();
         } catch (IOException exception) {
-            throw new SourceAnalysisException("Không đọc được thư mục source: " + dir, exception);
+            throw new SourceAnalysisException("Khong doc duoc thu muc source: " + dir, exception);
         }
     }
 
-    private List<ParsedFile> parseFiles(Path rootDir, List<Path> javaFiles) {
+    private ParseFilesResult parseFiles(Path rootDir, List<Path> javaFiles, boolean failOnError) {
         List<ParsedFile> results = new ArrayList<>();
         List<String> failedFiles = new ArrayList<>();
-        log.info("Tìm thấy {} production file .java trong {}", javaFiles.size(), rootDir);
+        log.info("Found {} production .java files in {}", javaFiles.size(), rootDir);
 
         for (Path file : javaFiles) {
             try {
@@ -81,19 +86,23 @@ class JavaSourceScanner {
                 if (!parseResult.isSuccessful()) throw new ParseProblemException(parseResult.getProblems());
                 CompilationUnit unit = parseResult.getResult()
                         .orElseThrow(() -> new ParseProblemException(parseResult.getProblems()));
-                results.add(new ParsedFile(unit, rootDir.relativize(file).toString().replace('\\', '/')));
+                results.add(new ParsedFile(unit, relativePath(rootDir, file)));
             } catch (Exception exception) {
-                log.warn("Không thể parse file {}: {}", file, firstLine(exception.getMessage()));
-                failedFiles.add(rootDir.relativize(file).toString());
+                log.warn("Could not parse file {}: {}", file, firstLine(exception.getMessage()));
+                failedFiles.add(relativePath(rootDir, file));
             }
         }
 
-        if (!failedFiles.isEmpty()) {
+        if (failOnError && !failedFiles.isEmpty()) {
             throw new SourceAnalysisException(
-                    "Không thể parse " + failedFiles.size() + " file Java: " + String.join(", ", failedFiles));
+                    "Khong the parse " + failedFiles.size() + " file Java: " + String.join(", ", failedFiles));
         }
-        if (results.isEmpty()) throw new SourceAnalysisException("Không tìm thấy file .java nào trong project");
-        return results;
+        if (results.isEmpty()) {
+            if (failedFiles.isEmpty()) throw new SourceAnalysisException("Khong tim thay file .java nao trong project");
+            throw new SourceAnalysisException("Khong parse duoc file production Java nao. File loi: "
+                    + String.join(", ", failedFiles));
+        }
+        return new ParseFilesResult(results, failedFiles);
     }
 
     private boolean isIgnoredPath(Path rootDir, Path file) {
@@ -108,9 +117,16 @@ class JavaSourceScanner {
         return relativePath.contains("/src/" + sourceSet + "/java/");
     }
 
+    private String relativePath(Path rootDir, Path file) {
+        return rootDir.relativize(file).toString().replace('\\', '/');
+    }
+
     private String firstLine(String message) {
-        if (message == null || message.isBlank()) return "Lỗi parse không xác định";
+        if (message == null || message.isBlank()) return "Unknown parse error";
         int lineBreak = message.indexOf('\n');
         return lineBreak >= 0 ? message.substring(0, lineBreak) : message;
+    }
+
+    private record ParseFilesResult(List<ParsedFile> parsedFiles, List<String> failedFiles) {
     }
 }

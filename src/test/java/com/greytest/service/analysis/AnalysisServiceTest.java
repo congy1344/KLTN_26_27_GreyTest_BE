@@ -23,14 +23,18 @@ import com.greytest.entity.Endpoint;
 import com.greytest.entity.JavaClass;
 import com.greytest.entity.JavaMethod;
 import com.greytest.entity.Project;
+import com.greytest.entity.RelevantAnnotation;
+import com.greytest.entity.ControllerServiceRelation;
 import com.greytest.entity.ServiceRepositoryRelation;
 import com.greytest.entity.enums.ClassType;
 import com.greytest.entity.enums.ProjectStatus;
 import com.greytest.mapper.AnalysisMapper;
+import com.greytest.repository.ControllerServiceRelationRepository;
 import com.greytest.repository.EndpointRepository;
 import com.greytest.repository.JavaClassRepository;
 import com.greytest.repository.JavaMethodRepository;
 import com.greytest.repository.ProjectRepository;
+import com.greytest.repository.RelevantAnnotationRepository;
 import com.greytest.repository.ServiceRepositoryRelationRepository;
 
 @ExtendWith(MockitoExtension.class)
@@ -41,6 +45,8 @@ class AnalysisServiceTest {
     @Mock private JavaMethodRepository methodRepository;
     @Mock private EndpointRepository endpointRepository;
     @Mock private ServiceRepositoryRelationRepository relationRepository;
+    @Mock private ControllerServiceRelationRepository controllerServiceRelationRepository;
+    @Mock private RelevantAnnotationRepository annotationRepository;
 
     @Test
     void mapsOverloadsAndDuplicateRepositoryNamesCorrectly(@TempDir Path sourceDir) throws IOException {
@@ -50,6 +56,8 @@ class AnalysisServiceTest {
         List<JavaMethod> methods = new ArrayList<>();
         List<Endpoint> endpoints = new ArrayList<>();
         List<ServiceRepositoryRelation> relations = new ArrayList<>();
+        List<ControllerServiceRelation> controllerServiceRelations = new ArrayList<>();
+        List<RelevantAnnotation> annotations = new ArrayList<>();
         AtomicLong ids = new AtomicLong(1);
 
         when(projectRepository.findById(1L)).thenReturn(Optional.of(project));
@@ -78,9 +86,24 @@ class AnalysisServiceTest {
             relations.add(entity);
             return entity;
         });
+        when(controllerServiceRelationRepository.save(any(ControllerServiceRelation.class))).thenAnswer(invocation -> {
+            ControllerServiceRelation entity = invocation.getArgument(0);
+            entity.setId(ids.getAndIncrement());
+            controllerServiceRelations.add(entity);
+            return entity;
+        });
+        when(annotationRepository.save(any(RelevantAnnotation.class))).thenAnswer(invocation -> {
+            RelevantAnnotation entity = invocation.getArgument(0);
+            entity.setId(ids.getAndIncrement());
+            annotations.add(entity);
+            return entity;
+        });
         when(classRepository.findByProjectId(1L)).thenAnswer(ignored -> classes);
-        when(classRepository.findByProjectIdAndClassType(1L, ClassType.SERVICE))
-                .thenAnswer(ignored -> classes.stream().filter(c -> c.getClassType() == ClassType.SERVICE).toList());
+        when(classRepository.findByProjectIdAndClassType(org.mockito.ArgumentMatchers.eq(1L), any(ClassType.class)))
+                .thenAnswer(invocation -> {
+                    ClassType classType = invocation.getArgument(1);
+                    return classes.stream().filter(c -> c.getClassType() == classType).toList();
+                });
         when(methodRepository.findByClassId(anyLong())).thenAnswer(invocation -> {
             Long classId = invocation.getArgument(0);
             return methods.stream().filter(m -> m.getClassId().equals(classId)).toList();
@@ -93,6 +116,27 @@ class AnalysisServiceTest {
             Long serviceId = invocation.getArgument(0);
             return relations.stream().filter(r -> r.getServiceClassId().equals(serviceId)).toList();
         });
+        when(controllerServiceRelationRepository.findByControllerClassId(anyLong())).thenAnswer(invocation -> {
+            Long controllerId = invocation.getArgument(0);
+            return controllerServiceRelations.stream()
+                    .filter(r -> r.getControllerClassId().equals(controllerId))
+                    .toList();
+        });
+        when(annotationRepository.findByClassId(anyLong())).thenAnswer(invocation -> {
+            Long classId = invocation.getArgument(0);
+            return annotations.stream()
+                    .filter(annotation -> annotation.getClassId().equals(classId)
+                            && annotation.getMethodId() == null)
+                    .toList();
+        });
+        when(annotationRepository.findByMethodIdIn(any())).thenAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            List<Long> methodIds = invocation.getArgument(0);
+            return annotations.stream()
+                    .filter(annotation -> annotation.getMethodId() != null
+                            && methodIds.contains(annotation.getMethodId()))
+                    .toList();
+        });
 
         AnalysisService service = new AnalysisService(
                 projectRepository,
@@ -100,12 +144,16 @@ class AnalysisServiceTest {
                 methodRepository,
                 endpointRepository,
                 relationRepository,
+                controllerServiceRelationRepository,
+                annotationRepository,
                 new JavaParserHelper(),
                 new AnalysisResultBuilder(
                         classRepository,
                         methodRepository,
                         endpointRepository,
                         relationRepository,
+                        controllerServiceRelationRepository,
+                        annotationRepository,
                         new AnalysisMapper()));
 
         service.analyze(1L);
@@ -126,6 +174,18 @@ class AnalysisServiceTest {
         assertThat(linkedMethod.getParameters()).singleElement()
                 .satisfies(param -> assertThat(param.type()).isEqualTo("Long"));
         assertThat(project.getStatus()).isEqualTo(ProjectStatus.ANALYZED);
+        assertThat(project.getTotalProductionFiles()).isEqualTo(5);
+        assertThat(project.getParsedProductionFiles()).isEqualTo(5);
+        assertThat(project.getFailedParseFiles()).isZero();
+        assertThat(controllerServiceRelations).singleElement()
+                .satisfies(relation -> {
+                    assertThat(relation.getServiceFieldName()).isEqualTo("userService");
+                    assertThat(relation.getCalledMethodName()).isEqualTo("findById");
+                    assertThat(relation.getServiceMethodId()).isNotNull();
+                });
+        assertThat(annotations)
+                .extracting(RelevantAnnotation::getAnnotationName)
+                .contains("Service", "RestController", "GetMapping");
     }
 
     private Project project(Path sourceDir) {
@@ -155,17 +215,26 @@ class AnalysisServiceTest {
                 package demo.service;
                 import demo.b.UserStore;
                 import org.springframework.stereotype.Service;
-                @Service class UserService {
+                @Service class UserService implements UserLookup {
                     private final UserStore repository = null;
                     private final UserStore duplicateReference = null;
+                    String findById(Long id) { return id.toString(); }
+                }
+                """);
+        Files.writeString(root.resolve("service/UserLookup.java"), """
+                package demo.service;
+                interface UserLookup {
+                    String findById(Long id);
                 }
                 """);
         Files.writeString(root.resolve("controller/UserController.java"), """
                 package demo.controller;
+                import demo.service.UserLookup;
                 import org.springframework.web.bind.annotation.GetMapping;
                 import org.springframework.web.bind.annotation.RestController;
                 @RestController class UserController {
-                    @GetMapping("/by-id") String find(Long id) { return id.toString(); }
+                    private final UserLookup userService = null;
+                    @GetMapping("/by-id") String find(Long id) { return userService.findById(id); }
                     @GetMapping("/by-name") String find(String name) { return name; }
                 }
                 """);

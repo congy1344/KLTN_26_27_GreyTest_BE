@@ -9,6 +9,8 @@ public record AnalysisManifestInput(
         @NotNull List<String> classes,
         @NotNull List<String> methods,
         @NotNull List<String> endpoints,
-        @NotNull List<String> serviceRepositoryRelations
+        @NotNull List<String> annotations,
+        @NotNull List<String> serviceRepositoryRelations,
+        @NotNull List<String> controllerServiceRelations
 ) {
 }

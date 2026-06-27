@@ -11,11 +11,13 @@ import com.greytest.dto.AnalysisManifestDto;
 import com.greytest.dto.AnalysisManifestInput;
 import com.greytest.dto.AnalysisManifestValidationDto;
 import com.greytest.dto.AnalysisResultDto;
+import com.greytest.dto.ControllerServiceRelationDto;
 import com.greytest.dto.EndpointDto;
 import com.greytest.dto.JavaClassDto;
 import com.greytest.dto.JavaMethodDto;
 import com.greytest.dto.ManifestCategoryDiffDto;
 import com.greytest.dto.MethodParamDto;
+import com.greytest.dto.RelevantAnnotationDto;
 import com.greytest.dto.ServiceRelationDto;
 
 /**
@@ -25,7 +27,7 @@ import com.greytest.dto.ServiceRelationDto;
 @Service
 public class AnalysisManifestService {
 
-    private static final String MANIFEST_VERSION = "1.0";
+    private static final String MANIFEST_VERSION = "1.1";
 
     private final AnalysisService analysisService;
 
@@ -46,12 +48,17 @@ public class AnalysisManifestService {
         ManifestCategoryDiffDto classDiff = compare(expected.classes(), actual.classes());
         ManifestCategoryDiffDto methodDiff = compare(expected.methods(), actual.methods());
         ManifestCategoryDiffDto endpointDiff = compare(expected.endpoints(), actual.endpoints());
+        ManifestCategoryDiffDto annotationDiff = compare(expected.annotations(), actual.annotations());
         ManifestCategoryDiffDto relationDiff = compare(
                 expected.serviceRepositoryRelations(), actual.serviceRepositoryRelations());
+        ManifestCategoryDiffDto controllerServiceRelationDiff = compare(
+                expected.controllerServiceRelations(), actual.controllerServiceRelations());
         boolean exactMatch = classDiff.exactMatch()
                 && methodDiff.exactMatch()
                 && endpointDiff.exactMatch()
-                && relationDiff.exactMatch();
+                && annotationDiff.exactMatch()
+                && relationDiff.exactMatch()
+                && controllerServiceRelationDiff.exactMatch();
 
         return new AnalysisManifestValidationDto(
                 projectId,
@@ -60,19 +67,28 @@ public class AnalysisManifestService {
                 classDiff,
                 methodDiff,
                 endpointDiff,
-                relationDiff);
+                annotationDiff,
+                relationDiff,
+                controllerServiceRelationDiff);
     }
 
     AnalysisManifestDto buildManifest(AnalysisResultDto analysis) {
         Set<String> classes = new TreeSet<>();
         Set<String> methods = new TreeSet<>();
         Set<String> endpoints = new TreeSet<>();
+        Set<String> annotations = new TreeSet<>();
 
         for (JavaClassDto javaClass : analysis.classes()) {
             classes.add(javaClass.qualifiedName());
+            for (RelevantAnnotationDto annotation : javaClass.annotations()) {
+                annotations.add("CLASS " + javaClass.qualifiedName() + " " + annotationIdentity(annotation));
+            }
             for (JavaMethodDto method : javaClass.methods()) {
                 String signature = methodSignature(javaClass.qualifiedName(), method);
                 methods.add(signature);
+                for (RelevantAnnotationDto annotation : method.annotations()) {
+                    annotations.add("METHOD " + signature + " " + annotationIdentity(annotation));
+                }
                 for (EndpointDto endpoint : method.endpoints()) {
                     endpoints.add(endpoint.httpMethod() + " " + endpoint.path() + " -> " + signature);
                 }
@@ -84,6 +100,15 @@ public class AnalysisManifestService {
             relations.add(relation.serviceQualifiedName() + " -> " + relation.repositoryQualifiedName());
         }
 
+        Set<String> controllerServiceRelations = new TreeSet<>();
+        for (ControllerServiceRelationDto relation : analysis.controllerServiceRelations()) {
+            controllerServiceRelations.add(relation.controllerQualifiedName()
+                    + "#" + relation.controllerMethodName()
+                    + " -> " + relation.serviceQualifiedName()
+                    + "#" + relation.serviceMethodName()
+                    + " via " + relation.serviceFieldName());
+        }
+
         return new AnalysisManifestDto(
                 analysis.projectId(),
                 analysis.projectName(),
@@ -91,7 +116,13 @@ public class AnalysisManifestService {
                 List.copyOf(classes),
                 List.copyOf(methods),
                 List.copyOf(endpoints),
-                List.copyOf(relations));
+                List.copyOf(annotations),
+                List.copyOf(relations),
+                List.copyOf(controllerServiceRelations));
+    }
+
+    private String annotationIdentity(RelevantAnnotationDto annotation) {
+        return annotation.category() + " " + annotation.attributes();
     }
 
     private String methodSignature(String qualifiedClassName, JavaMethodDto method) {

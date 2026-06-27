@@ -10,6 +10,8 @@ public record AnalysisManifestDto(
         List<String> classes,
         List<String> methods,
         List<String> endpoints,
-        List<String> serviceRepositoryRelations
+        List<String> annotations,
+        List<String> serviceRepositoryRelations,
+        List<String> controllerServiceRelations
 ) {
 }

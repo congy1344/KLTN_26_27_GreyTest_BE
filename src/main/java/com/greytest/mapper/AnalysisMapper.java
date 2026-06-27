@@ -8,11 +8,15 @@ import com.greytest.dto.EndpointDto;
 import com.greytest.dto.JavaClassDto;
 import com.greytest.dto.JavaMethodDto;
 import com.greytest.dto.MethodParamDto;
+import com.greytest.dto.ControllerServiceRelationDto;
+import com.greytest.dto.RelevantAnnotationDto;
 import com.greytest.dto.ServiceRelationDto;
+import com.greytest.entity.ControllerServiceRelation;
 import com.greytest.entity.Endpoint;
 import com.greytest.entity.JavaClass;
 import com.greytest.entity.JavaMethod;
 import com.greytest.entity.MethodParam;
+import com.greytest.entity.RelevantAnnotation;
 import com.greytest.entity.ServiceRepositoryRelation;
 
 /**
@@ -22,9 +26,17 @@ import com.greytest.entity.ServiceRepositoryRelation;
 public class AnalysisMapper {
 
     public JavaClassDto toDto(JavaClass entity, List<JavaMethod> methods,
-            List<Endpoint> allEndpoints) {
+            List<Endpoint> allEndpoints,
+            List<RelevantAnnotation> classAnnotations,
+            List<RelevantAnnotation> methodAnnotations) {
         List<JavaMethodDto> methodDtos = methods.stream()
-                .map(m -> toMethodDto(m, allEndpoints))
+                .map(m -> toMethodDto(
+                        m,
+                        allEndpoints,
+                        methodAnnotations.stream()
+                                .filter(annotation -> annotation.getMethodId() != null
+                                        && annotation.getMethodId().equals(m.getId()))
+                                .toList()))
                 .toList();
 
         return new JavaClassDto(
@@ -34,11 +46,13 @@ public class AnalysisMapper {
                 entity.getQualifiedName(),
                 entity.getClassType() != null ? entity.getClassType().name() : "OTHER",
                 entity.getFilePath(),
+                classAnnotations.stream().map(this::toAnnotationDto).toList(),
                 methodDtos
         );
     }
 
-    public JavaMethodDto toMethodDto(JavaMethod method, List<Endpoint> allEndpoints) {
+    public JavaMethodDto toMethodDto(JavaMethod method, List<Endpoint> allEndpoints,
+            List<RelevantAnnotation> annotations) {
         List<MethodParamDto> paramDtos = method.getParameters() != null
                 ? method.getParameters().stream().map(this::toParamDto).toList()
                 : List.of();
@@ -58,6 +72,7 @@ public class AnalysisMapper {
                 method.getSourceCode(),
                 method.getLineStart(),
                 method.getLineEnd(),
+                annotations.stream().map(this::toAnnotationDto).toList(),
                 endpointDtos
         );
     }
@@ -77,6 +92,15 @@ public class AnalysisMapper {
         return new MethodParamDto(param.name(), param.type());
     }
 
+    public RelevantAnnotationDto toAnnotationDto(RelevantAnnotation annotation) {
+        return new RelevantAnnotationDto(
+                annotation.getId(),
+                annotation.getTargetType() != null ? annotation.getTargetType().name() : null,
+                annotation.getCategory() != null ? annotation.getCategory().name() : null,
+                annotation.getAnnotationName(),
+                annotation.getAttributes());
+    }
+
     public ServiceRelationDto toRelationDto(ServiceRepositoryRelation relation,
             String serviceClassName,
             String serviceQualifiedName,
@@ -89,5 +113,25 @@ public class AnalysisMapper {
                 repositoryClassName,
                 repositoryQualifiedName
         );
+    }
+
+    public ControllerServiceRelationDto toControllerServiceRelationDto(
+            ControllerServiceRelation relation,
+            String controllerClassName,
+            String controllerQualifiedName,
+            String controllerMethodName,
+            String serviceClassName,
+            String serviceQualifiedName,
+            String serviceMethodName) {
+        return new ControllerServiceRelationDto(
+                relation.getId(),
+                controllerClassName,
+                controllerQualifiedName,
+                controllerMethodName,
+                serviceClassName,
+                serviceQualifiedName,
+                serviceMethodName,
+                relation.getServiceFieldName(),
+                relation.getServiceFieldType());
     }
 }

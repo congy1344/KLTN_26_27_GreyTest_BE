@@ -7,6 +7,8 @@ public record AnalysisManifestValidationDto(
         ManifestCategoryDiffDto classes,
         ManifestCategoryDiffDto methods,
         ManifestCategoryDiffDto endpoints,
-        ManifestCategoryDiffDto serviceRepositoryRelations
+        ManifestCategoryDiffDto annotations,
+        ManifestCategoryDiffDto serviceRepositoryRelations,
+        ManifestCategoryDiffDto controllerServiceRelations
 ) {
 }
