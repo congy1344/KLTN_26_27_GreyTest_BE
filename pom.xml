@@ -87,6 +87,13 @@
             <optional>true</optional>
         </dependency>
 
+        <!-- Password hashing for local auth (no full Spring Security filter chain in v1). -->
+        <dependency>
+            <groupId>org.springframework.security</groupId>
+            <artifactId>spring-security-crypto</artifactId>
+            <version>6.3.3</version>
+        </dependency>
+
         <!-- ponytail: LLM client thêm khi tích hợp AI Agent (xem AI_AGENT.md) -->
 
         <dependency>

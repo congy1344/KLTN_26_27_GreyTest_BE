@@ -71,6 +71,7 @@ public class AnalysisService {
     private final RelevantAnnotationRepository annotationRepository;
     private final JavaParserHelper parserHelper;
     private final AnalysisResultBuilder resultBuilder;
+    private final ExistingTestService existingTestService;
 
     public AnalysisService(
             ProjectRepository projectRepository,
@@ -81,7 +82,8 @@ public class AnalysisService {
             ControllerServiceRelationRepository controllerServiceRelationRepository,
             RelevantAnnotationRepository annotationRepository,
             JavaParserHelper parserHelper,
-            AnalysisResultBuilder resultBuilder) {
+            AnalysisResultBuilder resultBuilder,
+            ExistingTestService existingTestService) {
         this.projectRepository = projectRepository;
         this.classRepository = classRepository;
         this.methodRepository = methodRepository;
@@ -91,6 +93,7 @@ public class AnalysisService {
         this.annotationRepository = annotationRepository;
         this.parserHelper = parserHelper;
         this.resultBuilder = resultBuilder;
+        this.existingTestService = existingTestService;
     }
 
     /**
@@ -286,6 +289,7 @@ public class AnalysisService {
                 serviceContractNameToIds,
                 classIdToMethodKeyToId,
                 classIdToMethodNameToIds);
+        int storedExistingTests = existingTestService.refresh(projectId, sourceDir);
 
         project.setStatus(ProjectStatus.ANALYZED);
         projectRepository.save(project);
@@ -294,7 +298,7 @@ public class AnalysisService {
                 projectId, qualifiedNameToIds.values().stream().mapToInt(List::size).sum(),
                 totalMethods, totalEndpoints, totalRelations, totalControllerServiceRelations);
 
-        return resultBuilder.build(project, sourceScan.existingTestFileCount());
+        return resultBuilder.build(project, storedExistingTests);
     }
 
     /**
@@ -339,6 +343,7 @@ public class AnalysisService {
 
     private void cleanupOldData(Long projectId) {
         // Cascade sẽ xóa methods, endpoints, relations liên quan tại DB level
+        existingTestService.deleteByProjectId(projectId);
         classRepository.deleteByProjectId(projectId);
         classRepository.flush();
     }

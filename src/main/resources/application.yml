@@ -32,6 +32,8 @@ springdoc:
 greytest:
   storage:
     path: ${GREYTEST_STORAGE_PATH:./storage}
+  auth:
+    token-secret: ${GREYTEST_AUTH_TOKEN_SECRET:dev-greytest-token-secret-change-me}
 
 # API key LLM lấy từ env, KHÔNG commit (xem .env.example)
 llm:

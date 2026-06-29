@@ -47,6 +47,7 @@ class AnalysisServiceTest {
     @Mock private ServiceRepositoryRelationRepository relationRepository;
     @Mock private ControllerServiceRelationRepository controllerServiceRelationRepository;
     @Mock private RelevantAnnotationRepository annotationRepository;
+    @Mock private ExistingTestService existingTestService;
 
     @Test
     void mapsOverloadsAndDuplicateRepositoryNamesCorrectly(@TempDir Path sourceDir) throws IOException {
@@ -154,7 +155,8 @@ class AnalysisServiceTest {
                         relationRepository,
                         controllerServiceRelationRepository,
                         annotationRepository,
-                        new AnalysisMapper()));
+                        new AnalysisMapper()),
+                existingTestService);
 
         service.analyze(1L);
 

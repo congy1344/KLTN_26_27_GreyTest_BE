@@ -32,6 +32,8 @@ public class Project {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
+    private Long ownerUserId;
+
     private String name;
 
     @Enumerated(EnumType.STRING)

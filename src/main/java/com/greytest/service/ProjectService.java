@@ -13,9 +13,12 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 
 import com.greytest.dto.ProjectDto;
+import com.greytest.entity.AuthUser;
 import com.greytest.entity.Project;
 import com.greytest.entity.enums.ProjectStatus;
 import com.greytest.entity.enums.SourceType;
+import com.greytest.entity.enums.UserRole;
+import com.greytest.exception.AuthException;
 import com.greytest.exception.InvalidProjectSourceException;
 import com.greytest.exception.ProjectNotFoundException;
 import com.greytest.exception.StorageException;
@@ -58,17 +61,27 @@ public class ProjectService {
 
     @Transactional
     public ProjectDto createFromZip(MultipartFile file) {
+        return createFromZip(file, null);
+    }
+
+    @Transactional
+    public ProjectDto createFromZip(MultipartFile file, AuthUser owner) {
         Path dir = fileStorageService.storeZip(file);
         requireSpringBootProject(dir);
-        Project project = save(stripZipExtension(file.getOriginalFilename()), SourceType.ZIP, null, dir);
+        Project project = save(stripZipExtension(file.getOriginalFilename()), SourceType.ZIP, null, dir, owner);
         return analyzeImportedProject(project, dir, "ZIP");
     }
 
     @Transactional
     public ProjectDto createFromGithub(String url) {
+        return createFromGithub(url, null);
+    }
+
+    @Transactional
+    public ProjectDto createFromGithub(String url, AuthUser owner) {
         Path dir = githubService.clone(url);
         requireSpringBootProject(dir);
-        Project project = save(repoName(url), SourceType.GITHUB, url, dir);
+        Project project = save(repoName(url), SourceType.GITHUB, url, dir, owner);
         return analyzeImportedProject(project, dir, "GitHub " + url);
     }
 
@@ -81,8 +94,26 @@ public class ProjectService {
     }
 
     @Transactional(readOnly = true)
+    public List<ProjectDto> getAll(AuthUser user) {
+        if (user.getRole() == UserRole.ADMIN) {
+            return getAll();
+        }
+        return projectRepository.findByOwnerUserIdOrderByCreatedAtDesc(user.getId())
+                .stream()
+                .map(projectMapper::toDto)
+                .toList();
+    }
+
+    @Transactional(readOnly = true)
     public ProjectDto getById(Long id) {
         return projectMapper.toDto(findOrThrow(id));
+    }
+
+    @Transactional(readOnly = true)
+    public ProjectDto getById(Long id, AuthUser user) {
+        Project project = findOrThrow(id);
+        requireProjectAccess(project, user);
+        return projectMapper.toDto(project);
     }
 
     @Transactional
@@ -95,13 +126,23 @@ public class ProjectService {
         log.info("Đã xóa project {}", id);
     }
 
-    private Project save(String name, SourceType sourceType, String sourceUrl, Path dir) {
+    @Transactional
+    public void delete(Long id, AuthUser user) {
+        Project project = findOrThrow(id);
+        requireProjectAccess(project, user);
+        delete(id);
+    }
+
+    private Project save(String name, SourceType sourceType, String sourceUrl, Path dir, AuthUser owner) {
         Project project = new Project();
         project.setName(name);
         project.setSourceType(sourceType);
         project.setSourceUrl(sourceUrl);
         project.setStoragePath(dir.toString());
         project.setStatus(ProjectStatus.UPLOADED);
+        if (owner != null) {
+            project.setOwnerUserId(owner.getId());
+        }
         return projectRepository.save(project);
     }
 
@@ -123,6 +164,15 @@ public class ProjectService {
     }
 
     // Project hợp lệ phải có file build (pom.xml/build.gradle) ở đâu đó trong cây thư mục.
+    private void requireProjectAccess(Project project, AuthUser user) {
+        if (user.getRole() == UserRole.ADMIN) {
+            return;
+        }
+        if (!user.getId().equals(project.getOwnerUserId())) {
+            throw new AuthException("Khong co quyen truy cap project nay");
+        }
+    }
+
     private void requireSpringBootProject(Path dir) {
         try (Stream<Path> walk = Files.walk(dir)) {
             boolean hasBuildFile = walk.anyMatch(p -> BUILD_FILES.contains(p.getFileName().toString()));

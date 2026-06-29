@@ -8,4 +8,6 @@ import com.greytest.entity.JavaMethod;
 
 public interface JavaMethodRepository extends JpaRepository<JavaMethod, Long> {
     List<JavaMethod> findByClassId(Long classId);
+
+    List<JavaMethod> findByClassIdIn(List<Long> classIds);
 }

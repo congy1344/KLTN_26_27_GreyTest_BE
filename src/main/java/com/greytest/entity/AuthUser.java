@@ -5,8 +5,7 @@ import java.time.LocalDateTime;
 import org.hibernate.annotations.CreationTimestamp;
 import org.hibernate.annotations.UpdateTimestamp;
 
-import com.greytest.entity.enums.ReviewStatus;
-import com.greytest.entity.enums.RuleSource;
+import com.greytest.entity.enums.UserRole;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
@@ -20,34 +19,27 @@ import lombok.Getter;
 import lombok.Setter;
 
 @Entity
-@Table(name = "business_rule")
+@Table(name = "auth_user")
 @Getter
 @Setter
-public class BusinessRule {
+public class AuthUser {
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    private Long projectId;
+    @Column(nullable = false, unique = true)
+    private String email;
 
-    private Long methodId;
+    @Column(nullable = false)
+    private String passwordHash;
 
-    private String ruleCode;
-
-    @Column(columnDefinition = "TEXT")
-    private String description;
-
-    @Column(columnDefinition = "TEXT")
-    private String reviewNote;
+    private String fullName;
 
     @Enumerated(EnumType.STRING)
-    private RuleSource source;
+    private UserRole role;
 
-    @Enumerated(EnumType.STRING)
-    private ReviewStatus status;
-
-    private Boolean isModified;
+    private Boolean enabled;
 
     @CreationTimestamp
     @Column(updatable = false)

@@ -19,6 +19,7 @@ public class ProjectMapper {
                 project.getSourceUrl(),
                 project.getStatus(),
                 project.getCreatedAt(),
+                project.getOwnerUserId(),
                 sourceAvailable(project));
     }
 

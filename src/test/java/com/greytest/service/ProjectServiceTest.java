@@ -10,6 +10,7 @@ import static org.mockito.Mockito.doThrow;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Optional;
 
 import org.junit.jupiter.api.Test;
@@ -20,9 +21,11 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.mock.web.MockMultipartFile;
 
 import com.greytest.dto.ProjectDto;
+import com.greytest.entity.AuthUser;
 import com.greytest.entity.Project;
 import com.greytest.entity.enums.ProjectStatus;
 import com.greytest.entity.enums.SourceType;
+import com.greytest.entity.enums.UserRole;
 import com.greytest.exception.InvalidProjectSourceException;
 import com.greytest.exception.ProjectNotFoundException;
 import com.greytest.exception.SourceAnalysisException;
@@ -105,5 +108,23 @@ class ProjectServiceTest {
 
         assertThatThrownBy(() -> service().delete(99L))
                 .isInstanceOf(ProjectNotFoundException.class);
+    }
+
+    @Test
+    void normalUserOnlyListsOwnProjects() {
+        AuthUser user = new AuthUser();
+        user.setId(10L);
+        user.setRole(UserRole.USER);
+        Project project = new Project();
+        project.setId(1L);
+        project.setName("mine");
+        project.setSourceType(SourceType.ZIP);
+        project.setStatus(ProjectStatus.ANALYZED);
+        project.setOwnerUserId(10L);
+        when(projectRepository.findByOwnerUserIdOrderByCreatedAtDesc(10L)).thenReturn(List.of(project));
+
+        List<ProjectDto> projects = service().getAll(user);
+
+        assertThat(projects).extracting(ProjectDto::ownerUserId).containsExactly(10L);
     }
 }

@@ -1,8 +1,12 @@
 package com.greytest.entity;
 
 import java.time.LocalDateTime;
+import java.util.List;
+import java.util.Map;
 
 import org.hibernate.annotations.CreationTimestamp;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
@@ -14,33 +18,36 @@ import lombok.Getter;
 import lombok.Setter;
 
 @Entity
-@Table(name = "unit_test")
+@Table(name = "existing_test")
 @Getter
 @Setter
-public class UnitTest {
+public class ExistingTest {
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    private Long testCaseId;
-
-    private String testClassName;
-
-    private String testMethodName;
-
-    private String packageName;
-
-    private String generationType;
-
-    @Column(columnDefinition = "TEXT")
-    private String existingTestFilePath;
-
-    @Column(columnDefinition = "TEXT")
-    private String sourceCode;
+    private Long projectId;
 
     @Column(columnDefinition = "TEXT")
     private String filePath;
+
+    private String packageName;
+
+    private String testClassName;
+
+    private Long relatedClassId;
+
+    private Long relatedMethodId;
+
+    @JdbcTypeCode(SqlTypes.JSON)
+    private List<Map<String, Object>> testMethods;
+
+    @JdbcTypeCode(SqlTypes.JSON)
+    private List<String> imports;
+
+    @Column(columnDefinition = "TEXT")
+    private String sourceCode;
 
     @CreationTimestamp
     @Column(updatable = false)

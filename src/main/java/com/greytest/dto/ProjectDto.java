@@ -12,5 +12,6 @@ public record ProjectDto(
         String sourceUrl,
         ProjectStatus status,
         LocalDateTime createdAt,
+        Long ownerUserId,
         boolean sourceAvailable) {
 }
