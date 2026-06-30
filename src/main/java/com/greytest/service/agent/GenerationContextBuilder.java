@@ -9,7 +9,6 @@ import org.springframework.transaction.annotation.Transactional;
 
 import com.greytest.dto.AnalysisManifestDto;
 import com.greytest.dto.AnalysisResultDto;
-import com.greytest.dto.BusinessRuleDto;
 import com.greytest.dto.ControllerServiceRelationDto;
 import com.greytest.dto.ExistingTestDto;
 import com.greytest.dto.JavaClassDto;
@@ -29,7 +28,6 @@ import com.greytest.dto.agent.GenerationContextDtos.UnitTestContextDto;
 import com.greytest.entity.BusinessRule;
 import com.greytest.entity.enums.ReviewStatus;
 import com.greytest.repository.BusinessRuleRepository;
-import com.greytest.service.BusinessRuleService;
 import com.greytest.service.analysis.AnalysisManifestService;
 import com.greytest.service.analysis.AnalysisService;
 import com.greytest.service.analysis.ExistingTestService;
@@ -47,19 +45,16 @@ public class GenerationContextBuilder {
     private final AnalysisService analysisService;
     private final AnalysisManifestService manifestService;
     private final ExistingTestService existingTestService;
-    private final BusinessRuleService businessRuleService;
     private final BusinessRuleRepository businessRuleRepository;
 
     public GenerationContextBuilder(
             AnalysisService analysisService,
             AnalysisManifestService manifestService,
             ExistingTestService existingTestService,
-            BusinessRuleService businessRuleService,
             BusinessRuleRepository businessRuleRepository) {
         this.analysisService = analysisService;
         this.manifestService = manifestService;
         this.existingTestService = existingTestService;
-        this.businessRuleService = businessRuleService;
         this.businessRuleRepository = businessRuleRepository;
     }
 
@@ -193,7 +188,7 @@ public class GenerationContextBuilder {
     }
 
     private List<BusinessRuleContextDto> businessRules(Long projectId) {
-        return businessRuleService.list(projectId).stream()
+        return businessRuleRepository.findByProjectId(projectId).stream()
                 .map(this::ruleContext)
                 .sorted(Comparator.comparing(BusinessRuleContextDto::ruleCode))
                 .toList();
@@ -204,18 +199,6 @@ public class GenerationContextBuilder {
                 .map(this::ruleContext)
                 .sorted(Comparator.comparing(BusinessRuleContextDto::ruleCode))
                 .toList();
-    }
-
-    private BusinessRuleContextDto ruleContext(BusinessRuleDto rule) {
-        return new BusinessRuleContextDto(
-                rule.id(),
-                rule.methodId(),
-                rule.ruleCode(),
-                rule.description(),
-                rule.reviewNote(),
-                rule.source() == null ? null : rule.source().name(),
-                rule.status() == null ? null : rule.status().name(),
-                rule.isModified());
     }
 
     private BusinessRuleContextDto ruleContext(BusinessRule rule) {

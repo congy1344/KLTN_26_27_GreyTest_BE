@@ -19,7 +19,9 @@ services:
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/greytest
       SPRING_DATASOURCE_USERNAME: greytest
       SPRING_DATASOURCE_PASSWORD: greytest_password
+      LLM_PROVIDER: ${LLM_PROVIDER:-mock}
       LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
       GREYTEST_STORAGE_PATH: /app/storage
     volumes:
       - backend_storage:/app/storage

@@ -8,6 +8,7 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.multipart.MaxUploadSizeExceededException;
 
 import com.greytest.dto.ErrorResponse;
+import com.greytest.service.agent.LlmResponseException;
 
 import lombok.extern.slf4j.Slf4j;
 
@@ -66,6 +67,13 @@ public class GlobalExceptionHandler {
         log.warn("Không thể phân tích source: {}", e.getMessage());
         return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY)
                 .body(new ErrorResponse("ANALYSIS_ERROR", e.getMessage()));
+    }
+
+    @ExceptionHandler(LlmResponseException.class)
+    public ResponseEntity<ErrorResponse> handleLlmResponse(LlmResponseException e) {
+        log.warn("LLM call failed: {}", e.getMessage());
+        return ResponseEntity.status(HttpStatus.BAD_GATEWAY)
+                .body(new ErrorResponse("LLM_ERROR", e.getMessage()));
     }
 
     @ExceptionHandler(StorageException.class)

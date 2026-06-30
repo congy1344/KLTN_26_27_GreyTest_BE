@@ -37,4 +37,10 @@ greytest:
 
 # API key LLM lấy từ env, KHÔNG commit (xem .env.example)
 llm:
+  provider: ${LLM_PROVIDER:mock}
   api-key: ${LLM_API_KEY:}
+  model: ${LLM_MODEL:gpt-4o-mini}
+  temperature: ${LLM_TEMPERATURE:0.3}
+  max-tokens: ${LLM_MAX_TOKENS:4096}
+  timeout-seconds: ${LLM_TIMEOUT_SECONDS:60}
+  openai-url: ${LLM_OPENAI_URL:https://api.openai.com/v1/responses}

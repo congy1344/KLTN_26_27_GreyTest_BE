@@ -12,7 +12,6 @@ import org.junit.jupiter.api.Test;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.greytest.dto.AnalysisManifestDto;
 import com.greytest.dto.AnalysisResultDto;
-import com.greytest.dto.BusinessRuleDto;
 import com.greytest.dto.ControllerServiceRelationDto;
 import com.greytest.dto.EndpointDto;
 import com.greytest.dto.ExistingTestDto;
@@ -27,7 +26,6 @@ import com.greytest.entity.BusinessRule;
 import com.greytest.entity.enums.ReviewStatus;
 import com.greytest.entity.enums.RuleSource;
 import com.greytest.repository.BusinessRuleRepository;
-import com.greytest.service.BusinessRuleService;
 import com.greytest.service.analysis.AnalysisManifestService;
 import com.greytest.service.analysis.AnalysisService;
 import com.greytest.service.analysis.ExistingTestService;
@@ -37,13 +35,11 @@ class GenerationContextBuilderTest {
     private final AnalysisService analysisService = mock(AnalysisService.class);
     private final AnalysisManifestService manifestService = mock(AnalysisManifestService.class);
     private final ExistingTestService existingTestService = mock(ExistingTestService.class);
-    private final BusinessRuleService businessRuleService = mock(BusinessRuleService.class);
     private final BusinessRuleRepository businessRuleRepository = mock(BusinessRuleRepository.class);
     private final GenerationContextBuilder builder = new GenerationContextBuilder(
             analysisService,
             manifestService,
             existingTestService,
-            businessRuleService,
             businessRuleRepository);
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -81,7 +77,8 @@ class GenerationContextBuilderTest {
         when(analysisService.getAnalysisResult(1L)).thenReturn(analysis());
         when(manifestService.exportManifest(1L)).thenReturn(manifest());
         when(existingTestService.list(1L)).thenReturn(List.of(existingTest()));
-        when(businessRuleService.list(1L)).thenReturn(List.of(ruleDto()));
+        when(businessRuleRepository.findByProjectId(1L))
+                .thenReturn(List.of(ruleEntity(7L, 11L, ReviewStatus.APPROVED)));
     }
 
     private AnalysisResultDto analysis() {
@@ -184,21 +181,6 @@ class GenerationContextBuilderTest {
                 null,
                 List.of(Map.of("name", "createUser_success", "assertions", List.of("assertEquals"))),
                 List.of("org.junit.jupiter.api.Test"),
-                null);
-    }
-
-    private BusinessRuleDto ruleDto() {
-        return new BusinessRuleDto(
-                7L,
-                1L,
-                11L,
-                "BR-001",
-                "Email phai hop le truoc khi tao user.",
-                "OK",
-                RuleSource.USER_ADDED,
-                ReviewStatus.APPROVED,
-                false,
-                null,
                 null);
     }
 

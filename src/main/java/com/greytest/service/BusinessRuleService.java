@@ -4,7 +4,9 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -14,6 +16,10 @@ import com.greytest.dto.BusinessRuleReviewDto;
 import com.greytest.dto.CreateBusinessRuleRequest;
 import com.greytest.dto.ReviewedBusinessRuleDto;
 import com.greytest.dto.UpdateBusinessRuleRequest;
+import com.greytest.dto.agent.GenerationResponseDtos.BusinessRuleResponseDto;
+import com.greytest.dto.agent.GenerationResponseDtos.BusinessRuleReviewResponseDto;
+import com.greytest.dto.agent.GenerationResponseDtos.GeneratedBusinessRuleDto;
+import com.greytest.dto.agent.GenerationResponseDtos.ReviewedBusinessRuleSuggestionDto;
 import com.greytest.entity.BusinessRule;
 import com.greytest.entity.JavaClass;
 import com.greytest.entity.JavaMethod;
@@ -28,6 +34,8 @@ import com.greytest.repository.BusinessRuleRepository;
 import com.greytest.repository.JavaClassRepository;
 import com.greytest.repository.JavaMethodRepository;
 import com.greytest.repository.ProjectRepository;
+import com.greytest.service.agent.AIAgentService;
+import com.greytest.service.agent.LlmResponseException;
 
 @Service
 public class BusinessRuleService {
@@ -36,16 +44,19 @@ public class BusinessRuleService {
     private final ProjectRepository projectRepository;
     private final JavaClassRepository javaClassRepository;
     private final JavaMethodRepository javaMethodRepository;
+    private final AIAgentService aiAgentService;
 
     public BusinessRuleService(
             BusinessRuleRepository businessRuleRepository,
             ProjectRepository projectRepository,
             JavaClassRepository javaClassRepository,
-            JavaMethodRepository javaMethodRepository) {
+            JavaMethodRepository javaMethodRepository,
+            AIAgentService aiAgentService) {
         this.businessRuleRepository = businessRuleRepository;
         this.projectRepository = projectRepository;
         this.javaClassRepository = javaClassRepository;
         this.javaMethodRepository = javaMethodRepository;
+        this.aiAgentService = aiAgentService;
     }
 
     @Transactional(readOnly = true)
@@ -108,23 +119,29 @@ public class BusinessRuleService {
         Project project = ensureProjectExists(projectId);
         ensureBusinessRuleEditable(project);
 
-        Set<Long> coveredMethodIds = existingCoveredMethodIds(projectId);
-        List<JavaMethod> serviceMethods = serviceMethods(projectId);
-        List<BusinessRuleDto> created = new ArrayList<>();
-        for (JavaMethod method : serviceMethods) {
-            if (coveredMethodIds.contains(method.getId())) continue;
-            BusinessRule rule = new BusinessRule();
-            rule.setProjectId(projectId);
-            rule.setMethodId(method.getId());
-            rule.setRuleCode(nextRuleCode(projectId));
-            rule.setDescription("Method " + method.getMethodName()
-                    + " phai thuc hien dung rang buoc nghiep vu, validate input va xu ly truong hop loi lien quan.");
-            rule.setSource(RuleSource.AI_GENERATED);
-            rule.setStatus(ReviewStatus.PENDING_REVIEW);
-            rule.setIsModified(false);
-            rule.setReviewNote("AI auto sinh tu static analysis. User can review/chinh sua truoc khi approve.");
-            created.add(toDto(businessRuleRepository.save(rule)));
-            coveredMethodIds.add(method.getId());
+        Set<Long> validMethodIds = serviceMethodIds(projectId);
+        if (validMethodIds.isEmpty()) {
+            throw new InvalidProjectStatusException(
+                    "Project chua co service method nao de AI sinh Business Rule. Hay kiem tra ket qua Analysis.");
+        }
+
+        List<BusinessRule> existingRules = businessRuleRepository.findByProjectId(projectId);
+        Set<Long> coveredMethodIds = methodIds(existingRules);
+        if (coveredMethodIds.containsAll(validMethodIds)) return List.of();
+
+        BusinessRuleResponseDto response = aiAgentService.generateBusinessRules(projectId);
+        List<BusinessRuleDto> created = saveGeneratedRules(
+                projectId,
+                response.rules(),
+                RuleSource.AI_GENERATED,
+                validMethodIds,
+                coveredMethodIds,
+                ruleKeys(existingRules),
+                existingRules.size() + 1);
+        if (created.isEmpty()) {
+            throw new LlmResponseException("AI tra ve " + response.rules().size()
+                    + " Business Rule nhung method_id khong khop service method chua co rule. ID hop le: "
+                    + validMethodIds + ".");
         }
         project.setStatus(ProjectStatus.BR_PENDING_REVIEW);
         projectRepository.save(project);
@@ -136,18 +153,24 @@ public class BusinessRuleService {
         Project project = ensureProjectExists(projectId);
         ensureBusinessRuleEditable(project);
 
-        List<ReviewedBusinessRuleDto> reviewed = new ArrayList<>();
-        for (BusinessRule rule : businessRuleRepository.findByProjectId(projectId)) {
-            String verdict = isWeakRule(rule) ? "NEEDS_REVISION" : "OK";
-            String reason = isWeakRule(rule)
-                    ? "Rule con ngan hoac chua gan method, nen bo sung dieu kien dau vao/ket qua mong doi."
-                    : "Rule du ro de lam input sinh test plan.";
-            rule.setReviewNote(reason);
-            businessRuleRepository.save(rule);
-            reviewed.add(new ReviewedBusinessRuleDto(rule.getId(), verdict, rule.getDescription(), reason));
+        List<BusinessRule> existingRules = businessRuleRepository.findByProjectId(projectId);
+        if (existingRules.isEmpty()) {
+            throw new InvalidProjectStatusException(
+                    "Chua co Business Rule de AI review. Hay bam AI sinh BR truoc hoac them BR thu cong.");
         }
-
-        List<BusinessRuleDto> suggested = suggestMissingRules(projectId);
+        BusinessRuleReviewResponseDto response = aiAgentService.reviewBusinessRules(projectId);
+        List<ReviewedBusinessRuleDto> reviewed = applyReviewSuggestions(response.reviewedRules(), existingRules);
+        List<BusinessRuleDto> suggested = saveGeneratedRules(
+                projectId,
+                response.suggestedRules(),
+                RuleSource.AI_REVIEW_SUGGESTED,
+                serviceMethodIds(projectId),
+                Set.of(),
+                ruleKeys(existingRules),
+                existingRules.size() + 1);
+        if (reviewed.isEmpty() && suggested.isEmpty()) {
+            throw new LlmResponseException("AI khong tra ve review hoac goi y Business Rule hop le.");
+        }
         project.setStatus(ProjectStatus.BR_PENDING_REVIEW);
         projectRepository.save(project);
         return new BusinessRuleReviewDto(reviewed, suggested);
@@ -172,25 +195,74 @@ public class BusinessRuleService {
         return rules.stream().map(this::toDto).toList();
     }
 
-    private List<BusinessRuleDto> suggestMissingRules(Long projectId) {
-        Set<Long> coveredMethodIds = existingCoveredMethodIds(projectId);
-        List<BusinessRuleDto> suggested = new ArrayList<>();
-        for (JavaMethod method : serviceMethods(projectId)) {
-            if (coveredMethodIds.contains(method.getId())) continue;
+    private List<ReviewedBusinessRuleDto> applyReviewSuggestions(
+            List<ReviewedBusinessRuleSuggestionDto> suggestions,
+            List<BusinessRule> existingRules) {
+        Map<Long, BusinessRule> rulesById = existingRules.stream()
+                .filter(rule -> rule.getId() != null)
+                .collect(Collectors.toMap(BusinessRule::getId, rule -> rule, (first, second) -> first));
+        List<ReviewedBusinessRuleDto> reviewed = new ArrayList<>();
+        for (ReviewedBusinessRuleSuggestionDto suggestion : suggestions) {
+            BusinessRule rule = rulesById.get(suggestion.ruleId());
+            if (rule == null) continue;
+            rule.setReviewNote(reviewNote(suggestion));
+            businessRuleRepository.save(rule);
+            reviewed.add(new ReviewedBusinessRuleDto(
+                    rule.getId(),
+                    suggestion.verdict(),
+                    suggestion.suggestedDescription(),
+                    suggestion.reason()));
+        }
+        return reviewed;
+    }
+
+    private List<BusinessRuleDto> saveGeneratedRules(
+            Long projectId,
+            List<GeneratedBusinessRuleDto> generatedRules,
+            RuleSource source,
+            Set<Long> validMethodIds,
+            Set<Long> blockedMethodIds,
+            Set<String> existingRuleKeys,
+            int firstRuleNumber) {
+        List<BusinessRuleDto> created = new ArrayList<>();
+        int ruleNumber = firstRuleNumber;
+        for (GeneratedBusinessRuleDto generatedRule : generatedRules) {
+            if (!isUsableGeneratedRule(generatedRule, validMethodIds, blockedMethodIds)) continue;
+            String key = ruleKey(generatedRule.methodId(), generatedRule.description());
+            if (!existingRuleKeys.add(key)) continue;
+
             BusinessRule rule = new BusinessRule();
             rule.setProjectId(projectId);
-            rule.setMethodId(method.getId());
-            rule.setRuleCode(nextRuleCode(projectId));
-            rule.setDescription("Bo sung business rule cho method " + method.getMethodName()
-                    + " de mo ta dieu kien thanh cong, bien va loi nghiep vu.");
-            rule.setSource(RuleSource.AI_REVIEW_SUGGESTED);
+            rule.setMethodId(generatedRule.methodId());
+            rule.setRuleCode(nextRuleCode(ruleNumber++));
+            rule.setDescription(generatedRule.description().trim());
+            rule.setSource(source);
             rule.setStatus(ReviewStatus.PENDING_REVIEW);
             rule.setIsModified(false);
-            rule.setReviewNote("AI review phat hien service method chua co Business Rule bao phu.");
-            suggested.add(toDto(businessRuleRepository.save(rule)));
-            break;
+            rule.setReviewNote("AI category: " + generatedRule.category() + ". User review/chinh sua truoc khi approve.");
+            created.add(toDto(businessRuleRepository.save(rule)));
         }
-        return suggested;
+        return created;
+    }
+
+    private boolean isUsableGeneratedRule(
+            GeneratedBusinessRuleDto generatedRule,
+            Set<Long> validMethodIds,
+            Set<Long> blockedMethodIds) {
+        return generatedRule != null
+                && generatedRule.methodId() != null
+                && generatedRule.description() != null
+                && !generatedRule.description().isBlank()
+                && validMethodIds.contains(generatedRule.methodId())
+                && !blockedMethodIds.contains(generatedRule.methodId());
+    }
+
+    private String reviewNote(ReviewedBusinessRuleSuggestionDto suggestion) {
+        String note = suggestion.verdict() + ": " + suggestion.reason();
+        if (suggestion.suggestedDescription() == null || suggestion.suggestedDescription().isBlank()) {
+            return note;
+        }
+        return note + " Goi y: " + suggestion.suggestedDescription().trim();
     }
 
     private List<JavaMethod> serviceMethods(Long projectId) {
@@ -205,24 +277,41 @@ public class BusinessRuleService {
                 .toList();
     }
 
-    private Set<Long> existingCoveredMethodIds(Long projectId) {
-        Set<Long> covered = new HashSet<>();
-        for (BusinessRule rule : businessRuleRepository.findByProjectId(projectId)) {
-            if (rule.getMethodId() != null) {
-                covered.add(rule.getMethodId());
-            }
-        }
-        return covered;
+    private Set<Long> serviceMethodIds(Long projectId) {
+        return serviceMethods(projectId).stream()
+                .map(JavaMethod::getId)
+                .collect(Collectors.toCollection(HashSet::new));
     }
 
-    private boolean isWeakRule(BusinessRule rule) {
-        return rule.getMethodId() == null
-                || rule.getDescription() == null
-                || rule.getDescription().trim().length() < 20;
+    private Set<Long> methodIds(List<BusinessRule> rules) {
+        Set<Long> methodIds = new HashSet<>();
+        for (BusinessRule rule : rules) {
+            if (rule.getMethodId() != null) {
+                methodIds.add(rule.getMethodId());
+            }
+        }
+        return methodIds;
+    }
+
+    private Set<String> ruleKeys(List<BusinessRule> rules) {
+        Set<String> keys = new HashSet<>();
+        for (BusinessRule rule : rules) {
+            if (rule.getMethodId() != null && rule.getDescription() != null) {
+                keys.add(ruleKey(rule.getMethodId(), rule.getDescription()));
+            }
+        }
+        return keys;
+    }
+
+    private String ruleKey(Long methodId, String description) {
+        return methodId + "::" + description.trim().toLowerCase(java.util.Locale.ROOT);
     }
 
     private String nextRuleCode(Long projectId) {
-        int next = businessRuleRepository.findByProjectId(projectId).size() + 1;
+        return nextRuleCode(businessRuleRepository.findByProjectId(projectId).size() + 1);
+    }
+
+    private String nextRuleCode(int next) {
         return "BR-" + String.format("%03d", next);
     }
 
