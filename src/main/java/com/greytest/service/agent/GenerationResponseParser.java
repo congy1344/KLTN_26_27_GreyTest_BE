@@ -28,7 +28,7 @@ public class GenerationResponseParser {
             throw new LlmResponseException("LLM response rong.");
         }
         try {
-            T parsed = objectMapper.readValue(response, responseType);
+            T parsed = objectMapper.readValue(jsonPayload(response), responseType);
             var violations = validator.validate(parsed);
             if (!violations.isEmpty()) {
                 String firstError = violations.stream()
@@ -41,5 +41,51 @@ public class GenerationResponseParser {
         } catch (JsonProcessingException exception) {
             throw new LlmResponseException("LLM response khong phai JSON hop le.", exception);
         }
+    }
+
+    private String jsonPayload(String response) {
+        String text = stripCodeFence(response.trim());
+        if (text.startsWith("{")) return text;
+        String extracted = firstJsonObject(text);
+        return extracted.isBlank() ? text : extracted;
+    }
+
+    private String stripCodeFence(String text) {
+        if (!text.startsWith("```")) return text;
+        int firstLineEnd = text.indexOf('\n');
+        if (firstLineEnd < 0) return text;
+        int closingFence = text.lastIndexOf("```");
+        if (closingFence <= firstLineEnd) return text;
+        return text.substring(firstLineEnd + 1, closingFence).trim();
+    }
+
+    private String firstJsonObject(String text) {
+        int start = text.indexOf('{');
+        if (start < 0) return "";
+        boolean inString = false;
+        boolean escaped = false;
+        int depth = 0;
+        for (int i = start; i < text.length(); i++) {
+            char current = text.charAt(i);
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (current == '\\' && inString) {
+                escaped = true;
+                continue;
+            }
+            if (current == '"') {
+                inString = !inString;
+                continue;
+            }
+            if (inString) continue;
+            if (current == '{') depth++;
+            if (current == '}') {
+                depth--;
+                if (depth == 0) return text.substring(start, i + 1);
+            }
+        }
+        return "";
     }
 }

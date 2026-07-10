@@ -33,7 +33,9 @@ greytest:
   storage:
     path: ${GREYTEST_STORAGE_PATH:./storage}
   auth:
-    token-secret: ${GREYTEST_AUTH_TOKEN_SECRET:dev-greytest-token-secret-change-me}
+    token-secret: ${GREYTEST_AUTH_TOKEN_SECRET:}
+  ai-context-log-path: ${GREYTEST_AI_CONTEXT_LOG_PATH:../log}
+  ai-context-log-enabled: ${GREYTEST_AI_CONTEXT_LOG_ENABLED:false}
 
 # API key LLM lấy từ env, KHÔNG commit (xem .env.example)
 llm:
@@ -44,3 +46,4 @@ llm:
   max-tokens: ${LLM_MAX_TOKENS:4096}
   timeout-seconds: ${LLM_TIMEOUT_SECONDS:60}
   openai-url: ${LLM_OPENAI_URL:https://api.openai.com/v1/responses}
+  google-url: ${LLM_GOOGLE_URL:https://generativelanguage.googleapis.com/v1beta/interactions}

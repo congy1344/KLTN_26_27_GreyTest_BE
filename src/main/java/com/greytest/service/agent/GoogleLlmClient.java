@@ -18,11 +18,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 /**
- * LLM client that calls OpenAI Responses API when real AI testing is enabled.
+ * LLM client goi Google Gemini API khi can test that voi provider google.
  */
 @Service
-@ConditionalOnProperty(prefix = "llm", name = "provider", havingValue = "openai")
-public class OpenAiLlmClient implements LlmClient {
+@ConditionalOnProperty(prefix = "llm", name = "provider", havingValue = "google")
+public class GoogleLlmClient implements LlmClient {
 
     private static final int ERROR_BODY_LIMIT = 500;
 
@@ -36,14 +36,14 @@ public class OpenAiLlmClient implements LlmClient {
     private final URI endpoint;
 
     @Autowired
-    public OpenAiLlmClient(
+    public GoogleLlmClient(
             ObjectMapper objectMapper,
             @Value("${llm.api-key:}") String apiKey,
-            @Value("${llm.model:gpt-4o-mini}") String model,
+            @Value("${llm.model:gemini-3.5-flash}") String model,
             @Value("${llm.temperature:0.3}") double temperature,
             @Value("${llm.max-tokens:4096}") int maxTokens,
             @Value("${llm.timeout-seconds:60}") long timeoutSeconds,
-            @Value("${llm.openai-url:https://api.openai.com/v1/responses}") String endpoint) {
+            @Value("${llm.google-url:https://generativelanguage.googleapis.com/v1beta/interactions}") String endpoint) {
         this(
                 objectMapper,
                 HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(timeoutSeconds)).build(),
@@ -55,7 +55,7 @@ public class OpenAiLlmClient implements LlmClient {
                 URI.create(endpoint));
     }
 
-    OpenAiLlmClient(
+    GoogleLlmClient(
             ObjectMapper objectMapper,
             HttpClient httpClient,
             String apiKey,
@@ -81,7 +81,7 @@ public class OpenAiLlmClient implements LlmClient {
         }
         HttpRequest request = HttpRequest.newBuilder(endpoint)
                 .timeout(timeout)
-                .header("Authorization", "Bearer " + apiKey)
+                .header("x-goog-api-key", apiKey)
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(requestBody(prompt)))
                 .build();
@@ -89,15 +89,15 @@ public class OpenAiLlmClient implements LlmClient {
         try {
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
             if (response.statusCode() < 200 || response.statusCode() >= 300) {
-                throw new LlmResponseException("OpenAI API loi HTTP "
+                throw new LlmResponseException("Google Gemini API loi HTTP "
                         + response.statusCode() + ": " + snippet(response.body()));
             }
             return outputText(response.body());
         } catch (IOException exception) {
-            throw new LlmResponseException("Khong goi duoc OpenAI API.", exception);
+            throw new LlmResponseException("Khong goi duoc Google Gemini API.", exception);
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
-            throw new LlmResponseException("Bi gian doan khi goi OpenAI API.", exception);
+            throw new LlmResponseException("Bi gian doan khi goi Google Gemini API.", exception);
         }
     }
 
@@ -105,12 +105,13 @@ public class OpenAiLlmClient implements LlmClient {
         ObjectNode root = objectMapper.createObjectNode();
         root.put("model", model);
         root.put("input", prompt);
-        root.put("temperature", temperature);
-        root.put("max_output_tokens", maxTokens);
+        ObjectNode generationConfig = root.putObject("generation_config");
+        generationConfig.put("temperature", temperature);
+        generationConfig.put("max_output_tokens", maxTokens);
         try {
             return objectMapper.writeValueAsString(root);
         } catch (JsonProcessingException exception) {
-            throw new LlmResponseException("Khong tao duoc request OpenAI.", exception);
+            throw new LlmResponseException("Khong tao duoc request Google Gemini.", exception);
         }
     }
 
@@ -121,26 +122,62 @@ public class OpenAiLlmClient implements LlmClient {
             if (!outputText.isBlank()) {
                 return outputText;
             }
-            JsonNode output = root.path("output");
-            if (output.isArray()) {
-                for (JsonNode item : output) {
-                    String text = contentText(item.path("content"));
-                    if (!text.isBlank()) return text;
-                }
+            outputText = outputContentText(root.path("output"));
+            if (!outputText.isBlank()) {
+                return outputText;
             }
-            throw new LlmResponseException("OpenAI response khong co text output.");
+            outputText = candidateText(root.path("candidates"));
+            if (!outputText.isBlank()) {
+                return outputText;
+            }
+            outputText = stepsText(root.path("steps"));
+            if (!outputText.isBlank()) {
+                return outputText;
+            }
+            throw new LlmResponseException("Google Gemini response khong co text output: " + snippet(responseBody));
         } catch (JsonProcessingException exception) {
-            throw new LlmResponseException("OpenAI response khong phai JSON hop le.", exception);
+            throw new LlmResponseException("Google Gemini response khong phai JSON hop le.", exception);
         }
     }
 
-    private String contentText(JsonNode content) {
-        if (!content.isArray()) return "";
-        for (JsonNode item : content) {
-            String text = item.path("text").asText("");
+    private String outputContentText(JsonNode output) {
+        if (!output.isArray()) return "";
+        for (JsonNode item : output) {
+            String text = partsText(item.path("content"));
             if (!text.isBlank()) return text;
         }
         return "";
+    }
+
+    private String candidateText(JsonNode candidates) {
+        if (!candidates.isArray()) return "";
+        for (JsonNode candidate : candidates) {
+            String text = partsText(candidate.path("content").path("parts"));
+            if (!text.isBlank()) return text;
+        }
+        return "";
+    }
+
+    private String stepsText(JsonNode steps) {
+        if (!steps.isArray()) return "";
+        for (int i = steps.size() - 1; i >= 0; i--) {
+            String text = partsText(steps.get(i).path("content"));
+            if (!text.isBlank()) return text;
+        }
+        return "";
+    }
+
+    private String partsText(JsonNode parts) {
+        if (!parts.isArray()) return "";
+        StringBuilder text = new StringBuilder();
+        for (JsonNode part : parts) {
+            String value = part.path("text").asText("");
+            if (!value.isBlank()) {
+                if (!text.isEmpty()) text.append('\n');
+                text.append(value);
+            }
+        }
+        return text.toString();
     }
 
     private String snippet(String body) {

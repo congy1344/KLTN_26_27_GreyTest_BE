@@ -8,6 +8,7 @@ public record RegisterRequest(
         @Email(message = "Email khong hop le")
         @NotBlank(message = "Email la bat buoc")
         String email,
+        @NotBlank(message = "Mat khau la bat buoc")
         @Size(min = 6, message = "Mat khau phai co toi thieu 6 ky tu")
         String password,
         @NotBlank(message = "Ho ten la bat buoc")

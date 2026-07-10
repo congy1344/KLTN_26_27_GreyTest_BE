@@ -4,7 +4,7 @@ target/
 *.log
 
 # Source code upload/clone của user (không commit)
-storage/
+/storage/
 
 # IDE
 .idea/

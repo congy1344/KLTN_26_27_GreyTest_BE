@@ -63,7 +63,7 @@ class ProjectServiceTest {
         });
 
         ProjectDto dto = service().createFromZip(
-                new MockMultipartFile("file", "demo.zip", "application/zip", new byte[] {1}));
+                new MockMultipartFile("file", "demo.zip", "application/zip", new byte[] {1}), owner());
 
         assertThat(dto.id()).isEqualTo(1L);
         assertThat(dto.name()).isEqualTo("demo");
@@ -77,7 +77,7 @@ class ProjectServiceTest {
         when(fileStorageService.storeZip(any())).thenReturn(dir);
 
         assertThatThrownBy(() -> service().createFromZip(
-                new MockMultipartFile("file", "x.zip", "application/zip", new byte[] {1})))
+                new MockMultipartFile("file", "x.zip", "application/zip", new byte[] {1}), owner()))
                 .isInstanceOf(InvalidProjectSourceException.class);
 
         verify(fileStorageService).delete(dir);
@@ -96,7 +96,7 @@ class ProjectServiceTest {
                 .when(analysisService).analyze(1L);
 
         assertThatThrownBy(() -> service().createFromZip(
-                new MockMultipartFile("file", "demo.zip", "application/zip", new byte[] {1})))
+                new MockMultipartFile("file", "demo.zip", "application/zip", new byte[] {1}), owner()))
                 .isInstanceOf(SourceAnalysisException.class);
 
         verify(fileStorageService).delete(dir);
@@ -126,5 +126,13 @@ class ProjectServiceTest {
         List<ProjectDto> projects = service().getAll(user);
 
         assertThat(projects).extracting(ProjectDto::ownerUserId).containsExactly(10L);
+    }
+
+    private AuthUser owner() {
+        AuthUser user = new AuthUser();
+        user.setId(10L);
+        user.setRole(UserRole.USER);
+        user.setEnabled(true);
+        return user;
     }
 }

@@ -37,17 +37,17 @@ public class ProjectController {
     @PostMapping("/upload")
     public ResponseEntity<ProjectDto> upload(
             @RequestParam("file") MultipartFile file,
-            @RequestHeader(value = "Authorization", required = false) String authorization) {
+            @RequestHeader("Authorization") String authorization) {
         return ResponseEntity.status(HttpStatus.CREATED)
-                .body(projectService.createFromZip(file, authService.optionalCurrentUser(authorization).orElse(null)));
+                .body(projectService.createFromZip(file, authService.currentUser(authorization)));
     }
 
     @PostMapping("/github")
     public ResponseEntity<ProjectDto> github(
             @Valid @RequestBody GithubCloneRequest request,
-            @RequestHeader(value = "Authorization", required = false) String authorization) {
+            @RequestHeader("Authorization") String authorization) {
         return ResponseEntity.status(HttpStatus.CREATED)
-                .body(projectService.createFromGithub(request.url(), authService.optionalCurrentUser(authorization).orElse(null)));
+                .body(projectService.createFromGithub(request.url(), authService.currentUser(authorization)));
     }
 
     @GetMapping

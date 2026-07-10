@@ -10,8 +10,6 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import java.time.LocalDateTime;
-import java.util.Optional;
-
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
@@ -54,11 +52,13 @@ class ProjectControllerTest {
 
     @Test
     void uploadReturnsCreated() throws Exception {
-        when(authService.optionalCurrentUser(any())).thenReturn(Optional.empty());
+        AuthUser user = user();
+        when(authService.currentUser("Bearer token")).thenReturn(user);
         when(projectService.createFromZip(any(), any())).thenReturn(sampleDto());
 
         mockMvc.perform(multipart("/api/projects/upload")
-                        .file(new MockMultipartFile("file", "demo.zip", "application/zip", new byte[] {1})))
+                        .file(new MockMultipartFile("file", "demo.zip", "application/zip", new byte[] {1}))
+                        .header("Authorization", "Bearer token"))
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.id").value(1))
                 .andExpect(jsonPath("$.status").value("ANALYZED"));

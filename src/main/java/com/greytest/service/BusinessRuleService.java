@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -68,16 +69,26 @@ public class BusinessRuleService {
                 .toList();
     }
 
+    @Transactional(readOnly = true)
+    public Long projectIdForRule(Long ruleId) {
+        return businessRuleRepository.findById(ruleId)
+                .orElseThrow(() -> new IllegalArgumentException("Khong tim thay business rule " + ruleId))
+                .getProjectId();
+    }
+
     @Transactional
     public BusinessRuleDto create(Long projectId, CreateBusinessRuleRequest request) {
         Project project = ensureProjectExists(projectId);
         ensureBusinessRuleEditable(project);
+        String description = request.description().trim();
+        List<BusinessRule> existingRules = businessRuleRepository.findByProjectId(projectId);
+        ensureUniqueDescription(existingRules, null, description);
 
         BusinessRule rule = new BusinessRule();
         rule.setProjectId(projectId);
-        rule.setMethodId(request.methodId());
-        rule.setRuleCode(nextRuleCode(projectId));
-        rule.setDescription(request.description().trim());
+        rule.setMethodId(requireProjectServiceMethod(projectId, request.methodId()));
+        rule.setRuleCode(nextRuleCode(nextRuleNumber(existingRules)));
+        rule.setDescription(description);
         rule.setSource(RuleSource.USER_ADDED);
         rule.setStatus(ReviewStatus.PENDING_REVIEW);
         rule.setIsModified(false);
@@ -93,9 +104,11 @@ public class BusinessRuleService {
                 .orElseThrow(() -> new IllegalArgumentException("Khong tim thay business rule " + ruleId));
         Project project = ensureProjectExists(rule.getProjectId());
         ensureBusinessRuleEditable(project);
+        String description = request.description().trim();
+        ensureUniqueDescription(businessRuleRepository.findByProjectId(rule.getProjectId()), ruleId, description);
 
-        rule.setMethodId(request.methodId());
-        rule.setDescription(request.description().trim());
+        rule.setMethodId(requireProjectServiceMethod(rule.getProjectId(), request.methodId()));
+        rule.setDescription(description);
         rule.setSource(RuleSource.USER_MODIFIED);
         rule.setStatus(ReviewStatus.PENDING_REVIEW);
         rule.setIsModified(true);
@@ -137,7 +150,7 @@ public class BusinessRuleService {
                 validMethodIds,
                 coveredMethodIds,
                 ruleKeys(existingRules),
-                existingRules.size() + 1);
+                nextRuleNumber(existingRules));
         if (created.isEmpty()) {
             throw new LlmResponseException("AI tra ve " + response.rules().size()
                     + " Business Rule nhung method_id khong khop service method chua co rule. ID hop le: "
@@ -167,7 +180,7 @@ public class BusinessRuleService {
                 serviceMethodIds(projectId),
                 Set.of(),
                 ruleKeys(existingRules),
-                existingRules.size() + 1);
+                nextRuleNumber(existingRules));
         if (reviewed.isEmpty() && suggested.isEmpty()) {
             throw new LlmResponseException("AI khong tra ve review hoac goi y Business Rule hop le.");
         }
@@ -179,6 +192,9 @@ public class BusinessRuleService {
     @Transactional
     public List<BusinessRuleDto> approve(Long projectId) {
         Project project = ensureProjectExists(projectId);
+        if (project.getStatus() != ProjectStatus.BR_PENDING_REVIEW) {
+            throw new InvalidProjectStatusException("Chi co the approve Business Rule dang cho review.");
+        }
         List<BusinessRule> rules = businessRuleRepository.findByProjectId(projectId);
         if (rules.isEmpty()) {
             throw new InvalidProjectStatusException("Can co it nhat mot Business Rule truoc khi approve.");
@@ -228,7 +244,7 @@ public class BusinessRuleService {
         int ruleNumber = firstRuleNumber;
         for (GeneratedBusinessRuleDto generatedRule : generatedRules) {
             if (!isUsableGeneratedRule(generatedRule, validMethodIds, blockedMethodIds)) continue;
-            String key = ruleKey(generatedRule.methodId(), generatedRule.description());
+            String key = descriptionKey(generatedRule.description());
             if (!existingRuleKeys.add(key)) continue;
 
             BusinessRule rule = new BusinessRule();
@@ -296,19 +312,41 @@ public class BusinessRuleService {
     private Set<String> ruleKeys(List<BusinessRule> rules) {
         Set<String> keys = new HashSet<>();
         for (BusinessRule rule : rules) {
-            if (rule.getMethodId() != null && rule.getDescription() != null) {
-                keys.add(ruleKey(rule.getMethodId(), rule.getDescription()));
+            if (rule.getDescription() != null) {
+                keys.add(descriptionKey(rule.getDescription()));
             }
         }
         return keys;
     }
 
-    private String ruleKey(Long methodId, String description) {
-        return methodId + "::" + description.trim().toLowerCase(java.util.Locale.ROOT);
+    private void ensureUniqueDescription(List<BusinessRule> rules, Long currentRuleId, String description) {
+        String newKey = descriptionKey(description);
+        for (BusinessRule rule : rules) {
+            if (currentRuleId != null && currentRuleId.equals(rule.getId())) continue;
+            if (rule.getDescription() != null && descriptionKey(rule.getDescription()).equals(newKey)) {
+                throw new IllegalArgumentException("Business Rule da ton tai trong project: " + rule.getRuleCode());
+            }
+        }
     }
 
-    private String nextRuleCode(Long projectId) {
-        return nextRuleCode(businessRuleRepository.findByProjectId(projectId).size() + 1);
+    private String descriptionKey(String description) {
+        return description.trim().replaceAll("\\s+", " ").toLowerCase(Locale.ROOT);
+    }
+
+    private int nextRuleNumber(List<BusinessRule> rules) {
+        return rules.stream()
+                .map(BusinessRule::getRuleCode)
+                .mapToInt(this::ruleNumber)
+                .max()
+                .orElse(0) + 1;
+    }
+
+    private int ruleNumber(String code) {
+        try {
+            return code != null && code.startsWith("BR-") ? Integer.parseInt(code.substring(3)) : 0;
+        } catch (NumberFormatException ignored) {
+            return 0;
+        }
     }
 
     private String nextRuleCode(int next) {
@@ -318,6 +356,20 @@ public class BusinessRuleService {
     private Project ensureProjectExists(Long projectId) {
         return projectRepository.findById(projectId)
                 .orElseThrow(() -> new ProjectNotFoundException(projectId));
+    }
+
+    private Long requireProjectServiceMethod(Long projectId, Long methodId) {
+        if (methodId == null) {
+            throw new IllegalArgumentException("Business Rule phai lien ket voi mot Service method.");
+        }
+        JavaMethod method = javaMethodRepository.findById(methodId)
+                .orElseThrow(() -> new IllegalArgumentException("Khong tim thay Service method " + methodId));
+        JavaClass javaClass = javaClassRepository.findById(method.getClassId())
+                .orElseThrow(() -> new IllegalArgumentException("Khong tim thay class cua method " + methodId));
+        if (!projectId.equals(javaClass.getProjectId()) || javaClass.getClassType() != ClassType.SERVICE) {
+            throw new IllegalArgumentException("Method phai la Service method cua project hien tai.");
+        }
+        return methodId;
     }
 
     private void ensureBusinessRuleEditable(Project project) {

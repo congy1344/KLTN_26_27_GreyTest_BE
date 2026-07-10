@@ -23,9 +23,15 @@ import com.greytest.dto.ServiceRelationDto;
 import com.greytest.dto.agent.GenerationContextDtos.BusinessRuleGenerationContextDto;
 import com.greytest.dto.agent.GenerationContextDtos.TestPlanContextDto;
 import com.greytest.entity.BusinessRule;
+import com.greytest.entity.TestCase;
+import com.greytest.entity.TestPlan;
+import com.greytest.entity.enums.Priority;
 import com.greytest.entity.enums.ReviewStatus;
 import com.greytest.entity.enums.RuleSource;
+import com.greytest.entity.enums.TestType;
 import com.greytest.repository.BusinessRuleRepository;
+import com.greytest.repository.TestCaseRepository;
+import com.greytest.repository.TestPlanRepository;
 import com.greytest.service.analysis.AnalysisManifestService;
 import com.greytest.service.analysis.AnalysisService;
 import com.greytest.service.analysis.ExistingTestService;
@@ -36,11 +42,15 @@ class GenerationContextBuilderTest {
     private final AnalysisManifestService manifestService = mock(AnalysisManifestService.class);
     private final ExistingTestService existingTestService = mock(ExistingTestService.class);
     private final BusinessRuleRepository businessRuleRepository = mock(BusinessRuleRepository.class);
+    private final TestPlanRepository testPlanRepository = mock(TestPlanRepository.class);
+    private final TestCaseRepository testCaseRepository = mock(TestCaseRepository.class);
     private final GenerationContextBuilder builder = new GenerationContextBuilder(
             analysisService,
             manifestService,
             existingTestService,
-            businessRuleRepository);
+            businessRuleRepository,
+            testPlanRepository,
+            testCaseRepository);
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Test
@@ -71,6 +81,36 @@ class GenerationContextBuilderTest {
         assertThat(context.approvedBusinessRules()).extracting("ruleCode").containsExactly("BR-001");
         assertThat(context.classes()).hasSize(1);
         assertThat(context.classes().get(0).methods()).extracting("id").containsExactly(11L);
+    }
+
+    @Test
+    void unitTestContextIncludesApprovedArtifactsAndExistingTestSource() {
+        mockCommonInputs();
+        when(businessRuleRepository.findByProjectIdAndStatus(1L, ReviewStatus.APPROVED))
+                .thenReturn(List.of(ruleEntity(7L, 11L, ReviewStatus.APPROVED)));
+        TestPlan plan = new TestPlan();
+        plan.setId(20L);
+        plan.setProjectId(1L);
+        plan.setBusinessRuleId(7L);
+        plan.setPlanCode("TP-001");
+        plan.setTitle("Happy path");
+        plan.setDescription("Input hop le");
+        plan.setTestType(TestType.HAPPY_PATH);
+        plan.setStatus(ReviewStatus.APPROVED);
+        TestCase testCase = new TestCase();
+        testCase.setId(30L);
+        testCase.setTestPlanId(20L);
+        testCase.setCaseCode("TC-001");
+        testCase.setPriority(Priority.HIGH);
+        testCase.setStatus(ReviewStatus.APPROVED);
+        when(testPlanRepository.findByProjectId(1L)).thenReturn(List.of(plan));
+        when(testCaseRepository.findByTestPlanId(20L)).thenReturn(List.of(testCase));
+
+        var context = builder.buildUnitTestContext(1L);
+
+        assertThat(context.approvedTestPlans()).extracting("planCode").containsExactly("TP-001");
+        assertThat(context.approvedTestCases()).extracting("caseCode").containsExactly("TC-001");
+        assertThat(context.existingTests()).extracting("sourceCode").containsExactly("class UserServiceTest {}");
     }
 
     private void mockCommonInputs() {
@@ -181,6 +221,7 @@ class GenerationContextBuilderTest {
                 null,
                 List.of(Map.of("name", "createUser_success", "assertions", List.of("assertEquals"))),
                 List.of("org.junit.jupiter.api.Test"),
+                "class UserServiceTest {}",
                 null);
     }
 

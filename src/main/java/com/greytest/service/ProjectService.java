@@ -8,6 +8,7 @@ import java.util.Set;
 import java.util.stream.Stream;
 
 import org.springframework.data.domain.Sort;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
@@ -60,12 +61,8 @@ public class ProjectService {
     }
 
     @Transactional
-    public ProjectDto createFromZip(MultipartFile file) {
-        return createFromZip(file, null);
-    }
-
-    @Transactional
     public ProjectDto createFromZip(MultipartFile file, AuthUser owner) {
+        requireOwner(owner);
         Path dir = fileStorageService.storeZip(file);
         requireSpringBootProject(dir);
         Project project = save(stripZipExtension(file.getOriginalFilename()), SourceType.ZIP, null, dir, owner);
@@ -73,12 +70,8 @@ public class ProjectService {
     }
 
     @Transactional
-    public ProjectDto createFromGithub(String url) {
-        return createFromGithub(url, null);
-    }
-
-    @Transactional
     public ProjectDto createFromGithub(String url, AuthUser owner) {
+        requireOwner(owner);
         Path dir = githubService.clone(url);
         requireSpringBootProject(dir);
         Project project = save(repoName(url), SourceType.GITHUB, url, dir, owner);
@@ -116,6 +109,11 @@ public class ProjectService {
         return projectMapper.toDto(project);
     }
 
+    @Transactional(readOnly = true)
+    public void requireAccess(Long id, AuthUser user) {
+        requireProjectAccess(findOrThrow(id), user);
+    }
+
     @Transactional
     public void delete(Long id) {
         Project project = findOrThrow(id);
@@ -140,9 +138,7 @@ public class ProjectService {
         project.setSourceUrl(sourceUrl);
         project.setStoragePath(dir.toString());
         project.setStatus(ProjectStatus.UPLOADED);
-        if (owner != null) {
-            project.setOwnerUserId(owner.getId());
-        }
+        project.setOwnerUserId(owner.getId());
         return projectRepository.save(project);
     }
 
@@ -169,7 +165,13 @@ public class ProjectService {
             return;
         }
         if (!user.getId().equals(project.getOwnerUserId())) {
-            throw new AuthException("Khong co quyen truy cap project nay");
+            throw new AuthException("FORBIDDEN", "Khong co quyen truy cap project nay", HttpStatus.FORBIDDEN);
+        }
+    }
+
+    private void requireOwner(AuthUser owner) {
+        if (owner == null) {
+            throw new AuthException("AUTH_ERROR", "Can dang nhap de tao project", HttpStatus.UNAUTHORIZED);
         }
     }
 

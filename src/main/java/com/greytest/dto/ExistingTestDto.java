@@ -14,5 +14,6 @@ public record ExistingTestDto(
         Long relatedMethodId,
         List<Map<String, Object>> testMethods,
         List<String> imports,
+        String sourceCode,
         LocalDateTime createdAt) {
 }

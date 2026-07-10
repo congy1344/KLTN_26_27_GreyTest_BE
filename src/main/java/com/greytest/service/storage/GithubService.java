@@ -1,5 +1,6 @@
 package com.greytest.service.storage;
 
+import java.net.URI;
 import java.nio.file.Path;
 
 import org.eclipse.jgit.api.Git;
@@ -41,8 +42,19 @@ public class GithubService {
     }
 
     private void validateUrl(String url) {
-        if (url == null || !url.startsWith("https://") || !url.contains("github.com")) {
-            throw new InvalidProjectSourceException("URL phải là GitHub repository public (https://github.com/...)");
+        try {
+            URI uri = URI.create(url);
+            boolean valid = "https".equalsIgnoreCase(uri.getScheme())
+                    && "github.com".equalsIgnoreCase(uri.getHost())
+                    && uri.getUserInfo() == null
+                    && uri.getQuery() == null
+                    && uri.getFragment() == null
+                    && uri.getPath() != null
+                    && uri.getPath().matches("/[^/]+/[^/]+(?:\\.git)?/?");
+            if (valid) return;
+        } catch (IllegalArgumentException ignored) {
+            // Loi duoc chuan hoa thanh InvalidProjectSourceException ben duoi.
         }
+        throw new InvalidProjectSourceException("URL phải là GitHub repository public (https://github.com/...)");
     }
 }

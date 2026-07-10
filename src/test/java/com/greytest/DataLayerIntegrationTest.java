@@ -33,7 +33,7 @@ import jakarta.persistence.PersistenceContext;
  * <p>Yêu cầu: chạy {@code docker compose up -d postgres} trước khi test.
  * Mỗi test bọc trong transaction và rollback nên không để lại dữ liệu.
  */
-@SpringBootTest
+@SpringBootTest(properties = "greytest.auth.token-secret=test-only-token-secret-at-least-32-bytes")
 @Transactional
 class DataLayerIntegrationTest {
 

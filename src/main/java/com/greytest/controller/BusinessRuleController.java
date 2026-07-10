@@ -10,6 +10,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -17,7 +18,9 @@ import com.greytest.dto.BusinessRuleDto;
 import com.greytest.dto.BusinessRuleReviewDto;
 import com.greytest.dto.CreateBusinessRuleRequest;
 import com.greytest.dto.UpdateBusinessRuleRequest;
+import com.greytest.service.AuthService;
 import com.greytest.service.BusinessRuleService;
+import com.greytest.service.ProjectService;
 
 import jakarta.validation.Valid;
 
@@ -25,13 +28,23 @@ import jakarta.validation.Valid;
 public class BusinessRuleController {
 
     private final BusinessRuleService businessRuleService;
+    private final AuthService authService;
+    private final ProjectService projectService;
 
-    public BusinessRuleController(BusinessRuleService businessRuleService) {
+    public BusinessRuleController(
+            BusinessRuleService businessRuleService,
+            AuthService authService,
+            ProjectService projectService) {
         this.businessRuleService = businessRuleService;
+        this.authService = authService;
+        this.projectService = projectService;
     }
 
     @GetMapping("/api/projects/{projectId}/business-rules")
-    public List<BusinessRuleDto> list(@PathVariable Long projectId) {
+    public List<BusinessRuleDto> list(
+            @PathVariable Long projectId,
+            @RequestHeader("Authorization") String authorization) {
+        requireAccess(projectId, authorization);
         return businessRuleService.list(projectId);
     }
 
@@ -39,35 +52,55 @@ public class BusinessRuleController {
     @ResponseStatus(HttpStatus.CREATED)
     public BusinessRuleDto create(
             @PathVariable Long projectId,
+            @RequestHeader("Authorization") String authorization,
             @Valid @RequestBody CreateBusinessRuleRequest request) {
+        requireAccess(projectId, authorization);
         return businessRuleService.create(projectId, request);
     }
 
     @PostMapping("/api/projects/{projectId}/business-rules/generate")
-    public List<BusinessRuleDto> generate(@PathVariable Long projectId) {
+    public List<BusinessRuleDto> generate(
+            @PathVariable Long projectId,
+            @RequestHeader("Authorization") String authorization) {
+        requireAccess(projectId, authorization);
         return businessRuleService.generate(projectId);
     }
 
     @PostMapping("/api/projects/{projectId}/business-rules/review")
-    public BusinessRuleReviewDto review(@PathVariable Long projectId) {
+    public BusinessRuleReviewDto review(
+            @PathVariable Long projectId,
+            @RequestHeader("Authorization") String authorization) {
+        requireAccess(projectId, authorization);
         return businessRuleService.review(projectId);
     }
 
     @PostMapping("/api/projects/{projectId}/business-rules/approve")
-    public List<BusinessRuleDto> approve(@PathVariable Long projectId) {
+    public List<BusinessRuleDto> approve(
+            @PathVariable Long projectId,
+            @RequestHeader("Authorization") String authorization) {
+        requireAccess(projectId, authorization);
         return businessRuleService.approve(projectId);
     }
 
     @PutMapping("/api/business-rules/{ruleId}")
     public BusinessRuleDto update(
             @PathVariable Long ruleId,
+            @RequestHeader("Authorization") String authorization,
             @Valid @RequestBody UpdateBusinessRuleRequest request) {
+        requireAccess(businessRuleService.projectIdForRule(ruleId), authorization);
         return businessRuleService.update(ruleId, request);
     }
 
     @DeleteMapping("/api/business-rules/{ruleId}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
-    public void delete(@PathVariable Long ruleId) {
+    public void delete(
+            @PathVariable Long ruleId,
+            @RequestHeader("Authorization") String authorization) {
+        requireAccess(businessRuleService.projectIdForRule(ruleId), authorization);
         businessRuleService.delete(ruleId);
+    }
+
+    private void requireAccess(Long projectId, String authorization) {
+        projectService.requireAccess(projectId, authService.currentUser(authorization));
     }
 }

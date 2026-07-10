@@ -23,11 +23,17 @@ import com.greytest.dto.agent.GenerationContextDtos.ExistingTestContextDto;
 import com.greytest.dto.agent.GenerationContextDtos.MethodContextDto;
 import com.greytest.dto.agent.GenerationContextDtos.ProjectContextDto;
 import com.greytest.dto.agent.GenerationContextDtos.TestCaseContextDto;
+import com.greytest.dto.agent.GenerationContextDtos.TestCaseContextItemDto;
 import com.greytest.dto.agent.GenerationContextDtos.TestPlanContextDto;
+import com.greytest.dto.agent.GenerationContextDtos.TestPlanContextItemDto;
 import com.greytest.dto.agent.GenerationContextDtos.UnitTestContextDto;
 import com.greytest.entity.BusinessRule;
+import com.greytest.entity.TestCase;
+import com.greytest.entity.TestPlan;
 import com.greytest.entity.enums.ReviewStatus;
 import com.greytest.repository.BusinessRuleRepository;
+import com.greytest.repository.TestCaseRepository;
+import com.greytest.repository.TestPlanRepository;
 import com.greytest.service.analysis.AnalysisManifestService;
 import com.greytest.service.analysis.AnalysisService;
 import com.greytest.service.analysis.ExistingTestService;
@@ -46,16 +52,22 @@ public class GenerationContextBuilder {
     private final AnalysisManifestService manifestService;
     private final ExistingTestService existingTestService;
     private final BusinessRuleRepository businessRuleRepository;
+    private final TestPlanRepository testPlanRepository;
+    private final TestCaseRepository testCaseRepository;
 
     public GenerationContextBuilder(
             AnalysisService analysisService,
             AnalysisManifestService manifestService,
             ExistingTestService existingTestService,
-            BusinessRuleRepository businessRuleRepository) {
+            BusinessRuleRepository businessRuleRepository,
+            TestPlanRepository testPlanRepository,
+            TestCaseRepository testCaseRepository) {
         this.analysisService = analysisService;
         this.manifestService = manifestService;
         this.existingTestService = existingTestService;
         this.businessRuleRepository = businessRuleRepository;
+        this.testPlanRepository = testPlanRepository;
+        this.testCaseRepository = testCaseRepository;
     }
 
     /** Context cho AI tu sinh Business Rule tu cac service method. */
@@ -68,7 +80,7 @@ public class GenerationContextBuilder {
                 classes(analysis, serviceMethodIds(analysis)),
                 serviceRelations(analysis),
                 controllerServiceRelations(analysis),
-                existingTests(projectId));
+                existingTests(projectId, false));
     }
 
     /** Context cho AI review Business Rule user da nhap. */
@@ -82,7 +94,7 @@ public class GenerationContextBuilder {
                 serviceRelations(analysis),
                 controllerServiceRelations(analysis),
                 businessRules(projectId),
-                existingTests(projectId));
+                existingTests(projectId, false));
     }
 
     /** Context cho sinh Test Plan tu Business Rule da approve. */
@@ -95,10 +107,10 @@ public class GenerationContextBuilder {
                 summary(projectId, analysis),
                 classes(analysis, methodIds(approvedRules)),
                 approvedRules,
-                existingTests(projectId));
+                existingTests(projectId, false));
     }
 
-    /** Context cho sinh Test Case. Test Plan entity/service se noi vao Phase 6-7. */
+    /** Context cho sinh Test Case tu Test Plan da approve. */
     @Transactional(readOnly = true)
     public TestCaseContextDto buildTestCaseContext(Long projectId) {
         AnalysisResultDto analysis = analysisService.getAnalysisResult(projectId);
@@ -108,7 +120,8 @@ public class GenerationContextBuilder {
                 summary(projectId, analysis),
                 classes(analysis, methodIds(approvedRules)),
                 approvedRules,
-                existingTests(projectId));
+                approvedTestPlans(projectId),
+                existingTests(projectId, false));
     }
 
     /** Context cho sinh/cai thien Unit Test, gom existing tests rieng de khong tinh vao production counters. */
@@ -121,7 +134,9 @@ public class GenerationContextBuilder {
                 summary(projectId, analysis),
                 classes(analysis, methodIds(approvedRules)),
                 approvedRules,
-                existingTests(projectId));
+                approvedTestPlans(projectId),
+                approvedTestCases(projectId),
+                existingTests(projectId, true));
     }
 
     private ProjectContextDto project(AnalysisResultDto analysis) {
@@ -213,14 +228,14 @@ public class GenerationContextBuilder {
                 rule.getIsModified());
     }
 
-    private List<ExistingTestContextDto> existingTests(Long projectId) {
+    private List<ExistingTestContextDto> existingTests(Long projectId, boolean includeSource) {
         return existingTestService.list(projectId).stream()
-                .map(this::existingTestContext)
+                .map(test -> existingTestContext(test, includeSource))
                 .sorted(Comparator.comparing(ExistingTestContextDto::filePath))
                 .toList();
     }
 
-    private ExistingTestContextDto existingTestContext(ExistingTestDto test) {
+    private ExistingTestContextDto existingTestContext(ExistingTestDto test, boolean includeSource) {
         return new ExistingTestContextDto(
                 test.id(),
                 test.filePath(),
@@ -229,7 +244,41 @@ public class GenerationContextBuilder {
                 test.relatedClassId(),
                 test.relatedMethodId(),
                 test.testMethods(),
-                sorted(test.imports()));
+                sorted(test.imports()),
+                includeSource ? test.sourceCode() : null);
+    }
+
+    private List<TestPlanContextItemDto> approvedTestPlans(Long projectId) {
+        return testPlanRepository.findByProjectId(projectId).stream()
+                .filter(plan -> plan.getStatus() == ReviewStatus.APPROVED)
+                .map(this::testPlanContext)
+                .sorted(Comparator.comparing(TestPlanContextItemDto::planCode))
+                .toList();
+    }
+
+    private TestPlanContextItemDto testPlanContext(TestPlan plan) {
+        return new TestPlanContextItemDto(
+                plan.getId(), plan.getBusinessRuleId(), plan.getPlanCode(), plan.getTitle(), plan.getDescription(),
+                plan.getTestType() == null ? null : plan.getTestType().name(),
+                plan.getStatus() == null ? null : plan.getStatus().name(), plan.getIsModified());
+    }
+
+    private List<TestCaseContextItemDto> approvedTestCases(Long projectId) {
+        return approvedTestPlans(projectId).stream()
+                .flatMap(plan -> testCaseRepository.findByTestPlanId(plan.id()).stream())
+                .filter(testCase -> testCase.getStatus() == ReviewStatus.APPROVED)
+                .map(this::testCaseContext)
+                .sorted(Comparator.comparing(TestCaseContextItemDto::caseCode))
+                .toList();
+    }
+
+    private TestCaseContextItemDto testCaseContext(TestCase testCase) {
+        return new TestCaseContextItemDto(
+                testCase.getId(), testCase.getTestPlanId(), testCase.getCaseCode(),
+                testCase.getTestType() == null ? null : testCase.getTestType().name(), testCase.getDescription(),
+                testCase.getPreconditions(), testCase.getTestData(), testCase.getExpectedResult(),
+                testCase.getPriority() == null ? null : testCase.getPriority().name(), testCase.getTraceSource(),
+                testCase.getStatus() == null ? null : testCase.getStatus().name(), testCase.getIsModified());
     }
 
     private Set<Long> serviceMethodIds(AnalysisResultDto analysis) {

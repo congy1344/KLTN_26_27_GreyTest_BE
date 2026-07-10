@@ -5,6 +5,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -12,6 +13,8 @@ import com.greytest.dto.AnalysisResultDto;
 import com.greytest.dto.AnalysisManifestDto;
 import com.greytest.dto.AnalysisManifestInput;
 import com.greytest.dto.AnalysisManifestValidationDto;
+import com.greytest.service.AuthService;
+import com.greytest.service.ProjectService;
 import com.greytest.service.analysis.AnalysisManifestService;
 import com.greytest.service.analysis.AnalysisService;
 
@@ -23,29 +26,46 @@ public class AnalysisController {
 
     private final AnalysisService analysisService;
     private final AnalysisManifestService manifestService;
+    private final AuthService authService;
+    private final ProjectService projectService;
 
-    public AnalysisController(AnalysisService analysisService, AnalysisManifestService manifestService) {
+    public AnalysisController(
+            AnalysisService analysisService,
+            AnalysisManifestService manifestService,
+            AuthService authService,
+            ProjectService projectService) {
         this.analysisService = analysisService;
         this.manifestService = manifestService;
+        this.authService = authService;
+        this.projectService = projectService;
     }
 
     /** Trigger phân tích source code (hoặc re-analyze). */
     @PostMapping("/analyze")
-    public ResponseEntity<AnalysisResultDto> analyze(@PathVariable Long projectId) {
+    public ResponseEntity<AnalysisResultDto> analyze(
+            @PathVariable Long projectId,
+            @RequestHeader("Authorization") String authorization) {
+        projectService.requireAccess(projectId, authService.currentUser(authorization));
         AnalysisResultDto result = analysisService.analyze(projectId);
         return ResponseEntity.ok(result);
     }
 
     /** Lấy kết quả phân tích đã lưu. */
     @GetMapping("/analysis")
-    public ResponseEntity<AnalysisResultDto> getAnalysis(@PathVariable Long projectId) {
+    public ResponseEntity<AnalysisResultDto> getAnalysis(
+            @PathVariable Long projectId,
+            @RequestHeader("Authorization") String authorization) {
+        projectService.requireAccess(projectId, authService.currentUser(authorization));
         AnalysisResultDto result = analysisService.getAnalysisResult(projectId);
         return ResponseEntity.ok(result);
     }
 
     /** Xuất manifest deterministic dùng làm ground truth hoặc review thủ công. */
     @GetMapping("/analysis/manifest")
-    public ResponseEntity<AnalysisManifestDto> exportManifest(@PathVariable Long projectId) {
+    public ResponseEntity<AnalysisManifestDto> exportManifest(
+            @PathVariable Long projectId,
+            @RequestHeader("Authorization") String authorization) {
+        projectService.requireAccess(projectId, authService.currentUser(authorization));
         return ResponseEntity.ok(manifestService.exportManifest(projectId));
     }
 
@@ -53,7 +73,9 @@ public class AnalysisController {
     @PostMapping("/analysis/manifest/validate")
     public ResponseEntity<AnalysisManifestValidationDto> validateManifest(
             @PathVariable Long projectId,
+            @RequestHeader("Authorization") String authorization,
             @Valid @RequestBody AnalysisManifestInput expected) {
+        projectService.requireAccess(projectId, authService.currentUser(authorization));
         return ResponseEntity.ok(manifestService.validateManifest(projectId, expected));
     }
 }

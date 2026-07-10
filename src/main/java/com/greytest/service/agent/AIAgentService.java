@@ -25,16 +25,19 @@ public class AIAgentService {
     private final PromptManager promptManager;
     private final LlmClient llmClient;
     private final GenerationResponseParser responseParser;
+    private final AiContextLogService contextLogService;
 
     public AIAgentService(
             GenerationContextBuilder contextBuilder,
             PromptManager promptManager,
             LlmClient llmClient,
-            GenerationResponseParser responseParser) {
+            GenerationResponseParser responseParser,
+            AiContextLogService contextLogService) {
         this.contextBuilder = contextBuilder;
         this.promptManager = promptManager;
         this.llmClient = llmClient;
         this.responseParser = responseParser;
+        this.contextLogService = contextLogService;
     }
 
     public BusinessRuleResponseDto generateBusinessRules(Long projectId) {
@@ -61,6 +64,7 @@ public class AIAgentService {
 
     private <T> T call(String promptName, Object context, Class<T> responseType) {
         String prompt = promptManager.render(promptName, Map.of("context_json", context));
+        contextLogService.write(promptName, context, prompt);
         for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
             try {
                 return responseParser.parse(llmClient.complete(prompt), responseType);

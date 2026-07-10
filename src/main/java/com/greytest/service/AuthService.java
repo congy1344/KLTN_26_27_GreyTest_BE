@@ -9,6 +9,7 @@ import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpStatus;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
@@ -35,7 +36,10 @@ public class AuthService {
 
     public AuthService(
             AuthUserRepository userRepository,
-            @Value("${greytest.auth.token-secret:dev-greytest-token-secret-change-me}") String tokenSecret) {
+            @Value("${greytest.auth.token-secret}") String tokenSecret) {
+        if (tokenSecret == null || tokenSecret.getBytes(StandardCharsets.UTF_8).length < 32) {
+            throw new IllegalStateException("GREYTEST_AUTH_TOKEN_SECRET phai co it nhat 32 bytes");
+        }
         this.userRepository = userRepository;
         this.tokenSecret = tokenSecret;
     }
@@ -44,7 +48,7 @@ public class AuthService {
     public LoginResponse register(RegisterRequest request) {
         String email = normalizeEmail(request.email());
         if (userRepository.findByEmailIgnoreCase(email).isPresent()) {
-            throw new AuthException("Email da duoc su dung");
+            throw new AuthException("EMAIL_EXISTS", "Email da duoc su dung", HttpStatus.CONFLICT);
         }
 
         AuthUser user = new AuthUser();
@@ -60,10 +64,10 @@ public class AuthService {
     @Transactional(readOnly = true)
     public LoginResponse login(LoginRequest request) {
         AuthUser user = userRepository.findByEmailIgnoreCase(normalizeEmail(request.email()))
-                .orElseThrow(() -> new AuthException("Email hoac mat khau khong dung"));
+                .orElseThrow(() -> unauthorized("Email hoac mat khau khong dung"));
         if (!Boolean.TRUE.equals(user.getEnabled())
                 || !passwordEncoder.matches(request.password(), user.getPasswordHash())) {
-            throw new AuthException("Email hoac mat khau khong dung");
+            throw unauthorized("Email hoac mat khau khong dung");
         }
         return new LoginResponse(issueToken(user), toDto(user));
     }
@@ -71,21 +75,13 @@ public class AuthService {
     @Transactional(readOnly = true)
     public AuthUser currentUser(String authorizationHeader) {
         Long userId = parseBearerToken(authorizationHeader)
-                .orElseThrow(() -> new AuthException("Token khong hop le hoac da het han"));
+                .orElseThrow(() -> unauthorized("Token khong hop le hoac da het han"));
         AuthUser user = userRepository.findById(userId)
-                .orElseThrow(() -> new AuthException("Nguoi dung khong ton tai"));
+                .orElseThrow(() -> unauthorized("Nguoi dung khong ton tai"));
         if (!Boolean.TRUE.equals(user.getEnabled())) {
-            throw new AuthException("Tai khoan da bi vo hieu hoa");
+            throw unauthorized("Tai khoan da bi vo hieu hoa");
         }
         return user;
-    }
-
-    @Transactional(readOnly = true)
-    public Optional<AuthUser> optionalCurrentUser(String authorizationHeader) {
-        if (authorizationHeader == null || authorizationHeader.isBlank()) {
-            return Optional.empty();
-        }
-        return Optional.of(currentUser(authorizationHeader));
     }
 
     public AuthUserDto toDto(AuthUser user) {
@@ -131,8 +127,12 @@ public class AuthService {
             mac.init(new SecretKeySpec(tokenSecret.getBytes(StandardCharsets.UTF_8), HMAC_ALGORITHM));
             return base64Url(mac.doFinal(encodedPayload.getBytes(StandardCharsets.UTF_8)));
         } catch (Exception exception) {
-            throw new AuthException("Khong tao duoc token dang nhap");
+            throw new IllegalStateException("Khong tao duoc token dang nhap", exception);
         }
+    }
+
+    private AuthException unauthorized(String message) {
+        return new AuthException("AUTH_ERROR", message, HttpStatus.UNAUTHORIZED);
     }
 
     private boolean constantTimeEquals(String expected, String actual) {

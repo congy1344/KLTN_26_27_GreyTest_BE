@@ -186,6 +186,7 @@ public class ExistingTestService {
                 test.getRelatedMethodId(),
                 test.getTestMethods(),
                 test.getImports(),
+                test.getSourceCode(),
                 test.getCreatedAt());
     }
 

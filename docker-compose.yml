@@ -22,6 +22,7 @@ services:
       LLM_PROVIDER: ${LLM_PROVIDER:-mock}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
+      GREYTEST_AUTH_TOKEN_SECRET: ${GREYTEST_AUTH_TOKEN_SECRET:-}
       GREYTEST_STORAGE_PATH: /app/storage
     volumes:
       - backend_storage:/app/storage

@@ -16,6 +16,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import com.greytest.dto.BusinessRuleDto;
 import com.greytest.dto.BusinessRuleReviewDto;
+import com.greytest.dto.CreateBusinessRuleRequest;
 import com.greytest.dto.agent.GenerationResponseDtos.BusinessRuleResponseDto;
 import com.greytest.dto.agent.GenerationResponseDtos.BusinessRuleReviewResponseDto;
 import com.greytest.dto.agent.GenerationResponseDtos.GeneratedBusinessRuleDto;
@@ -120,6 +121,21 @@ class BusinessRuleServiceTest {
                 .hasMessageContaining("Chua co Business Rule");
     }
 
+    @Test
+    void createRejectsDuplicateDescriptionInSameProject() {
+        mockProject();
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(rule(
+                7L,
+                11L,
+                "Save a daily statistical data point for an account, capturing normalized incomes, expenses, and current exchange rates.")));
+
+        assertThatThrownBy(() -> service().create(1L, new CreateBusinessRuleRequest(
+                11L,
+                " save a daily statistical data point for an account, capturing normalized incomes, expenses, and current exchange rates. ")))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Business Rule da ton tai");
+    }
+
     private BusinessRuleService service() {
         return new BusinessRuleService(
                 businessRuleRepository,
@@ -150,6 +166,17 @@ class BusinessRuleServiceTest {
         when(javaClassRepository.findByProjectIdAndClassType(1L, ClassType.SERVICE))
                 .thenReturn(List.of(serviceClass));
         when(javaMethodRepository.findByClassIdIn(List.of(10L))).thenReturn(List.of(methods));
+    }
+
+    private void mockProjectServiceMethod(Long methodId) {
+        JavaMethod method = method(methodId, "createUser");
+        method.setClassId(10L);
+        JavaClass serviceClass = new JavaClass();
+        serviceClass.setId(10L);
+        serviceClass.setProjectId(1L);
+        serviceClass.setClassType(ClassType.SERVICE);
+        when(javaMethodRepository.findById(methodId)).thenReturn(Optional.of(method));
+        when(javaClassRepository.findById(10L)).thenReturn(Optional.of(serviceClass));
     }
 
     private void mockBusinessRuleSave() {

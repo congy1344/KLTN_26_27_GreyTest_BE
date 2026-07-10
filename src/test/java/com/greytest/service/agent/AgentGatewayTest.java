@@ -5,10 +5,13 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.greytest.dto.AnalysisManifestDto;
@@ -66,14 +69,20 @@ class AgentGatewayTest {
     }
 
     @Test
-    void aiAgentServiceUsesGatewayPieces() {
+    void aiAgentServiceUsesGatewayPieces(@TempDir Path tempDir) throws Exception {
         GenerationContextBuilder contextBuilder = mock(GenerationContextBuilder.class);
         when(contextBuilder.buildBusinessRuleGenerationContext(1L)).thenReturn(context());
-        AIAgentService service = new AIAgentService(contextBuilder, promptManager, mockLlmClient, parser);
+        AiContextLogService contextLogService = new AiContextLogService(objectMapper, tempDir.toString());
+        AIAgentService service = new AIAgentService(contextBuilder, promptManager, mockLlmClient, parser, contextLogService);
 
         BusinessRuleResponseDto response = service.generateBusinessRules(1L);
 
         assertThat(response.rules()).extracting("category").containsExactly("VALIDATION");
+        try (var files = Files.list(tempDir)) {
+            Path logFile = files.findFirst().orElseThrow();
+            assertThat(logFile.getFileName().toString()).contains("business-rule");
+            assertThat(Files.readString(logFile)).contains("context_json", "rendered_prompt", "\"projectId\" : 1");
+        }
     }
 
     @Test
@@ -89,6 +98,48 @@ class AgentGatewayTest {
         assertThatThrownBy(() -> parser.parse(invalidJson, BusinessRuleResponseDto.class))
                 .isInstanceOf(LlmResponseException.class)
                 .hasMessageContaining("LLM response khong dung schema");
+    }
+
+    @Test
+    void parserAcceptsJsonCodeFence() {
+        String fencedJson = """
+                ```json
+                {
+                  "rules": [
+                    {
+                      "method_id": 1,
+                      "description": "Input {demo} phai hop le.",
+                      "category": "VALIDATION"
+                    }
+                  ]
+                }
+                ```
+                """;
+
+        BusinessRuleResponseDto response = parser.parse(fencedJson, BusinessRuleResponseDto.class);
+
+        assertThat(response.rules()).hasSize(1);
+    }
+
+    @Test
+    void parserAcceptsJsonWrappedByText() {
+        String wrappedJson = """
+                Day la ket qua JSON:
+                {
+                  "rules": [
+                    {
+                      "method_id": 1,
+                      "description": "Input phai hop le.",
+                      "category": "VALIDATION"
+                    }
+                  ]
+                }
+                Ket thuc.
+                """;
+
+        BusinessRuleResponseDto response = parser.parse(wrappedJson, BusinessRuleResponseDto.class);
+
+        assertThat(response.rules()).hasSize(1);
     }
 
     private BusinessRuleGenerationContextDto context() {

@@ -25,7 +25,7 @@ public class MockLlmClient implements LlmClient {
         String normalized = prompt == null ? "" : prompt.toLowerCase(Locale.ROOT);
         if (normalized.contains("prompt: business-rule-review")) return businessRuleReview(prompt);
         if (normalized.contains("prompt: business-rule")) return businessRule(prompt);
-        if (normalized.contains("prompt: test-plan")) return testPlan();
+        if (normalized.contains("prompt: test-plan")) return testPlan(prompt);
         if (normalized.contains("prompt: test-case")) return testCase();
         if (normalized.contains("prompt: unit-test")) return unitTest();
         throw new LlmResponseException("MockLlmClient khong nhan dien duoc prompt template.");
@@ -92,19 +92,20 @@ public class MockLlmClient implements LlmClient {
         return ids.isEmpty() ? List.of(1L) : ids;
     }
 
-    private String testPlan() {
+    private String testPlan(String prompt) {
+        long ruleId = firstId(prompt, FIRST_RULE_ID);
         return """
                 {
                   "plans": [
                     {
-                      "rule_id": 1,
+                      "rule_id": %d,
                       "title": "Happy path cho rule chinh",
                       "description": "Kiem tra luong thanh cong khi tat ca dieu kien hop le.",
                       "test_type": "HAPPY_PATH"
                     }
                   ]
                 }
-                """;
+                """.formatted(ruleId);
     }
 
     private String testCase() {

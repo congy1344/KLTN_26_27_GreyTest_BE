@@ -1,6 +1,7 @@
 package com.greytest.dto.agent;
 
 import java.util.List;
+import java.util.Map;
 
 import com.greytest.dto.AnalysisManifestDto;
 import com.greytest.dto.ControllerServiceRelationDto;
@@ -79,7 +80,34 @@ public final class GenerationContextDtos {
             Long relatedClassId,
             Long relatedMethodId,
             List<?> testMethods,
-            List<String> imports) {
+            List<String> imports,
+            String sourceCode) {
+    }
+
+    public record TestPlanContextItemDto(
+            Long id,
+            Long businessRuleId,
+            String planCode,
+            String title,
+            String description,
+            String testType,
+            String status,
+            Boolean isModified) {
+    }
+
+    public record TestCaseContextItemDto(
+            Long id,
+            Long testPlanId,
+            String caseCode,
+            String testType,
+            String description,
+            String preconditions,
+            Map<String, Object> testData,
+            String expectedResult,
+            String priority,
+            String traceSource,
+            String status,
+            Boolean isModified) {
     }
 
     public record BusinessRuleGenerationContextDto(
@@ -114,6 +142,7 @@ public final class GenerationContextDtos {
             AnalysisSummaryDto analysis,
             List<ClassContextDto> classes,
             List<BusinessRuleContextDto> approvedBusinessRules,
+            List<TestPlanContextItemDto> approvedTestPlans,
             List<ExistingTestContextDto> existingTests) {
     }
 
@@ -122,6 +151,8 @@ public final class GenerationContextDtos {
             AnalysisSummaryDto analysis,
             List<ClassContextDto> classes,
             List<BusinessRuleContextDto> approvedBusinessRules,
+            List<TestPlanContextItemDto> approvedTestPlans,
+            List<TestCaseContextItemDto> approvedTestCases,
             List<ExistingTestContextDto> existingTests) {
     }
 }
