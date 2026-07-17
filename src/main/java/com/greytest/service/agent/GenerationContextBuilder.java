@@ -74,10 +74,12 @@ public class GenerationContextBuilder {
     @Transactional(readOnly = true)
     public BusinessRuleGenerationContextDto buildBusinessRuleGenerationContext(Long projectId) {
         AnalysisResultDto analysis = analysisService.getAnalysisResult(projectId);
+        Set<Long> uncoveredMethodIds = serviceMethodIds(analysis);
+        uncoveredMethodIds.removeAll(methodIds(businessRules(projectId)));
         return new BusinessRuleGenerationContextDto(
                 project(analysis),
                 summary(projectId, analysis),
-                classes(analysis, serviceMethodIds(analysis)),
+                classes(analysis, uncoveredMethodIds),
                 serviceRelations(analysis),
                 controllerServiceRelations(analysis),
                 existingTests(projectId, false));

@@ -1,4 +1,6 @@
 spring:
+  config:
+    import: optional:file:.env[.properties]
   application:
     name: greytest
   datasource:
@@ -36,6 +38,7 @@ greytest:
     token-secret: ${GREYTEST_AUTH_TOKEN_SECRET:}
   ai-context-log-path: ${GREYTEST_AI_CONTEXT_LOG_PATH:../log}
   ai-context-log-enabled: ${GREYTEST_AI_CONTEXT_LOG_ENABLED:false}
+  ai-context-log-console-enabled: ${GREYTEST_AI_CONTEXT_LOG_CONSOLE_ENABLED:false}
 
 # API key LLM lấy từ env, KHÔNG commit (xem .env.example)
 llm:

@@ -6,6 +6,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.util.Locale;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -15,6 +16,7 @@ import org.springframework.stereotype.Service;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 /**
@@ -101,17 +103,167 @@ public class GoogleLlmClient implements LlmClient {
         }
     }
 
-    private String requestBody(String prompt) {
+    String requestBody(String prompt) {
         ObjectNode root = objectMapper.createObjectNode();
         root.put("model", model);
         root.put("input", prompt);
         ObjectNode generationConfig = root.putObject("generation_config");
         generationConfig.put("temperature", temperature);
         generationConfig.put("max_output_tokens", maxTokens);
+        root.set("response_format", responseFormat(prompt));
         try {
             return objectMapper.writeValueAsString(root);
         } catch (JsonProcessingException exception) {
             throw new LlmResponseException("Khong tao duoc request Google Gemini.", exception);
+        }
+    }
+
+    private ObjectNode responseFormat(String prompt) {
+        ObjectNode format = objectMapper.createObjectNode();
+        format.put("type", "text");
+        format.put("mime_type", "application/json");
+        format.set("schema", schemaFor(prompt));
+        return format;
+    }
+
+    private ObjectNode schemaFor(String prompt) {
+        String promptHeader = promptHeader(prompt);
+        if (promptHeader.equals("# prompt: business-rule-review")) {
+            ObjectNode schema = objectSchema();
+            ObjectNode properties = schema.putObject("properties");
+            properties.set("reviewed_rules", arraySchema(reviewedRuleSchema()));
+            properties.set("suggested_rules", arraySchema(businessRuleSchema()));
+            required(schema, "reviewed_rules", "suggested_rules");
+            return schema;
+        }
+        if (promptHeader.equals("# prompt: business-rule")) {
+            return responseSchema("rules", businessRuleSchema());
+        }
+        if (promptHeader.equals("# prompt: test-plan")) {
+            return responseSchema("plans", testPlanSchema());
+        }
+        if (promptHeader.equals("# prompt: test-case")) {
+            return responseSchema("cases", testCaseSchema());
+        }
+        if (promptHeader.equals("# prompt: unit-test")) {
+            return responseSchema("unit_tests", unitTestSchema());
+        }
+        return objectSchema();
+    }
+
+    private String promptHeader(String prompt) {
+        if (prompt == null || prompt.isBlank()) return "";
+        int lineEnd = prompt.indexOf('\n');
+        String firstLine = lineEnd < 0 ? prompt : prompt.substring(0, lineEnd);
+        return firstLine.trim().toLowerCase(Locale.ROOT);
+    }
+
+    private ObjectNode responseSchema(String arrayName, ObjectNode itemSchema) {
+        ObjectNode schema = objectSchema();
+        schema.putObject("properties").set(arrayName, arraySchema(itemSchema));
+        required(schema, arrayName);
+        return schema;
+    }
+
+    private ObjectNode businessRuleSchema() {
+        ObjectNode schema = objectSchema();
+        ObjectNode properties = schema.putObject("properties");
+        properties.set("method_id", type("integer"));
+        properties.set("description", type("string"));
+        properties.set("category", enumSchema("VALIDATION", "BUSINESS_LOGIC", "SIDE_EFFECT"));
+        required(schema, "method_id", "description", "category");
+        return schema;
+    }
+
+    private ObjectNode reviewedRuleSchema() {
+        ObjectNode schema = objectSchema();
+        ObjectNode properties = schema.putObject("properties");
+        properties.set("rule_id", type("integer"));
+        properties.set("verdict", enumSchema("OK", "NEEDS_REVISION", "DUPLICATE", "WRONG_METHOD", "TOO_VAGUE"));
+        properties.set("suggested_description", nullableStringSchema());
+        properties.set("reason", type("string"));
+        required(schema, "rule_id", "verdict", "suggested_description", "reason");
+        return schema;
+    }
+
+    private ObjectNode testPlanSchema() {
+        ObjectNode schema = objectSchema();
+        ObjectNode properties = schema.putObject("properties");
+        properties.set("rule_id", type("integer"));
+        properties.set("title", type("string"));
+        properties.set("description", type("string"));
+        properties.set("test_type", enumSchema("HAPPY_PATH", "BOUNDARY", "EXCEPTION", "EDGE"));
+        required(schema, "rule_id", "title", "description", "test_type");
+        return schema;
+    }
+
+    private ObjectNode testCaseSchema() {
+        ObjectNode schema = objectSchema();
+        ObjectNode properties = schema.putObject("properties");
+        properties.set("plan_id", type("integer"));
+        properties.set("test_type", type("string"));
+        properties.set("description", type("string"));
+        properties.set("preconditions", type("string"));
+        properties.set("test_data", objectSchema());
+        properties.set("expected_result", type("string"));
+        properties.set("priority", enumSchema("HIGH", "MEDIUM", "LOW"));
+        properties.set("trace_source", type("string"));
+        required(schema, "plan_id", "test_type", "description", "preconditions", "test_data",
+                "expected_result", "priority", "trace_source");
+        return schema;
+    }
+
+    private ObjectNode unitTestSchema() {
+        ObjectNode schema = objectSchema();
+        ObjectNode properties = schema.putObject("properties");
+        properties.set("case_id", type("integer"));
+        properties.set("test_class_name", type("string"));
+        properties.set("test_method_name", type("string"));
+        properties.set("package_name", type("string"));
+        properties.set("generation_type", enumSchema("NEW_TEST", "IMPROVE_EXISTING_TEST", "SUPPLEMENT_EXISTING_TEST"));
+        properties.set("source_code", type("string"));
+        required(schema, "case_id", "test_class_name", "test_method_name", "package_name",
+                "generation_type", "source_code");
+        return schema;
+    }
+
+    private ObjectNode arraySchema(ObjectNode itemSchema) {
+        ObjectNode schema = type("array");
+        schema.set("items", itemSchema);
+        return schema;
+    }
+
+    private ObjectNode enumSchema(String... values) {
+        ObjectNode schema = type("string");
+        ArrayNode items = schema.putArray("enum");
+        for (String value : values) {
+            items.add(value);
+        }
+        return schema;
+    }
+
+    private ObjectNode nullableStringSchema() {
+        ObjectNode schema = objectMapper.createObjectNode();
+        ArrayNode type = schema.putArray("type");
+        type.add("string");
+        type.add("null");
+        return schema;
+    }
+
+    private ObjectNode objectSchema() {
+        return type("object");
+    }
+
+    private ObjectNode type(String type) {
+        ObjectNode schema = objectMapper.createObjectNode();
+        schema.put("type", type);
+        return schema;
+    }
+
+    private void required(ObjectNode schema, String... names) {
+        ArrayNode required = schema.putArray("required");
+        for (String name : names) {
+            required.add(name);
         }
     }
 

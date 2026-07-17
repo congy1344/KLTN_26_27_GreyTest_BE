@@ -8,6 +8,8 @@ Rules:
 - Do not invent method_id. Do not use class id.
 - Each rule must describe business intent, not repeat code.
 - Use categories: VALIDATION, BUSINESS_LOGIC, SIDE_EFFECT.
+- For each method, propose 1-5 independent rules when applicable. A method may have separate validation, business-logic, and side-effect rules.
+- Do not create duplicate or overlapping rules in the same response.
 
 Output schema:
 - Root object has "rules".

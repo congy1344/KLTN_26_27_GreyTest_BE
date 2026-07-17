@@ -39,7 +39,7 @@ class AgentGatewayTest {
                 mockLlmClient.complete(prompt),
                 BusinessRuleResponseDto.class);
 
-        assertThat(prompt).contains("# Prompt: business-rule", "\"project\" : \"demo\"");
+        assertThat(prompt).contains("# Prompt: business-rule", "\"project\" : \"demo\"", "1-5 independent rules");
         assertThat(response.rules()).hasSize(1);
         assertThat(response.rules().get(0).methodId()).isEqualTo(1L);
     }
@@ -79,10 +79,30 @@ class AgentGatewayTest {
 
         assertThat(response.rules()).extracting("category").containsExactly("VALIDATION");
         try (var files = Files.list(tempDir)) {
-            Path logFile = files.findFirst().orElseThrow();
-            assertThat(logFile.getFileName().toString()).contains("business-rule");
-            assertThat(Files.readString(logFile)).contains("context_json", "rendered_prompt", "\"projectId\" : 1");
+            List<Path> logFiles = files.toList();
+            Path contextLog = logFiles.stream()
+                    .filter(file -> !file.getFileName().toString().contains("-response-"))
+                    .findFirst().orElseThrow();
+            Path responseLog = logFiles.stream()
+                    .filter(file -> file.getFileName().toString().contains("-response-1"))
+                    .findFirst().orElseThrow();
+            assertThat(Files.readString(contextLog)).contains("context_json", "rendered_prompt", "\"projectId\" : 1");
+            assertThat(Files.readString(responseLog)).contains("\"rules\"");
         }
+    }
+
+    @Test
+    void contextLogDefaultPathUsesProjectRootLog(@TempDir Path tempDir) throws Exception {
+        Path projectRoot = tempDir.resolve("greytest");
+        Files.createDirectories(projectRoot.resolve("backend"));
+        Files.createDirectories(projectRoot.resolve("frontend"));
+
+        assertThat(AiContextLogService.resolveLogDir("../log", projectRoot.resolve("backend")))
+                .isEqualTo(projectRoot.resolve("log"));
+        assertThat(AiContextLogService.resolveLogDir("log", projectRoot.resolve("backend")))
+                .isEqualTo(projectRoot.resolve("backend").resolve("log"));
+        assertThat(AiContextLogService.resolveLogDir("./log", projectRoot.resolve("backend")))
+                .isEqualTo(projectRoot.resolve("backend").resolve("log"));
     }
 
     @Test

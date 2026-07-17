@@ -67,7 +67,9 @@ public class AIAgentService {
         contextLogService.write(promptName, context, prompt);
         for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
             try {
-                return responseParser.parse(llmClient.complete(prompt), responseType);
+                String response = llmClient.complete(prompt);
+                contextLogService.writeResponse(promptName, attempt, response);
+                return responseParser.parse(response, responseType);
             } catch (LlmResponseException exception) {
                 log.warn("LLM response invalid for {} attempt {}: {}", promptName, attempt, exception.getMessage());
                 if (attempt == MAX_ATTEMPTS) throw exception;

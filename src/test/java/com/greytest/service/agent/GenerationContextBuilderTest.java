@@ -66,7 +66,7 @@ class GenerationContextBuilderTest {
         assertThat(context.analysis().totalClasses()).isEqualTo(2);
         assertThat(context.existingTests()).hasSize(1);
         assertThat(context.classes()).extracting("qualifiedName").containsExactly("demo.UserService");
-        assertThat(context.classes().get(0).methods()).extracting("methodName").containsExactly("createUser");
+        assertThat(context.classes().get(0).methods()).extracting("methodName").containsExactly("updateUser");
     }
 
     @Test
@@ -142,7 +142,18 @@ class GenerationContextBuilderTest {
                 "SERVICE",
                 "src/main/java/demo/UserService.java",
                 List.of(),
-                List.of(serviceMethod));
+                List.of(serviceMethod, new JavaMethodDto(
+                        12L,
+                        "updateUser",
+                        "User",
+                        List.of(),
+                        List.of(),
+                        "PUBLIC",
+                        "User updateUser() { return null; }",
+                        14,
+                        16,
+                        List.of(),
+                        List.of())));
         JavaMethodDto controllerMethod = new JavaMethodDto(
                 31L,
                 "create",

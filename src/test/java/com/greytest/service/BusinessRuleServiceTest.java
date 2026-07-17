@@ -3,6 +3,8 @@ package com.greytest.service;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import java.util.List;
@@ -109,6 +111,36 @@ class BusinessRuleServiceTest {
         assertThatThrownBy(() -> service().generate(1L))
                 .isInstanceOf(InvalidProjectStatusException.class)
                 .hasMessageContaining("chua co service method");
+    }
+
+    @Test
+    void generateSkipsAiWhenEveryServiceMethodAlreadyHasBusinessRule() {
+        mockProject();
+        mockServiceMethods(method(11L, "createUser"));
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(
+                rule(7L, 11L, "Email phai hop le truoc khi tao user.")));
+
+        assertThat(service().generate(1L)).isEmpty();
+
+        verifyNoInteractions(aiAgentService);
+    }
+
+    @Test
+    void generateOnlyAcceptsRulesForMethodsWithoutBusinessRule() {
+        mockProject();
+        mockProjectSave();
+        mockServiceMethods(method(11L, "createUser"), method(12L, "updateUser"));
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(
+                rule(7L, 11L, "Email phai hop le truoc khi tao user.")));
+        when(aiAgentService.generateBusinessRules(1L)).thenReturn(new BusinessRuleResponseDto(List.of(
+                new GeneratedBusinessRuleDto(11L, "Rule cu khong duoc them lai.", "VALIDATION"),
+                new GeneratedBusinessRuleDto(12L, "User cap nhat phai ton tai.", "BUSINESS_LOGIC"))));
+        mockBusinessRuleSave();
+
+        List<BusinessRuleDto> rules = service().generate(1L);
+
+        assertThat(rules).extracting(BusinessRuleDto::methodId).containsExactly(12L);
+        verify(aiAgentService).generateBusinessRules(1L);
     }
 
     @Test

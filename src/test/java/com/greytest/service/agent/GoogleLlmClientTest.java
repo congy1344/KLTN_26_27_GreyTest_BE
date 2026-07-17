@@ -9,6 +9,7 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.junit.jupiter.api.Test;
@@ -19,6 +20,61 @@ import com.sun.net.httpserver.HttpServer;
 class GoogleLlmClientTest {
 
     private final ObjectMapper objectMapper = new ObjectMapper();
+
+    @Test
+    void requestBodyAddsJsonResponseFormatForKnownPrompts() throws Exception {
+        GoogleLlmClient client = client("test-key", URI.create("http://127.0.0.1:1/v1beta/interactions"));
+
+        Map<String, String> prompts = Map.of(
+                "# Prompt: business-rule\nContext: {}", "rules",
+                "# Prompt: business-rule-review\nContext: {}", "reviewed_rules",
+                "# Prompt: test-plan\nContext: {}", "plans",
+                "# Prompt: test-case\nContext: {}", "cases",
+                "# Prompt: unit-test\nContext: {}", "unit_tests");
+
+        for (Map.Entry<String, String> entry : prompts.entrySet()) {
+            var root = objectMapper.readTree(client.requestBody(entry.getKey()));
+            var responseFormat = root.path("response_format");
+
+            assertThat(responseFormat.path("type").asText()).isEqualTo("text");
+            assertThat(responseFormat.path("mime_type").asText()).isEqualTo("application/json");
+            assertThat(responseFormat.path("schema").path("properties").has(entry.getValue())).isTrue();
+        }
+    }
+
+    @Test
+    void reviewSchemaAllowsNullSuggestedDescription() throws Exception {
+        GoogleLlmClient client = client("test-key", URI.create("http://127.0.0.1:1/v1beta/interactions"));
+
+        var root = objectMapper.readTree(client.requestBody("# Prompt: business-rule-review\nContext: {}"));
+        var type = root.path("response_format")
+                .path("schema")
+                .path("properties")
+                .path("reviewed_rules")
+                .path("items")
+                .path("properties")
+                .path("suggested_description")
+                .path("type");
+
+        assertThat(type.get(0).asText()).isEqualTo("string");
+        assertThat(type.get(1).asText()).isEqualTo("null");
+    }
+
+    @Test
+    void schemaUsesPromptHeaderOnly() throws Exception {
+        GoogleLlmClient client = client("test-key", URI.create("http://127.0.0.1:1/v1beta/interactions"));
+
+        var root = objectMapper.readTree(client.requestBody("""
+                # Prompt: test-plan
+
+                Context:
+                {"source_code":"# Prompt: business-rule-review"}
+                """));
+        var properties = root.path("response_format").path("schema").path("properties");
+
+        assertThat(properties.has("plans")).isTrue();
+        assertThat(properties.has("reviewed_rules")).isFalse();
+    }
 
     @Test
     void callsInteractionsApiAndReturnsOutputText() throws Exception {
@@ -40,14 +96,8 @@ class GoogleLlmClientTest {
         });
         server.start();
         try {
-            GoogleLlmClient client = new GoogleLlmClient(
-                    objectMapper,
-                    HttpClient.newHttpClient(),
+            GoogleLlmClient client = client(
                     "test-key",
-                    "gemini-3.5-flash",
-                    0.3,
-                    512,
-                    Duration.ofSeconds(5),
                     URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/v1beta/interactions"));
 
             String output = client.complete("Prompt text");
@@ -87,14 +137,8 @@ class GoogleLlmClientTest {
         });
         server.start();
         try {
-            GoogleLlmClient client = new GoogleLlmClient(
-                    objectMapper,
-                    HttpClient.newHttpClient(),
+            GoogleLlmClient client = client(
                     "test-key",
-                    "gemini-3.5-flash",
-                    0.3,
-                    512,
-                    Duration.ofSeconds(5),
                     URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/v1beta/interactions"));
 
             String output = client.complete("Prompt text");
@@ -130,14 +174,8 @@ class GoogleLlmClientTest {
         });
         server.start();
         try {
-            GoogleLlmClient client = new GoogleLlmClient(
-                    objectMapper,
-                    HttpClient.newHttpClient(),
+            GoogleLlmClient client = client(
                     "test-key",
-                    "gemini-3.5-flash",
-                    0.3,
-                    512,
-                    Duration.ofSeconds(5),
                     URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/v1beta/interactions"));
 
             String output = client.complete("Prompt text");
@@ -150,18 +188,24 @@ class GoogleLlmClientTest {
 
     @Test
     void failsClearlyWhenApiKeyMissing() {
-        GoogleLlmClient client = new GoogleLlmClient(
-                objectMapper,
-                HttpClient.newHttpClient(),
+        GoogleLlmClient client = client(
                 "",
-                "gemini-3.5-flash",
-                0.3,
-                512,
-                Duration.ofSeconds(5),
                 URI.create("http://127.0.0.1:1/v1beta/interactions"));
 
         assertThatThrownBy(() -> client.complete("Prompt text"))
                 .isInstanceOf(LlmResponseException.class)
                 .hasMessageContaining("LLM_API_KEY");
+    }
+
+    private GoogleLlmClient client(String apiKey, URI endpoint) {
+        return new GoogleLlmClient(
+                objectMapper,
+                HttpClient.newHttpClient(),
+                apiKey,
+                "gemini-3.5-flash",
+                0.3,
+                512,
+                Duration.ofSeconds(5),
+                endpoint);
     }
 }

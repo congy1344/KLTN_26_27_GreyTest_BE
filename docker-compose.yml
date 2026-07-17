@@ -24,8 +24,12 @@ services:
       LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
       GREYTEST_AUTH_TOKEN_SECRET: ${GREYTEST_AUTH_TOKEN_SECRET:-}
       GREYTEST_STORAGE_PATH: /app/storage
+      GREYTEST_AI_CONTEXT_LOG_ENABLED: ${GREYTEST_AI_CONTEXT_LOG_ENABLED:-false}
+      GREYTEST_AI_CONTEXT_LOG_CONSOLE_ENABLED: ${GREYTEST_AI_CONTEXT_LOG_CONSOLE_ENABLED:-false}
+      GREYTEST_AI_CONTEXT_LOG_PATH: /app/log
     volumes:
       - backend_storage:/app/storage
+      - ../log:/app/log
     depends_on:
       - postgres
 

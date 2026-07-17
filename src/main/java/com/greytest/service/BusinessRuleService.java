@@ -140,21 +140,23 @@ public class BusinessRuleService {
 
         List<BusinessRule> existingRules = businessRuleRepository.findByProjectId(projectId);
         Set<Long> coveredMethodIds = methodIds(existingRules);
-        if (coveredMethodIds.containsAll(validMethodIds)) return List.of();
+        Set<Long> uncoveredMethodIds = new HashSet<>(validMethodIds);
+        uncoveredMethodIds.removeAll(coveredMethodIds);
+        if (uncoveredMethodIds.isEmpty()) return List.of();
 
         BusinessRuleResponseDto response = aiAgentService.generateBusinessRules(projectId);
         List<BusinessRuleDto> created = saveGeneratedRules(
                 projectId,
                 response.rules(),
                 RuleSource.AI_GENERATED,
-                validMethodIds,
-                coveredMethodIds,
+                uncoveredMethodIds,
+                Set.of(),
                 ruleKeys(existingRules),
                 nextRuleNumber(existingRules));
         if (created.isEmpty()) {
             throw new LlmResponseException("AI tra ve " + response.rules().size()
                     + " Business Rule nhung method_id khong khop service method chua co rule. ID hop le: "
-                    + validMethodIds + ".");
+                    + uncoveredMethodIds + ".");
         }
         project.setStatus(ProjectStatus.BR_PENDING_REVIEW);
         projectRepository.save(project);
