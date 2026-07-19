@@ -1,7 +1,10 @@
 package com.greytest.service;
 
+import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.stream.Collectors;
@@ -17,6 +20,7 @@ import com.greytest.dto.agent.GenerationResponseDtos.TestPlanResponseDto;
 import com.greytest.entity.BusinessRule;
 import com.greytest.entity.Project;
 import com.greytest.entity.TestPlan;
+import com.greytest.entity.TestPlanCoveredRule;
 import com.greytest.entity.enums.ProjectStatus;
 import com.greytest.entity.enums.ReviewStatus;
 import com.greytest.entity.enums.TestType;
@@ -24,8 +28,10 @@ import com.greytest.exception.InvalidProjectStatusException;
 import com.greytest.exception.ProjectNotFoundException;
 import com.greytest.repository.BusinessRuleRepository;
 import com.greytest.repository.ProjectRepository;
+import com.greytest.repository.TestPlanCoveredRuleRepository;
 import com.greytest.repository.TestPlanRepository;
 import com.greytest.service.agent.AIAgentService;
+import com.greytest.service.agent.GenerationContextBuilder;
 import com.greytest.service.agent.LlmResponseException;
 
 /**
@@ -35,16 +41,19 @@ import com.greytest.service.agent.LlmResponseException;
 public class TestPlanService {
 
     private final TestPlanRepository testPlanRepository;
+    private final TestPlanCoveredRuleRepository testPlanCoveredRuleRepository;
     private final BusinessRuleRepository businessRuleRepository;
     private final ProjectRepository projectRepository;
     private final AIAgentService aiAgentService;
 
     public TestPlanService(
             TestPlanRepository testPlanRepository,
+            TestPlanCoveredRuleRepository testPlanCoveredRuleRepository,
             BusinessRuleRepository businessRuleRepository,
             ProjectRepository projectRepository,
             AIAgentService aiAgentService) {
         this.testPlanRepository = testPlanRepository;
+        this.testPlanCoveredRuleRepository = testPlanCoveredRuleRepository;
         this.businessRuleRepository = businessRuleRepository;
         this.projectRepository = projectRepository;
         this.aiAgentService = aiAgentService;
@@ -76,24 +85,29 @@ public class TestPlanService {
             throw new InvalidProjectStatusException("Can co it nhat mot Business Rule APPROVED truoc khi sinh Test Plan.");
         }
 
-        TestPlanResponseDto response = aiAgentService.generateTestPlan(projectId);
-        List<TestPlan> validPlans = buildGeneratedPlans(projectId, response.plans(), approvedRules);
-        if (validPlans.isEmpty()) {
-            throw new LlmResponseException("AI khong tra ve Test Plan hop le cho Business Rule da approve.");
+        List<GeneratedTestPlanDto> generatedPlans = new ArrayList<>();
+        for (List<BusinessRule> batch : methodBatches(approvedRules)) {
+            Set<Long> batchRuleIds = ruleIds(batch);
+            TestPlanResponseDto response = aiAgentService.generateTestPlan(projectId, batchRuleIds);
+            ensureBatchMatchesMethods(response.plans(), rulesByMethod(batch));
+            generatedPlans.addAll(response.plans());
         }
-        Set<Long> missingRuleIds = approvedRules.stream()
-                .map(BusinessRule::getId)
-                .collect(Collectors.toCollection(TreeSet::new));
-        validPlans.stream().map(TestPlan::getBusinessRuleId).forEach(missingRuleIds::remove);
-        if (!missingRuleIds.isEmpty()) {
-            throw new LlmResponseException("AI chua sinh Test Plan cho Business Rule: " + missingRuleIds);
+
+        List<GeneratedPlanDraft> validPlanDrafts = buildGeneratedPlanDrafts(projectId, generatedPlans, approvedRules);
+        if (validPlanDrafts.isEmpty()) {
+            throw new LlmResponseException("AI khong tra ve Test Plan hop le cho Business Rule da approve.");
         }
 
         List<TestPlan> oldPlans = testPlanRepository.findByProjectId(projectId);
         if (!oldPlans.isEmpty()) {
             testPlanRepository.deleteAll(oldPlans);
+            testPlanRepository.flush();
         }
-        List<TestPlanDto> created = testPlanRepository.saveAll(validPlans).stream()
+        List<TestPlan> savedPlans = testPlanRepository.saveAll(validPlanDrafts.stream()
+                        .map(GeneratedPlanDraft::plan)
+                        .toList());
+        testPlanCoveredRuleRepository.saveAll(coveredRuleLinks(savedPlans, validPlanDrafts));
+        List<TestPlanDto> created = savedPlans.stream()
                 .map(this::toDto)
                 .toList();
         project.setStatus(ProjectStatus.PLAN_PENDING_REVIEW);
@@ -118,7 +132,9 @@ public class TestPlanService {
         plan.setIsModified(false);
         project.setStatus(ProjectStatus.PLAN_PENDING_REVIEW);
         projectRepository.save(project);
-        return toDto(testPlanRepository.save(plan));
+        TestPlan savedPlan = testPlanRepository.save(plan);
+        testPlanCoveredRuleRepository.save(coveredRuleLink(savedPlan.getId(), rule.getId()));
+        return toDto(savedPlan);
     }
 
     @Transactional
@@ -128,6 +144,7 @@ public class TestPlanService {
         Project project = ensureProjectExists(plan.getProjectId());
         ensurePlanEditable(project);
         BusinessRule rule = ensureApprovedRule(plan.getProjectId(), request.businessRuleId());
+        boolean anchorChanged = !rule.getId().equals(plan.getBusinessRuleId());
 
         plan.setBusinessRuleId(rule.getId());
         plan.setTitle(request.title().trim());
@@ -137,7 +154,11 @@ public class TestPlanService {
         plan.setIsModified(true);
         project.setStatus(ProjectStatus.PLAN_PENDING_REVIEW);
         projectRepository.save(project);
-        return toDto(testPlanRepository.save(plan));
+        TestPlan savedPlan = testPlanRepository.save(plan);
+        if (anchorChanged) {
+            replaceCoveredRules(savedPlan.getId(), Set.of(rule.getId()));
+        }
+        return toDto(savedPlan);
     }
 
     @Transactional
@@ -170,7 +191,7 @@ public class TestPlanService {
         return plans.stream().map(this::toDto).toList();
     }
 
-    private List<TestPlan> buildGeneratedPlans(
+    private List<GeneratedPlanDraft> buildGeneratedPlanDrafts(
             Long projectId,
             List<GeneratedTestPlanDto> generatedPlans,
             List<BusinessRule> approvedRules) {
@@ -180,13 +201,126 @@ public class TestPlanService {
         int[] planNumber = {1};
         return generatedPlans.stream()
                 .filter(plan -> isUsableGeneratedPlan(plan, approvedRuleIds))
-                .map(plan -> generatedPlan(projectId, plan, planNumber[0]++))
+                .map(plan -> new GeneratedPlanDraft(
+                        generatedPlan(projectId, plan, planNumber[0]++),
+                        new TreeSet<>(plan.coveredRuleIds())))
                 .toList();
+    }
+
+    private List<TestPlanCoveredRule> coveredRuleLinks(List<TestPlan> plans, List<GeneratedPlanDraft> drafts) {
+        List<TestPlanCoveredRule> links = new ArrayList<>();
+        for (int index = 0; index < plans.size(); index++) {
+            Long planId = plans.get(index).getId();
+            for (Long ruleId : drafts.get(index).coveredRuleIds()) {
+                links.add(coveredRuleLink(planId, ruleId));
+            }
+        }
+        return links;
+    }
+
+    private TestPlanCoveredRule coveredRuleLink(Long planId, Long ruleId) {
+        TestPlanCoveredRule link = new TestPlanCoveredRule();
+        link.setTestPlanId(planId);
+        link.setBusinessRuleId(ruleId);
+        return link;
+    }
+
+    private void replaceCoveredRules(Long planId, Set<Long> ruleIds) {
+        Set<Long> existingRuleIds = testPlanCoveredRuleRepository.findByTestPlanId(planId).stream()
+                .map(TestPlanCoveredRule::getBusinessRuleId)
+                .collect(Collectors.toCollection(TreeSet::new));
+        if (existingRuleIds.equals(ruleIds)) return;
+
+        testPlanCoveredRuleRepository.deleteByTestPlanId(planId);
+        testPlanCoveredRuleRepository.flush();
+        testPlanCoveredRuleRepository.saveAll(ruleIds.stream()
+                .map(ruleId -> coveredRuleLink(planId, ruleId))
+                .toList());
+    }
+
+    private List<List<BusinessRule>> methodBatches(List<BusinessRule> rules) {
+        List<List<BusinessRule>> methodGroups = new ArrayList<>(rulesByMethod(rules).values()).stream()
+                .map(ruleIds -> rules.stream()
+                        .filter(rule -> ruleIds.contains(rule.getId()))
+                        .sorted(Comparator.comparing(BusinessRule::getId))
+                        .toList())
+                .toList();
+        List<List<BusinessRule>> batches = new ArrayList<>();
+        for (int start = 0; start < methodGroups.size(); start += GenerationContextBuilder.MAX_TEST_PLAN_METHODS) {
+            batches.add(methodGroups.subList(start, Math.min(start + GenerationContextBuilder.MAX_TEST_PLAN_METHODS, methodGroups.size()))
+                    .stream()
+                    .flatMap(List::stream)
+                    .toList());
+        }
+        return batches;
+    }
+
+    private Map<Long, Set<Long>> rulesByMethod(List<BusinessRule> rules) {
+        List<BusinessRule> sortedRules = rules.stream()
+                .sorted(Comparator
+                        .comparing(BusinessRule::getMethodId, Comparator.nullsLast(Long::compareTo))
+                        .thenComparing(BusinessRule::getId))
+                .toList();
+        Map<Long, Set<Long>> result = new LinkedHashMap<>();
+        for (BusinessRule rule : sortedRules) {
+            if (rule.getMethodId() == null) {
+                throw new LlmResponseException("Business Rule chua lien ket method: " + rule.getId());
+            }
+            result.computeIfAbsent(rule.getMethodId(), ignored -> new TreeSet<>()).add(rule.getId());
+        }
+        return result;
+    }
+
+    private Set<Long> ruleIds(List<BusinessRule> rules) {
+        return rules.stream()
+                .map(BusinessRule::getId)
+                .collect(Collectors.toCollection(TreeSet::new));
+    }
+
+    private void ensureBatchMatchesMethods(List<GeneratedTestPlanDto> plans, Map<Long, Set<Long>> expectedRulesByMethod) {
+        Map<Long, Set<Long>> returnedRulesByMethod = new LinkedHashMap<>();
+        for (GeneratedTestPlanDto plan : plans) {
+            if (plan == null || plan.methodId() == null || !expectedRulesByMethod.containsKey(plan.methodId())) {
+                throw new LlmResponseException("AI tra ve Test Plan nam ngoai batch method: " + expectedRulesByMethod.keySet());
+            }
+            Set<Long> expectedRuleIds = expectedRulesByMethod.get(plan.methodId());
+            Set<Long> coveredRuleIds = plan.coveredRuleIds() == null
+                    ? Set.of()
+                    : new TreeSet<>(plan.coveredRuleIds());
+            if (plan.coveredRuleIds() == null
+                    || plan.coveredRuleIds().size() != coveredRuleIds.size()
+                    || coveredRuleIds.isEmpty()
+                    || !expectedRuleIds.containsAll(coveredRuleIds)) {
+                throw new LlmResponseException("AI tra ve covered_rule_ids nam ngoai method "
+                        + plan.methodId() + ": " + expectedRuleIds);
+            }
+            if (plan.ruleId() == null || !coveredRuleIds.contains(plan.ruleId())) {
+                throw new LlmResponseException("AI tra ve anchor rule_id khong thuoc method: " + plan.ruleId());
+            }
+            returnedRulesByMethod.computeIfAbsent(plan.methodId(), ignored -> new TreeSet<>()).addAll(coveredRuleIds);
+        }
+        Set<Long> expectedMethodIds = new TreeSet<>(expectedRulesByMethod.keySet());
+        Set<Long> returnedMethodIds = new TreeSet<>(returnedRulesByMethod.keySet());
+        if (!returnedMethodIds.equals(expectedMethodIds)) {
+            Set<Long> missingMethodIds = new TreeSet<>(expectedMethodIds);
+            missingMethodIds.removeAll(returnedMethodIds);
+            throw new LlmResponseException("AI chua sinh Test Plan cho method: " + missingMethodIds);
+        }
+        for (Map.Entry<Long, Set<Long>> entry : expectedRulesByMethod.entrySet()) {
+            if (!entry.getValue().equals(returnedRulesByMethod.get(entry.getKey()))) {
+                throw new LlmResponseException("AI chua cover dung Business Rule cho method "
+                        + entry.getKey() + ": " + entry.getValue());
+            }
+        }
     }
 
     private boolean isUsableGeneratedPlan(GeneratedTestPlanDto plan, Set<Long> approvedRuleIds) {
         return plan != null
+                && plan.methodId() != null
                 && approvedRuleIds.contains(plan.ruleId())
+                && plan.coveredRuleIds() != null
+                && !plan.coveredRuleIds().isEmpty()
+                && plan.coveredRuleIds().contains(plan.ruleId())
                 && plan.title() != null
                 && !plan.title().isBlank()
                 && plan.description() != null
@@ -276,5 +410,8 @@ public class TestPlanService {
                 plan.getStatus(),
                 plan.getIsModified(),
                 plan.getCreatedAt());
+    }
+
+    private record GeneratedPlanDraft(TestPlan plan, Set<Long> coveredRuleIds) {
     }
 }

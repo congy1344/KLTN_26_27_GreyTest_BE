@@ -1,6 +1,7 @@
 package com.greytest.service.agent;
 
 import java.util.Map;
+import java.util.Set;
 
 import org.springframework.stereotype.Service;
 
@@ -52,6 +53,10 @@ public class AIAgentService {
 
     public TestPlanResponseDto generateTestPlan(Long projectId) {
         return call("test-plan", contextBuilder.buildTestPlanContext(projectId), TestPlanResponseDto.class);
+    }
+
+    public TestPlanResponseDto generateTestPlan(Long projectId, Set<Long> ruleIds) {
+        return call("test-plan", contextBuilder.buildTestPlanContext(projectId, ruleIds), TestPlanResponseDto.class);
     }
 
     public TestCaseResponseDto generateTestCases(Long projectId) {

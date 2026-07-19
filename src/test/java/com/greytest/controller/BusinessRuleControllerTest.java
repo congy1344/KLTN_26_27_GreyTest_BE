@@ -92,6 +92,7 @@ class BusinessRuleControllerTest {
                 "BR-001",
                 "Moi endpoint REST phai co it nhat mot test case.",
                 null,
+                null,
                 RuleSource.AI_GENERATED,
                 ReviewStatus.PENDING_REVIEW,
                 false,

@@ -91,6 +91,14 @@ public class BusinessRuleController {
         return businessRuleService.update(ruleId, request);
     }
 
+    @PostMapping("/api/business-rules/{ruleId}/accept-suggestion")
+    public BusinessRuleDto acceptSuggestion(
+            @PathVariable Long ruleId,
+            @RequestHeader("Authorization") String authorization) {
+        requireAccess(businessRuleService.projectIdForRule(ruleId), authorization);
+        return businessRuleService.acceptSuggestion(ruleId);
+    }
+
     @DeleteMapping("/api/business-rules/{ruleId}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     public void delete(

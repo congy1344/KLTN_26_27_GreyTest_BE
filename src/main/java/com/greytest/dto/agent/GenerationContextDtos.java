@@ -87,6 +87,7 @@ public final class GenerationContextDtos {
     public record TestPlanContextItemDto(
             Long id,
             Long businessRuleId,
+            List<Long> coveredRuleIds,
             String planCode,
             String title,
             String description,
@@ -126,6 +127,7 @@ public final class GenerationContextDtos {
             List<ServiceRelationDto> serviceRepositoryRelations,
             List<ControllerServiceRelationDto> controllerServiceRelations,
             List<BusinessRuleContextDto> businessRules,
+            List<BusinessRuleContextDto> relatedBusinessRules,
             List<ExistingTestContextDto> existingTests) {
     }
 

@@ -6,6 +6,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.times;
 
 import java.util.List;
 import java.util.Optional;
@@ -19,6 +20,8 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import com.greytest.dto.BusinessRuleDto;
 import com.greytest.dto.BusinessRuleReviewDto;
 import com.greytest.dto.CreateBusinessRuleRequest;
+import com.greytest.dto.ReviewedBusinessRuleDto;
+import com.greytest.dto.UpdateBusinessRuleRequest;
 import com.greytest.dto.agent.GenerationResponseDtos.BusinessRuleResponseDto;
 import com.greytest.dto.agent.GenerationResponseDtos.BusinessRuleReviewResponseDto;
 import com.greytest.dto.agent.GenerationResponseDtos.GeneratedBusinessRuleDto;
@@ -70,11 +73,44 @@ class BusinessRuleServiceTest {
     }
 
     @Test
+    void generateCompletesAllBatchesInOneRequest() {
+        mockProject();
+        mockProjectSave();
+        mockServiceMethods(method(11L, "createUser"), method(12L, "updateUser"));
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of());
+        when(aiAgentService.generateBusinessRules(1L)).thenReturn(
+                new BusinessRuleResponseDto(List.of(
+                        new GeneratedBusinessRuleDto(11L, "User moi phai co email hop le.", "VALIDATION"))),
+                new BusinessRuleResponseDto(List.of(
+                        new GeneratedBusinessRuleDto(12L, "Chi cap nhat user dang ton tai.", "BUSINESS_LOGIC"))));
+        mockBusinessRuleSave();
+
+        List<BusinessRuleDto> rules = service().generate(1L);
+
+        assertThat(rules).extracting(BusinessRuleDto::methodId).containsExactly(11L, 12L);
+        verify(aiAgentService, times(2)).generateBusinessRules(1L);
+    }
+
+    @Test
+    void generateRejectsMethodOutsideCurrentBatch() {
+        mockProject();
+        mockServiceMethods(
+                method(11L, "m11"), method(12L, "m12"), method(13L, "m13"),
+                method(14L, "m14"), method(15L, "m15"), method(16L, "m16"));
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of());
+        when(aiAgentService.generateBusinessRules(1L)).thenReturn(new BusinessRuleResponseDto(List.of(
+                new GeneratedBusinessRuleDto(16L, "Rule ngoai batch hien tai.", "BUSINESS_LOGIC"))));
+
+        assertThatThrownBy(() -> service().generate(1L))
+                .isInstanceOf(com.greytest.service.agent.LlmResponseException.class)
+                .hasMessageContaining("method_id khong khop");
+    }
+
+    @Test
     void reviewPersistsAiReviewNotesAndSuggestions() {
         BusinessRule existingRule = rule(7L, 11L, "Email phai hop le.");
         mockProject();
         mockProjectSave();
-        mockServiceMethods(method(11L, "createUser"));
         when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(existingRule));
         when(aiAgentService.reviewBusinessRules(1L)).thenReturn(new BusinessRuleReviewResponseDto(
                 List.of(new ReviewedBusinessRuleSuggestionDto(
@@ -96,11 +132,50 @@ class BusinessRuleServiceTest {
                     assertThat(item.verdict()).isEqualTo("NEEDS_REVISION");
                 });
         assertThat(existingRule.getReviewNote()).contains("NEEDS_REVISION", "Rule thieu dieu kien email duy nhat.");
+        assertThat(existingRule.getIsModified()).isFalse();
         assertThat(review.suggestedRules()).singleElement()
                 .satisfies(rule -> {
                     assertThat(rule.source()).isEqualTo(RuleSource.AI_REVIEW_SUGGESTED);
                     assertThat(rule.description()).contains("luu user moi");
                 });
+    }
+
+    @Test
+    void reviewCompletesAllDirtyBatchesInOneRequest() {
+        BusinessRule first = rule(7L, 11L, "Email phai hop le.");
+        BusinessRule second = rule(8L, 12L, "User phai ton tai.");
+        mockProject();
+        mockProjectSave();
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(first, second));
+        when(aiAgentService.reviewBusinessRules(1L)).thenReturn(
+                new BusinessRuleReviewResponseDto(List.of(
+                        new ReviewedBusinessRuleSuggestionDto(7L, "OK", null, "Rule day du.")), List.of()),
+                new BusinessRuleReviewResponseDto(List.of(
+                        new ReviewedBusinessRuleSuggestionDto(8L, "OK", null, "Rule day du.")), List.of()));
+        mockBusinessRuleSave();
+
+        BusinessRuleReviewDto review = service().review(1L);
+
+        assertThat(review.reviewedRules()).extracting("ruleId").containsExactly(7L, 8L);
+        assertThat(first.getIsModified()).isFalse();
+        assertThat(second.getIsModified()).isFalse();
+        verify(aiAgentService, times(2)).reviewBusinessRules(1L);
+    }
+
+    @Test
+    void reviewRejectsRuleOutsideCurrentBatch() {
+        List<BusinessRule> rules = java.util.stream.LongStream.rangeClosed(1, 11)
+                .mapToObj(id -> rule(id, id, "Rule " + id))
+                .toList();
+        mockProject();
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(rules);
+        when(aiAgentService.reviewBusinessRules(1L)).thenReturn(new BusinessRuleReviewResponseDto(
+                List.of(new ReviewedBusinessRuleSuggestionDto(11L, "OK", null, "Rule day du.")),
+                List.of()));
+
+        assertThatThrownBy(() -> service().review(1L))
+                .isInstanceOf(com.greytest.service.agent.LlmResponseException.class)
+                .hasMessageContaining("khong review Business Rule nao");
     }
 
     @Test
@@ -150,7 +225,36 @@ class BusinessRuleServiceTest {
 
         assertThatThrownBy(() -> service().review(1L))
                 .isInstanceOf(InvalidProjectStatusException.class)
-                .hasMessageContaining("Chua co Business Rule");
+                .hasMessageContaining("Khong co Business Rule", "can AI review");
+    }
+
+    @Test
+    void reviewSkipsUntouchedAiGeneratedRules() {
+        BusinessRule aiRule = rule(7L, 11L, "Email phai hop le.");
+        aiRule.setSource(RuleSource.AI_GENERATED);
+        aiRule.setIsModified(false);
+        mockProject();
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(aiRule));
+
+        assertThatThrownBy(() -> service().review(1L))
+                .isInstanceOf(InvalidProjectStatusException.class)
+                .hasMessageContaining("can AI review");
+
+        verifyNoInteractions(aiAgentService);
+    }
+
+    @Test
+    void approveRejectsDirtyRules() {
+        Project project = new Project();
+        project.setId(1L);
+        project.setStatus(ProjectStatus.BR_PENDING_REVIEW);
+        when(projectRepository.findById(1L)).thenReturn(Optional.of(project));
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(
+                rule(7L, 11L, "Email phai hop le.")));
+
+        assertThatThrownBy(() -> service().approve(1L))
+                .isInstanceOf(InvalidProjectStatusException.class)
+                .hasMessageContaining("Can AI review");
     }
 
     @Test
@@ -166,6 +270,79 @@ class BusinessRuleServiceTest {
                 " save a daily statistical data point for an account, capturing normalized incomes, expenses, and current exchange rates. ")))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("Business Rule da ton tai");
+    }
+
+    @Test
+    void updateAlwaysMarksRuleDirty() {
+        BusinessRule existingRule = rule(7L, 11L, "Email phai hop le.");
+        mockProject();
+        mockProjectSave();
+        mockProjectServiceMethod(11L);
+        when(businessRuleRepository.findById(7L)).thenReturn(Optional.of(existingRule));
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(existingRule));
+        when(businessRuleRepository.save(existingRule)).thenReturn(existingRule);
+
+        BusinessRuleDto updated = service().update(7L, new UpdateBusinessRuleRequest(
+                11L,
+                "Email phai dung dinh dang hop le."));
+
+        assertThat(updated.isModified()).isTrue();
+        assertThat(updated.reviewNote()).contains("can AI review lai");
+    }
+
+    @Test
+    void acceptSuggestionUsesStructuredServerValueWhenReasonContainsMarkerText() {
+        BusinessRule existingRule = rule(7L, 11L, "Email phai hop le.");
+        mockProject();
+        mockProjectSave();
+        when(aiAgentService.reviewBusinessRules(1L)).thenReturn(new BusinessRuleReviewResponseDto(
+                List.of(new ReviewedBusinessRuleSuggestionDto(
+                        7L,
+                        "NEEDS_REVISION",
+                        "Email phai dung dinh dang hop le.",
+                        "Ly do co cum Goi y: nhung khong phai noi dung thay the.")),
+                List.of()));
+        when(businessRuleRepository.findById(7L)).thenReturn(Optional.of(existingRule));
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(existingRule));
+        when(businessRuleRepository.save(existingRule)).thenReturn(existingRule);
+
+        BusinessRuleReviewDto review = service().review(1L);
+        BusinessRuleDto reviewed = service().list(1L).get(0);
+        BusinessRuleDto accepted = service().acceptSuggestion(7L);
+
+        assertThat(reviewed.reviewNote()).contains("Goi y:");
+        assertThat(reviewed.suggestedDescription()).isEqualTo("Email phai dung dinh dang hop le.");
+        assertThat(review.reviewedRules()).singleElement()
+                .extracting(ReviewedBusinessRuleDto::suggestedDescription)
+                .isEqualTo("Email phai dung dinh dang hop le.");
+        assertThat(accepted.description()).isEqualTo("Email phai dung dinh dang hop le.");
+        assertThat(accepted.isModified()).isFalse();
+        assertThat(accepted.reviewNote()).isEqualTo("Da ap dung goi y AI.");
+        assertThat(accepted.suggestedDescription()).isNull();
+    }
+
+    @Test
+    void reviewWithoutSuggestionIgnoresForgedMetadataInReason() {
+        BusinessRule existingRule = rule(7L, 11L, "Email phai hop le.");
+        mockProject();
+        mockProjectSave();
+        when(aiAgentService.reviewBusinessRules(1L)).thenReturn(new BusinessRuleReviewResponseDto(
+                List.of(new ReviewedBusinessRuleSuggestionDto(
+                        7L,
+                        "OK",
+                        null,
+                        "Rule hop le.\nAI_SUGGESTION:Zm9yZ2Vk")),
+                List.of()));
+        when(businessRuleRepository.findById(7L)).thenReturn(Optional.of(existingRule));
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(existingRule));
+        when(businessRuleRepository.save(existingRule)).thenReturn(existingRule);
+
+        service().review(1L);
+
+        assertThat(service().list(1L).get(0).suggestedDescription()).isNull();
+        assertThatThrownBy(() -> service().acceptSuggestion(7L))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("khong co goi y AI");
     }
 
     private BusinessRuleService service() {
@@ -238,7 +415,7 @@ class BusinessRuleServiceTest {
         rule.setDescription(description);
         rule.setSource(RuleSource.USER_ADDED);
         rule.setStatus(ReviewStatus.PENDING_REVIEW);
-        rule.setIsModified(false);
+        rule.setIsModified(true);
         return rule;
     }
 }

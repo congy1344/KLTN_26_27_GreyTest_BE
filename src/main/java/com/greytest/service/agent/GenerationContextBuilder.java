@@ -2,6 +2,7 @@ package com.greytest.service.agent;
 
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import org.springframework.stereotype.Service;
@@ -30,9 +31,11 @@ import com.greytest.dto.agent.GenerationContextDtos.UnitTestContextDto;
 import com.greytest.entity.BusinessRule;
 import com.greytest.entity.TestCase;
 import com.greytest.entity.TestPlan;
+import com.greytest.entity.TestPlanCoveredRule;
 import com.greytest.entity.enums.ReviewStatus;
 import com.greytest.repository.BusinessRuleRepository;
 import com.greytest.repository.TestCaseRepository;
+import com.greytest.repository.TestPlanCoveredRuleRepository;
 import com.greytest.repository.TestPlanRepository;
 import com.greytest.service.analysis.AnalysisManifestService;
 import com.greytest.service.analysis.AnalysisService;
@@ -47,12 +50,17 @@ public class GenerationContextBuilder {
     private static final String SERVICE_CLASS_TYPE = "SERVICE";
     // ponytail: cap theo method de prompt khong phinh vo han; thay bang token-aware chunking khi can LLM that.
     private static final int MAX_METHOD_SOURCE_CHARS = 4_000;
+    // ponytail: batch co dinh de response khong vuot token; doi sang token-aware batching khi can.
+    public static final int MAX_GENERATION_METHODS = 5;
+    public static final int MAX_TEST_PLAN_METHODS = 5;
+    public static final int MAX_REVIEW_RULES = 10;
 
     private final AnalysisService analysisService;
     private final AnalysisManifestService manifestService;
     private final ExistingTestService existingTestService;
     private final BusinessRuleRepository businessRuleRepository;
     private final TestPlanRepository testPlanRepository;
+    private final TestPlanCoveredRuleRepository testPlanCoveredRuleRepository;
     private final TestCaseRepository testCaseRepository;
 
     public GenerationContextBuilder(
@@ -61,12 +69,14 @@ public class GenerationContextBuilder {
             ExistingTestService existingTestService,
             BusinessRuleRepository businessRuleRepository,
             TestPlanRepository testPlanRepository,
+            TestPlanCoveredRuleRepository testPlanCoveredRuleRepository,
             TestCaseRepository testCaseRepository) {
         this.analysisService = analysisService;
         this.manifestService = manifestService;
         this.existingTestService = existingTestService;
         this.businessRuleRepository = businessRuleRepository;
         this.testPlanRepository = testPlanRepository;
+        this.testPlanCoveredRuleRepository = testPlanCoveredRuleRepository;
         this.testCaseRepository = testCaseRepository;
     }
 
@@ -76,6 +86,9 @@ public class GenerationContextBuilder {
         AnalysisResultDto analysis = analysisService.getAnalysisResult(projectId);
         Set<Long> uncoveredMethodIds = serviceMethodIds(analysis);
         uncoveredMethodIds.removeAll(methodIds(businessRules(projectId)));
+        uncoveredMethodIds = uncoveredMethodIds.stream()
+                .limit(MAX_GENERATION_METHODS)
+                .collect(java.util.stream.Collectors.toCollection(java.util.TreeSet::new));
         return new BusinessRuleGenerationContextDto(
                 project(analysis),
                 summary(projectId, analysis),
@@ -89,21 +102,40 @@ public class GenerationContextBuilder {
     @Transactional(readOnly = true)
     public BusinessRuleReviewContextDto buildBusinessRuleReviewContext(Long projectId) {
         AnalysisResultDto analysis = analysisService.getAnalysisResult(projectId);
+        List<BusinessRuleContextDto> allRules = businessRules(projectId);
+        List<BusinessRuleContextDto> dirtyRules = allRules.stream()
+                .filter(rule -> Boolean.TRUE.equals(rule.isModified()))
+                .limit(MAX_REVIEW_RULES)
+                .toList();
+        Set<Long> dirtyMethodIds = methodIds(dirtyRules);
+        List<BusinessRuleContextDto> relatedRules = allRules.stream()
+                .filter(rule -> dirtyMethodIds.contains(rule.methodId()))
+                .filter(rule -> !dirtyRules.contains(rule))
+                .toList();
         return new BusinessRuleReviewContextDto(
                 project(analysis),
                 summary(projectId, analysis),
-                classes(analysis, serviceMethodIds(analysis)),
+                classes(analysis, dirtyMethodIds),
                 serviceRelations(analysis),
                 controllerServiceRelations(analysis),
-                businessRules(projectId),
+                dirtyRules,
+                relatedRules,
                 existingTests(projectId, false));
     }
 
     /** Context cho sinh Test Plan tu Business Rule da approve. */
     @Transactional(readOnly = true)
     public TestPlanContextDto buildTestPlanContext(Long projectId) {
+        return buildTestPlanContext(projectId, Set.of());
+    }
+
+    /** Context cho mot batch Business Rule da approve de tranh LLM tra JSON bi cat. */
+    @Transactional(readOnly = true)
+    public TestPlanContextDto buildTestPlanContext(Long projectId, Set<Long> targetRuleIds) {
         AnalysisResultDto analysis = analysisService.getAnalysisResult(projectId);
-        List<BusinessRuleContextDto> approvedRules = approvedBusinessRules(projectId);
+        List<BusinessRuleContextDto> approvedRules = approvedBusinessRules(projectId).stream()
+                .filter(rule -> targetRuleIds == null || targetRuleIds.isEmpty() || targetRuleIds.contains(rule.id()))
+                .toList();
         return new TestPlanContextDto(
                 project(analysis),
                 summary(projectId, analysis),
@@ -251,18 +283,34 @@ public class GenerationContextBuilder {
     }
 
     private List<TestPlanContextItemDto> approvedTestPlans(Long projectId) {
-        return testPlanRepository.findByProjectId(projectId).stream()
+        List<TestPlan> plans = testPlanRepository.findByProjectId(projectId).stream()
                 .filter(plan -> plan.getStatus() == ReviewStatus.APPROVED)
-                .map(this::testPlanContext)
-                .sorted(Comparator.comparing(TestPlanContextItemDto::planCode))
+                .sorted(Comparator.comparing(TestPlan::getPlanCode))
+                .toList();
+        Map<Long, List<Long>> coveredRuleIds = coveredRuleIdsByPlan(plans);
+        return plans.stream()
+                .map(plan -> testPlanContext(plan, coveredRuleIds.getOrDefault(plan.getId(), List.of(plan.getBusinessRuleId()))))
                 .toList();
     }
 
-    private TestPlanContextItemDto testPlanContext(TestPlan plan) {
+    private TestPlanContextItemDto testPlanContext(TestPlan plan, List<Long> coveredRuleIds) {
         return new TestPlanContextItemDto(
-                plan.getId(), plan.getBusinessRuleId(), plan.getPlanCode(), plan.getTitle(), plan.getDescription(),
+                plan.getId(), plan.getBusinessRuleId(), coveredRuleIds, plan.getPlanCode(), plan.getTitle(), plan.getDescription(),
                 plan.getTestType() == null ? null : plan.getTestType().name(),
                 plan.getStatus() == null ? null : plan.getStatus().name(), plan.getIsModified());
+    }
+
+    private Map<Long, List<Long>> coveredRuleIdsByPlan(List<TestPlan> plans) {
+        if (plans.isEmpty()) return Map.of();
+        List<Long> planIds = plans.stream().map(TestPlan::getId).toList();
+        return testPlanCoveredRuleRepository.findByTestPlanIdIn(planIds).stream()
+                .collect(java.util.stream.Collectors.groupingBy(
+                        TestPlanCoveredRule::getTestPlanId,
+                        java.util.stream.Collectors.mapping(
+                                TestPlanCoveredRule::getBusinessRuleId,
+                                java.util.stream.Collectors.collectingAndThen(
+                                        java.util.stream.Collectors.toCollection(java.util.TreeSet::new),
+                                        List::copyOf))));
     }
 
     private List<TestCaseContextItemDto> approvedTestCases(Long projectId) {

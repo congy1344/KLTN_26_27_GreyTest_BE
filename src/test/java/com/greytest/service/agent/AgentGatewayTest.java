@@ -9,6 +9,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.LongStream;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -39,7 +40,11 @@ class AgentGatewayTest {
                 mockLlmClient.complete(prompt),
                 BusinessRuleResponseDto.class);
 
-        assertThat(prompt).contains("# Prompt: business-rule", "\"project\" : \"demo\"", "1-5 independent rules");
+        assertThat(prompt).contains(
+                "# Prompt: business-rule",
+                "\"project\" : \"demo\"",
+                "Do not target a fixed number of rules per method",
+                "at most 20 rules total");
         assertThat(response.rules()).hasSize(1);
         assertThat(response.rules().get(0).methodId()).isEqualTo(1L);
     }
@@ -118,6 +123,22 @@ class AgentGatewayTest {
         assertThatThrownBy(() -> parser.parse(invalidJson, BusinessRuleResponseDto.class))
                 .isInstanceOf(LlmResponseException.class)
                 .hasMessageContaining("LLM response khong dung schema");
+    }
+
+    @Test
+    void parserRejectsMoreThanTwentyBusinessRules() throws Exception {
+        List<Map<String, Object>> rules = LongStream.rangeClosed(1, 21)
+                .mapToObj(id -> Map.<String, Object>of(
+                        "method_id", id,
+                        "description", "Rule " + id,
+                        "category", "VALIDATION"))
+                .toList();
+
+        assertThatThrownBy(() -> parser.parse(
+                objectMapper.writeValueAsString(Map.of("rules", rules)),
+                BusinessRuleResponseDto.class))
+                .isInstanceOf(LlmResponseException.class)
+                .hasMessageContaining("size must be between 0 and 20");
     }
 
     @Test

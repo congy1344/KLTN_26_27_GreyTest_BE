@@ -8,7 +8,12 @@ Rules:
 - Do not invent method_id. Do not use class id.
 - Each rule must describe business intent, not repeat code.
 - Use categories: VALIDATION, BUSINESS_LOGIC, SIDE_EFFECT.
-- For each method, propose 1-5 independent rules when applicable. A method may have separate validation, business-logic, and side-effect rules.
+- For each method, generate the smallest non-overlapping set of rules needed to cover its distinct observable business behaviors.
+- Do not target a fixed number of rules per method.
+- Add a rule only for an independently testable validation, business decision/state change, or observable side effect supported by the source.
+- Do not force every category, describe implementation details, or create stylistic variants of an existing rule.
+- Cover every method in this context. Before returning JSON, silently verify that no observable behavior is missing and remove redundant rules.
+- Return at most 20 rules total.
 - Do not create duplicate or overlapping rules in the same response.
 
 Output schema:

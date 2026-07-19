@@ -1,8 +1,10 @@
 package com.greytest.service.agent;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.regex.Pattern;
 
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -18,6 +20,9 @@ public class MockLlmClient implements LlmClient {
     private static final Pattern METHOD_ID = Pattern.compile("\"id\"\\s*:\\s*(\\d+)\\s*,\\s*\"classQualifiedName\"");
     private static final Pattern FIRST_RULE_ID = Pattern.compile(
             "\"businessRules\"\\s*:\\s*\\[\\s*\\{\\s*\"id\"\\s*:\\s*(\\d+)",
+            Pattern.DOTALL);
+    private static final Pattern BUSINESS_RULE_ID_AND_METHOD = Pattern.compile(
+            "\"id\"\\s*:\\s*(\\d+)\\s*,\\s*\"methodId\"\\s*:\\s*(\\d+)",
             Pattern.DOTALL);
 
     @Override
@@ -93,19 +98,46 @@ public class MockLlmClient implements LlmClient {
     }
 
     private String testPlan(String prompt) {
-        long ruleId = firstId(prompt, FIRST_RULE_ID);
+        Map<Long, List<Long>> rulesByMethod = ruleIdsByMethod(prompt);
+        StringBuilder plans = new StringBuilder();
+        int index = 0;
+        for (Map.Entry<Long, List<Long>> entry : rulesByMethod.entrySet()) {
+            if (index++ > 0) plans.append(",\n");
+            long methodId = entry.getKey();
+            List<Long> ruleIds = entry.getValue();
+            long anchorRuleId = ruleIds.get(0);
+            plans.append("""
+                        {
+                          "method_id": %d,
+                          "rule_id": %d,
+                          "covered_rule_ids": %s,
+                          "title": "Plan cho method %d",
+                          "description": "Kiem tra cac luong chinh cua method theo Business Rule da duyet.",
+                          "test_type": "HAPPY_PATH"
+                        }""".formatted(methodId, anchorRuleId, ruleIds, methodId));
+        }
         return """
                 {
                   "plans": [
-                    {
-                      "rule_id": %d,
-                      "title": "Happy path cho rule chinh",
-                      "description": "Kiem tra luong thanh cong khi tat ca dieu kien hop le.",
-                      "test_type": "HAPPY_PATH"
-                    }
+                %s
                   ]
                 }
-                """.formatted(ruleId);
+                """.formatted(plans);
+    }
+
+    private Map<Long, List<Long>> ruleIdsByMethod(String prompt) {
+        if (prompt == null) return Map.of(1L, List.of(1L));
+        var matcher = BUSINESS_RULE_ID_AND_METHOD.matcher(prompt);
+        Map<Long, List<Long>> rulesByMethod = new LinkedHashMap<>();
+        while (matcher.find()) {
+            long ruleId = Long.parseLong(matcher.group(1));
+            long methodId = Long.parseLong(matcher.group(2));
+            rulesByMethod.computeIfAbsent(methodId, ignored -> new ArrayList<>()).add(ruleId);
+        }
+        if (rulesByMethod.isEmpty()) {
+            rulesByMethod.put(1L, List.of(firstId(prompt, FIRST_RULE_ID)));
+        }
+        return rulesByMethod;
     }
 
     private String testCase() {

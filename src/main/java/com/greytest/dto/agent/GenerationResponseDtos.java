@@ -10,6 +10,7 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
+import jakarta.validation.constraints.Size;
 
 public final class GenerationResponseDtos {
 
@@ -17,7 +18,7 @@ public final class GenerationResponseDtos {
     }
 
     public record BusinessRuleResponseDto(
-            @NotEmpty @Valid List<GeneratedBusinessRuleDto> rules) {
+            @NotEmpty @Size(max = 20) @Valid List<GeneratedBusinessRuleDto> rules) {
     }
 
     public record GeneratedBusinessRuleDto(
@@ -43,7 +44,9 @@ public final class GenerationResponseDtos {
     }
 
     public record GeneratedTestPlanDto(
+            @JsonProperty("method_id") @NotNull Long methodId,
             @JsonProperty("rule_id") @NotNull Long ruleId,
+            @JsonProperty("covered_rule_ids") @NotEmpty List<Long> coveredRuleIds,
             @NotBlank String title,
             @NotBlank String description,
             @JsonProperty("test_type")

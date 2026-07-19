@@ -12,6 +12,7 @@ public record BusinessRuleDto(
         String ruleCode,
         String description,
         String reviewNote,
+        String suggestedDescription,
         RuleSource source,
         ReviewStatus status,
         Boolean isModified,

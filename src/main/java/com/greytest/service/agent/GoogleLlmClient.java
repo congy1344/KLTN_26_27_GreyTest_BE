@@ -189,11 +189,13 @@ public class GoogleLlmClient implements LlmClient {
     private ObjectNode testPlanSchema() {
         ObjectNode schema = objectSchema();
         ObjectNode properties = schema.putObject("properties");
+        properties.set("method_id", type("integer"));
         properties.set("rule_id", type("integer"));
+        properties.set("covered_rule_ids", arraySchema(type("integer")));
         properties.set("title", type("string"));
         properties.set("description", type("string"));
         properties.set("test_type", enumSchema("HAPPY_PATH", "BOUNDARY", "EXCEPTION", "EDGE"));
-        required(schema, "rule_id", "title", "description", "test_type");
+        required(schema, "method_id", "rule_id", "covered_rule_ids", "title", "description", "test_type");
         return schema;
     }
 
