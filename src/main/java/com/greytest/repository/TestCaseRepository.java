@@ -8,4 +8,6 @@ import com.greytest.entity.TestCase;
 
 public interface TestCaseRepository extends JpaRepository<TestCase, Long> {
     List<TestCase> findByTestPlanId(Long testPlanId);
+
+    List<TestCase> findByTestPlanIdIn(List<Long> testPlanIds);
 }
