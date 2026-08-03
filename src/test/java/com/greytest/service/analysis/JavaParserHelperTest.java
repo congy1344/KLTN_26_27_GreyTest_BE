@@ -53,6 +53,34 @@ class JavaParserHelperTest {
     }
 
     @Test
+    void skipsTrivialAccessorsButKeepsAnnotatedAndBusinessMethods(@TempDir Path sourceDir) throws IOException {
+        Files.writeString(sourceDir.resolve("Sample.java"), """
+                package demo;
+                import org.springframework.web.bind.annotation.GetMapping;
+
+                class Sample {
+                    private String name;
+
+                    String getName() { return name; }
+
+                    void setName(String name) { this.name = name; }
+
+                    @GetMapping("/name")
+                    String getNameEndpoint() { return name; }
+
+                    String getDisplayName() { return name.trim(); }
+                }
+                """);
+
+        ParsedFile parsedFile = parser.parseDirectory(sourceDir).get(0);
+        ClassOrInterfaceDeclaration declaration = parser.findClasses(parsedFile.compilationUnit()).get(0);
+
+        assertThat(parser.extractMethods(declaration))
+                .extracting(ExtractedMethod::key)
+                .containsExactly("getNameEndpoint()", "getDisplayName()");
+    }
+
+    @Test
     void rejectsProjectWhenAnyJavaFileCannotBeParsed(@TempDir Path sourceDir) throws IOException {
         Files.writeString(sourceDir.resolve("Broken.java"), "class Broken {");
 

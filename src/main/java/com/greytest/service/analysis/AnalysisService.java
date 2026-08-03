@@ -56,12 +56,6 @@ import lombok.extern.slf4j.Slf4j;
 @Service
 public class AnalysisService {
 
-    /** Chỉ cho phép analyze khi project ở status này. */
-    private static final Set<ProjectStatus> ANALYZABLE_STATUSES = Set.of(
-            ProjectStatus.UPLOADED,
-            ProjectStatus.ANALYZED
-    );
-
     private final ProjectRepository projectRepository;
     private final JavaClassRepository classRepository;
     private final JavaMethodRepository methodRepository;
@@ -72,6 +66,8 @@ public class AnalysisService {
     private final JavaParserHelper parserHelper;
     private final AnalysisResultBuilder resultBuilder;
     private final ExistingTestService existingTestService;
+    private final com.greytest.repository.BusinessRuleRepository businessRuleRepository;
+    private final com.greytest.repository.CoverageReportRepository coverageReportRepository;
 
     public AnalysisService(
             ProjectRepository projectRepository,
@@ -83,7 +79,9 @@ public class AnalysisService {
             RelevantAnnotationRepository annotationRepository,
             JavaParserHelper parserHelper,
             AnalysisResultBuilder resultBuilder,
-            ExistingTestService existingTestService) {
+            ExistingTestService existingTestService,
+            com.greytest.repository.BusinessRuleRepository businessRuleRepository,
+            com.greytest.repository.CoverageReportRepository coverageReportRepository) {
         this.projectRepository = projectRepository;
         this.classRepository = classRepository;
         this.methodRepository = methodRepository;
@@ -94,6 +92,8 @@ public class AnalysisService {
         this.parserHelper = parserHelper;
         this.resultBuilder = resultBuilder;
         this.existingTestService = existingTestService;
+        this.businessRuleRepository = businessRuleRepository;
+        this.coverageReportRepository = coverageReportRepository;
     }
 
     /**
@@ -103,15 +103,19 @@ public class AnalysisService {
     @Transactional
     public AnalysisResultDto analyze(Long projectId) {
         Project project = findOrThrow(projectId);
-        validateStatus(project);
         Path sourceDir = resolveSourceDir(project);
 
         log.info("Bắt đầu phân tích project: {} (id={})", project.getName(), projectId);
 
-        // Xóa data cũ nếu re-analyze
-        if (project.getStatus() == ProjectStatus.ANALYZED) {
-            log.info("Re-analyze: xóa dữ liệu phân tích cũ của project {}", projectId);
+        // Re-analyze ở bất kỳ pha nào = reset về đầu pipeline: xóa data phân tích cũ,
+        // xóa Business Rule (nếu không, FK SET NULL làm BR mồ côi method và bước sinh
+        // Test Plan sẽ lỗi; cascade kéo theo Plan/Case/Unit Test) và xóa lịch sử
+        // coverage (source đã đổi nên số cũ hết ý nghĩa).
+        if (project.getStatus() != ProjectStatus.UPLOADED) {
+            log.info("Re-analyze: xóa dữ liệu phân tích + artifact pipeline cũ của project {}", projectId);
             cleanupOldData(projectId);
+            businessRuleRepository.deleteByProjectId(projectId);
+            coverageReportRepository.deleteByProjectId(projectId);
         }
 
         SourceScanResult sourceScan = parserHelper.scanProject(sourceDir);
@@ -153,6 +157,7 @@ public class AnalysisService {
                 javaClass.setQualifiedName(qualifiedName);
                 javaClass.setFilePath(pf.relativePath());
                 javaClass.setClassType(classType);
+                javaClass.setSourceCode(typeDecl.toString());
                 javaClass = classRepository.save(javaClass);
                 saveAnnotations(projectId, javaClass.getId(), null, AnnotationTargetType.CLASS,
                         parserHelper.extractRelevantAnnotations(typeDecl));
@@ -316,15 +321,6 @@ public class AnalysisService {
     private Project findOrThrow(Long projectId) {
         return projectRepository.findById(projectId)
                 .orElseThrow(() -> new ProjectNotFoundException(projectId));
-    }
-
-    private void validateStatus(Project project) {
-        if (!ANALYZABLE_STATUSES.contains(project.getStatus())) {
-            throw new InvalidProjectStatusException(
-                    "Project '" + project.getName() + "' đang ở trạng thái " + project.getStatus()
-                            + ". Chỉ có thể phân tích khi status là UPLOADED hoặc ANALYZED."
-            );
-        }
     }
 
     private Path resolveSourceDir(Project project) {

@@ -24,11 +24,14 @@ import com.greytest.dto.RelevantAnnotationDto;
 import com.greytest.dto.ServiceRelationDto;
 import com.greytest.dto.agent.GenerationContextDtos.BusinessRuleGenerationContextDto;
 import com.greytest.dto.agent.GenerationContextDtos.BusinessRuleReviewContextDto;
+import com.greytest.dto.agent.GenerationContextDtos.TestCaseContextDto;
 import com.greytest.dto.agent.GenerationContextDtos.TestPlanContextDto;
+import com.greytest.dto.CoverageGapDto;
 import com.greytest.entity.BusinessRule;
 import com.greytest.entity.TestCase;
 import com.greytest.entity.TestPlan;
 import com.greytest.entity.TestPlanCoveredRule;
+import com.greytest.entity.UnitTest;
 import com.greytest.entity.enums.Priority;
 import com.greytest.entity.enums.ReviewStatus;
 import com.greytest.entity.enums.RuleSource;
@@ -37,6 +40,7 @@ import com.greytest.repository.BusinessRuleRepository;
 import com.greytest.repository.TestCaseRepository;
 import com.greytest.repository.TestPlanCoveredRuleRepository;
 import com.greytest.repository.TestPlanRepository;
+import com.greytest.repository.UnitTestRepository;
 import com.greytest.service.analysis.AnalysisManifestService;
 import com.greytest.service.analysis.AnalysisService;
 import com.greytest.service.analysis.ExistingTestService;
@@ -50,6 +54,7 @@ class GenerationContextBuilderTest {
     private final TestPlanRepository testPlanRepository = mock(TestPlanRepository.class);
     private final TestPlanCoveredRuleRepository testPlanCoveredRuleRepository = mock(TestPlanCoveredRuleRepository.class);
     private final TestCaseRepository testCaseRepository = mock(TestCaseRepository.class);
+    private final UnitTestRepository unitTestRepository = mock(UnitTestRepository.class);
     private final GenerationContextBuilder builder = new GenerationContextBuilder(
             analysisService,
             manifestService,
@@ -57,7 +62,8 @@ class GenerationContextBuilderTest {
             businessRuleRepository,
             testPlanRepository,
             testPlanCoveredRuleRepository,
-            testCaseRepository);
+            testCaseRepository,
+            unitTestRepository);
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Test
@@ -71,13 +77,15 @@ class GenerationContextBuilderTest {
         assertThat(second).isEqualTo(first);
         assertThat(first.length()).isLessThan(10_000);
         assertThat(context.analysis().totalClasses()).isEqualTo(2);
-        assertThat(context.existingTests()).hasSize(1);
+        assertThat(context.existingTests()).isEmpty();
+        assertThat(context.serviceRepositoryRelations()).isEmpty();
+        assertThat(context.controllerServiceRelations()).isEmpty();
         assertThat(context.classes()).extracting("qualifiedName").containsExactly("demo.UserService");
         assertThat(context.classes().get(0).methods()).extracting("methodName").containsExactly("updateUser");
     }
 
     @Test
-    void batchesBusinessRuleMethodsAcrossRequests() {
+    void sendsOneBusinessRuleMethodPerRequest() {
         when(analysisService.getAnalysisResult(1L)).thenReturn(analysisWithServiceMethods(21));
         when(manifestService.exportManifest(1L)).thenReturn(manifest());
         when(existingTestService.list(1L)).thenReturn(List.of());
@@ -90,9 +98,9 @@ class GenerationContextBuilderTest {
         BusinessRuleGenerationContextDto second = builder.buildBusinessRuleGenerationContext(1L);
 
         assertThat(first.classes().get(0).methods()).extracting("id")
-                .containsExactlyInAnyOrderElementsOf(LongStream.rangeClosed(1, 5).boxed().toList());
+                .containsExactly(1L);
         assertThat(second.classes().get(0).methods()).extracting("id")
-                .containsExactlyInAnyOrderElementsOf(LongStream.rangeClosed(6, 10).boxed().toList());
+                .containsExactly(6L);
     }
 
     @Test
@@ -144,8 +152,38 @@ class GenerationContextBuilderTest {
     }
 
     @Test
+    void testCaseContextUsesOnlyRequestedPlansAndRelevantExistingTests() {
+        when(analysisService.getAnalysisResult(1L)).thenReturn(analysis());
+        BusinessRule firstRule = ruleEntity(7L, 11L, ReviewStatus.APPROVED);
+        BusinessRule secondRule = ruleEntity(8L, 12L, ReviewStatus.APPROVED);
+        when(businessRuleRepository.findByProjectIdAndStatus(1L, ReviewStatus.APPROVED))
+                .thenReturn(List.of(firstRule, secondRule));
+        TestPlan firstPlan = testPlan(20L, 7L, "TP-001");
+        TestPlan secondPlan = testPlan(21L, 8L, "TP-002");
+        when(testPlanRepository.findByProjectId(1L)).thenReturn(List.of(firstPlan, secondPlan));
+        when(testPlanCoveredRuleRepository.findByTestPlanIdIn(List.of(20L, 21L)))
+                .thenReturn(List.of(coveredRule(20L, 7L), coveredRule(21L, 8L)));
+        ExistingTestDto unrelatedTest = new ExistingTestDto(
+                51L, 1L, "src/test/java/demo/UserControllerTest.java", "demo", "UserControllerTest",
+                30L, null, List.of(), List.of(), null, null);
+        when(existingTestService.list(1L)).thenReturn(List.of(existingTest(), unrelatedTest));
+
+        TestCaseContextDto context = builder.buildTestCaseContext(1L, Set.of(20L));
+
+        assertThat(context.approvedTestPlans()).extracting("id").containsExactly(20L);
+        assertThat(context.approvedBusinessRules()).extracting("id").containsExactly(7L);
+        assertThat(context.classes()).extracting("className").containsExactly("UserService");
+        assertThat(context.classes().get(0).methods()).extracting("id").containsExactly(11L);
+        assertThat(context.existingTests()).extracting("testClassName").containsExactly("UserServiceTest");
+    }
+
+    @Test
     void unitTestContextIncludesApprovedArtifactsAndExistingTestSource() {
         mockCommonInputs();
+        ExistingTestDto unrelatedTest = new ExistingTestDto(
+                51L, 1L, "src/test/java/demo/UserControllerTest.java", "demo", "UserControllerTest",
+                30L, null, List.of(), List.of(), "class UserControllerTest {}", null);
+        when(existingTestService.list(1L)).thenReturn(List.of(existingTest(), unrelatedTest));
         when(businessRuleRepository.findByProjectIdAndStatus(1L, ReviewStatus.APPROVED))
                 .thenReturn(List.of(ruleEntity(7L, 11L, ReviewStatus.APPROVED)));
         TestPlan plan = new TestPlan();
@@ -163,17 +201,96 @@ class GenerationContextBuilderTest {
         testCase.setCaseCode("TC-001");
         testCase.setPriority(Priority.HIGH);
         testCase.setStatus(ReviewStatus.APPROVED);
+        TestCase previousCase = new TestCase();
+        previousCase.setId(29L);
+        previousCase.setTestPlanId(20L);
+        previousCase.setCaseCode("TC-000");
+        previousCase.setPriority(Priority.HIGH);
+        previousCase.setStatus(ReviewStatus.APPROVED);
+        UnitTest previousUnit = new UnitTest();
+        previousUnit.setTestCaseId(29L);
+        previousUnit.setTestClassName("UserServiceTest");
+        previousUnit.setTestMethodName("createUser_existing");
+        previousUnit.setPackageName("demo");
+        previousUnit.setFilePath("src/test/java/demo/UserServiceTest.java");
+        previousUnit.setSourceCode("class UserServiceTest { void createUser_existing() {} }");
         when(testPlanRepository.findByProjectId(1L)).thenReturn(List.of(plan));
         when(testPlanCoveredRuleRepository.findByTestPlanIdIn(List.of(20L)))
                 .thenReturn(List.of(coveredRule(20L, 7L), coveredRule(20L, 8L)));
-        when(testCaseRepository.findByTestPlanId(20L)).thenReturn(List.of(testCase));
+        when(testCaseRepository.findByTestPlanId(20L)).thenReturn(List.of(previousCase, testCase));
+        when(unitTestRepository.findByTestCaseId(29L)).thenReturn(previousUnit);
 
         var context = builder.buildUnitTestContext(1L);
 
         assertThat(context.approvedTestPlans()).extracting("planCode").containsExactly("TP-001");
         assertThat(context.approvedTestPlans().get(0).coveredRuleIds()).containsExactly(7L, 8L);
-        assertThat(context.approvedTestCases()).extracting("caseCode").containsExactly("TC-001");
+        assertThat(context.approvedTestCases()).extracting("caseCode").containsExactly("TC-000", "TC-001");
         assertThat(context.existingTests()).extracting("sourceCode").containsExactly("class UserServiceTest {}");
+
+        var refinement = builder.buildUnitTestContext(1L, Set.of(30L));
+        assertThat(refinement.approvedTestCases()).extracting("caseCode").containsExactly("TC-001");
+        assertThat(refinement.existingApprovedTestCases()).extracting("caseCode").containsExactly("TC-000");
+        assertThat(refinement.previousGeneratedUnitTests()).extracting("testMethodName")
+                .containsExactly("createUser_existing");
+    }
+
+    @Test
+    void unitTestBatchContextStaysBoundedForOneLargePlan() {
+        mockCommonInputs();
+        when(businessRuleRepository.findByProjectIdAndStatus(1L, ReviewStatus.APPROVED))
+                .thenReturn(List.of(ruleEntity(7L, 11L, ReviewStatus.APPROVED)));
+        TestPlan plan = testPlan(20L, 7L, "TP-001");
+        when(testPlanRepository.findByProjectId(1L)).thenReturn(List.of(plan));
+        when(testPlanCoveredRuleRepository.findByTestPlanIdIn(List.of(20L)))
+                .thenReturn(List.of(coveredRule(20L, 7L)));
+        List<TestCase> testCases = LongStream.rangeClosed(1, 31).mapToObj(id -> {
+            TestCase testCase = new TestCase();
+            testCase.setId(id);
+            testCase.setTestPlanId(20L);
+            testCase.setCaseCode("TC-" + id);
+            testCase.setPriority(Priority.HIGH);
+            testCase.setStatus(ReviewStatus.APPROVED);
+            return testCase;
+        }).toList();
+        when(testCaseRepository.findByTestPlanId(20L)).thenReturn(testCases);
+        ExistingTestDto largeExistingTest = new ExistingTestDto(
+                50L, 1L, "src/test/java/demo/UserServiceTest.java", "demo", "UserServiceTest",
+                10L, null, List.of(), List.of(), "x".repeat(10_000), null);
+        when(existingTestService.list(1L)).thenReturn(List.of(largeExistingTest));
+
+        var context = builder.buildUnitTestContext(1L, Set.of(31L));
+
+        assertThat(context.approvedTestCases()).extracting("id").containsExactly(31L);
+        assertThat(context.existingApprovedTestCases()).hasSize(10);
+        assertThat(context.existingTests()).singleElement()
+                .extracting("sourceCode").asString().hasSizeLessThan(5_000);
+    }
+
+    @Test
+    void refinementContextContainsOnlyGapMethodsAndTheirPlans() {
+        mockCommonInputs();
+        BusinessRule approved = ruleEntity(7L, 11L, ReviewStatus.APPROVED);
+        when(businessRuleRepository.findByProjectIdAndStatus(1L, ReviewStatus.APPROVED))
+                .thenReturn(List.of(approved));
+        TestPlan plan = new TestPlan();
+        plan.setId(20L);
+        plan.setProjectId(1L);
+        plan.setBusinessRuleId(7L);
+        plan.setPlanCode("TP-001");
+        plan.setStatus(ReviewStatus.APPROVED);
+        when(testPlanRepository.findByProjectId(1L)).thenReturn(List.of(plan));
+        when(testPlanCoveredRuleRepository.findByTestPlanIdIn(List.of(20L)))
+                .thenReturn(List.of(coveredRule(20L, 7L)));
+
+        var gap = new CoverageGapDto(11L, "UserService", "createUser",
+                java.math.BigDecimal.valueOf(40), java.math.BigDecimal.valueOf(50),
+                List.of(11), List.of(11), "HIGH", "cover branch", true);
+        var context = builder.buildCoverageRefinementContext(1L, 2, List.of(gap));
+
+        assertThat(context.round()).isEqualTo(2);
+        assertThat(context.coverageGaps()).containsExactly(gap);
+        assertThat(context.classes().get(0).methods()).extracting("id").containsExactly(11L);
+        assertThat(context.approvedTestPlans()).extracting("id").containsExactly(20L);
     }
 
     private void mockCommonInputs() {
@@ -204,6 +321,7 @@ class GenerationContextBuilderTest {
                 "demo.UserService",
                 "SERVICE",
                 "src/main/java/demo/UserService.java",
+                null,
                 List.of(),
                 List.of(serviceMethod, new JavaMethodDto(
                         12L,
@@ -236,6 +354,7 @@ class GenerationContextBuilderTest {
                 "demo.UserController",
                 "CONTROLLER",
                 "src/main/java/demo/UserController.java",
+                null,
                 List.of(),
                 List.of(controllerMethod));
         return new AnalysisResultDto(
@@ -279,7 +398,7 @@ class GenerationContextBuilderTest {
                 .toList();
         JavaClassDto service = new JavaClassDto(
                 1L, "demo", "BatchService", "demo.BatchService", "SERVICE",
-                "src/main/java/demo/BatchService.java", List.of(), methods);
+                "src/main/java/demo/BatchService.java", null, List.of(), methods);
         return new AnalysisResultDto(
                 1L, "demo", "ANALYZED", 1, count, 0, 0, 0, 0, 1, 1, 0,
                 List.of(), List.of(service), List.of(), List.of());
@@ -325,6 +444,19 @@ class GenerationContextBuilderTest {
         rule.setStatus(status);
         rule.setIsModified(false);
         return rule;
+    }
+
+    private TestPlan testPlan(Long id, Long ruleId, String code) {
+        TestPlan plan = new TestPlan();
+        plan.setId(id);
+        plan.setProjectId(1L);
+        plan.setBusinessRuleId(ruleId);
+        plan.setPlanCode(code);
+        plan.setTitle("Plan " + code);
+        plan.setDescription("Description " + code);
+        plan.setTestType(TestType.HAPPY_PATH);
+        plan.setStatus(ReviewStatus.APPROVED);
+        return plan;
     }
 
     private TestPlanCoveredRule coveredRule(Long planId, Long ruleId) {

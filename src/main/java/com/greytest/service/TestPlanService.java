@@ -363,16 +363,22 @@ public class TestPlanService {
                 .orElseThrow(() -> new ProjectNotFoundException(projectId));
     }
 
+    // Cho phép regenerate/sửa Test Plan ở mọi pha từ BR_APPROVED trở đi; dữ liệu pha sau
+    // (Case/Unit Test) được DB cascade dọn, status rollback về PLAN_PENDING_REVIEW
+    private static final Set<ProjectStatus> PLAN_EDITABLE_STATUSES = Set.of(
+            ProjectStatus.BR_APPROVED, ProjectStatus.PLAN_PENDING_REVIEW, ProjectStatus.PLAN_APPROVED,
+            ProjectStatus.CASE_PENDING_REVIEW, ProjectStatus.CASE_APPROVED, ProjectStatus.TEST_GENERATED,
+            ProjectStatus.COVERAGE_ANALYZED, ProjectStatus.COMPLETED);
+
     private void ensureCanGenerate(Project project) {
-        if (!Set.of(ProjectStatus.BR_APPROVED, ProjectStatus.PLAN_PENDING_REVIEW).contains(project.getStatus())) {
+        if (!PLAN_EDITABLE_STATUSES.contains(project.getStatus())) {
             throw new InvalidProjectStatusException(
                     "Chi co the sinh Test Plan sau khi Business Rule da APPROVED.");
         }
     }
 
     private void ensurePlanEditable(Project project) {
-        if (!Set.of(ProjectStatus.BR_APPROVED, ProjectStatus.PLAN_PENDING_REVIEW, ProjectStatus.PLAN_APPROVED)
-                .contains(project.getStatus())) {
+        if (!PLAN_EDITABLE_STATUSES.contains(project.getStatus())) {
             throw new InvalidProjectStatusException(
                     "Chi co the thao tac Test Plan sau khi Business Rule da APPROVED.");
         }
@@ -409,7 +415,14 @@ public class TestPlanService {
                 plan.getTestType(),
                 plan.getStatus(),
                 plan.getIsModified(),
-                plan.getCreatedAt());
+                plan.getCreatedAt(),
+                testPlanCoveredRuleRepository.findByTestPlanId(plan.getId()).stream()
+                        .map(TestPlanCoveredRule::getBusinessRuleId)
+                        .collect(Collectors.collectingAndThen(
+                                Collectors.toCollection(TreeSet::new),
+                                ruleIds -> ruleIds.isEmpty()
+                                        ? List.of(plan.getBusinessRuleId())
+                                        : List.copyOf(ruleIds))));
     }
 
     private record GeneratedPlanDraft(TestPlan plan, Set<Long> coveredRuleIds) {

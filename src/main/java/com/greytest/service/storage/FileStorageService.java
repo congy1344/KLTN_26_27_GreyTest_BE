@@ -59,6 +59,19 @@ public class FileStorageService {
         return dir;
     }
 
+    /** Lưu file jacoco.xml do user upload, trả về đường dẫn file đã lưu. */
+    public Path storeCoverageXml(Long projectId, MultipartFile file) {
+        try {
+            Path dir = projectsRoot.resolveSibling("coverage").resolve(String.valueOf(projectId));
+            Files.createDirectories(dir);
+            Path target = dir.resolve(UUID.randomUUID() + ".xml");
+            Files.copy(file.getInputStream(), target, StandardCopyOption.REPLACE_EXISTING);
+            return target;
+        } catch (IOException e) {
+            throw new StorageException("Không lưu được file coverage XML", e);
+        }
+    }
+
     /** Xóa toàn bộ thư mục source của project. */
     public void delete(Path dir) {
         if (dir == null || !Files.exists(dir)) {

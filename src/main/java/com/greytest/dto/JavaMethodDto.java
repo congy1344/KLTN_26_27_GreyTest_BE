@@ -13,6 +13,22 @@ public record JavaMethodDto(
         Integer lineStart,
         Integer lineEnd,
         List<RelevantAnnotationDto> annotations,
-        List<EndpointDto> endpoints
+        List<EndpointDto> endpoints,
+        List<SourceBranchDto> branches
 ) {
+    public JavaMethodDto(
+            Long id,
+            String methodName,
+            String returnType,
+            List<MethodParamDto> parameters,
+            List<String> throwsList,
+            String visibility,
+            String sourceCode,
+            Integer lineStart,
+            Integer lineEnd,
+            List<RelevantAnnotationDto> annotations,
+            List<EndpointDto> endpoints) {
+        this(id, methodName, returnType, parameters, throwsList, visibility, sourceCode,
+                lineStart, lineEnd, annotations, endpoints, List.of());
+    }
 }

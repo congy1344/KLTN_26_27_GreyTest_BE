@@ -8,11 +8,13 @@ import static org.mockito.Mockito.when;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.stream.LongStream;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.springframework.context.i18n.LocaleContextHolder;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.greytest.dto.AnalysisManifestDto;
@@ -20,6 +22,8 @@ import com.greytest.dto.agent.GenerationContextDtos.AnalysisSummaryDto;
 import com.greytest.dto.agent.GenerationContextDtos.BusinessRuleGenerationContextDto;
 import com.greytest.dto.agent.GenerationContextDtos.ProjectContextDto;
 import com.greytest.dto.agent.GenerationResponseDtos.BusinessRuleResponseDto;
+import com.greytest.dto.agent.GenerationResponseDtos.TestCaseResponseDto;
+import com.greytest.dto.agent.GenerationResponseDtos.UnitTestResponseDto;
 
 import jakarta.validation.Validation;
 import jakarta.validation.Validator;
@@ -43,8 +47,7 @@ class AgentGatewayTest {
         assertThat(prompt).contains(
                 "# Prompt: business-rule",
                 "\"project\" : \"demo\"",
-                "Do not target a fixed number of rules per method",
-                "at most 20 rules total");
+                "Do not target a fixed number of rules per method");
         assertThat(response.rules()).hasSize(1);
         assertThat(response.rules().get(0).methodId()).isEqualTo(1L);
     }
@@ -74,6 +77,59 @@ class AgentGatewayTest {
     }
 
     @Test
+    void mockClientFollowsSystemLanguage() {
+        String response = mockLlmClient.complete("""
+                # Prompt: business-rule
+                # Output language
+                Return every natural-language field in English.
+                """);
+
+        assertThat(response)
+                .contains("Input must be valid before executing business logic.")
+                .doesNotContain("Input phải hợp lệ");
+    }
+
+    @Test
+    void mockClientSupportsCoverageRefinementForEveryTargetPlan() {
+        String prompt = """
+                # Prompt: coverage-refinement
+                Context:
+                {
+                  "approvedTestPlans": [
+                    { "id": 20, "businessRuleId": 7 },
+                    { "id": 21, "businessRuleId": 8 }
+                  ]
+                }
+                """;
+
+        TestCaseResponseDto response = parser.parse(
+                mockLlmClient.complete(prompt),
+                TestCaseResponseDto.class);
+
+        assertThat(response.cases()).extracting("planId").containsExactly(20L, 21L);
+    }
+
+    @Test
+    void mockClientGeneratesOneUnitTestPerTargetCase() {
+        String prompt = """
+                # Prompt: unit-test
+                Context:
+                {
+                  "approvedTestCases": [
+                    { "id": 30, "testPlanId": 20 },
+                    { "id": 31, "testPlanId": 20 }
+                  ]
+                }
+                """;
+
+        UnitTestResponseDto response = parser.parse(
+                mockLlmClient.complete(prompt),
+                UnitTestResponseDto.class);
+
+        assertThat(response.unitTests()).extracting("caseId").containsExactly(30L, 31L);
+    }
+
+    @Test
     void aiAgentServiceUsesGatewayPieces(@TempDir Path tempDir) throws Exception {
         GenerationContextBuilder contextBuilder = mock(GenerationContextBuilder.class);
         when(contextBuilder.buildBusinessRuleGenerationContext(1L)).thenReturn(context());
@@ -91,8 +147,26 @@ class AgentGatewayTest {
             Path responseLog = logFiles.stream()
                     .filter(file -> file.getFileName().toString().contains("-response-1"))
                     .findFirst().orElseThrow();
-            assertThat(Files.readString(contextLog)).contains("context_json", "rendered_prompt", "\"projectId\" : 1");
+            assertThat(Files.readString(contextLog)).contains("context_json", "rendered_prompt", "\"id\" : 1");
             assertThat(Files.readString(responseLog)).contains("\"rules\"");
+        }
+    }
+
+    @Test
+    void aiAgentUsesSystemLanguageWithoutTranslatingTechnicalTokens(@TempDir Path tempDir) {
+        GenerationContextBuilder contextBuilder = mock(GenerationContextBuilder.class);
+        AIAgentService service = new AIAgentService(
+                contextBuilder, promptManager, mockLlmClient, parser,
+                new AiContextLogService(objectMapper, tempDir.toString()));
+
+        try {
+            LocaleContextHolder.setLocale(Locale.ENGLISH);
+            assertThat(service.languageInstruction()).contains("in English", "JSON keys", "file paths");
+
+            LocaleContextHolder.setLocale(Locale.forLanguageTag("vi"));
+            assertThat(service.languageInstruction()).contains("tieng Viet", "API", "Unit Test", "khong dich guong ep");
+        } finally {
+            LocaleContextHolder.resetLocaleContext();
         }
     }
 
@@ -126,8 +200,8 @@ class AgentGatewayTest {
     }
 
     @Test
-    void parserRejectsMoreThanTwentyBusinessRules() throws Exception {
-        List<Map<String, Object>> rules = LongStream.rangeClosed(1, 21)
+    void parserRejectsMoreThanOneHundredBusinessRules() throws Exception {
+        List<Map<String, Object>> rules = LongStream.rangeClosed(1, 101)
                 .mapToObj(id -> Map.<String, Object>of(
                         "method_id", id,
                         "description", "Rule " + id,
@@ -138,7 +212,7 @@ class AgentGatewayTest {
                 objectMapper.writeValueAsString(Map.of("rules", rules)),
                 BusinessRuleResponseDto.class))
                 .isInstanceOf(LlmResponseException.class)
-                .hasMessageContaining("size must be between 0 and 20");
+                .hasMessageContaining("size must be between 0 and 100");
     }
 
     @Test

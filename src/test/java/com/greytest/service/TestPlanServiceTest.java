@@ -225,6 +225,18 @@ class TestPlanServiceTest {
         assertThat(project.getStatus()).isEqualTo(ProjectStatus.PLAN_APPROVED);
     }
 
+    @Test
+    void generateChoPhepRegenerateKhiDaHoanTatPipeline() {
+        // Guard mở cho vòng regenerate: ở COMPLETED vẫn gọi được generate — lỗi ném ra
+        // phải là "thiếu BR approved" (bước sau guard), không phải lỗi chặn status
+        mockProject(ProjectStatus.COMPLETED);
+        when(businessRuleRepository.findByProjectIdAndStatus(1L, ReviewStatus.APPROVED)).thenReturn(List.of());
+
+        assertThatThrownBy(() -> service().generate(1L))
+                .isInstanceOf(InvalidProjectStatusException.class)
+                .hasMessageContaining("it nhat mot Business Rule APPROVED");
+    }
+
     private TestPlanService service() {
         return new TestPlanService(
                 testPlanRepository,

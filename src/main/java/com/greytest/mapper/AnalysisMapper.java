@@ -18,6 +18,7 @@ import com.greytest.entity.JavaMethod;
 import com.greytest.entity.MethodParam;
 import com.greytest.entity.RelevantAnnotation;
 import com.greytest.entity.ServiceRepositoryRelation;
+import com.greytest.service.analysis.MethodBranchAnalyzer;
 
 /**
  * Mapper chuyển đổi Analysis entities sang DTO cho API response.
@@ -46,6 +47,7 @@ public class AnalysisMapper {
                 entity.getQualifiedName(),
                 entity.getClassType() != null ? entity.getClassType().name() : "OTHER",
                 entity.getFilePath(),
+                entity.getSourceCode(),
                 classAnnotations.stream().map(this::toAnnotationDto).toList(),
                 methodDtos
         );
@@ -73,7 +75,8 @@ public class AnalysisMapper {
                 method.getLineStart(),
                 method.getLineEnd(),
                 annotations.stream().map(this::toAnnotationDto).toList(),
-                endpointDtos
+                endpointDtos,
+                MethodBranchAnalyzer.analyze(method.getSourceCode(), method.getLineStart())
         );
     }
 

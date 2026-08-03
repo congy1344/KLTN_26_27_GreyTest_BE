@@ -3,6 +3,8 @@ package com.greytest.service.analysis;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.io.IOException;
@@ -48,117 +50,24 @@ class AnalysisServiceTest {
     @Mock private ControllerServiceRelationRepository controllerServiceRelationRepository;
     @Mock private RelevantAnnotationRepository annotationRepository;
     @Mock private ExistingTestService existingTestService;
+    @Mock private com.greytest.repository.BusinessRuleRepository businessRuleRepository;
+    @Mock private com.greytest.repository.CoverageReportRepository coverageReportRepository;
+
+    private final List<JavaClass> classes = new ArrayList<>();
+    private final List<JavaMethod> methods = new ArrayList<>();
+    private final List<Endpoint> endpoints = new ArrayList<>();
+    private final List<ServiceRepositoryRelation> relations = new ArrayList<>();
+    private final List<ControllerServiceRelation> controllerServiceRelations = new ArrayList<>();
+    private final List<RelevantAnnotation> annotations = new ArrayList<>();
+    private final AtomicLong ids = new AtomicLong(1);
 
     @Test
     void mapsOverloadsAndDuplicateRepositoryNamesCorrectly(@TempDir Path sourceDir) throws IOException {
         writeSources(sourceDir);
         Project project = project(sourceDir);
-        List<JavaClass> classes = new ArrayList<>();
-        List<JavaMethod> methods = new ArrayList<>();
-        List<Endpoint> endpoints = new ArrayList<>();
-        List<ServiceRepositoryRelation> relations = new ArrayList<>();
-        List<ControllerServiceRelation> controllerServiceRelations = new ArrayList<>();
-        List<RelevantAnnotation> annotations = new ArrayList<>();
-        AtomicLong ids = new AtomicLong(1);
+        AnalysisService service = buildService(project);
 
-        when(projectRepository.findById(1L)).thenReturn(Optional.of(project));
-        when(projectRepository.save(any(Project.class))).thenAnswer(invocation -> invocation.getArgument(0));
-        when(classRepository.save(any(JavaClass.class))).thenAnswer(invocation -> {
-            JavaClass entity = invocation.getArgument(0);
-            entity.setId(ids.getAndIncrement());
-            classes.add(entity);
-            return entity;
-        });
-        when(methodRepository.save(any(JavaMethod.class))).thenAnswer(invocation -> {
-            JavaMethod entity = invocation.getArgument(0);
-            entity.setId(ids.getAndIncrement());
-            methods.add(entity);
-            return entity;
-        });
-        when(endpointRepository.save(any(Endpoint.class))).thenAnswer(invocation -> {
-            Endpoint entity = invocation.getArgument(0);
-            entity.setId(ids.getAndIncrement());
-            endpoints.add(entity);
-            return entity;
-        });
-        when(relationRepository.save(any(ServiceRepositoryRelation.class))).thenAnswer(invocation -> {
-            ServiceRepositoryRelation entity = invocation.getArgument(0);
-            entity.setId(ids.getAndIncrement());
-            relations.add(entity);
-            return entity;
-        });
-        when(controllerServiceRelationRepository.save(any(ControllerServiceRelation.class))).thenAnswer(invocation -> {
-            ControllerServiceRelation entity = invocation.getArgument(0);
-            entity.setId(ids.getAndIncrement());
-            controllerServiceRelations.add(entity);
-            return entity;
-        });
-        when(annotationRepository.save(any(RelevantAnnotation.class))).thenAnswer(invocation -> {
-            RelevantAnnotation entity = invocation.getArgument(0);
-            entity.setId(ids.getAndIncrement());
-            annotations.add(entity);
-            return entity;
-        });
-        when(classRepository.findByProjectId(1L)).thenAnswer(ignored -> classes);
-        when(classRepository.findByProjectIdAndClassType(org.mockito.ArgumentMatchers.eq(1L), any(ClassType.class)))
-                .thenAnswer(invocation -> {
-                    ClassType classType = invocation.getArgument(1);
-                    return classes.stream().filter(c -> c.getClassType() == classType).toList();
-                });
-        when(methodRepository.findByClassId(anyLong())).thenAnswer(invocation -> {
-            Long classId = invocation.getArgument(0);
-            return methods.stream().filter(m -> m.getClassId().equals(classId)).toList();
-        });
-        when(endpointRepository.findByMethodId(anyLong())).thenAnswer(invocation -> {
-            Long methodId = invocation.getArgument(0);
-            return endpoints.stream().filter(e -> e.getMethodId().equals(methodId)).toList();
-        });
-        when(relationRepository.findByServiceClassId(anyLong())).thenAnswer(invocation -> {
-            Long serviceId = invocation.getArgument(0);
-            return relations.stream().filter(r -> r.getServiceClassId().equals(serviceId)).toList();
-        });
-        when(controllerServiceRelationRepository.findByControllerClassId(anyLong())).thenAnswer(invocation -> {
-            Long controllerId = invocation.getArgument(0);
-            return controllerServiceRelations.stream()
-                    .filter(r -> r.getControllerClassId().equals(controllerId))
-                    .toList();
-        });
-        when(annotationRepository.findByClassId(anyLong())).thenAnswer(invocation -> {
-            Long classId = invocation.getArgument(0);
-            return annotations.stream()
-                    .filter(annotation -> annotation.getClassId().equals(classId)
-                            && annotation.getMethodId() == null)
-                    .toList();
-        });
-        when(annotationRepository.findByMethodIdIn(any())).thenAnswer(invocation -> {
-            @SuppressWarnings("unchecked")
-            List<Long> methodIds = invocation.getArgument(0);
-            return annotations.stream()
-                    .filter(annotation -> annotation.getMethodId() != null
-                            && methodIds.contains(annotation.getMethodId()))
-                    .toList();
-        });
-
-        AnalysisService service = new AnalysisService(
-                projectRepository,
-                classRepository,
-                methodRepository,
-                endpointRepository,
-                relationRepository,
-                controllerServiceRelationRepository,
-                annotationRepository,
-                new JavaParserHelper(),
-                new AnalysisResultBuilder(
-                        classRepository,
-                        methodRepository,
-                        endpointRepository,
-                        relationRepository,
-                        controllerServiceRelationRepository,
-                        annotationRepository,
-                        new AnalysisMapper()),
-                existingTestService);
-
-        service.analyze(1L);
+        var result = service.analyze(1L);
 
         JavaClass importedRepository = classes.stream()
                 .filter(c -> c.getPackageName().equals("demo.b"))
@@ -188,6 +97,130 @@ class AnalysisServiceTest {
         assertThat(annotations)
                 .extracting(RelevantAnnotation::getAnnotationName)
                 .contains("Service", "RestController", "GetMapping");
+        assertThat(result.classes())
+                .anySatisfy(javaClass -> {
+                    assertThat(javaClass.className()).isEqualTo("UserController");
+                    assertThat(javaClass.sourceCode()).contains("class UserController");
+                });
+    }
+
+    @Test
+    void reAnalyzeSauKhiCoPipelineXoaBusinessRuleVaCoverage(@TempDir Path sourceDir) throws IOException {
+        // Re-analyze khi pipeline đã đi xa: phải reset về đầu — xóa data phân tích cũ,
+        // xóa BR (cascade Plan/Case/Unit Test) và lịch sử coverage
+        writeSources(sourceDir);
+        Project project = project(sourceDir);
+        project.setStatus(ProjectStatus.COVERAGE_ANALYZED);
+        AnalysisService service = buildService(project);
+
+        service.analyze(1L);
+
+        verify(existingTestService).deleteByProjectId(1L);
+        verify(classRepository).deleteByProjectId(1L);
+        verify(businessRuleRepository).deleteByProjectId(1L);
+        verify(coverageReportRepository).deleteByProjectId(1L);
+        assertThat(project.getStatus()).isEqualTo(ProjectStatus.ANALYZED);
+    }
+
+    private AnalysisService buildService(Project project) {
+        lenient().when(projectRepository.findById(1L)).thenReturn(Optional.of(project));
+        lenient().when(projectRepository.save(any(Project.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        lenient().when(classRepository.save(any(JavaClass.class))).thenAnswer(invocation -> {
+            JavaClass entity = invocation.getArgument(0);
+            entity.setId(ids.getAndIncrement());
+            classes.add(entity);
+            return entity;
+        });
+        lenient().when(methodRepository.save(any(JavaMethod.class))).thenAnswer(invocation -> {
+            JavaMethod entity = invocation.getArgument(0);
+            entity.setId(ids.getAndIncrement());
+            methods.add(entity);
+            return entity;
+        });
+        lenient().when(endpointRepository.save(any(Endpoint.class))).thenAnswer(invocation -> {
+            Endpoint entity = invocation.getArgument(0);
+            entity.setId(ids.getAndIncrement());
+            endpoints.add(entity);
+            return entity;
+        });
+        lenient().when(relationRepository.save(any(ServiceRepositoryRelation.class))).thenAnswer(invocation -> {
+            ServiceRepositoryRelation entity = invocation.getArgument(0);
+            entity.setId(ids.getAndIncrement());
+            relations.add(entity);
+            return entity;
+        });
+        lenient().when(controllerServiceRelationRepository.save(any(ControllerServiceRelation.class))).thenAnswer(invocation -> {
+            ControllerServiceRelation entity = invocation.getArgument(0);
+            entity.setId(ids.getAndIncrement());
+            controllerServiceRelations.add(entity);
+            return entity;
+        });
+        lenient().when(annotationRepository.save(any(RelevantAnnotation.class))).thenAnswer(invocation -> {
+            RelevantAnnotation entity = invocation.getArgument(0);
+            entity.setId(ids.getAndIncrement());
+            annotations.add(entity);
+            return entity;
+        });
+        lenient().when(classRepository.findByProjectId(1L)).thenAnswer(ignored -> classes);
+        lenient().when(classRepository.findByProjectIdAndClassType(org.mockito.ArgumentMatchers.eq(1L), any(ClassType.class)))
+                .thenAnswer(invocation -> {
+                    ClassType classType = invocation.getArgument(1);
+                    return classes.stream().filter(c -> c.getClassType() == classType).toList();
+                });
+        lenient().when(methodRepository.findByClassId(anyLong())).thenAnswer(invocation -> {
+            Long classId = invocation.getArgument(0);
+            return methods.stream().filter(m -> m.getClassId().equals(classId)).toList();
+        });
+        lenient().when(endpointRepository.findByMethodId(anyLong())).thenAnswer(invocation -> {
+            Long methodId = invocation.getArgument(0);
+            return endpoints.stream().filter(e -> e.getMethodId().equals(methodId)).toList();
+        });
+        lenient().when(relationRepository.findByServiceClassId(anyLong())).thenAnswer(invocation -> {
+            Long serviceId = invocation.getArgument(0);
+            return relations.stream().filter(r -> r.getServiceClassId().equals(serviceId)).toList();
+        });
+        lenient().when(controllerServiceRelationRepository.findByControllerClassId(anyLong())).thenAnswer(invocation -> {
+            Long controllerId = invocation.getArgument(0);
+            return controllerServiceRelations.stream()
+                    .filter(r -> r.getControllerClassId().equals(controllerId))
+                    .toList();
+        });
+        lenient().when(annotationRepository.findByClassId(anyLong())).thenAnswer(invocation -> {
+            Long classId = invocation.getArgument(0);
+            return annotations.stream()
+                    .filter(annotation -> annotation.getClassId().equals(classId)
+                            && annotation.getMethodId() == null)
+                    .toList();
+        });
+        lenient().when(annotationRepository.findByMethodIdIn(any())).thenAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            List<Long> methodIds = invocation.getArgument(0);
+            return annotations.stream()
+                    .filter(annotation -> annotation.getMethodId() != null
+                            && methodIds.contains(annotation.getMethodId()))
+                    .toList();
+        });
+
+        return new AnalysisService(
+                projectRepository,
+                classRepository,
+                methodRepository,
+                endpointRepository,
+                relationRepository,
+                controllerServiceRelationRepository,
+                annotationRepository,
+                new JavaParserHelper(),
+                new AnalysisResultBuilder(
+                        classRepository,
+                        methodRepository,
+                        endpointRepository,
+                        relationRepository,
+                        controllerServiceRelationRepository,
+                        annotationRepository,
+                        new AnalysisMapper()),
+                existingTestService,
+                businessRuleRepository,
+                coverageReportRepository);
     }
 
     private Project project(Path sourceDir) {

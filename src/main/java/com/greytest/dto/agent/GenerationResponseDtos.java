@@ -18,13 +18,18 @@ public final class GenerationResponseDtos {
     }
 
     public record BusinessRuleResponseDto(
-            @NotEmpty @Size(max = 20) @Valid List<GeneratedBusinessRuleDto> rules) {
+            @NotNull @Size(max = 100) @Valid List<GeneratedBusinessRuleDto> rules) {
     }
 
     public record GeneratedBusinessRuleDto(
             @JsonProperty("method_id") @NotNull Long methodId,
             @NotBlank String description,
-            @NotBlank @Pattern(regexp = "VALIDATION|BUSINESS_LOGIC|SIDE_EFFECT") String category) {
+            @NotBlank @Pattern(regexp = "VALIDATION|BUSINESS_LOGIC|SIDE_EFFECT") String category,
+            @JsonProperty("branch_id") String branchId) {
+
+        public GeneratedBusinessRuleDto(Long methodId, String description, String category) {
+            this(methodId, description, category, null);
+        }
     }
 
     public record BusinessRuleReviewResponseDto(
@@ -61,7 +66,7 @@ public final class GenerationResponseDtos {
 
     public record GeneratedTestCaseDto(
             @JsonProperty("plan_id") @NotNull Long planId,
-            @JsonProperty("test_type") @NotBlank String testType,
+            @JsonProperty("test_type") @NotBlank @Pattern(regexp = "HAPPY_PATH|BOUNDARY|EXCEPTION|EDGE") String testType,
             @NotBlank String description,
             @NotBlank String preconditions,
             @JsonProperty("test_data") @NotNull Map<String, Object> testData,

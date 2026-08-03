@@ -17,5 +17,23 @@ public record BusinessRuleDto(
         ReviewStatus status,
         Boolean isModified,
         LocalDateTime createdAt,
-        LocalDateTime updatedAt) {
+        LocalDateTime updatedAt,
+        String sourceBranchId) {
+
+    public BusinessRuleDto(
+            Long id,
+            Long projectId,
+            Long methodId,
+            String ruleCode,
+            String description,
+            String reviewNote,
+            String suggestedDescription,
+            RuleSource source,
+            ReviewStatus status,
+            Boolean isModified,
+            LocalDateTime createdAt,
+            LocalDateTime updatedAt) {
+        this(id, projectId, methodId, ruleCode, description, reviewNote, suggestedDescription,
+                source, status, isModified, createdAt, updatedAt, null);
+    }
 }

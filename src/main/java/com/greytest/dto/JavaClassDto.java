@@ -9,6 +9,7 @@ public record JavaClassDto(
         String qualifiedName,
         String classType,
         String filePath,
+        String sourceCode,
         List<RelevantAnnotationDto> annotations,
         List<JavaMethodDto> methods
 ) {

@@ -8,6 +8,7 @@ import java.util.Set;
 import java.util.stream.Stream;
 
 import org.springframework.data.domain.Sort;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -25,9 +26,9 @@ import com.greytest.exception.ProjectNotFoundException;
 import com.greytest.exception.StorageException;
 import com.greytest.mapper.ProjectMapper;
 import com.greytest.repository.ProjectRepository;
-import com.greytest.service.analysis.AnalysisService;
 import com.greytest.service.storage.FileStorageService;
 import com.greytest.service.storage.GithubService;
+import com.greytest.service.analysis.AnalysisService;
 
 import lombok.extern.slf4j.Slf4j;
 
@@ -45,19 +46,24 @@ public class ProjectService {
     private final FileStorageService fileStorageService;
     private final GithubService githubService;
     private final ProjectMapper projectMapper;
-    private final AnalysisService analysisService;
 
+    @Autowired
     public ProjectService(
             ProjectRepository projectRepository,
             FileStorageService fileStorageService,
             GithubService githubService,
-            ProjectMapper projectMapper,
-            AnalysisService analysisService) {
+            ProjectMapper projectMapper) {
         this.projectRepository = projectRepository;
         this.fileStorageService = fileStorageService;
         this.githubService = githubService;
         this.projectMapper = projectMapper;
-        this.analysisService = analysisService;
+    }
+
+    /** Backward-compatible constructor; upload no longer triggers analysis. */
+    @Deprecated
+    public ProjectService(ProjectRepository projectRepository, FileStorageService fileStorageService,
+            GithubService githubService, ProjectMapper projectMapper, AnalysisService ignoredAnalysisService) {
+        this(projectRepository, fileStorageService, githubService, projectMapper);
     }
 
     @Transactional
@@ -66,7 +72,7 @@ public class ProjectService {
         Path dir = fileStorageService.storeZip(file);
         requireSpringBootProject(dir);
         Project project = save(stripZipExtension(file.getOriginalFilename()), SourceType.ZIP, null, dir, owner);
-        return analyzeImportedProject(project, dir, "ZIP");
+        return projectMapper.toDto(project);
     }
 
     @Transactional
@@ -75,7 +81,7 @@ public class ProjectService {
         Path dir = githubService.clone(url);
         requireSpringBootProject(dir);
         Project project = save(repoName(url), SourceType.GITHUB, url, dir, owner);
-        return analyzeImportedProject(project, dir, "GitHub " + url);
+        return projectMapper.toDto(project);
     }
 
     @Transactional(readOnly = true)
@@ -140,19 +146,6 @@ public class ProjectService {
         project.setStatus(ProjectStatus.UPLOADED);
         project.setOwnerUserId(owner.getId());
         return projectRepository.save(project);
-    }
-
-    private ProjectDto analyzeImportedProject(Project project, Path dir, String sourceDescription) {
-        try {
-            analysisService.analyze(project.getId());
-            project.setStatus(ProjectStatus.ANALYZED);
-            log.info("Tạo và phân tích project {} từ {} tại {}", project.getId(), sourceDescription, dir);
-            return projectMapper.toDto(project);
-        } catch (RuntimeException exception) {
-            // DB transaction sẽ rollback; source trên filesystem cần được dọn riêng.
-            fileStorageService.delete(dir);
-            throw exception;
-        }
     }
 
     private Project findOrThrow(Long id) {

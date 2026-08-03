@@ -29,6 +29,9 @@ public class GenerationResponseParser {
         }
         try {
             T parsed = objectMapper.readValue(jsonPayload(response), responseType);
+            if (parsed == null) {
+                throw new LlmResponseException("LLM response khong dung schema: payload null");
+            }
             var violations = validator.validate(parsed);
             if (!violations.isEmpty()) {
                 String firstError = violations.stream()
@@ -39,7 +42,8 @@ public class GenerationResponseParser {
             }
             return parsed;
         } catch (JsonProcessingException exception) {
-            throw new LlmResponseException("LLM response khong phai JSON hop le.", exception);
+            // Output hỏng do model nondeterminism (cắt cụt, lặp từ...) → cho phép gọi lại lần 2
+            throw new LlmResponseException("LLM response khong phai JSON hop le.", exception, true);
         }
     }
 

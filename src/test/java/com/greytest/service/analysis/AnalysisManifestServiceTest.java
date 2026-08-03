@@ -87,6 +87,7 @@ class AnalysisManifestServiceTest {
                 "demo.UserController",
                 "CONTROLLER",
                 "src/main/java/demo/UserController.java",
+                null,
                 List.of(new RelevantAnnotationDto(6L, "CLASS", "COMPONENT", "RestController", "@RestController")),
                 List.of(method));
         JavaClassDto repository = new JavaClassDto(
@@ -96,6 +97,7 @@ class AnalysisManifestServiceTest {
                 "demo.UserRepository",
                 "REPOSITORY",
                 "src/main/java/demo/UserRepository.java",
+                null,
                 List.of(),
                 List.of());
         ServiceRelationDto relation = new ServiceRelationDto(

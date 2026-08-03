@@ -17,6 +17,7 @@ import com.github.javaparser.ast.body.Parameter;
 import com.github.javaparser.ast.body.RecordDeclaration;
 import com.github.javaparser.ast.body.TypeDeclaration;
 import com.github.javaparser.ast.expr.AnnotationExpr;
+import com.github.javaparser.ast.expr.AssignExpr;
 import com.github.javaparser.ast.expr.Expression;
 import com.github.javaparser.ast.expr.FieldAccessExpr;
 import com.github.javaparser.ast.expr.MethodCallExpr;
@@ -146,6 +147,8 @@ public class JavaParserHelper {
     public List<ExtractedMethod> extractMethods(TypeDeclaration<?> typeDecl) {
         List<ExtractedMethod> methods = new ArrayList<>();
         for (MethodDeclaration md : typeDecl.getMethods()) {
+            if (isTrivialAccessor(md)) continue;
+
             List<ParamInfo> params = md.getParameters().stream()
                     .map(p -> new ParamInfo(p.getNameAsString(), p.getTypeAsString()))
                     .toList();
@@ -280,6 +283,53 @@ public class JavaParserHelper {
         return Visibility.PACKAGE_PRIVATE;
     }
 
+    /** Bỏ getter/setter bean thuần để analysis context tập trung vào logic có thể sinh test. */
+    private boolean isTrivialAccessor(MethodDeclaration method) {
+        return method.getAnnotations().isEmpty()
+                && method.getThrownExceptions().isEmpty()
+                && (isTrivialGetter(method) || isTrivialSetter(method));
+    }
+
+    private boolean isTrivialGetter(MethodDeclaration method) {
+        String name = method.getNameAsString();
+        boolean getterName = (name.startsWith("get") && name.length() > 3)
+                || (name.startsWith("is") && name.length() > 2);
+        if (!getterName || !method.getParameters().isEmpty() || method.getType().isVoidType()) {
+            return false;
+        }
+        return method.getBody()
+                .filter(body -> body.getStatements().size() == 1)
+                .map(body -> body.getStatement(0))
+                .filter(statement -> statement.isReturnStmt())
+                .flatMap(statement -> statement.asReturnStmt().getExpression())
+                .map(this::isFieldReference)
+                .orElse(false);
+    }
+
+    private boolean isTrivialSetter(MethodDeclaration method) {
+        String name = method.getNameAsString();
+        if (!name.startsWith("set") || name.length() <= 3
+                || !method.getType().isVoidType()
+                || method.getParameters().size() != 1) {
+            return false;
+        }
+        String parameterName = method.getParameter(0).getNameAsString();
+        return method.getBody()
+                .filter(body -> body.getStatements().size() == 1)
+                .map(body -> body.getStatement(0))
+                .filter(statement -> statement.isExpressionStmt())
+                .map(statement -> statement.asExpressionStmt().getExpression())
+                .filter(Expression::isAssignExpr)
+                .map(Expression::asAssignExpr)
+                .filter(assign -> assign.getOperator() == AssignExpr.Operator.ASSIGN)
+                .filter(assign -> isFieldReference(assign.getTarget()))
+                .map(AssignExpr::getValue)
+                .filter(Expression::isNameExpr)
+                .map(value -> value.asNameExpr().getNameAsString())
+                .filter(parameterName::equals)
+                .isPresent();
+    }
+
     private String methodKey(MethodDeclaration method) {
         String parameterTypes = method.getParameters().stream()
                 .map(Parameter::getTypeAsString)
@@ -323,6 +373,10 @@ public class JavaParserHelper {
             return java.util.Optional.of(fieldAccess.getNameAsString());
         }
         return java.util.Optional.empty();
+    }
+
+    private boolean isFieldReference(Expression expression) {
+        return fieldScopeName(expression).isPresent();
     }
 
     private String normalizeTypeName(String typeName) {

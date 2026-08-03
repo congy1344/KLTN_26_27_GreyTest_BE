@@ -3,12 +3,16 @@ package com.greytest.dto.agent;
 import java.util.List;
 import java.util.Map;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
+
 import com.greytest.dto.AnalysisManifestDto;
 import com.greytest.dto.ControllerServiceRelationDto;
+import com.greytest.dto.CoverageGapDto;
 import com.greytest.dto.EndpointDto;
 import com.greytest.dto.MethodParamDto;
 import com.greytest.dto.RelevantAnnotationDto;
 import com.greytest.dto.ServiceRelationDto;
+import com.greytest.dto.SourceBranchDto;
 
 public final class GenerationContextDtos {
 
@@ -32,6 +36,7 @@ public final class GenerationContextDtos {
             int parsedProductionFiles,
             int failedParseFiles,
             List<String> failedParseFilePaths,
+            @JsonIgnore
             AnalysisManifestDto manifest) {
     }
 
@@ -58,7 +63,8 @@ public final class GenerationContextDtos {
             Integer lineStart,
             Integer lineEnd,
             List<RelevantAnnotationDto> annotations,
-            List<EndpointDto> endpoints) {
+            List<EndpointDto> endpoints,
+            List<SourceBranchDto> branches) {
     }
 
     public record BusinessRuleContextDto(
@@ -69,7 +75,8 @@ public final class GenerationContextDtos {
             String reviewNote,
             String source,
             String status,
-            Boolean isModified) {
+            Boolean isModified,
+            String sourceBranchId) {
     }
 
     public record ExistingTestContextDto(
@@ -109,6 +116,15 @@ public final class GenerationContextDtos {
             String traceSource,
             String status,
             Boolean isModified) {
+    }
+
+    public record GeneratedUnitTestContextDto(
+            Long testCaseId,
+            String testClassName,
+            String testMethodName,
+            String packageName,
+            String filePath,
+            String sourceCode) {
     }
 
     public record BusinessRuleGenerationContextDto(
@@ -155,6 +171,20 @@ public final class GenerationContextDtos {
             List<BusinessRuleContextDto> approvedBusinessRules,
             List<TestPlanContextItemDto> approvedTestPlans,
             List<TestCaseContextItemDto> approvedTestCases,
+            List<TestCaseContextItemDto> existingApprovedTestCases,
+            List<GeneratedUnitTestContextDto> previousGeneratedUnitTests,
             List<ExistingTestContextDto> existingTests) {
+    }
+
+    public record CoverageRefinementContextDto(
+            ProjectContextDto project,
+            AnalysisSummaryDto analysis,
+            List<ClassContextDto> classes,
+            List<BusinessRuleContextDto> approvedBusinessRules,
+            List<TestPlanContextItemDto> approvedTestPlans,
+            List<TestCaseContextItemDto> approvedTestCases,
+            List<ExistingTestContextDto> existingTests,
+            int round,
+            List<CoverageGapDto> coverageGaps) {
     }
 }

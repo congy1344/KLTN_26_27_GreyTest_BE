@@ -44,9 +44,13 @@ greytest:
 llm:
   provider: ${LLM_PROVIDER:mock}
   api-key: ${LLM_API_KEY:}
+  api-key-fallback: ${LLM_API_KEY1:}
   model: ${LLM_MODEL:gpt-4o-mini}
+  openai-model: ${LLM_OPENAI_MODEL:${LLM_MODEL:gpt-4o-mini}}
+  google-model: ${LLM_GOOGLE_MODEL:${LLM_MODEL:gemini-3.5-flash}}
   temperature: ${LLM_TEMPERATURE:0.3}
-  max-tokens: ${LLM_MAX_TOKENS:4096}
+  # Test case/unit test JSON tiếng Việt rất tốn token; 4096 từng gây cắt cụt response giữa chừng
+  max-tokens: ${LLM_MAX_TOKENS:16384}
   timeout-seconds: ${LLM_TIMEOUT_SECONDS:60}
   openai-url: ${LLM_OPENAI_URL:https://api.openai.com/v1/responses}
   google-url: ${LLM_GOOGLE_URL:https://generativelanguage.googleapis.com/v1beta/interactions}

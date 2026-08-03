@@ -8,8 +8,10 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.times;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 
 import org.junit.jupiter.api.Test;
@@ -56,7 +58,7 @@ class BusinessRuleServiceTest {
         mockProjectSave();
         mockServiceMethods(method(11L, "createUser"));
         when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of());
-        when(aiAgentService.generateBusinessRules(1L)).thenReturn(new BusinessRuleResponseDto(List.of(
+        when(aiAgentService.generateBusinessRules(1L, Set.of(11L))).thenReturn(new BusinessRuleResponseDto(List.of(
                 new GeneratedBusinessRuleDto(11L, "Email phai hop le truoc khi tao user.", "VALIDATION"),
                 new GeneratedBusinessRuleDto(11L, "User moi khong duoc trung email da ton tai.", "BUSINESS_LOGIC"))));
         mockBusinessRuleSave();
@@ -73,14 +75,15 @@ class BusinessRuleServiceTest {
     }
 
     @Test
-    void generateCompletesAllBatchesInOneRequest() {
+    void generateHandlesEachMethodInItsOwnRequest() {
         mockProject();
         mockProjectSave();
         mockServiceMethods(method(11L, "createUser"), method(12L, "updateUser"));
         when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of());
-        when(aiAgentService.generateBusinessRules(1L)).thenReturn(
+        when(aiAgentService.generateBusinessRules(1L, Set.of(11L))).thenReturn(
                 new BusinessRuleResponseDto(List.of(
-                        new GeneratedBusinessRuleDto(11L, "User moi phai co email hop le.", "VALIDATION"))),
+                        new GeneratedBusinessRuleDto(11L, "User moi phai co email hop le.", "VALIDATION"))));
+        when(aiAgentService.generateBusinessRules(1L, Set.of(12L))).thenReturn(
                 new BusinessRuleResponseDto(List.of(
                         new GeneratedBusinessRuleDto(12L, "Chi cap nhat user dang ton tai.", "BUSINESS_LOGIC"))));
         mockBusinessRuleSave();
@@ -88,7 +91,8 @@ class BusinessRuleServiceTest {
         List<BusinessRuleDto> rules = service().generate(1L);
 
         assertThat(rules).extracting(BusinessRuleDto::methodId).containsExactly(11L, 12L);
-        verify(aiAgentService, times(2)).generateBusinessRules(1L);
+        verify(aiAgentService).generateBusinessRules(1L, Set.of(11L));
+        verify(aiAgentService).generateBusinessRules(1L, Set.of(12L));
     }
 
     @Test
@@ -98,16 +102,131 @@ class BusinessRuleServiceTest {
                 method(11L, "m11"), method(12L, "m12"), method(13L, "m13"),
                 method(14L, "m14"), method(15L, "m15"), method(16L, "m16"));
         when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of());
-        when(aiAgentService.generateBusinessRules(1L)).thenReturn(new BusinessRuleResponseDto(List.of(
-                new GeneratedBusinessRuleDto(16L, "Rule ngoai batch hien tai.", "BUSINESS_LOGIC"))));
+        when(aiAgentService.generateBusinessRules(1L, Set.of(11L))).thenReturn(new BusinessRuleResponseDto(List.of(
+                new GeneratedBusinessRuleDto(12L, "Rule ngoai batch hien tai.", "BUSINESS_LOGIC"))));
 
         assertThatThrownBy(() -> service().generate(1L))
                 .isInstanceOf(com.greytest.service.agent.LlmResponseException.class)
-                .hasMessageContaining("method_id khong khop");
+                .hasMessageContaining("ngoai Service method");
     }
 
     @Test
-    void reviewPersistsAiReviewNotesAndSuggestions() {
+    void generateKeepsEachServiceSeparateAndUsesSourceOrder() {
+        mockProject();
+        mockProjectSave();
+        JavaClass firstService = serviceClass(10L, "src/main/java/a/AccountService.java", "a.AccountService");
+        JavaClass secondService = serviceClass(20L, "src/main/java/b/PaymentService.java", "b.PaymentService");
+        JavaMethod laterMethod = method(12L, "closeAccount");
+        laterMethod.setLineStart(40);
+        JavaMethod earlierMethod = method(11L, "openAccount");
+        earlierMethod.setLineStart(20);
+        JavaMethod paymentMethod = method(21L, "pay");
+        paymentMethod.setLineStart(15);
+        when(javaClassRepository.findByProjectIdAndClassType(1L, ClassType.SERVICE))
+                .thenReturn(List.of(secondService, firstService));
+        when(javaMethodRepository.findByClassIdIn(List.of(10L))).thenReturn(List.of(laterMethod, earlierMethod));
+        when(javaMethodRepository.findByClassIdIn(List.of(20L))).thenReturn(List.of(paymentMethod));
+        when(javaMethodRepository.findById(11L)).thenReturn(Optional.of(earlierMethod));
+        when(javaMethodRepository.findById(12L)).thenReturn(Optional.of(laterMethod));
+        when(javaMethodRepository.findById(21L)).thenReturn(Optional.of(paymentMethod));
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of());
+        List<List<Long>> requestedBatches = new ArrayList<>();
+        when(aiAgentService.generateBusinessRules(
+                org.mockito.ArgumentMatchers.eq(1L),
+                org.mockito.ArgumentMatchers.<Set<Long>>any())).thenAnswer(invocation -> {
+                    Set<Long> methodIds = invocation.getArgument(1);
+                    requestedBatches.add(List.copyOf(methodIds));
+                    return new BusinessRuleResponseDto(methodIds.stream()
+                            .map(id -> new GeneratedBusinessRuleDto(
+                                    id, "Rule for method " + id, "BUSINESS_LOGIC"))
+                            .toList());
+                });
+        mockBusinessRuleSave();
+
+        service().generate(1L);
+
+        assertThat(requestedBatches).containsExactly(
+                List.of(11L),
+                List.of(12L),
+                List.of(21L));
+    }
+
+    @Test
+    void generateDoesNotRetryOrFabricateWhenSourceHasNoRule() {
+        mockProject();
+        mockProjectSave();
+        mockServiceMethods(method(11L, "technicalHelper"));
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of());
+        when(aiAgentService.generateBusinessRules(1L, Set.of(11L)))
+                .thenReturn(new BusinessRuleResponseDto(List.of()));
+
+        assertThat(service().generate(1L)).isEmpty();
+
+        verify(aiAgentService).generateBusinessRules(1L, Set.of(11L));
+    }
+
+    @Test
+    void generateRejectsResponseWhenAnIfElseBranchIsMissing() {
+        mockProject();
+        JavaMethod branchedMethod = method(11L, "findUser");
+        branchedMethod.setLineStart(20);
+        branchedMethod.setSourceCode("""
+                public String findUser(boolean exists) {
+                    if (exists) {
+                        return "found";
+                    } else {
+                        return "missing";
+                    }
+                }
+                """);
+        mockServiceMethods(branchedMethod);
+        when(javaMethodRepository.findById(11L)).thenReturn(Optional.of(branchedMethod));
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of());
+        when(aiAgentService.generateBusinessRules(1L, Set.of(11L))).thenReturn(
+                new BusinessRuleResponseDto(List.of(
+                        new GeneratedBusinessRuleDto(
+                                11L, "Tra ve user khi ton tai.", "BUSINESS_LOGIC", "IF-1-TRUE"))));
+
+        assertThatThrownBy(() -> service().generate(1L))
+                .isInstanceOf(com.greytest.service.agent.LlmResponseException.class)
+                .hasMessageContaining("chua bao phu du nhanh", "IF-1-FALSE");
+    }
+
+    @Test
+    void generatePersistsBranchesInSourceOrderForTraceability() {
+        mockProject();
+        mockProjectSave();
+        JavaMethod branchedMethod = method(11L, "findUser");
+        branchedMethod.setLineStart(20);
+        branchedMethod.setSourceCode("""
+                public String findUser(boolean exists) {
+                    if (exists) {
+                        return "found";
+                    }
+                    return "missing";
+                }
+                """);
+        mockServiceMethods(branchedMethod);
+        when(javaMethodRepository.findById(11L)).thenReturn(Optional.of(branchedMethod));
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of());
+        when(aiAgentService.generateBusinessRules(1L, Set.of(11L))).thenReturn(
+                new BusinessRuleResponseDto(List.of(
+                        new GeneratedBusinessRuleDto(
+                                11L, "Tra ve missing khi khong ton tai.", "BUSINESS_LOGIC", "IF-1-FALSE"),
+                        new GeneratedBusinessRuleDto(
+                                11L, "Tra ve user khi ton tai.", "BUSINESS_LOGIC", "IF-1-TRUE"))));
+        mockBusinessRuleSave();
+
+        List<BusinessRuleDto> rules = service().generate(1L);
+
+        assertThat(rules).extracting(BusinessRuleDto::sourceBranchId)
+                .containsExactly("IF-1-TRUE", "IF-1-FALSE");
+        assertThat(rules).extracting(BusinessRuleDto::reviewNote)
+                .allMatch(note -> !note.contains("SOURCE_BRANCH:"));
+    }
+
+    @Test
+    void reviewPersistsAiReviewOnExistingRuleWithoutCreatingAnotherRule() {
         BusinessRule existingRule = rule(7L, 11L, "Email phai hop le.");
         mockProject();
         mockProjectSave();
@@ -133,11 +252,26 @@ class BusinessRuleServiceTest {
                 });
         assertThat(existingRule.getReviewNote()).contains("NEEDS_REVISION", "Rule thieu dieu kien email duy nhat.");
         assertThat(existingRule.getIsModified()).isFalse();
-        assertThat(review.suggestedRules()).singleElement()
-                .satisfies(rule -> {
-                    assertThat(rule.source()).isEqualTo(RuleSource.AI_REVIEW_SUGGESTED);
-                    assertThat(rule.description()).contains("luu user moi");
-                });
+        assertThat(review.suggestedRules()).isEmpty();
+        verify(businessRuleRepository, times(1)).save(any(BusinessRule.class));
+    }
+
+    @Test
+    void reviewIgnoresAdditionalRulesReturnedByAi() {
+        BusinessRule existingRule = rule(7L, 11L, "Tra ve user khi ton tai.");
+        mockProject();
+        mockProjectSave();
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(existingRule));
+        when(aiAgentService.reviewBusinessRules(1L)).thenReturn(new BusinessRuleReviewResponseDto(
+                List.of(new ReviewedBusinessRuleSuggestionDto(7L, "OK", null, "Hop le.")),
+                List.of(new GeneratedBusinessRuleDto(
+                        11L, "Rule khong duoc tao trong khi review.", "BUSINESS_LOGIC", "IF-99-TRUE"))));
+        mockBusinessRuleSave();
+
+        BusinessRuleReviewDto review = service().review(1L);
+
+        assertThat(review.suggestedRules()).isEmpty();
+        verify(businessRuleRepository, times(1)).save(existingRule);
     }
 
     @Test
@@ -207,15 +341,14 @@ class BusinessRuleServiceTest {
         mockServiceMethods(method(11L, "createUser"), method(12L, "updateUser"));
         when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(
                 rule(7L, 11L, "Email phai hop le truoc khi tao user.")));
-        when(aiAgentService.generateBusinessRules(1L)).thenReturn(new BusinessRuleResponseDto(List.of(
-                new GeneratedBusinessRuleDto(11L, "Rule cu khong duoc them lai.", "VALIDATION"),
+        when(aiAgentService.generateBusinessRules(1L, Set.of(12L))).thenReturn(new BusinessRuleResponseDto(List.of(
                 new GeneratedBusinessRuleDto(12L, "User cap nhat phai ton tai.", "BUSINESS_LOGIC"))));
         mockBusinessRuleSave();
 
         List<BusinessRuleDto> rules = service().generate(1L);
 
         assertThat(rules).extracting(BusinessRuleDto::methodId).containsExactly(12L);
-        verify(aiAgentService).generateBusinessRules(1L);
+        verify(aiAgentService).generateBusinessRules(1L, Set.of(12L));
     }
 
     @Test
@@ -244,17 +377,109 @@ class BusinessRuleServiceTest {
     }
 
     @Test
-    void approveRejectsDirtyRules() {
+    void manualRulesCanCoverBranchesAndApproveWithoutAiReview() {
+        Project project = new Project();
+        project.setId(1L);
+        project.setStatus(ProjectStatus.ANALYZED);
+        when(projectRepository.findById(1L)).thenReturn(Optional.of(project));
+        mockProjectSave();
+
+        JavaClass serviceClass = serviceClass(
+                10L, "src/main/java/UserService.java", "demo.UserService");
+        JavaMethod method = method(11L, "findUser");
+        method.setClassId(10L);
+        method.setSourceCode("""
+                public String findUser(boolean exists) {
+                    if (exists) return "found";
+                    return "missing";
+                }
+                """);
+        when(javaClassRepository.findById(10L)).thenReturn(Optional.of(serviceClass));
+        when(javaClassRepository.findByProjectIdAndClassType(1L, ClassType.SERVICE))
+                .thenReturn(List.of(serviceClass));
+        when(javaMethodRepository.findById(11L)).thenReturn(Optional.of(method));
+        when(javaMethodRepository.findByClassIdIn(List.of(10L))).thenReturn(List.of(method));
+
+        List<BusinessRule> savedRules = new ArrayList<>();
+        when(businessRuleRepository.findByProjectId(1L)).thenAnswer(ignored -> new ArrayList<>(savedRules));
+        AtomicLong ids = new AtomicLong(1);
+        when(businessRuleRepository.save(any(BusinessRule.class))).thenAnswer(invocation -> {
+            BusinessRule rule = invocation.getArgument(0);
+            if (rule.getId() == null) {
+                rule.setId(ids.getAndIncrement());
+                savedRules.add(rule);
+            }
+            return rule;
+        });
+
+        service().create(1L, new CreateBusinessRuleRequest(
+                11L, "Tra ve user khi ton tai.", "IF-1-TRUE"));
+        service().create(1L, new CreateBusinessRuleRequest(
+                11L, "Tra ve missing khi user khong ton tai.", "IF-1-FALSE"));
+        service().approve(1L);
+
+        assertThat(project.getStatus()).isEqualTo(ProjectStatus.BR_APPROVED);
+        assertThat(service().list(1L)).extracting(BusinessRuleDto::sourceBranchId)
+                .containsExactly("IF-1-TRUE", "IF-1-FALSE");
+    }
+
+    @Test
+    void approveAllowsDirtyRulesAsExplicitUserDecision() {
         Project project = new Project();
         project.setId(1L);
         project.setStatus(ProjectStatus.BR_PENDING_REVIEW);
         when(projectRepository.findById(1L)).thenReturn(Optional.of(project));
-        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(
-                rule(7L, 11L, "Email phai hop le.")));
+        BusinessRule dirtyRule = rule(7L, 11L, "Email phai hop le.");
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(dirtyRule));
+        mockProjectSave();
+
+        service().approve(1L);
+
+        assertThat(dirtyRule.getStatus()).isEqualTo(ReviewStatus.APPROVED);
+        assertThat(dirtyRule.getIsModified()).isFalse();
+        assertThat(project.getStatus()).isEqualTo(ProjectStatus.BR_APPROVED);
+    }
+
+    @Test
+    void approveRejectsRulesThatDoNotCoverEverySourceBranch() {
+        Project project = new Project();
+        project.setId(1L);
+        project.setStatus(ProjectStatus.BR_PENDING_REVIEW);
+        when(projectRepository.findById(1L)).thenReturn(Optional.of(project));
+        JavaMethod branchedMethod = method(11L, "findUser");
+        branchedMethod.setSourceCode("""
+                public String findUser(boolean exists) {
+                    if (exists) return "found";
+                    return "missing";
+                }
+                """);
+        mockServiceMethods(branchedMethod);
+        BusinessRule trueRule = rule(7L, 11L, "Tra ve user khi ton tai.");
+        trueRule.setIsModified(false);
+        trueRule.setReviewNote("SOURCE_BRANCH:IF-1-TRUE\nDa review.");
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(trueRule));
 
         assertThatThrownBy(() -> service().approve(1L))
                 .isInstanceOf(InvalidProjectStatusException.class)
-                .hasMessageContaining("Can AI review");
+                .hasMessageContaining("IF-1-FALSE");
+    }
+
+    @Test
+    void approveRejectsUnreadableMethodSourceInsteadOfAssumingNoBranches() {
+        Project project = new Project();
+        project.setId(1L);
+        project.setStatus(ProjectStatus.BR_PENDING_REVIEW);
+        when(projectRepository.findById(1L)).thenReturn(Optional.of(project));
+        JavaMethod unreadableMethod = method(11L, "findUser");
+        unreadableMethod.setSourceCode("public String findUser() { if (");
+        mockServiceMethods(unreadableMethod);
+        BusinessRule rule = rule(7L, 11L, "Tra ve user.");
+        rule.setIsModified(false);
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(rule));
+
+        assertThatThrownBy(() -> service().approve(1L))
+                .isInstanceOf(InvalidProjectStatusException.class)
+                .hasMessageContaining("Khong the xac minh nhanh source", "phan tich lai project");
     }
 
     @Test
@@ -287,7 +512,7 @@ class BusinessRuleServiceTest {
                 "Email phai dung dinh dang hop le."));
 
         assertThat(updated.isModified()).isTrue();
-        assertThat(updated.reviewNote()).contains("can AI review lai");
+        assertThat(updated.reviewNote()).contains("AI review lai la tuy chon");
     }
 
     @Test
@@ -345,6 +570,26 @@ class BusinessRuleServiceTest {
                 .hasMessageContaining("khong co goi y AI");
     }
 
+    @Test
+    void deleteRuleSauCoverageKeoStatusVeChoReviewLai() {
+        // Vòng regenerate: xóa BR khi pipeline đã đi xa — cascade DB dọn Plan/Case/Unit,
+        // status phải rollback về BR_PENDING_REVIEW
+        Project project = new Project();
+        project.setId(1L);
+        project.setStatus(ProjectStatus.COVERAGE_ANALYZED);
+        when(projectRepository.findById(1L)).thenReturn(Optional.of(project));
+        mockProjectSave();
+        BusinessRule rule = new BusinessRule();
+        rule.setId(7L);
+        rule.setProjectId(1L);
+        when(businessRuleRepository.findById(7L)).thenReturn(Optional.of(rule));
+
+        service().delete(7L);
+
+        verify(businessRuleRepository).delete(rule);
+        assertThat(project.getStatus()).isEqualTo(ProjectStatus.BR_PENDING_REVIEW);
+    }
+
     private BusinessRuleService service() {
         return new BusinessRuleService(
                 businessRuleRepository,
@@ -367,14 +612,26 @@ class BusinessRuleServiceTest {
     }
 
     private void mockServiceMethods(JavaMethod... methods) {
-        JavaClass serviceClass = new JavaClass();
-        serviceClass.setId(10L);
-        serviceClass.setProjectId(1L);
-        serviceClass.setClassType(ClassType.SERVICE);
-        serviceClass.setClassName("UserService");
+        JavaClass serviceClass = serviceClass(
+                10L, "src/main/java/UserService.java", "demo.UserService");
         when(javaClassRepository.findByProjectIdAndClassType(1L, ClassType.SERVICE))
                 .thenReturn(List.of(serviceClass));
         when(javaMethodRepository.findByClassIdIn(List.of(10L))).thenReturn(List.of(methods));
+        for (JavaMethod method : methods) {
+            org.mockito.Mockito.lenient().when(javaMethodRepository.findById(method.getId()))
+                    .thenReturn(Optional.of(method));
+        }
+    }
+
+    private JavaClass serviceClass(Long id, String filePath, String qualifiedName) {
+        JavaClass serviceClass = new JavaClass();
+        serviceClass.setId(id);
+        serviceClass.setProjectId(1L);
+        serviceClass.setClassType(ClassType.SERVICE);
+        serviceClass.setClassName(qualifiedName.substring(qualifiedName.lastIndexOf('.') + 1));
+        serviceClass.setQualifiedName(qualifiedName);
+        serviceClass.setFilePath(filePath);
+        return serviceClass;
     }
 
     private void mockProjectServiceMethod(Long methodId) {
@@ -403,6 +660,7 @@ class BusinessRuleServiceTest {
         JavaMethod method = new JavaMethod();
         method.setId(id);
         method.setMethodName(name);
+        method.setSourceCode("public void " + name + "() {}");
         return method;
     }
 

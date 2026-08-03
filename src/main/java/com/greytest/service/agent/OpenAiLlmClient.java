@@ -39,7 +39,7 @@ public class OpenAiLlmClient implements LlmClient {
     public OpenAiLlmClient(
             ObjectMapper objectMapper,
             @Value("${llm.api-key:}") String apiKey,
-            @Value("${llm.model:gpt-4o-mini}") String model,
+            @Value("${llm.openai-model:${llm.model:gpt-4o-mini}}") String model,
             @Value("${llm.temperature:0.3}") double temperature,
             @Value("${llm.max-tokens:4096}") int maxTokens,
             @Value("${llm.timeout-seconds:60}") long timeoutSeconds,
@@ -89,12 +89,13 @@ public class OpenAiLlmClient implements LlmClient {
         try {
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
             if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                int status = response.statusCode();
                 throw new LlmResponseException("OpenAI API loi HTTP "
-                        + response.statusCode() + ": " + snippet(response.body()));
+                        + status + ": " + snippet(response.body()), status == 429 || status >= 500);
             }
             return outputText(response.body());
         } catch (IOException exception) {
-            throw new LlmResponseException("Khong goi duoc OpenAI API.", exception);
+            throw new LlmResponseException("Khong goi duoc OpenAI API.", exception, true);
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
             throw new LlmResponseException("Bi gian doan khi goi OpenAI API.", exception);
@@ -145,7 +146,9 @@ public class OpenAiLlmClient implements LlmClient {
 
     private String snippet(String body) {
         if (body == null) return "";
-        if (body.length() <= ERROR_BODY_LIMIT) return body;
-        return body.substring(0, ERROR_BODY_LIMIT) + "...";
+        String sanitized = body.replaceAll("(?i)(api[-_ ]?key|authorization|token|password)\\s*[:=]\\s*[\\\"']?[^,\\\"'\\s}]+", "$1=[redacted]")
+                .replaceAll("[\\r\\n\\t]+", " ");
+        if (sanitized.length() <= ERROR_BODY_LIMIT) return sanitized;
+        return sanitized.substring(0, ERROR_BODY_LIMIT) + "...";
     }
 }

@@ -6,7 +6,10 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Stream;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -30,18 +33,20 @@ public class GoogleLlmClient implements LlmClient {
 
     private final ObjectMapper objectMapper;
     private final HttpClient httpClient;
-    private final String apiKey;
+    private final List<String> apiKeys;
     private final String model;
     private final double temperature;
     private final int maxTokens;
     private final Duration timeout;
     private final URI endpoint;
+    private final AtomicInteger activeKeyIndex = new AtomicInteger();
 
     @Autowired
     public GoogleLlmClient(
             ObjectMapper objectMapper,
             @Value("${llm.api-key:}") String apiKey,
-            @Value("${llm.model:gemini-3.5-flash}") String model,
+            @Value("${llm.api-key-fallback:}") String fallbackApiKey,
+            @Value("${llm.google-model:${llm.model:gemini-3.5-flash}}") String model,
             @Value("${llm.temperature:0.3}") double temperature,
             @Value("${llm.max-tokens:4096}") int maxTokens,
             @Value("${llm.timeout-seconds:60}") long timeoutSeconds,
@@ -50,6 +55,7 @@ public class GoogleLlmClient implements LlmClient {
                 objectMapper,
                 HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(timeoutSeconds)).build(),
                 apiKey,
+                fallbackApiKey,
                 model,
                 temperature,
                 maxTokens,
@@ -61,6 +67,7 @@ public class GoogleLlmClient implements LlmClient {
             ObjectMapper objectMapper,
             HttpClient httpClient,
             String apiKey,
+            String fallbackApiKey,
             String model,
             double temperature,
             int maxTokens,
@@ -68,7 +75,10 @@ public class GoogleLlmClient implements LlmClient {
             URI endpoint) {
         this.objectMapper = objectMapper;
         this.httpClient = httpClient;
-        this.apiKey = apiKey;
+        this.apiKeys = Stream.of(apiKey, fallbackApiKey)
+                .filter(key -> key != null && !key.isBlank())
+                .distinct()
+                .toList();
         this.model = model;
         this.temperature = temperature;
         this.maxTokens = maxTokens;
@@ -78,29 +88,43 @@ public class GoogleLlmClient implements LlmClient {
 
     @Override
     public String complete(String prompt) {
-        if (apiKey == null || apiKey.isBlank()) {
-            throw new LlmResponseException("LLM_API_KEY chua duoc cau hinh.");
+        if (apiKeys.isEmpty()) {
+            throw new LlmResponseException("LLM_API_KEY hoac LLM_API_KEY1 chua duoc cau hinh.");
         }
-        HttpRequest request = HttpRequest.newBuilder(endpoint)
-                .timeout(timeout)
-                .header("x-goog-api-key", apiKey)
-                .header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString(requestBody(prompt)))
-                .build();
-
-        try {
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-            if (response.statusCode() < 200 || response.statusCode() >= 300) {
+        String body = requestBody(prompt);
+        for (int index = activeKeyIndex.get(); index < apiKeys.size(); index++) {
+            HttpRequest request = HttpRequest.newBuilder(endpoint)
+                    .timeout(timeout)
+                    .header("x-goog-api-key", apiKeys.get(index))
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(body))
+                    .build();
+            try {
+                HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+                int status = response.statusCode();
+                if (status >= 200 && status < 300) {
+                    return outputText(response.body());
+                }
+                if (index + 1 < apiKeys.size() && quotaExceeded(status, response.body())) {
+                    activeKeyIndex.set(index + 1);
+                    continue;
+                }
                 throw new LlmResponseException("Google Gemini API loi HTTP "
-                        + response.statusCode() + ": " + snippet(response.body()));
+                        + status + ": " + snippet(response.body()), status == 429 || status >= 500);
+            } catch (IOException exception) {
+                throw new LlmResponseException("Khong goi duoc Google Gemini API.", exception, true);
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                throw new LlmResponseException("Bi gian doan khi goi Google Gemini API.", exception);
             }
-            return outputText(response.body());
-        } catch (IOException exception) {
-            throw new LlmResponseException("Khong goi duoc Google Gemini API.", exception);
-        } catch (InterruptedException exception) {
-            Thread.currentThread().interrupt();
-            throw new LlmResponseException("Bi gian doan khi goi Google Gemini API.", exception);
         }
+        throw new LlmResponseException("Khong co Google Gemini API key kha dung.");
+    }
+
+    private boolean quotaExceeded(int status, String responseBody) {
+        if (status == 429) return true;
+        String body = responseBody == null ? "" : responseBody.toLowerCase(Locale.ROOT);
+        return status == 403 && (body.contains("quota") || body.contains("resource_exhausted"));
     }
 
     String requestBody(String prompt) {
@@ -122,7 +146,10 @@ public class GoogleLlmClient implements LlmClient {
         ObjectNode format = objectMapper.createObjectNode();
         format.put("type", "text");
         format.put("mime_type", "application/json");
-        format.set("schema", schemaFor(prompt));
+        ObjectNode schema = schemaFor(prompt);
+        if (schema != null) {
+            format.set("schema", schema);
+        }
         return format;
     }
 
@@ -143,12 +170,15 @@ public class GoogleLlmClient implements LlmClient {
             return responseSchema("plans", testPlanSchema());
         }
         if (promptHeader.equals("# prompt: test-case")) {
-            return responseSchema("cases", testCaseSchema());
+            // test_data là object tự do (input/mocks tùy method) — schema Gemini không mô tả
+            // được bare object và sẽ degenerate (xả whitespace/lặp từ) ngay tại field này.
+            // Bỏ schema, chỉ giữ mime_type JSON; parser + Bean Validation vẫn validate output.
+            return null;
         }
         if (promptHeader.equals("# prompt: unit-test")) {
             return responseSchema("unit_tests", unitTestSchema());
         }
-        return objectSchema();
+        return null;
     }
 
     private String promptHeader(String prompt) {
@@ -196,22 +226,6 @@ public class GoogleLlmClient implements LlmClient {
         properties.set("description", type("string"));
         properties.set("test_type", enumSchema("HAPPY_PATH", "BOUNDARY", "EXCEPTION", "EDGE"));
         required(schema, "method_id", "rule_id", "covered_rule_ids", "title", "description", "test_type");
-        return schema;
-    }
-
-    private ObjectNode testCaseSchema() {
-        ObjectNode schema = objectSchema();
-        ObjectNode properties = schema.putObject("properties");
-        properties.set("plan_id", type("integer"));
-        properties.set("test_type", type("string"));
-        properties.set("description", type("string"));
-        properties.set("preconditions", type("string"));
-        properties.set("test_data", objectSchema());
-        properties.set("expected_result", type("string"));
-        properties.set("priority", enumSchema("HIGH", "MEDIUM", "LOW"));
-        properties.set("trace_source", type("string"));
-        required(schema, "plan_id", "test_type", "description", "preconditions", "test_data",
-                "expected_result", "priority", "trace_source");
         return schema;
     }
 
@@ -336,7 +350,13 @@ public class GoogleLlmClient implements LlmClient {
 
     private String snippet(String body) {
         if (body == null) return "";
-        if (body.length() <= ERROR_BODY_LIMIT) return body;
-        return body.substring(0, ERROR_BODY_LIMIT) + "...";
+        String sanitized = body;
+        for (String apiKey : apiKeys) {
+            sanitized = sanitized.replace(apiKey, "[redacted]");
+        }
+        sanitized = sanitized.replaceAll("(?i)(api[-_ ]?key|authorization|token|password)\\s*[:=]\\s*[\\\"']?[^,\\\"'\\s}]+", "$1=[redacted]")
+                .replaceAll("[\\r\\n\\t]+", " ");
+        if (sanitized.length() <= ERROR_BODY_LIMIT) return sanitized;
+        return sanitized.substring(0, ERROR_BODY_LIMIT) + "...";
     }
 }

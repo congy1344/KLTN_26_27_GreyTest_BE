@@ -10,6 +10,7 @@ Rules:
 - A plan may cover one or multiple Business Rules when they belong to the same methodId.
 - Copy method_id exactly from Context -> approvedBusinessRules[] -> methodId.
 - The union of covered_rule_ids for a methodId must contain every Business Rule id for that methodId in this batch.
+- Use approvedBusinessRules[].sourceBranchId to keep TRUE/FALSE source branches distinguishable in plan titles and descriptions.
 - rule_id is the anchor Business Rule id: use the smallest id in covered_rule_ids.
 - Do not create one plan per Business Rule when one scenario can cover several rules.
 - Do not invent method_id or rule_id. Do not create redundant plans.
