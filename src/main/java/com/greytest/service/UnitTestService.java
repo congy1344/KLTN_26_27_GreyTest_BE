@@ -63,10 +63,47 @@ public class UnitTestService {
                 throw new LlmResponseException("AI chua sinh du Unit Test cho moi Test Case da approve.");
             generated.addAll(valid);
         }
-        var methodKeys=generated.stream().map(this::methodKey).collect(java.util.stream.Collectors.toSet());
-        if(methodKeys.size()!=generated.size())
-            throw new LlmResponseException("AI sinh trung ten Unit Test. Hay thu lai.");
-        return generated;
+        return uniqueMethodNames(generated,Set.of());
+    }
+    private List<GeneratedUnitTestDto> uniqueMethodNames(List<GeneratedUnitTestDto> generated,Set<String> existingKeys){
+        Set<String> used=new java.util.HashSet<>(existingKeys);
+        List<GeneratedUnitTestDto> unique=new ArrayList<>();
+        for(GeneratedUnitTestDto test:generated){
+            String name=test.testMethodName();
+            String key=methodKey(test);
+            if(!used.add(key)){
+                name=uniqueName(test,used);
+                key=test.packageName()+"\n"+test.testClassName()+"\n"+name;
+                used.add(key);
+            }
+            unique.add(new GeneratedUnitTestDto(test.caseId(),test.testClassName(),name,test.packageName(),test.generationType(),renameMethod(test.sourceCode(),test.testMethodName(),name)));
+        }
+        return unique;
+    }
+    private String uniqueName(GeneratedUnitTestDto test,Set<String> used){
+        String base=test.testMethodName()+"Case"+test.caseId();
+        String name=base;
+        int suffix=2;
+        while(used.contains(test.packageName()+"\n"+test.testClassName()+"\n"+name)) name=base+"_"+suffix++;
+        return name;
+    }
+    private String renameMethod(String source,String oldName,String newName){
+        if(oldName.equals(newName)) return source;
+        try{
+            var result=new com.github.javaparser.JavaParser().parse(source);
+            var unit=result.getResult().filter(ignored->result.isSuccessful()).orElse(null);
+            if(unit!=null){
+                for(var method:unit.findAll(com.github.javaparser.ast.body.MethodDeclaration.class)){
+                    if(oldName.equals(method.getNameAsString())){
+                        method.setName(newName);
+                        return unit.toString();
+                    }
+                }
+            }
+        }catch(Exception ignored){
+            // Nếu source AI chưa parse được, vẫn đổi tên bằng regex tối thiểu để user có file sửa tiếp.
+        }
+        return source.replaceFirst("(?<![A-Za-z0-9_$])"+java.util.regex.Pattern.quote(oldName)+"\\s*\\(",java.util.regex.Matcher.quoteReplacement(newName+"("));
     }
     private String methodKey(GeneratedUnitTestDto test){return test.packageName()+"\n"+test.testClassName()+"\n"+test.testMethodName();}
     private String methodKey(UnitTest test){return test.getPackageName()+"\n"+test.getTestClassName()+"\n"+test.getTestMethodName();}
@@ -89,8 +126,7 @@ public class UnitTestService {
         var existingKeys=approvedCases(projectId).stream().filter(testCase->!expectedIds.contains(testCase.getId()))
                 .map(testCase->units.findByTestCaseId(testCase.getId())).filter(java.util.Objects::nonNull)
                 .map(this::methodKey).collect(java.util.stream.Collectors.toSet());
-        if(generated.stream().map(this::methodKey).anyMatch(existingKeys::contains))
-            throw new LlmResponseException("AI sinh trung ten Unit Test da co. Hay thu lai.");
+        generated=uniqueMethodNames(generated,existingKeys);
         var saved=units.saveAll(generated.stream().map(x->from(x,"SUPPLEMENT_EXISTING_TEST")).toList());
         p.setStatus(ProjectStatus.TEST_GENERATED); projects.save(p);
         return saved.stream().map(this::dto).toList();

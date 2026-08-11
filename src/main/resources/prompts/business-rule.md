@@ -13,12 +13,18 @@ Rules:
 - Each rule must describe business intent, not repeat code.
 - Use categories: VALIDATION, BUSINESS_LOGIC, SIDE_EFFECT.
 - Context -> classes[0] -> methods contains exactly one Service method.
-- The method includes a deterministic branches checklist extracted from its source.
-- If branches is not empty, return exactly one rule for every branches[].branchId.
-- Copy branch_id exactly from branches[].branchId. Cover TRUE and FALSE outcomes separately.
-- Do not omit, duplicate, merge, or invent branch_id values.
+- The method includes a deterministic control-flow checklist extracted from its source: IF, SWITCH, TERNARY, FOR, FOREACH, WHILE, and DO_WHILE.
+- branches[].branchId is an outcome id. Legacy IF outcomes use `IF-n-TRUE/FALSE`; all other outcomes use `DECISION-ID::OUTCOME`, for example `SWITCH-1::CASE-1` or `FOR-1::ENTER`.
+- Derive the decision id by removing the final `-TRUE/-FALSE` from legacy IF ids or everything from `::` onward from modern outcome ids.
+- If branches is not empty, return exactly one rule for every unique control-flow decision id, not one rule per outcome.
+- Set branch_id to the decision id such as `IF-1`, `SWITCH-1`, `TERNARY-1`, or `FOR-1`; never copy an outcome suffix into branch_id.
+- One rule must express the complete source-proven business constraint or processing decision and summarize all observable outcomes of that decision.
+- For SWITCH, include every supported case mapping and default behavior in the same rule when source proves them.
+- For loops, describe the source-proven collection/range processing behavior, including empty/skip behavior when applicable; do not merely say that a loop executes.
+- Do not create a separate rule whose only meaning is that processing continues, a condition is false, or validation passed. Those are test outcomes, not independent Business Rules.
+- Do not omit, duplicate, or invent decision ids.
 - If branches is empty, branch_id must be null and generate only directly observable rules.
-- For each branch, describe the behavior proved by its condition and outcome. Never infer behavior outside the source.
+- Never infer behavior outside the source.
 - Do not target a fixed number of rules per method.
 - Add a rule only for an independently testable validation, business decision/state change, or observable side effect supported by the source.
 - Do not force every category, describe implementation details, or create stylistic variants of an existing rule.
@@ -34,7 +40,7 @@ Output schema:
   - "method_id": number copied exactly from Context -> classes[] -> methods[] -> id.
   - "description": one short business rule sentence.
   - "category": one of VALIDATION, BUSINESS_LOGIC, SIDE_EFFECT.
-  - "branch_id": exact source branch id, or null only when branches is empty.
+  - "branch_id": control-flow decision id such as `IF-1`, `SWITCH-1`, or `FOR-1`; null only when branches is empty.
 
 Context:
 {{context_json}}

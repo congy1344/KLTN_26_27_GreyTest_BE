@@ -77,7 +77,8 @@ public class TestCaseService {
         Set<Long> expectedPlanIds = approvedPlans.stream()
                 .map(TestPlan::getId)
                 .collect(java.util.stream.Collectors.toSet());
-        return transactions.execute(status -> persistGenerated(projectId, expectedPlanIds, generatedCases));
+        return transactions.execute(status -> persistGenerated(
+                projectId, expectedPlanIds, deduplicate(generatedCases, approvedPlans)));
     }
 
     /**
@@ -98,8 +99,8 @@ public class TestCaseService {
             throw new LlmResponseException(
                     "AI phai sinh Test Case chi cho Test Plan " + plan.getPlanCode() + ".");
         }
-        return transactions.execute(status ->
-                persistRegeneratedPlan(projectId, expectedPlan, generatedCases));
+        return transactions.execute(status -> persistRegeneratedPlan(
+                projectId, expectedPlan, deduplicate(generatedCases, List.of(plan))));
     }
 
     private List<TestCaseDto> persistGenerated(
@@ -189,6 +190,36 @@ public class TestCaseService {
                 plan.getIsModified());
     }
 
+    private List<GeneratedTestCaseDto> deduplicate(
+            List<GeneratedTestCaseDto> generatedCases,
+            List<TestPlan> sourcePlans) {
+        var methodByPlan = new java.util.HashMap<Long, Long>();
+        var remainingByPlan = new java.util.HashMap<Long, Integer>();
+        for (TestPlan plan : sourcePlans) {
+            Long methodId = rules.findById(plan.getBusinessRuleId())
+                    .map(BusinessRule::getMethodId)
+                    .orElse(plan.getId());
+            methodByPlan.put(plan.getId(), methodId);
+        }
+        for (GeneratedTestCaseDto testCase : generatedCases) {
+            remainingByPlan.merge(testCase.planId(), 1, Integer::sum);
+        }
+
+        Set<SemanticScenarioKey> seen = new java.util.HashSet<>();
+        List<GeneratedTestCaseDto> unique = new ArrayList<>();
+        for (GeneratedTestCaseDto testCase : generatedCases) {
+            SemanticScenarioKey key = scenarioKey(
+                    methodByPlan.getOrDefault(testCase.planId(), testCase.planId()), testCase);
+            int remaining = remainingByPlan.getOrDefault(testCase.planId(), 1);
+            if (seen.add(key) || remaining <= 1) {
+                unique.add(testCase);
+            } else {
+                remainingByPlan.put(testCase.planId(), remaining - 1);
+            }
+        }
+        return unique;
+    }
+
     private List<List<TestPlan>> planBatches(List<TestPlan> approvedPlans) {
         List<List<TestPlan>> batches = new ArrayList<>();
         for (int start = 0; start < approvedPlans.size(); start += GenerationContextBuilder.MAX_TEST_CASE_PLANS) {
@@ -216,11 +247,13 @@ public class TestCaseService {
         var generatedMethodIds=valid.stream().map(c->planMethodIds.get(c.planId())).collect(java.util.stream.Collectors.toSet());
         if(valid.isEmpty()||valid.size()!=response.cases().size()||!generatedMethodIds.containsAll(refinableMethodIds))
             throw new LlmResponseException("AI sinh Test Case không liên kết đúng Test Plan đã duyệt.");
-        var scenarioKeys=valid.stream().map(GeneratedTestCaseDto::planId).distinct()
-                .flatMap(planId->cases.findByTestPlanId(planId).stream())
-                .map(this::scenarioKey)
+        var scenarioKeys=planMethodIds.entrySet().stream()
+                .filter(entry->refinableMethodIds.contains(entry.getValue()))
+                .flatMap(entry->cases.findByTestPlanId(entry.getKey()).stream()
+                        .map(testCase->scenarioKey(entry.getValue(),testCase)))
                 .collect(java.util.stream.Collectors.toCollection(java.util.HashSet::new));
-        if(valid.stream().map(this::scenarioKey).anyMatch(key->!scenarioKeys.add(key)))
+        if(valid.stream().map(testCase->scenarioKey(planMethodIds.get(testCase.planId()),testCase))
+                .anyMatch(key->!scenarioKeys.add(key)))
             throw new LlmResponseException("AI sinh Test Case trùng với scenario đã có.");
         int[] n={nextCaseNumber()};
         var saved=cases.saveAll(valid.stream().map(x->supplemental(x,n[0]++,round)).toList());
@@ -238,10 +271,14 @@ public class TestCaseService {
     private TestCase from(GeneratedTestCaseDto x,int n){ TestCase c=new TestCase(); c.setTestPlanId(x.planId()); c.setCaseCode("TC-"+String.format("%03d", n)); c.setTestType(parseType(x.testType())); c.setDescription(x.description()); c.setPreconditions(x.preconditions()); c.setTestData(x.testData()); c.setExpectedResult(x.expectedResult()); c.setPriority(Priority.valueOf(x.priority())); c.setTraceSource(x.traceSource()); c.setStatus(ReviewStatus.PENDING_REVIEW); c.setIsModified(false); return c; }
     private TestCase supplemental(GeneratedTestCaseDto x,int n,int round){ TestCase c=from(x,n); c.setStatus(ReviewStatus.APPROVED); if(!x.traceSource().contains("JaCoCo")) c.setTraceSource(x.traceSource()+" -> JaCoCo round "+round); return c; }
     private int nextCaseNumber(){ return cases.findAll().stream().map(TestCase::getCaseCode).filter(java.util.Objects::nonNull).filter(code->code.matches("TC-\\d+")).mapToInt(code->Integer.parseInt(code.substring(3))).max().orElse(0)+1; }
-    private ScenarioKey scenarioKey(TestCase c){return new ScenarioKey(c.getTestPlanId(),normalize(c.getDescription()),c.getTestData(),normalize(c.getExpectedResult()));}
-    private ScenarioKey scenarioKey(GeneratedTestCaseDto c){return new ScenarioKey(c.planId(),normalize(c.description()),c.testData(),normalize(c.expectedResult()));}
+    private SemanticScenarioKey scenarioKey(Long methodId,TestCase c){
+        return new SemanticScenarioKey(methodId,normalize(c.getPreconditions()),c.getTestData(),normalize(c.getExpectedResult()));
+    }
+    private SemanticScenarioKey scenarioKey(Long methodId,GeneratedTestCaseDto c){
+        return new SemanticScenarioKey(methodId,normalize(c.preconditions()),c.testData(),normalize(c.expectedResult()));
+    }
     private String normalize(String value){return value==null?"":value.trim().replaceAll("\\s+"," ").toLowerCase(java.util.Locale.ROOT);}
-    private record ScenarioKey(Long planId,String description,java.util.Map<String,Object> testData,String expectedResult){}
+    private record SemanticScenarioKey(Long methodId,String preconditions,java.util.Map<String,Object> testData,String expectedResult){}
     private record PlanSnapshot(Long id,Long projectId,Long businessRuleId,String title,String description,TestType testType,ReviewStatus status,Boolean isModified){}
     private TestType parseType(String s){ return TestType.valueOf(s); }
     private TestType parseTypeOrNull(String s){ try{return TestType.valueOf(s);}catch(Exception e){return null;} }

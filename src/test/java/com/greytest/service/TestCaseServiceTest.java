@@ -108,6 +108,92 @@ class TestCaseServiceTest {
     }
 
     @Test
+    void generateRemovesEquivalentScenarioWhenEveryPlanStillHasACase() {
+        project(ProjectStatus.PLAN_APPROVED);
+        TestPlan normalPlan = approvedPlan(20L, false);
+        TestPlan edgePlan = approvedPlan(21L, false);
+        edgePlan.setBusinessRuleId(8L);
+        BusinessRule normalRule = new BusinessRule();
+        normalRule.setId(7L);
+        normalRule.setMethodId(11L);
+        BusinessRule edgeRule = new BusinessRule();
+        edgeRule.setId(8L);
+        edgeRule.setMethodId(11L);
+        when(plans.findByProjectId(1L)).thenReturn(List.of(normalPlan, edgePlan));
+        when(plans.existsById(20L)).thenReturn(true);
+        when(plans.existsById(21L)).thenReturn(true);
+        when(plans.findById(20L)).thenReturn(Optional.of(normalPlan));
+        when(plans.findById(21L)).thenReturn(Optional.of(edgePlan));
+        when(rules.findById(7L)).thenReturn(Optional.of(normalRule));
+        when(rules.findById(8L)).thenReturn(Optional.of(edgeRule));
+        var values = java.util.Map.<String, Object>of("values", java.util.List.of(10, 20));
+        when(ai.generateTestCases(1L, Set.of(20L, 21L))).thenReturn(new TestCaseResponseDto(List.of(
+                generatedCase(20L, "average with valid values", values, "15"),
+                generatedCase(21L, "mixed values return their average", values, "15"),
+                generatedCase(21L, "empty values return zero", java.util.Map.of("values", List.of()), "0"))));
+        when(cases.saveAll(org.mockito.ArgumentMatchers.anyList()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        var result = service.generate(1L);
+
+        assertThat(result).extracting("description")
+                .containsExactly("average with valid values", "empty values return zero");
+        assertThat(result).extracting("testPlanId").containsExactly(20L, 21L);
+    }
+
+    @Test
+    void generateKeepsEquivalentScenarioWhenItIsTheOnlyCaseOfAPlan() {
+        project(ProjectStatus.PLAN_APPROVED);
+        TestPlan firstPlan = approvedPlan(20L, false);
+        TestPlan secondPlan = approvedPlan(21L, false);
+        secondPlan.setBusinessRuleId(8L);
+        BusinessRule firstRule = new BusinessRule();
+        firstRule.setId(7L);
+        firstRule.setMethodId(11L);
+        BusinessRule secondRule = new BusinessRule();
+        secondRule.setId(8L);
+        secondRule.setMethodId(11L);
+        when(plans.findByProjectId(1L)).thenReturn(List.of(firstPlan, secondPlan));
+        when(plans.existsById(20L)).thenReturn(true);
+        when(plans.existsById(21L)).thenReturn(true);
+        when(plans.findById(20L)).thenReturn(Optional.of(firstPlan));
+        when(plans.findById(21L)).thenReturn(Optional.of(secondPlan));
+        when(rules.findById(7L)).thenReturn(Optional.of(firstRule));
+        when(rules.findById(8L)).thenReturn(Optional.of(secondRule));
+        var values = java.util.Map.<String, Object>of("score", 90);
+        when(ai.generateTestCases(1L, Set.of(20L, 21L))).thenReturn(new TestCaseResponseDto(List.of(
+                generatedCase(20L, "first trace", values, "EXCELLENT"),
+                generatedCase(21L, "second trace", values, "EXCELLENT"))));
+        when(cases.saveAll(org.mockito.ArgumentMatchers.anyList()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        assertThat(service.generate(1L)).extracting("testPlanId").containsExactly(20L, 21L);
+    }
+
+
+    @Test
+    void generateKeepsSameInputAndOutputWhenPreconditionsDiffer() {
+        project(ProjectStatus.PLAN_APPROVED);
+        TestPlan plan = approvedPlan(20L, false);
+        BusinessRule rule = new BusinessRule();
+        rule.setId(7L);
+        rule.setMethodId(11L);
+        when(plans.findByProjectId(1L)).thenReturn(List.of(plan));
+        when(plans.existsById(20L)).thenReturn(true);
+        when(plans.findById(20L)).thenReturn(Optional.of(plan));
+        when(rules.findById(7L)).thenReturn(Optional.of(rule));
+        var testData = java.util.Map.<String, Object>of("id", 1);
+        when(ai.generateTestCases(1L, Set.of(20L))).thenReturn(new TestCaseResponseDto(List.of(
+                generatedCase(20L, "repository miss", "repository returns empty", testData, "not found"),
+                generatedCase(20L, "inactive user", "repository returns an inactive user", testData, "not found"))));
+        when(cases.saveAll(org.mockito.ArgumentMatchers.anyList()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        assertThat(service.generate(1L)).extracting("preconditions")
+                .containsExactly("repository returns empty", "repository returns an inactive user");
+    }
+
+    @Test
     void generateDoesNotPersistWhenALateBatchFails() {
         project(ProjectStatus.PLAN_APPROVED);
         List<TestPlan> approvedPlans = LongStream.rangeClosed(1, 6)
@@ -286,7 +372,8 @@ class TestCaseServiceTest {
         rule.setMethodId(11L);
         TestCase oldCase = new TestCase();
         oldCase.setTestPlanId(20L);
-        oldCase.setDescription("Missing branch");
+        oldCase.setDescription("Repository has no matching entity");
+        oldCase.setPreconditions("ready");
         oldCase.setTestData(java.util.Map.of());
         oldCase.setExpectedResult("Throws");
         when(plans.findByProjectId(1L)).thenReturn(List.of(plan));
@@ -297,7 +384,7 @@ class TestCaseServiceTest {
         when(ai.generateCoverageRefinement(org.mockito.ArgumentMatchers.eq(1L),
                 org.mockito.ArgumentMatchers.eq(2), org.mockito.ArgumentMatchers.anyList()))
                 .thenReturn(new TestCaseResponseDto(List.of(new GeneratedTestCaseDto(
-                        20L, "EXCEPTION", "  missing   branch ", "ready", java.util.Map.of(),
+                        20L, "EXCEPTION", "Different wording for the same scenario", "ready", java.util.Map.of(),
                         "throws", "HIGH", "BR-001 -> TP-001"))));
 
         assertThatThrownBy(() -> service.generateSupplemental(1L, List.of(new CoverageGapDto(
@@ -308,9 +395,20 @@ class TestCaseServiceTest {
     }
 
     private GeneratedTestCaseDto generatedCase(Long planId, String description) {
+        return generatedCase(planId, description, java.util.Map.of(), "success");
+    }
+
+    private GeneratedTestCaseDto generatedCase(
+            Long planId, String description, java.util.Map<String, Object> testData, String expectedResult) {
+        return generatedCase(planId, description, "ready", testData, expectedResult);
+    }
+
+    private GeneratedTestCaseDto generatedCase(
+            Long planId, String description, String preconditions,
+            java.util.Map<String, Object> testData, String expectedResult) {
         return new GeneratedTestCaseDto(
-                planId, "HAPPY_PATH", description, "ready", java.util.Map.of(),
-                "success", "HIGH", "BR -> TP");
+                planId, "HAPPY_PATH", description, preconditions, testData,
+                expectedResult, "HIGH", "BR -> TP");
     }
 
     private TestPlan approvedPlan(Long id, boolean modified) {

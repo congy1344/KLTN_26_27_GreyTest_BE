@@ -95,6 +95,7 @@ public class BusinessRuleService {
 
         Long validMethodId = requireProjectServiceMethod(projectId, request.methodId());
         String sourceBranchId = requireSourceBranch(validMethodId, request.sourceBranchId());
+        ensureDecisionAvailable(existingRules, null, validMethodId, sourceBranchId);
 
         BusinessRule rule = new BusinessRule();
         rule.setProjectId(projectId);
@@ -276,6 +277,7 @@ public class BusinessRuleService {
         if (rules.isEmpty()) {
             throw new InvalidProjectStatusException("Can co it nhat mot Business Rule truoc khi approve.");
         }
+        ensureNoDuplicateDecisions(rules);
         List<String> missingBranches = serviceMethods(projectId).stream()
                 .flatMap(method -> {
                     Set<String> covered = rules.stream()
@@ -283,14 +285,14 @@ public class BusinessRuleService {
                             .map(rule -> sourceBranchId(rule.getReviewNote()))
                             .filter(java.util.Objects::nonNull)
                             .collect(Collectors.toSet());
-                    return branchIds(method).stream()
+                    return decisionIds(method).stream()
                             .filter(branchId -> !covered.contains(branchId))
                             .map(branchId -> method.getMethodName() + ":" + branchId);
                 })
                 .toList();
         if (!missingBranches.isEmpty()) {
             throw new InvalidProjectStatusException(
-                    "Chua the approve vi con nhanh source chua co Business Rule: " + missingBranches);
+                    "Chua the approve vi con quyet dinh source chua co Business Rule: " + missingBranches);
         }
         for (BusinessRule rule : rules) {
             rule.setStatus(ReviewStatus.APPROVED);
@@ -414,16 +416,16 @@ public class BusinessRuleService {
     }
 
     private boolean needsGeneration(JavaMethod method, List<BusinessRule> existingRules) {
-        Set<String> expectedBranches = branchIds(method);
+        Set<String> expectedDecisions = decisionIds(method);
         List<BusinessRule> methodRules = existingRules.stream()
                 .filter(rule -> method.getId().equals(rule.getMethodId()))
                 .toList();
-        if (expectedBranches.isEmpty()) return methodRules.isEmpty();
+        if (expectedDecisions.isEmpty()) return methodRules.isEmpty();
         Set<String> coveredBranches = methodRules.stream()
                 .map(rule -> sourceBranchId(rule.getReviewNote()))
                 .filter(java.util.Objects::nonNull)
                 .collect(Collectors.toSet());
-        return !coveredBranches.containsAll(expectedBranches);
+        return !coveredBranches.containsAll(expectedDecisions);
     }
 
     private void ensureBranchCoverage(
@@ -432,13 +434,13 @@ public class BusinessRuleService {
         Map<Long, Set<String>> returnedByMethod =
                 ensureValidBranchAssignments(activeMethodIds, generatedRules);
         for (Long methodId : activeMethodIds) {
-            Set<String> expected = requiredBranchIds(methodId);
+            Set<String> expected = requiredDecisionIds(methodId);
             Set<String> returned = returnedByMethod.getOrDefault(methodId, Set.of());
             if (!expected.isEmpty() && !expected.equals(returned)) {
                 Set<String> missing = new LinkedHashSet<>(expected);
                 missing.removeAll(returned);
                 throw new LlmResponseException(
-                        "AI chua bao phu du nhanh if/else cua method " + methodId + ": " + missing);
+                        "AI chua bao phu du quyet dinh control-flow cua method " + methodId + ": " + missing);
             }
         }
     }
@@ -458,12 +460,12 @@ public class BusinessRuleService {
                 throw new LlmResponseException(
                         "AI tra ve Business Rule nam ngoai Service method dang phan tich.");
             }
-            Set<String> expected = requiredBranchIds(rule.methodId());
-            String branchId = normalizedBranchId(rule.branchId());
+            Set<String> expected = requiredDecisionIds(rule.methodId());
+            String branchId = decisionId(rule.branchId());
             if (expected.isEmpty()) {
                 if (branchId != null) {
                     throw new LlmResponseException(
-                            "AI gan branch_id cho method khong co nhanh if/else: " + rule.methodId());
+                            "AI gan branch_id cho method khong co quyet dinh control-flow: " + rule.methodId());
                 }
             } else if (branchId == null || !expected.contains(branchId)) {
                 throw new LlmResponseException(
@@ -475,7 +477,7 @@ public class BusinessRuleService {
             if (!uniqueAssignments.add(assignment)) {
                 throw new LlmResponseException(
                         "AI sinh trung Business Rule cho method " + rule.methodId()
-                                + (branchId == null ? "." : ", nhanh " + branchId + "."));
+                                + (branchId == null ? "." : ", quyet dinh " + branchId + "."));
             }
             if (branchId != null) {
                 returnedByMethod.computeIfAbsent(rule.methodId(), ignored -> new LinkedHashSet<>()).add(branchId);
@@ -484,21 +486,22 @@ public class BusinessRuleService {
         return returnedByMethod;
     }
 
-    private Set<String> requiredBranchIds(Long methodId) {
+    private Set<String> requiredDecisionIds(Long methodId) {
         JavaMethod method = javaMethodRepository.findById(methodId)
                 .orElseThrow(() -> new LlmResponseException(
                         "Khong tim thay Service method " + methodId + " de xac minh Business Rule."));
-        return branchIds(method);
+        return decisionIds(method);
     }
 
-    private Set<String> branchIds(JavaMethod method) {
+    private Set<String> decisionIds(JavaMethod method) {
         try {
             return MethodBranchAnalyzer.analyze(method.getSourceCode(), method.getLineStart()).stream()
                     .map(com.greytest.dto.SourceBranchDto::branchId)
+                    .map(this::decisionId)
                     .collect(Collectors.toCollection(LinkedHashSet::new));
         } catch (IllegalStateException exception) {
             throw new InvalidProjectStatusException(
-                    "Khong the xac minh nhanh source cua method " + method.getMethodName()
+                    "Khong the xac minh control-flow cua method " + method.getMethodName()
                             + ". Hay phan tich lai project.");
         }
     }
@@ -506,10 +509,12 @@ public class BusinessRuleService {
     private int branchOrder(Long methodId, String branchId) {
         JavaMethod method = javaMethodRepository.findById(methodId).orElse(null);
         if (method == null || branchId == null) return Integer.MAX_VALUE;
-        List<String> branchIds = MethodBranchAnalyzer.analyze(method.getSourceCode(), method.getLineStart()).stream()
+        List<String> decisionIds = MethodBranchAnalyzer.analyze(method.getSourceCode(), method.getLineStart()).stream()
                 .map(com.greytest.dto.SourceBranchDto::branchId)
+                .map(this::decisionId)
+                .distinct()
                 .toList();
-        int index = branchIds.indexOf(branchId);
+        int index = decisionIds.indexOf(decisionId(branchId));
         return index < 0 ? Integer.MAX_VALUE : index;
     }
 
@@ -578,12 +583,58 @@ public class BusinessRuleService {
         }
     }
 
+    private void ensureDecisionAvailable(
+            List<BusinessRule> rules,
+            Long currentRuleId,
+            Long methodId,
+            String branchId) {
+        if (branchId == null) return;
+        for (BusinessRule rule : rules) {
+            if (currentRuleId != null && currentRuleId.equals(rule.getId())) continue;
+            if (methodId.equals(rule.getMethodId())
+                    && branchId.equals(sourceBranchId(rule.getReviewNote()))) {
+                throw new IllegalArgumentException(
+                        "Quyet dinh source da co Business Rule: " + branchId);
+            }
+        }
+    }
+
+    private void ensureNoDuplicateDecisions(List<BusinessRule> rules) {
+        var branchesByDecision = new java.util.LinkedHashMap<String, List<String>>();
+        for (BusinessRule rule : rules) {
+            if (rule.getMethodId() == null) continue;
+            String rawBranchId = rawSourceBranchId(rule.getReviewNote());
+            String branchId = decisionId(rawBranchId);
+            if (branchId != null) {
+                branchesByDecision.computeIfAbsent(
+                        branchKey(rule.getMethodId(), branchId), ignored -> new ArrayList<>())
+                        .add(rawBranchId);
+            }
+        }
+        List<String> duplicates = branchesByDecision.entrySet().stream()
+                .filter(entry -> entry.getValue().size() > 1)
+                .filter(entry -> !isLegacyOutcomePair(entry.getValue()))
+                .map(java.util.Map.Entry::getKey)
+                .toList();
+        if (!duplicates.isEmpty()) {
+            throw new InvalidProjectStatusException(
+                    "Chua the approve vi mot quyet dinh source dang co nhieu Business Rule: " + duplicates);
+        }
+    }
+
+    private boolean isLegacyOutcomePair(List<String> branchIds) {
+        if (branchIds.size() != 2) return false;
+        String decision = decisionId(branchIds.get(0));
+        return decision != null && new HashSet<>(branchIds)
+                .equals(Set.of(decision + "-TRUE", decision + "-FALSE"));
+    }
+
     private String descriptionKey(String description) {
         return description.trim().replaceAll("\\s+", " ").toLowerCase(Locale.ROOT);
     }
 
     private String generatedRuleKey(GeneratedBusinessRuleDto rule) {
-        String branchId = normalizedBranchId(rule.branchId());
+        String branchId = decisionId(rule.branchId());
         return branchId == null
                 ? descriptionKey(rule.description())
                 : branchKey(rule.methodId(), branchId);
@@ -597,34 +648,46 @@ public class BusinessRuleService {
         return branchId == null || branchId.isBlank() ? null : branchId.trim();
     }
 
+    private String decisionId(String branchId) {
+        String normalized = normalizedBranchId(branchId);
+        if (normalized == null) return null;
+        int outcomeSeparator = normalized.indexOf("::");
+        return outcomeSeparator < 0
+                ? normalized.replaceFirst("-(TRUE|FALSE)$", "")
+                : normalized.substring(0, outcomeSeparator);
+    }
+
     private String requireSourceBranch(Long methodId, String requestedBranchId) {
-        String branchId = normalizedBranchId(requestedBranchId);
-        Set<String> validBranchIds = requiredBranchIds(methodId);
+        String branchId = decisionId(requestedBranchId);
+        Set<String> validBranchIds = requiredDecisionIds(methodId);
         if (validBranchIds.isEmpty()) {
             if (branchId != null) {
-                throw new IllegalArgumentException("Method khong co nhanh source de gan Business Rule.");
+                throw new IllegalArgumentException("Method khong co quyet dinh source de gan Business Rule.");
             }
             return null;
         }
         if (branchId == null || !validBranchIds.contains(branchId)) {
             throw new IllegalArgumentException(
-                    "Hay chon mot nhanh source hop le cho Business Rule: " + validBranchIds);
+                    "Hay chon mot quyet dinh source hop le cho Business Rule: " + validBranchIds);
         }
         return branchId;
     }
 
     private String withSourceBranch(String branchId, String note) {
-        String normalized = normalizedBranchId(branchId);
+        String normalized = decisionId(branchId);
         return normalized == null ? note : SOURCE_BRANCH_MARKER + normalized + "\n" + note;
     }
 
     private String sourceBranchId(String reviewNote) {
+        return decisionId(rawSourceBranchId(reviewNote));
+    }
+
+    private String rawSourceBranchId(String reviewNote) {
         if (reviewNote == null || !reviewNote.startsWith(SOURCE_BRANCH_MARKER)) return null;
         int lineEnd = reviewNote.indexOf('\n');
-        String value = reviewNote.substring(
+        return normalizedBranchId(reviewNote.substring(
                 SOURCE_BRANCH_MARKER.length(),
-                lineEnd < 0 ? reviewNote.length() : lineEnd);
-        return normalizedBranchId(value);
+                lineEnd < 0 ? reviewNote.length() : lineEnd));
     }
 
     private String withoutSourceBranch(String reviewNote) {

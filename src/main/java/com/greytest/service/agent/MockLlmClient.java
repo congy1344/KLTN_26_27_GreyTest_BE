@@ -119,7 +119,14 @@ public class MockLlmClient implements LlmClient {
         if (prompt == null) return List.of();
         var matcher = BRANCH_ID.matcher(prompt);
         List<String> ids = new ArrayList<>();
-        while (matcher.find()) ids.add(matcher.group(1));
+        while (matcher.find()) {
+            String branchId = matcher.group(1);
+            int outcomeSeparator = branchId.indexOf("::");
+            String decisionId = outcomeSeparator < 0
+                    ? branchId.replaceFirst("-(TRUE|FALSE)$", "")
+                    : branchId.substring(0, outcomeSeparator);
+            if (!ids.contains(decisionId)) ids.add(decisionId);
+        }
         return ids;
     }
 

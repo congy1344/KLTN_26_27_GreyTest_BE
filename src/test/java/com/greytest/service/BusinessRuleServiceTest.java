@@ -166,8 +166,9 @@ class BusinessRuleServiceTest {
     }
 
     @Test
-    void generateRejectsResponseWhenAnIfElseBranchIsMissing() {
+    void generateAcceptsOneBusinessRuleForAnIfDecision() {
         mockProject();
+        mockProjectSave();
         JavaMethod branchedMethod = method(11L, "findUser");
         branchedMethod.setLineStart(20);
         branchedMethod.setSourceCode("""
@@ -185,17 +186,73 @@ class BusinessRuleServiceTest {
         when(aiAgentService.generateBusinessRules(1L, Set.of(11L))).thenReturn(
                 new BusinessRuleResponseDto(List.of(
                         new GeneratedBusinessRuleDto(
-                                11L, "Tra ve user khi ton tai.", "BUSINESS_LOGIC", "IF-1-TRUE"))));
+                                11L,
+                                "Tra ve user theo ket qua kiem tra ton tai.",
+                                "BUSINESS_LOGIC",
+                                "IF-1"))));
+        mockBusinessRuleSave();
 
-        assertThatThrownBy(() -> service().generate(1L))
-                .isInstanceOf(com.greytest.service.agent.LlmResponseException.class)
-                .hasMessageContaining("chua bao phu du nhanh", "IF-1-FALSE");
+        assertThat(service().generate(1L)).extracting(BusinessRuleDto::sourceBranchId)
+                .containsExactly("IF-1");
     }
 
     @Test
-    void generatePersistsBranchesInSourceOrderForTraceability() {
+    void generateAcceptsOneBusinessRuleForEverySwitchDecision() {
         mockProject();
         mockProjectSave();
+        JavaMethod method = method(11L, "taxRate");
+        method.setLineStart(20);
+        method.setSourceCode("""
+                public int taxRate(String region) {
+                    return switch (region) {
+                        case "VN" -> 10;
+                        case "US" -> 8;
+                        default -> throw new IllegalArgumentException();
+                    };
+                }
+                """);
+        mockServiceMethods(method);
+        when(javaMethodRepository.findById(11L)).thenReturn(Optional.of(method));
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of());
+        when(aiAgentService.generateBusinessRules(1L, Set.of(11L))).thenReturn(
+                new BusinessRuleResponseDto(List.of(
+                        new GeneratedBusinessRuleDto(
+                                11L,
+                                "Thue suat phu thuoc vao ma khu vuc hop le.",
+                                "BUSINESS_LOGIC",
+                                "SWITCH-1"))));
+        mockBusinessRuleSave();
+
+        assertThat(service().generate(1L)).extracting(BusinessRuleDto::sourceBranchId)
+                .containsExactly("SWITCH-1");
+    }
+    @Test
+    void generateStillRequiresOneRuleForEachDistinctIfDecision() {
+        mockProject();
+        JavaMethod branchedMethod = method(11L, "classifyUser");
+        branchedMethod.setLineStart(20);
+        branchedMethod.setSourceCode("""
+                public String classifyUser(boolean exists, boolean active) {
+                    if (!exists) return "missing";
+                    if (active) return "active";
+                    return "inactive";
+                }
+                """);
+        mockServiceMethods(branchedMethod);
+        when(javaMethodRepository.findById(11L)).thenReturn(Optional.of(branchedMethod));
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of());
+        when(aiAgentService.generateBusinessRules(1L, Set.of(11L))).thenReturn(
+                new BusinessRuleResponseDto(List.of(
+                        new GeneratedBusinessRuleDto(
+                                11L, "User phai ton tai de phan loai.", "VALIDATION", "IF-1"))));
+
+        assertThatThrownBy(() -> service().generate(1L))
+                .isInstanceOf(com.greytest.service.agent.LlmResponseException.class)
+                .hasMessageContaining("chua bao phu du quyet dinh control-flow", "IF-2");
+    }
+    @Test
+    void generateRejectsSeparateTrueAndFalseRulesForTheSameDecision() {
+        mockProject();
         JavaMethod branchedMethod = method(11L, "findUser");
         branchedMethod.setLineStart(20);
         branchedMethod.setSourceCode("""
@@ -215,14 +272,9 @@ class BusinessRuleServiceTest {
                                 11L, "Tra ve missing khi khong ton tai.", "BUSINESS_LOGIC", "IF-1-FALSE"),
                         new GeneratedBusinessRuleDto(
                                 11L, "Tra ve user khi ton tai.", "BUSINESS_LOGIC", "IF-1-TRUE"))));
-        mockBusinessRuleSave();
-
-        List<BusinessRuleDto> rules = service().generate(1L);
-
-        assertThat(rules).extracting(BusinessRuleDto::sourceBranchId)
-                .containsExactly("IF-1-TRUE", "IF-1-FALSE");
-        assertThat(rules).extracting(BusinessRuleDto::reviewNote)
-                .allMatch(note -> !note.contains("SOURCE_BRANCH:"));
+        assertThatThrownBy(() -> service().generate(1L))
+                .isInstanceOf(com.greytest.service.agent.LlmResponseException.class)
+                .hasMessageContaining("trung Business Rule", "IF-1");
     }
 
     @Test
@@ -377,7 +429,7 @@ class BusinessRuleServiceTest {
     }
 
     @Test
-    void manualRulesCanCoverBranchesAndApproveWithoutAiReview() {
+    void manualRuleCanCoverAnIfDecisionAndApproveWithoutAiReview() {
         Project project = new Project();
         project.setId(1L);
         project.setStatus(ProjectStatus.ANALYZED);
@@ -413,14 +465,12 @@ class BusinessRuleServiceTest {
         });
 
         service().create(1L, new CreateBusinessRuleRequest(
-                11L, "Tra ve user khi ton tai.", "IF-1-TRUE"));
-        service().create(1L, new CreateBusinessRuleRequest(
-                11L, "Tra ve missing khi user khong ton tai.", "IF-1-FALSE"));
+                11L, "Tra ve ket qua theo trang thai ton tai cua user.", "IF-1"));
         service().approve(1L);
 
         assertThat(project.getStatus()).isEqualTo(ProjectStatus.BR_APPROVED);
         assertThat(service().list(1L)).extracting(BusinessRuleDto::sourceBranchId)
-                .containsExactly("IF-1-TRUE", "IF-1-FALSE");
+                .containsExactly("IF-1");
     }
 
     @Test
@@ -441,7 +491,7 @@ class BusinessRuleServiceTest {
     }
 
     @Test
-    void approveRejectsRulesThatDoNotCoverEverySourceBranch() {
+    void approveTreatsLegacyTrueBranchMarkerAsItsIfDecision() {
         Project project = new Project();
         project.setId(1L);
         project.setStatus(ProjectStatus.BR_PENDING_REVIEW);
@@ -459,11 +509,41 @@ class BusinessRuleServiceTest {
         trueRule.setReviewNote("SOURCE_BRANCH:IF-1-TRUE\nDa review.");
         when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(trueRule));
 
-        assertThatThrownBy(() -> service().approve(1L))
-                .isInstanceOf(InvalidProjectStatusException.class)
-                .hasMessageContaining("IF-1-FALSE");
+        service().approve(1L);
+
+        assertThat(project.getStatus()).isEqualTo(ProjectStatus.BR_APPROVED);
+        assertThat(service().list(1L)).extracting(BusinessRuleDto::sourceBranchId)
+                .containsExactly("IF-1");
     }
 
+    @Test
+    void approveAllowsLegacyTrueFalsePairForOneIfDecision() {
+        Project project = new Project();
+        project.setId(1L);
+        project.setStatus(ProjectStatus.BR_PENDING_REVIEW);
+        when(projectRepository.findById(1L)).thenReturn(Optional.of(project));
+        JavaMethod branchedMethod = method(11L, "findUser");
+        branchedMethod.setSourceCode("""
+                public String findUser(boolean exists) {
+                    if (exists) return "found";
+                    return "missing";
+                }
+                """);
+        mockServiceMethods(branchedMethod);
+        BusinessRule trueRule = rule(7L, 11L, "Tra ve user khi ton tai.");
+        trueRule.setIsModified(false);
+        trueRule.setReviewNote("SOURCE_BRANCH:IF-1-TRUE\nDa review.");
+        BusinessRule falseRule = rule(8L, 11L, "Tra ve missing khi khong ton tai.");
+        falseRule.setIsModified(false);
+        falseRule.setReviewNote("SOURCE_BRANCH:IF-1-FALSE\nDa review.");
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(trueRule, falseRule));
+
+        service().approve(1L);
+
+        assertThat(project.getStatus()).isEqualTo(ProjectStatus.BR_APPROVED);
+        assertThat(trueRule.getStatus()).isEqualTo(ReviewStatus.APPROVED);
+        assertThat(falseRule.getStatus()).isEqualTo(ReviewStatus.APPROVED);
+    }
     @Test
     void approveRejectsUnreadableMethodSourceInsteadOfAssumingNoBranches() {
         Project project = new Project();
@@ -479,7 +559,7 @@ class BusinessRuleServiceTest {
 
         assertThatThrownBy(() -> service().approve(1L))
                 .isInstanceOf(InvalidProjectStatusException.class)
-                .hasMessageContaining("Khong the xac minh nhanh source", "phan tich lai project");
+                .hasMessageContaining("Khong the xac minh control-flow", "phan tich lai project");
     }
 
     @Test
@@ -495,6 +575,29 @@ class BusinessRuleServiceTest {
                 " save a daily statistical data point for an account, capturing normalized incomes, expenses, and current exchange rates. ")))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("Business Rule da ton tai");
+    }
+
+    @Test
+    void createRejectsSecondRuleForSameSourceDecision() {
+        BusinessRule existingRule = rule(7L, 11L, "Tra ve user khi ton tai.");
+        existingRule.setReviewNote("SOURCE_BRANCH:IF-1\nDa tao.");
+        mockProject();
+        mockProjectServiceMethod(11L);
+        JavaMethod method = method(11L, "findUser");
+        method.setClassId(10L);
+        method.setSourceCode("""
+                public String findUser(boolean exists) {
+                    if (exists) return "found";
+                    return "missing";
+                }
+                """);
+        when(javaMethodRepository.findById(11L)).thenReturn(Optional.of(method));
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(existingRule));
+
+        assertThatThrownBy(() -> service().create(1L, new CreateBusinessRuleRequest(
+                11L, "Mo ta khac cho cung mot quyet dinh.", "IF-1")))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Quyet dinh source da co Business Rule", "IF-1");
     }
 
     @Test

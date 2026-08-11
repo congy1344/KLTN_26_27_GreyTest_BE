@@ -1,6 +1,7 @@
 package com.greytest.dto.agent;
 
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
@@ -73,6 +74,13 @@ public final class GenerationResponseDtos {
             @JsonProperty("expected_result") @NotBlank String expectedResult,
             @NotBlank @Pattern(regexp = "HIGH|MEDIUM|LOW") String priority,
             @JsonProperty("trace_source") @NotBlank String traceSource) {
+
+        public GeneratedTestCaseDto {
+            if (testType != null) {
+                testType = testType.trim().toUpperCase(Locale.ROOT);
+                if ("NEGATIVE".equals(testType)) testType = "EXCEPTION";
+            }
+        }
     }
 
     public record UnitTestResponseDto(

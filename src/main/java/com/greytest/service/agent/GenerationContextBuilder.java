@@ -562,6 +562,11 @@ public class GenerationContextBuilder {
         if (reviewNote == null || !reviewNote.startsWith("SOURCE_BRANCH:")) return null;
         int lineEnd = reviewNote.indexOf('\n');
         String value = reviewNote.substring("SOURCE_BRANCH:".length(), lineEnd < 0 ? reviewNote.length() : lineEnd);
-        return value.isBlank() ? null : value.trim();
+        if (value.isBlank()) return null;
+        String normalized = value.trim();
+        int outcomeSeparator = normalized.indexOf("::");
+        return outcomeSeparator < 0
+                ? normalized.replaceFirst("-(TRUE|FALSE)$", "")
+                : normalized.substring(0, outcomeSeparator);
     }
 }

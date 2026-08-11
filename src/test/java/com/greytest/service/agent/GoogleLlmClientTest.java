@@ -79,6 +79,25 @@ class GoogleLlmClientTest {
     }
 
     @Test
+    void businessRuleSchemaRequiresNullableBranchId() throws Exception {
+        GoogleLlmClient client = client("test-key", URI.create("http://127.0.0.1:1/v1beta/interactions"));
+
+        var itemSchema = objectMapper.readTree(client.requestBody("# Prompt: business-rule\nContext: {}"))
+                .path("response_format")
+                .path("schema")
+                .path("properties")
+                .path("rules")
+                .path("items");
+
+        assertThat(itemSchema.path("properties").path("branch_id").path("type"))
+                .extracting(type -> type.asText())
+                .containsExactly("string", "null");
+        assertThat(itemSchema.path("required"))
+                .extracting(field -> field.asText())
+                .contains("branch_id");
+    }
+
+    @Test
     void schemaUsesPromptHeaderOnly() throws Exception {
         GoogleLlmClient client = client("test-key", URI.create("http://127.0.0.1:1/v1beta/interactions"));
 

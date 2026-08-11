@@ -8,10 +8,8 @@ import java.util.List;
 import java.util.Set;
 import java.util.stream.Stream;
 
-import com.github.javaparser.JavaParser;
 import com.github.javaparser.ParseProblemException;
 import com.github.javaparser.ParseResult;
-import com.github.javaparser.ParserConfiguration;
 import com.github.javaparser.ast.CompilationUnit;
 import com.greytest.exception.SourceAnalysisException;
 import com.greytest.service.analysis.JavaParserHelper.ParsedFile;
@@ -23,8 +21,6 @@ import lombok.extern.slf4j.Slf4j;
 @Slf4j
 class JavaSourceScanner {
 
-    private static final ParserConfiguration PARSER_CONFIGURATION = new ParserConfiguration()
-            .setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_21);
     private static final Set<String> IGNORED_DIRECTORY_NAMES = Set.of(
             ".git", ".gradle", "target", "build", "out", "node_modules",
             "generated-sources", "generated-test-sources");
@@ -82,7 +78,7 @@ class JavaSourceScanner {
 
         for (Path file : javaFiles) {
             try {
-                ParseResult<CompilationUnit> parseResult = new JavaParser(PARSER_CONFIGURATION).parse(file);
+                ParseResult<CompilationUnit> parseResult = JavaParserFactory.parse(file);
                 if (!parseResult.isSuccessful()) throw new ParseProblemException(parseResult.getProblems());
                 CompilationUnit unit = parseResult.getResult()
                         .orElseThrow(() -> new ParseProblemException(parseResult.getProblems()));

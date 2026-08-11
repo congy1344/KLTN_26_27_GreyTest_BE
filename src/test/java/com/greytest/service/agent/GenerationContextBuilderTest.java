@@ -123,12 +123,14 @@ class GenerationContextBuilderTest {
     void testPlanContextUsesOnlyApprovedRuleMethods() {
         mockCommonInputs();
         BusinessRule approved = ruleEntity(7L, 11L, ReviewStatus.APPROVED);
+        approved.setReviewNote("SOURCE_BRANCH:IF-1-FALSE\nLegacy data.");
         when(businessRuleRepository.findByProjectIdAndStatus(1L, ReviewStatus.APPROVED))
                 .thenReturn(List.of(approved));
 
         TestPlanContextDto context = builder.buildTestPlanContext(1L);
 
         assertThat(context.approvedBusinessRules()).extracting("ruleCode").containsExactly("BR-001");
+        assertThat(context.approvedBusinessRules().get(0).sourceBranchId()).isEqualTo("IF-1");
         assertThat(context.classes()).hasSize(1);
         assertThat(context.classes().get(0).methods()).extracting("id").containsExactly(11L);
     }

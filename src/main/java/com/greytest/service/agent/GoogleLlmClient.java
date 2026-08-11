@@ -199,9 +199,10 @@ public class GoogleLlmClient implements LlmClient {
         ObjectNode schema = objectSchema();
         ObjectNode properties = schema.putObject("properties");
         properties.set("method_id", type("integer"));
+        properties.set("branch_id", nullableStringSchema());
         properties.set("description", type("string"));
         properties.set("category", enumSchema("VALIDATION", "BUSINESS_LOGIC", "SIDE_EFFECT"));
-        required(schema, "method_id", "description", "category");
+        required(schema, "method_id", "branch_id", "description", "category");
         return schema;
     }
 

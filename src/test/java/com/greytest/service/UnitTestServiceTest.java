@@ -156,7 +156,7 @@ class UnitTestServiceTest {
     }
 
     @Test
-    void generationRejectsDuplicateMethodNamesAcrossBatches() {
+    void generationRenamesDuplicateMethodNamesAcrossBatches() {
         Project project = new Project();
         project.setId(1L);
         project.setStatus(ProjectStatus.CASE_APPROVED);
@@ -172,26 +172,32 @@ class UnitTestServiceTest {
             return testCase;
         }).toList();
         when(projects.findById(1L)).thenReturn(Optional.of(project));
+        when(projects.findByIdForUpdate(1L)).thenReturn(Optional.of(project));
         when(cases.findAll()).thenReturn(approved);
         when(plans.findById(20L)).thenReturn(Optional.of(plan));
         when(ai.generateUnitTests(org.mockito.ArgumentMatchers.eq(1L), org.mockito.ArgumentMatchers.<Set<Long>>any()))
                 .thenAnswer(invocation -> {
                     Set<Long> ids = invocation.getArgument(1);
                     return new UnitTestResponseDto(ids.stream()
-                            .map(id -> new GeneratedUnitTestDto(id, "ServiceTest",
-                                    id == 6L ? "case1" : "case" + id,
-                                    "demo", "NEW_TEST", "class ServiceTest {}"))
+                            .map(id -> {
+                                String methodName = id == 6L ? "case1" : "case" + id;
+                                return new GeneratedUnitTestDto(id, "ServiceTest", methodName,
+                                        "demo", "NEW_TEST", "package demo; class ServiceTest { void " + methodName + "(){} }");
+                            })
                             .toList());
                 });
+        when(units.saveAll(org.mockito.ArgumentMatchers.anyList())).thenAnswer(invocation -> invocation.getArgument(0));
 
-        assertThatThrownBy(() -> service.generate(1L))
-                .isInstanceOf(LlmResponseException.class)
-                .hasMessageContaining("trung ten");
-        verify(units, never()).saveAll(org.mockito.ArgumentMatchers.anyList());
+        var result = service.generate(1L);
+
+        assertThat(result).extracting("testMethodName")
+                .contains("case1", "case1Case6");
+        assertThat(result).filteredOn(test -> test.testCaseId().equals(6L)).singleElement()
+                .satisfies(test -> assertThat(test.sourceCode()).contains("void case1Case6()"));
     }
 
     @Test
-    void supplementalRejectsMethodNameAlreadyPresentInExportedTests() {
+    void supplementalRenamesMethodNameAlreadyPresentInExportedTests() {
         Project project = new Project();
         project.setId(1L);
         project.setStatus(ProjectStatus.CASE_APPROVED);
@@ -219,12 +225,16 @@ class UnitTestServiceTest {
         when(units.findByTestCaseId(30L)).thenReturn(oldUnit);
         when(ai.generateUnitTests(1L, Set.of(31L))).thenReturn(new UnitTestResponseDto(List.of(
                 new GeneratedUnitTestDto(31L, "ServiceTest", "sameScenario",
-                        "demo", "NEW_TEST", "class ServiceTest {}"))));
+                        "demo", "NEW_TEST", "package demo; class ServiceTest { void sameScenario(){} }"))));
+        when(units.saveAll(org.mockito.ArgumentMatchers.anyList())).thenAnswer(invocation -> invocation.getArgument(0));
 
-        assertThatThrownBy(() -> service.generateSupplemental(1L, List.of(31L)))
-                .isInstanceOf(LlmResponseException.class)
-                .hasMessageContaining("da co");
-        verify(units, never()).saveAll(org.mockito.ArgumentMatchers.anyList());
+        var result = service.generateSupplemental(1L, List.of(31L));
+
+        assertThat(result).singleElement()
+                .satisfies(test -> {
+                    assertThat(test.testMethodName()).isEqualTo("sameScenarioCase31");
+                    assertThat(test.sourceCode()).contains("void sameScenarioCase31()");
+                });
     }
 
     @Test

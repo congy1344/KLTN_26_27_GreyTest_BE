@@ -97,6 +97,19 @@ class JavaParserHelperTest {
     }
 
     @Test
+    void parsesLegacyJava8UnderscoreIdentifier(@TempDir Path sourceDir) throws IOException {
+        Files.writeString(sourceDir.resolve("LegacyJava8.java"), """
+                class LegacyJava8 {
+                    int _(int _) {
+                        return _;
+                    }
+                }
+                """);
+
+        assertThat(parser.parseDirectory(sourceDir)).hasSize(1);
+    }
+
+    @Test
     void parsesJava21PatternSwitch(@TempDir Path sourceDir) throws IOException {
         Files.writeString(sourceDir.resolve("PatternSwitchSample.java"), """
                 class PatternSwitchSample {

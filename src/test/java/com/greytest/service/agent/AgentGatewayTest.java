@@ -47,11 +47,55 @@ class AgentGatewayTest {
         assertThat(prompt).contains(
                 "# Prompt: business-rule",
                 "\"project\" : \"demo\"",
-                "Do not target a fixed number of rules per method");
+                "Do not target a fixed number of rules per method",
+                "exactly one rule for every unique control-flow decision id",
+                "IF, SWITCH, TERNARY, FOR, FOREACH, WHILE, and DO_WHILE",
+                "Do not create a separate rule whose only meaning is that processing continues");
         assertThat(response.rules()).hasSize(1);
         assertThat(response.rules().get(0).methodId()).isEqualTo(1L);
     }
 
+    @Test
+    void testCasePromptRequiresSourceBasedBoundaryValuesAndNoDuplicateScenarios() {
+        String prompt = promptManager.render("test-case", Map.of("context_json", Map.of("project", "demo")));
+
+        assertThat(prompt).contains(
+                "Use test_type only: HAPPY_PATH, BOUNDARY, EXCEPTION, EDGE",
+                "Never output NEGATIVE",
+                "at the exact threshold",
+                "immediately below and immediately above",
+                "Do not generate duplicate scenarios",
+                "`preconditions`, `test_data`, and `expected_result` are all equivalent");
+    }
+
+    @Test
+    void mockClientCollapsesAllOutcomesIntoDecisionLevelBusinessRules() {
+        String prompt = """
+                # Prompt: business-rule
+                Context:
+                {
+                  "classes": [{
+                    "methods": [{
+                      "id": 90983,
+                      "classQualifiedName": "demo.AccountService",
+                      "branches": [
+                        { "branchId": "IF-1-TRUE" },
+                        { "branchId": "IF-1-FALSE" },
+                        { "branchId": "SWITCH-1::CASE-1" },
+                        { "branchId": "SWITCH-1::DEFAULT" }
+                      ]
+                    }]
+                  }]
+                }
+                """;
+
+        BusinessRuleResponseDto response = parser.parse(
+                mockLlmClient.complete(prompt),
+                BusinessRuleResponseDto.class);
+
+        assertThat(response.rules()).extracting("branchId")
+                .containsExactly("IF-1", "SWITCH-1");
+    }
     @Test
     void mockClientUsesMethodIdFromPromptContext() {
         String prompt = """
@@ -182,6 +226,28 @@ class AgentGatewayTest {
                 .isEqualTo(projectRoot.resolve("backend").resolve("log"));
         assertThat(AiContextLogService.resolveLogDir("./log", projectRoot.resolve("backend")))
                 .isEqualTo(projectRoot.resolve("backend").resolve("log"));
+    }
+
+    @Test
+    void parserNormalizesNegativeTestCaseTypeToException() {
+        String responseJson = """
+                {
+                  "cases": [{
+                    "plan_id": 1,
+                    "test_type": "NEGATIVE",
+                    "description": "Khong tim thay user.",
+                    "preconditions": "Repository tra ve rong.",
+                    "test_data": {"id": 999},
+                    "expected_result": "Tra ve null.",
+                    "priority": "MEDIUM",
+                    "trace_source": "BR-001 -> TP-001"
+                  }]
+                }
+                """;
+
+        TestCaseResponseDto response = parser.parse(responseJson, TestCaseResponseDto.class);
+
+        assertThat(response.cases()).extracting("testType").containsExactly("EXCEPTION");
     }
 
     @Test
