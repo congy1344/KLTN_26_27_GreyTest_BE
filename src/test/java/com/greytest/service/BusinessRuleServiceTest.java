@@ -51,6 +51,7 @@ class BusinessRuleServiceTest {
     @Mock private JavaClassRepository javaClassRepository;
     @Mock private JavaMethodRepository javaMethodRepository;
     @Mock private AIAgentService aiAgentService;
+    @Mock private GenerationProgressService generationProgressService;
 
     @Test
     void generatePersistsAiGeneratedRules() {
@@ -93,6 +94,24 @@ class BusinessRuleServiceTest {
         assertThat(rules).extracting(BusinessRuleDto::methodId).containsExactly(11L, 12L);
         verify(aiAgentService).generateBusinessRules(1L, Set.of(11L));
         verify(aiAgentService).generateBusinessRules(1L, Set.of(12L));
+    }
+
+    @Test
+    void generateReportsSaveStepWhenFailureHappensAfterLastBatch() {
+        mockProject();
+        mockServiceMethods(method(11L, "createUser"));
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of());
+        when(aiAgentService.generateBusinessRules(1L, Set.of(11L))).thenReturn(new BusinessRuleResponseDto(List.of(
+                new GeneratedBusinessRuleDto(11L, "Email phai hop le.", "VALIDATION"))));
+        mockBusinessRuleSave();
+        when(projectRepository.save(any(Project.class))).thenThrow(new IllegalStateException("database unavailable"));
+
+        assertThatThrownBy(() -> service().generate(1L)).isInstanceOf(IllegalStateException.class);
+
+        verify(generationProgressService).fail(
+                org.mockito.ArgumentMatchers.eq(1L),
+                org.mockito.ArgumentMatchers.eq(com.greytest.dto.GenerationProgressStage.BUSINESS_RULE),
+                org.mockito.ArgumentMatchers.contains("bước kiểm tra và lưu Business Rule"));
     }
 
     @Test
@@ -699,7 +718,8 @@ class BusinessRuleServiceTest {
                 projectRepository,
                 javaClassRepository,
                 javaMethodRepository,
-                aiAgentService);
+                aiAgentService,
+                generationProgressService);
     }
 
     private void mockProject() {

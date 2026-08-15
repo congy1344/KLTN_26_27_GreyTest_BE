@@ -17,6 +17,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import com.greytest.dto.BusinessRuleDto;
 import com.greytest.dto.BusinessRuleReviewDto;
+import com.greytest.dto.GenerationProgressStage;
 import com.greytest.dto.CreateBusinessRuleRequest;
 import com.greytest.dto.ReviewedBusinessRuleDto;
 import com.greytest.dto.UpdateBusinessRuleRequest;
@@ -55,18 +56,21 @@ public class BusinessRuleService {
     private final JavaClassRepository javaClassRepository;
     private final JavaMethodRepository javaMethodRepository;
     private final AIAgentService aiAgentService;
+    private final GenerationProgressService generationProgressService;
 
     public BusinessRuleService(
             BusinessRuleRepository businessRuleRepository,
             ProjectRepository projectRepository,
             JavaClassRepository javaClassRepository,
             JavaMethodRepository javaMethodRepository,
-            AIAgentService aiAgentService) {
+            AIAgentService aiAgentService,
+            GenerationProgressService generationProgressService) {
         this.businessRuleRepository = businessRuleRepository;
         this.projectRepository = projectRepository;
         this.javaClassRepository = javaClassRepository;
         this.javaMethodRepository = javaMethodRepository;
         this.aiAgentService = aiAgentService;
+        this.generationProgressService = generationProgressService;
     }
 
     @Transactional(readOnly = true)
@@ -171,10 +175,17 @@ public class BusinessRuleService {
                 .collect(Collectors.toCollection(HashSet::new));
         if (uncoveredMethodIds.isEmpty()) return List.of();
 
+        List<Set<Long>> methodBatches = serviceMethodBatches(projectId, uncoveredMethodIds);
+        generationProgressService.start(projectId, GenerationProgressStage.BUSINESS_RULE,
+                methodBatches.size() + 1,
+                "Đã xác định " + uncoveredMethodIds.size() + " Service method trong "
+                        + methodBatches.size() + " batch.");
         List<BusinessRuleDto> created = new ArrayList<>();
         Set<String> existingRuleKeys = ruleKeys(existingRules);
         int firstRuleNumber = nextRuleNumber(existingRules);
-        for (Set<Long> activeMethodIds : serviceMethodBatches(projectId, uncoveredMethodIds)) {
+        int batchNumber = 0;
+        try {
+        for (Set<Long> activeMethodIds : methodBatches) {
             BusinessRuleResponseDto response = aiAgentService.generateBusinessRules(projectId, activeMethodIds);
             if (response.rules().stream()
                     .filter(java.util.Objects::nonNull)
@@ -201,10 +212,24 @@ public class BusinessRuleService {
                     existingRuleKeys,
                     firstRuleNumber + created.size());
             created.addAll(batch);
+            batchNumber++;
+            generationProgressService.advance(projectId, GenerationProgressStage.BUSINESS_RULE,
+                    "Batch " + batchNumber + "/" + methodBatches.size() + ": đã sinh "
+                            + batch.size() + " Business Rule cho " + activeMethodIds.size() + " method.");
         }
         project.setStatus(ProjectStatus.BR_PENDING_REVIEW);
         projectRepository.save(project);
+        generationProgressService.completeAfterCommit(projectId, GenerationProgressStage.BUSINESS_RULE,
+                "Hoàn tất: đã lưu " + created.size() + " Business Rule.");
         return created;
+        } catch (RuntimeException exception) {
+            String failureLocation = batchNumber < methodBatches.size()
+                    ? "Dừng ở batch " + (batchNumber + 1) + "."
+                    : "Dừng ở bước kiểm tra và lưu Business Rule.";
+            generationProgressService.fail(projectId, GenerationProgressStage.BUSINESS_RULE,
+                    failureLocation + " Sinh Business Rule thất bại; xem thông báo lỗi để biết chi tiết.");
+            throw exception;
+        }
     }
 
     @Transactional

@@ -48,6 +48,7 @@ class TestPlanServiceTest {
     @Mock private BusinessRuleRepository businessRuleRepository;
     @Mock private ProjectRepository projectRepository;
     @Mock private AIAgentService aiAgentService;
+    @Mock private GenerationProgressService generationProgressService;
 
     @Test
     void generatePersistsValidAiPlansAndDeletesOldPlans() {
@@ -101,6 +102,25 @@ class TestPlanServiceTest {
         verify(aiAgentService).generateTestPlan(1L, Set.of(1L, 2L, 3L, 4L, 5L));
         verify(aiAgentService).generateTestPlan(1L, Set.of(6L));
         assertThat(project.getStatus()).isEqualTo(ProjectStatus.PLAN_PENDING_REVIEW);
+    }
+
+    @Test
+    void generateReportsSaveStepWhenFailureHappensAfterLastBatch() {
+        mockProject(ProjectStatus.BR_APPROVED);
+        BusinessRule rule = approvedRule(7L);
+        when(businessRuleRepository.findByProjectIdAndStatus(1L, ReviewStatus.APPROVED)).thenReturn(List.of(rule));
+        when(aiAgentService.generateTestPlan(eq(1L), anySet())).thenReturn(new TestPlanResponseDto(List.of(
+                generatedPlan(11L, 7L, List.of(7L), "Happy path"))));
+        when(testPlanRepository.findByProjectId(1L)).thenReturn(List.of());
+        mockTestPlanSaveAll();
+        when(projectRepository.save(any(Project.class))).thenThrow(new IllegalStateException("database unavailable"));
+
+        assertThatThrownBy(() -> service().generate(1L)).isInstanceOf(IllegalStateException.class);
+
+        verify(generationProgressService).fail(
+                org.mockito.ArgumentMatchers.eq(1L),
+                org.mockito.ArgumentMatchers.eq(com.greytest.dto.GenerationProgressStage.TEST_PLAN),
+                org.mockito.ArgumentMatchers.contains("bước kiểm tra và lưu Test Plan"));
     }
 
     @Test
@@ -243,7 +263,8 @@ class TestPlanServiceTest {
                 testPlanCoveredRuleRepository,
                 businessRuleRepository,
                 projectRepository,
-                aiAgentService);
+                aiAgentService,
+                generationProgressService);
     }
 
     private Project mockProject(ProjectStatus status) {

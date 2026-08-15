@@ -46,6 +46,7 @@ class TestCaseServiceTest {
     @Mock private AIAgentService ai;
     @Mock private BusinessRuleRepository rules;
     @Mock private PlatformTransactionManager transactionManager;
+    @Mock private GenerationProgressService generationProgress;
 
     @InjectMocks private TestCaseService service;
 
@@ -105,6 +106,26 @@ class TestCaseServiceTest {
         assertThat(batches.getAllValues()).extracting(Set::size).containsExactly(5, 5, 1);
         assertThat(batches.getAllValues().stream().flatMap(Set::stream))
                 .containsExactlyInAnyOrderElementsOf(LongStream.rangeClosed(1, 11).boxed().toList());
+    }
+
+    @Test
+    void generateReportsSaveStepWhenFailureHappensAfterLastBatch() {
+        project(ProjectStatus.PLAN_APPROVED);
+        TestPlan plan = approvedPlan(20L, false);
+        when(plans.findByProjectId(1L)).thenReturn(List.of(plan));
+        when(plans.existsById(20L)).thenReturn(true);
+        when(plans.findById(20L)).thenReturn(Optional.of(plan));
+        when(ai.generateTestCases(1L, Set.of(20L))).thenReturn(new TestCaseResponseDto(List.of(
+                generatedCase(20L, "valid case"))));
+        when(cases.saveAll(org.mockito.ArgumentMatchers.anyList()))
+                .thenThrow(new IllegalStateException("database unavailable"));
+
+        assertThatThrownBy(() -> service.generate(1L)).isInstanceOf(IllegalStateException.class);
+
+        verify(generationProgress).fail(
+                org.mockito.ArgumentMatchers.eq(1L),
+                org.mockito.ArgumentMatchers.eq(com.greytest.dto.GenerationProgressStage.TEST_CASE),
+                org.mockito.ArgumentMatchers.contains("bước kiểm tra và lưu Test Case"));
     }
 
     @Test

@@ -9,6 +9,9 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLongArray;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 import org.springframework.beans.factory.annotation.Autowired;
@@ -30,6 +33,9 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 public class GoogleLlmClient implements LlmClient {
 
     private static final int ERROR_BODY_LIMIT = 500;
+    private static final long DEFAULT_QUOTA_COOLDOWN_MILLIS = 30_000;
+    private static final Pattern RETRY_SECONDS_PATTERN = Pattern.compile(
+            "(?:retry\\s+in|retryDelay[^0-9]*)([0-9]+(?:\\.[0-9]+)?)s", Pattern.CASE_INSENSITIVE);
 
     private final ObjectMapper objectMapper;
     private final HttpClient httpClient;
@@ -40,12 +46,19 @@ public class GoogleLlmClient implements LlmClient {
     private final Duration timeout;
     private final URI endpoint;
     private final AtomicInteger activeKeyIndex = new AtomicInteger();
+    private final AtomicLongArray cooldownUntilMillis;
 
     @Autowired
     public GoogleLlmClient(
             ObjectMapper objectMapper,
             @Value("${llm.api-key:}") String apiKey,
             @Value("${llm.api-key-fallback:}") String fallbackApiKey,
+            @Value("${llm.api-key-2:}") String apiKey2,
+            @Value("${llm.api-key-3:}") String apiKey3,
+            @Value("${llm.api-key-4:}") String apiKey4,
+            @Value("${llm.api-key-5:}") String apiKey5,
+            @Value("${llm.api-key-6:}") String apiKey6,
+            @Value("${llm.api-key-7:}") String apiKey7,
             @Value("${llm.google-model:${llm.model:gemini-3.5-flash}}") String model,
             @Value("${llm.temperature:0.3}") double temperature,
             @Value("${llm.max-tokens:4096}") int maxTokens,
@@ -54,8 +67,10 @@ public class GoogleLlmClient implements LlmClient {
         this(
                 objectMapper,
                 HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(timeoutSeconds)).build(),
-                apiKey,
-                fallbackApiKey,
+                Stream.of(apiKey, fallbackApiKey, apiKey2, apiKey3, apiKey4, apiKey5, apiKey6, apiKey7)
+                        .filter(key -> key != null && !key.isBlank())
+                        .distinct()
+                        .toList(),
                 model,
                 temperature,
                 maxTokens,
@@ -73,12 +88,25 @@ public class GoogleLlmClient implements LlmClient {
             int maxTokens,
             Duration timeout,
             URI endpoint) {
-        this.objectMapper = objectMapper;
-        this.httpClient = httpClient;
-        this.apiKeys = Stream.of(apiKey, fallbackApiKey)
+        this(objectMapper, httpClient, Stream.of(apiKey, fallbackApiKey)
                 .filter(key -> key != null && !key.isBlank())
                 .distinct()
-                .toList();
+                .toList(), model, temperature, maxTokens, timeout, endpoint);
+    }
+
+    GoogleLlmClient(
+            ObjectMapper objectMapper,
+            HttpClient httpClient,
+            List<String> apiKeys,
+            String model,
+            double temperature,
+            int maxTokens,
+            Duration timeout,
+            URI endpoint) {
+        this.objectMapper = objectMapper;
+        this.httpClient = httpClient;
+        this.apiKeys = List.copyOf(apiKeys);
+        this.cooldownUntilMillis = new AtomicLongArray(apiKeys.size());
         this.model = model;
         this.temperature = temperature;
         this.maxTokens = maxTokens;
@@ -92,7 +120,19 @@ public class GoogleLlmClient implements LlmClient {
             throw new LlmResponseException("LLM_API_KEY hoac LLM_API_KEY1 chua duoc cau hinh.");
         }
         String body = requestBody(prompt);
-        for (int index = activeKeyIndex.get(); index < apiKeys.size(); index++) {
+        // Mỗi worker giữ một điểm bắt đầu khác nhau để không dồn request đồng thời vào cùng key.
+        int startIndex = Math.floorMod(activeKeyIndex.getAndIncrement(), apiKeys.size());
+        String lastQuotaResponse = null;
+        long retryAfterMillis = 0;
+        long earliestCooldown = Long.MAX_VALUE;
+        for (int offset = 0; offset < apiKeys.size(); offset++) {
+            int index = (startIndex + offset) % apiKeys.size();
+            long cooldown = cooldownUntilMillis.get(index);
+            long now = System.currentTimeMillis();
+            if (cooldown > now) {
+                earliestCooldown = Math.min(earliestCooldown, cooldown);
+                continue;
+            }
             HttpRequest request = HttpRequest.newBuilder(endpoint)
                     .timeout(timeout)
                     .header("x-goog-api-key", apiKeys.get(index))
@@ -105,8 +145,13 @@ public class GoogleLlmClient implements LlmClient {
                 if (status >= 200 && status < 300) {
                     return outputText(response.body());
                 }
-                if (index + 1 < apiKeys.size() && quotaExceeded(status, response.body())) {
-                    activeKeyIndex.set(index + 1);
+                if (quotaExceeded(status, response.body())) {
+                    lastQuotaResponse = response.body();
+                    long keyDelay = Math.max(retryAfterMillis(response), DEFAULT_QUOTA_COOLDOWN_MILLIS);
+                    retryAfterMillis = Math.max(retryAfterMillis, keyDelay);
+                    long deadline = System.currentTimeMillis() + keyDelay;
+                    long appliedDeadline = cooldownUntilMillis.accumulateAndGet(index, deadline, Math::max);
+                    earliestCooldown = Math.min(earliestCooldown, appliedDeadline);
                     continue;
                 }
                 throw new LlmResponseException("Google Gemini API loi HTTP "
@@ -118,7 +163,33 @@ public class GoogleLlmClient implements LlmClient {
                 throw new LlmResponseException("Bi gian doan khi goi Google Gemini API.", exception);
             }
         }
+        if (lastQuotaResponse != null || earliestCooldown != Long.MAX_VALUE) {
+            long remainingCooldown = earliestCooldown == Long.MAX_VALUE
+                    ? retryAfterMillis
+                    : Math.max(earliestCooldown - System.currentTimeMillis(), 0);
+            throw new LlmResponseException(
+                    "Google Gemini API loi HTTP 429: "
+                            + (lastQuotaResponse == null ? "Tat ca API key dang trong thoi gian cho quota." : snippet(lastQuotaResponse)),
+                    true,
+                    Math.max(retryAfterMillis, remainingCooldown));
+        }
         throw new LlmResponseException("Khong co Google Gemini API key kha dung.");
+    }
+
+    private long retryAfterMillis(HttpResponse<String> response) {
+        String header = response.headers().firstValue("Retry-After").orElse("").trim();
+        try {
+            if (!header.isEmpty()) return Math.round(Double.parseDouble(header) * 1_000);
+        } catch (NumberFormatException ignored) {
+            // Gemini thường trả thời gian chờ trong JSON body.
+        }
+        Matcher matcher = RETRY_SECONDS_PATTERN.matcher(response.body() == null ? "" : response.body());
+        if (!matcher.find()) return 0;
+        try {
+            return Math.round(Double.parseDouble(matcher.group(1)) * 1_000);
+        } catch (NumberFormatException ignored) {
+            return 0;
+        }
     }
 
     private boolean quotaExceeded(int status, String responseBody) {

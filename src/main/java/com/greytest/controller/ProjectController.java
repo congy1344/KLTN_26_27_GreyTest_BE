@@ -18,6 +18,7 @@ import org.springframework.web.multipart.MultipartFile;
 import com.greytest.dto.GithubCloneRequest;
 import com.greytest.dto.ProjectDto;
 import com.greytest.service.AuthService;
+import com.greytest.service.GenerationJobService;
 import com.greytest.service.ProjectService;
 
 import jakarta.validation.Valid;
@@ -28,10 +29,15 @@ public class ProjectController {
 
     private final ProjectService projectService;
     private final AuthService authService;
+    private final GenerationJobService generationJobService;
 
-    public ProjectController(ProjectService projectService, AuthService authService) {
+    public ProjectController(
+            ProjectService projectService,
+            AuthService authService,
+            GenerationJobService generationJobService) {
         this.projectService = projectService;
         this.authService = authService;
+        this.generationJobService = generationJobService;
     }
 
     @PostMapping("/upload")
@@ -66,7 +72,9 @@ public class ProjectController {
     public ResponseEntity<Void> delete(
             @PathVariable Long id,
             @RequestHeader("Authorization") String authorization) {
-        projectService.delete(id, authService.currentUser(authorization));
+        var user = authService.currentUser(authorization);
+        projectService.requireAccess(id, user);
+        generationJobService.executeMutation(id, () -> projectService.delete(id, user));
         return ResponseEntity.noContent().build();
     }
 }

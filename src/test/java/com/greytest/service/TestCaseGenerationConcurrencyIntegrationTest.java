@@ -10,6 +10,7 @@ import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ExecutionException;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -32,6 +33,7 @@ import com.greytest.repository.ProjectRepository;
 import com.greytest.repository.TestCaseRepository;
 import com.greytest.repository.TestPlanRepository;
 import com.greytest.service.agent.AIAgentService;
+import com.greytest.exception.GenerationInProgressException;
 
 @SpringBootTest
 class TestCaseGenerationConcurrencyIntegrationTest {
@@ -53,7 +55,7 @@ class TestCaseGenerationConcurrencyIntegrationTest {
     }
 
     @Test
-    void concurrentGenerationLeavesOneReplacementSet() throws Exception {
+    void concurrentGenerationRejectsSecondRequestAndLeavesOneReplacementSet() throws Exception {
         Project project = new Project();
         project.setName("concurrency-" + System.nanoTime());
         project.setSourceType(SourceType.ZIP);
@@ -81,12 +83,13 @@ class TestCaseGenerationConcurrencyIntegrationTest {
         plan.setIsModified(false);
         plan = plans.saveAndFlush(plan);
 
-        CountDownLatch bothRequestsReachedAi = new CountDownLatch(2);
+        CountDownLatch firstRequestReachedAi = new CountDownLatch(1);
+        CountDownLatch releaseFirstRequest = new CountDownLatch(1);
         Long planId = plan.getId();
         when(ai.generateTestCases(eq(projectId), anySet())).thenAnswer(invocation -> {
-            bothRequestsReachedAi.countDown();
-            if (!bothRequestsReachedAi.await(5, TimeUnit.SECONDS)) {
-                throw new IllegalStateException("Second request did not reach AI phase");
+            firstRequestReachedAi.countDown();
+            if (!releaseFirstRequest.await(5, TimeUnit.SECONDS)) {
+                throw new IllegalStateException("First request was not released");
             }
             return new TestCaseResponseDto(List.of(new GeneratedTestCaseDto(
                     planId,
@@ -102,10 +105,18 @@ class TestCaseGenerationConcurrencyIntegrationTest {
         var executor = Executors.newFixedThreadPool(2);
         try {
             var first = executor.submit(() -> service.generate(projectId));
+            assertThat(firstRequestReachedAi.await(5, TimeUnit.SECONDS)).isTrue();
             var second = executor.submit(() -> service.generate(projectId));
+            try {
+                second.get(5, TimeUnit.SECONDS);
+                throw new AssertionError("Second generation should have been rejected");
+            } catch (ExecutionException exception) {
+                assertThat(exception.getCause()).isInstanceOf(GenerationInProgressException.class);
+            }
+            releaseFirstRequest.countDown();
             first.get(15, TimeUnit.SECONDS);
-            second.get(15, TimeUnit.SECONDS);
         } finally {
+            releaseFirstRequest.countDown();
             executor.shutdownNow();
         }
 

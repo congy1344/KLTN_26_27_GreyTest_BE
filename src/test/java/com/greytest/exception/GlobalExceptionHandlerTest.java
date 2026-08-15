@@ -28,4 +28,13 @@ class GlobalExceptionHandlerTest {
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
         assertThat(response.getBody().code()).isEqualTo("NOT_FOUND");
     }
+
+    @Test
+    void concurrentGenerationReturnsConflict() {
+        var response = handler.handleGenerationInProgress(
+                new GenerationInProgressException("Tác vụ đang chạy."));
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        assertThat(response.getBody().code()).isEqualTo("GENERATION_IN_PROGRESS");
+    }
 }

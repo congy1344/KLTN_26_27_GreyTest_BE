@@ -44,6 +44,7 @@ class UnitTestServiceTest {
     @Mock private AIAgentService ai;
     @Mock private UnitTestFileService files;
     @Mock private PlatformTransactionManager transactionManager;
+    @Mock private GenerationProgressService generationProgress;
     @InjectMocks private UnitTestService service;
 
     @Test
@@ -80,6 +81,10 @@ class UnitTestServiceTest {
                 });
         verify(units, never()).deleteAll();
         verify(projects).save(project);
+        verify(generationProgress).completeAfterCommit(
+                org.mockito.ArgumentMatchers.eq(1L),
+                org.mockito.ArgumentMatchers.eq(com.greytest.dto.GenerationProgressStage.UNIT_TEST),
+                org.mockito.ArgumentMatchers.contains("Unit Test bổ sung"));
     }
 
     @Test
@@ -119,6 +124,10 @@ class UnitTestServiceTest {
         verify(ai, org.mockito.Mockito.times(3)).generateUnitTests(
                 org.mockito.ArgumentMatchers.eq(1L), batches.capture());
         assertThat(batches.getAllValues()).extracting(Set::size).containsExactly(5, 5, 1);
+        verify(generationProgress).completeAfterCommit(
+                org.mockito.ArgumentMatchers.eq(1L),
+                org.mockito.ArgumentMatchers.eq(com.greytest.dto.GenerationProgressStage.UNIT_TEST),
+                org.mockito.ArgumentMatchers.contains("Unit Test"));
     }
 
     @Test

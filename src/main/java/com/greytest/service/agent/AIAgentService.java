@@ -3,6 +3,7 @@ package com.greytest.service.agent;
 import java.util.Map;
 import java.util.Locale;
 import java.util.Set;
+import java.util.concurrent.ThreadLocalRandom;
 
 import org.springframework.stereotype.Service;
 import org.springframework.context.i18n.LocaleContextHolder;
@@ -13,6 +14,7 @@ import com.greytest.dto.agent.GenerationResponseDtos.TestCaseResponseDto;
 import com.greytest.dto.agent.GenerationResponseDtos.TestPlanResponseDto;
 import com.greytest.dto.agent.GenerationResponseDtos.UnitTestResponseDto;
 import com.greytest.dto.CoverageGapDto;
+import com.greytest.service.GenerationJobContext;
 import java.util.List;
 
 import lombok.extern.slf4j.Slf4j;
@@ -103,9 +105,25 @@ public class AIAgentService {
             } catch (LlmResponseException exception) {
                 log.warn("LLM response invalid for {} attempt {}: {}", promptName, attempt, exception.getMessage());
                 if (!exception.isRetryable() || attempt == MAX_ATTEMPTS) throw exception;
+                waitBeforeRetry(promptName, attempt, exception);
             }
         }
         throw new LlmResponseException("Khong the parse LLM response.");
+    }
+
+    private void waitBeforeRetry(String promptName, int attempt, LlmResponseException exception) {
+        long exponentialDelay = Math.min(1_000L << Math.max(attempt - 1, 0), 60_000L);
+        long jitter = ThreadLocalRandom.current().nextLong(250L, 751L);
+        long delay = Math.min(Math.max(exception.getRetryAfterMillis(), exponentialDelay) + jitter, 60_000L);
+        log.info("LLM {} is temporarily limited; retrying in {} ms", promptName, delay);
+        GenerationJobContext.log("Gemini đang giới hạn lượt gọi. Hệ thống sẽ tự thử lại sau khoảng "
+                + Math.max(1, Math.round(delay / 1_000.0)) + " giây.");
+        try {
+            Thread.sleep(delay);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new LlmResponseException("Bi gian doan trong khi cho thu lai LLM.", interrupted);
+        }
     }
 
     String languageInstruction() {

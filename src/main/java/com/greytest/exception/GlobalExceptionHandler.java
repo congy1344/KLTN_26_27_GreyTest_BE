@@ -80,6 +80,12 @@ public class GlobalExceptionHandler {
                 .body(new ErrorResponse("INVALID_STATUS", e.getMessage()));
     }
 
+    @ExceptionHandler(GenerationInProgressException.class)
+    public ResponseEntity<ErrorResponse> handleGenerationInProgress(GenerationInProgressException e) {
+        return ResponseEntity.status(HttpStatus.CONFLICT)
+                .body(new ErrorResponse("GENERATION_IN_PROGRESS", e.getMessage()));
+    }
+
     @ExceptionHandler(SourceAnalysisException.class)
     public ResponseEntity<ErrorResponse> handleSourceAnalysis(SourceAnalysisException e) {
         log.warn("Không thể phân tích source: {}", e.getMessage());

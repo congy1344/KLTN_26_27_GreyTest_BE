@@ -15,6 +15,7 @@ import com.greytest.dto.CoverageRefinementDto;
 import com.greytest.service.AuthService;
 import com.greytest.service.CoverageService;
 import com.greytest.service.CoverageRefinementService;
+import com.greytest.service.GenerationJobService;
 import com.greytest.service.ProjectService;
 
 @RestController
@@ -24,20 +25,23 @@ public class CoverageController {
     private final AuthService auth;
     private final ProjectService projects;
     private final CoverageRefinementService refinement;
+    private final GenerationJobService jobs;
 
     public CoverageController(CoverageService service, AuthService auth, ProjectService projects,
-            CoverageRefinementService refinement) {
+            CoverageRefinementService refinement, GenerationJobService jobs) {
         this.service = service;
         this.auth = auth;
         this.projects = projects;
         this.refinement = refinement;
+        this.jobs = jobs;
     }
 
     @PostMapping("/api/projects/{projectId}/coverage/upload")
     public ResponseEntity<CoverageReportDto> upload(@PathVariable Long projectId,
             @RequestParam("file") MultipartFile file, @RequestHeader("Authorization") String authorization) {
         access(projectId, authorization);
-        return ResponseEntity.status(HttpStatus.CREATED).body(service.upload(projectId, file));
+        return ResponseEntity.status(HttpStatus.CREATED)
+                .body(jobs.executeMutation(projectId, () -> service.upload(projectId, file)));
     }
 
     /** Trả 204 khi project chưa có coverage report nào. */
@@ -53,7 +57,7 @@ public class CoverageController {
     public CoverageRefinementDto refine(@PathVariable Long projectId,
             @RequestHeader("Authorization") String authorization) {
         access(projectId, authorization);
-        return refinement.start(projectId);
+        return jobs.executeMutation(projectId, () -> refinement.start(projectId));
     }
 
     private void access(Long id, String authorization) {

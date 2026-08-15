@@ -8,6 +8,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import java.util.List;
+import java.util.function.Supplier;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -23,6 +24,7 @@ import com.greytest.entity.AuthUser;
 import com.greytest.entity.enums.UserRole;
 import com.greytest.exception.InvalidProjectStatusException;
 import com.greytest.service.AuthService;
+import com.greytest.service.GenerationJobService;
 import com.greytest.service.ProjectService;
 import com.greytest.service.analysis.AnalysisManifestService;
 import com.greytest.service.analysis.AnalysisService;
@@ -45,11 +47,15 @@ class AnalysisControllerTest {
     @MockBean
     private ProjectService projectService;
 
+    @MockBean
+    private GenerationJobService generationJobService;
+
     @Test
     void analyzeReturnsAnalysisResult() throws Exception {
         AuthUser user = user();
         when(authService.currentUser("Bearer token")).thenReturn(user);
         when(analysisService.analyze(1L)).thenReturn(result());
+        allowMutation(result());
 
         mockMvc.perform(post("/api/projects/1/analyze").header("Authorization", "Bearer token"))
                 .andExpect(status().isOk())
@@ -58,6 +64,9 @@ class AnalysisControllerTest {
                 .andExpect(jsonPath("$.existingTestFiles").value(0));
 
         verify(projectService).requireAccess(1L, user);
+        verify(generationJobService).executeMutation(
+                org.mockito.ArgumentMatchers.eq(1L),
+                org.mockito.ArgumentMatchers.<Supplier<AnalysisResultDto>>any());
     }
 
     @Test
@@ -79,6 +88,7 @@ class AnalysisControllerTest {
         when(authService.currentUser("Bearer token")).thenReturn(user);
         when(analysisService.analyze(1L))
                 .thenThrow(new InvalidProjectStatusException("Khong the phan tich"));
+        allowMutation(result());
 
         mockMvc.perform(post("/api/projects/1/analyze").header("Authorization", "Bearer token"))
                 .andExpect(status().isConflict())
@@ -146,6 +156,13 @@ class AnalysisControllerTest {
         return new AnalysisResultDto(1L, "demo", "ANALYZED", 0, 0, 0, 0, 0, 0,
                 0, 0, 0, List.of(),
                 List.of(), List.of(), List.of());
+    }
+
+    private void allowMutation(AnalysisResultDto ignored) {
+        when(generationJobService.executeMutation(
+                org.mockito.ArgumentMatchers.eq(1L),
+                org.mockito.ArgumentMatchers.<Supplier<AnalysisResultDto>>any()))
+                .thenAnswer(invocation -> invocation.<Supplier<AnalysisResultDto>>getArgument(1).get());
     }
 
     private AuthUser user() {

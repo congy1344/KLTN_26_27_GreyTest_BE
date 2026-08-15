@@ -14,6 +14,7 @@ import com.greytest.dto.AnalysisManifestDto;
 import com.greytest.dto.AnalysisManifestInput;
 import com.greytest.dto.AnalysisManifestValidationDto;
 import com.greytest.service.AuthService;
+import com.greytest.service.GenerationJobService;
 import com.greytest.service.ProjectService;
 import com.greytest.service.analysis.AnalysisManifestService;
 import com.greytest.service.analysis.AnalysisService;
@@ -28,16 +29,19 @@ public class AnalysisController {
     private final AnalysisManifestService manifestService;
     private final AuthService authService;
     private final ProjectService projectService;
+    private final GenerationJobService generationJobService;
 
     public AnalysisController(
             AnalysisService analysisService,
             AnalysisManifestService manifestService,
             AuthService authService,
-            ProjectService projectService) {
+            ProjectService projectService,
+            GenerationJobService generationJobService) {
         this.analysisService = analysisService;
         this.manifestService = manifestService;
         this.authService = authService;
         this.projectService = projectService;
+        this.generationJobService = generationJobService;
     }
 
     /** Trigger phân tích source code (hoặc re-analyze). */
@@ -46,7 +50,8 @@ public class AnalysisController {
             @PathVariable Long projectId,
             @RequestHeader("Authorization") String authorization) {
         projectService.requireAccess(projectId, authService.currentUser(authorization));
-        AnalysisResultDto result = analysisService.analyze(projectId);
+        AnalysisResultDto result = generationJobService.executeMutation(
+                projectId, () -> analysisService.analyze(projectId));
         return ResponseEntity.ok(result);
     }
 

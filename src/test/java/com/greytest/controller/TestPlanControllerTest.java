@@ -9,6 +9,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import java.util.List;
+import java.util.function.Supplier;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -18,12 +19,16 @@ import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 
 import com.greytest.dto.TestPlanDto;
+import com.greytest.dto.GenerationJobAcceptedDto;
+import com.greytest.dto.GenerationProgressStage;
+import com.greytest.dto.GenerationProgressStatus;
 import com.greytest.entity.AuthUser;
 import com.greytest.entity.enums.ReviewStatus;
 import com.greytest.entity.enums.TestType;
 import com.greytest.entity.enums.UserRole;
 import com.greytest.service.AuthService;
 import com.greytest.service.ProjectService;
+import com.greytest.service.GenerationJobService;
 import com.greytest.service.TestPlanService;
 
 @WebMvcTest(TestPlanController.class)
@@ -41,6 +46,9 @@ class TestPlanControllerTest {
     @MockBean
     private ProjectService projectService;
 
+    @MockBean
+    private GenerationJobService generationJobService;
+
     @Test
     void listReturnsTestPlans() throws Exception {
         AuthUser user = user();
@@ -55,16 +63,24 @@ class TestPlanControllerTest {
     }
 
     @Test
-    void generateReturnsTestPlans() throws Exception {
+    void generateAcceptsBackgroundJobImmediately() throws Exception {
         AuthUser user = user();
         when(authService.currentUser("Bearer token")).thenReturn(user);
-        when(testPlanService.generate(1L)).thenReturn(List.of(plan()));
+        when(generationJobService.submit(
+                org.mockito.ArgumentMatchers.eq(1L),
+                org.mockito.ArgumentMatchers.eq(GenerationProgressStage.TEST_PLAN),
+                org.mockito.ArgumentMatchers.any(Runnable.class)))
+                .thenReturn(new GenerationJobAcceptedDto(
+                        GenerationProgressStage.TEST_PLAN,
+                        GenerationProgressStatus.QUEUED,
+                        "Đang chạy nền."));
 
         mockMvc.perform(post("/api/projects/1/test-plans/generate").header("Authorization", "Bearer token"))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$[0].testType").value("HAPPY_PATH"));
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.status").value("QUEUED"));
 
         verify(projectService).requireAccess(1L, user);
+        verify(testPlanService, org.mockito.Mockito.never()).generate(1L);
     }
 
     @Test
@@ -91,6 +107,10 @@ class TestPlanControllerTest {
         when(testPlanService.projectIdForPlan(2L)).thenReturn(1L);
         when(testPlanService.update(org.mockito.ArgumentMatchers.eq(2L), org.mockito.ArgumentMatchers.any()))
                 .thenReturn(plan());
+        when(generationJobService.executeMutation(
+                org.mockito.ArgumentMatchers.eq(1L),
+                org.mockito.ArgumentMatchers.<Supplier<TestPlanDto>>any()))
+                .thenAnswer(invocation -> invocation.<Supplier<TestPlanDto>>getArgument(1).get());
 
         mockMvc.perform(put("/api/test-plans/2")
                         .header("Authorization", "Bearer token")

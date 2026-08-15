@@ -2,6 +2,8 @@ package com.greytest.controller;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.verify;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart;
@@ -24,6 +26,7 @@ import com.greytest.entity.enums.ProjectStatus;
 import com.greytest.entity.enums.SourceType;
 import com.greytest.entity.enums.UserRole;
 import com.greytest.service.AuthService;
+import com.greytest.service.GenerationJobService;
 import com.greytest.service.ProjectService;
 
 @WebMvcTest(ProjectController.class)
@@ -37,6 +40,9 @@ class ProjectControllerTest {
 
     @MockBean
     private AuthService authService;
+
+    @MockBean
+    private GenerationJobService generationJobService;
 
     private ProjectDto sampleDto() {
         return new ProjectDto(1L, "demo", SourceType.ZIP, null, ProjectStatus.ANALYZED, LocalDateTime.now(), null, true);
@@ -88,8 +94,20 @@ class ProjectControllerTest {
     void deleteReturnsNoContent() throws Exception {
         AuthUser user = user();
         when(authService.currentUser("Bearer token")).thenReturn(user);
+        doAnswer(invocation -> {
+            invocation.<Runnable>getArgument(1).run();
+            return null;
+        }).when(generationJobService).executeMutation(
+                org.mockito.ArgumentMatchers.eq(1L),
+                org.mockito.ArgumentMatchers.any(Runnable.class));
 
         mockMvc.perform(delete("/api/projects/1").header("Authorization", "Bearer token"))
                 .andExpect(status().isNoContent());
+
+        verify(projectService).requireAccess(1L, user);
+        verify(generationJobService).executeMutation(
+                org.mockito.ArgumentMatchers.eq(1L),
+                org.mockito.ArgumentMatchers.any(Runnable.class));
+        verify(projectService).delete(1L, user);
     }
 }

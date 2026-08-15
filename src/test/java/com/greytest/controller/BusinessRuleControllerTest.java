@@ -8,6 +8,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import java.util.List;
+import java.util.function.Supplier;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -23,6 +24,7 @@ import com.greytest.entity.enums.RuleSource;
 import com.greytest.entity.enums.UserRole;
 import com.greytest.service.AuthService;
 import com.greytest.service.BusinessRuleService;
+import com.greytest.service.GenerationJobService;
 import com.greytest.service.ProjectService;
 
 @WebMvcTest(BusinessRuleController.class)
@@ -39,6 +41,9 @@ class BusinessRuleControllerTest {
 
     @MockBean
     private ProjectService projectService;
+
+    @MockBean
+    private GenerationJobService generationJobService;
 
     @Test
     void listChecksProjectAccess() throws Exception {
@@ -60,6 +65,10 @@ class BusinessRuleControllerTest {
         when(businessRuleService.projectIdForRule(2L)).thenReturn(1L);
         when(businessRuleService.update(org.mockito.ArgumentMatchers.eq(2L), org.mockito.ArgumentMatchers.any()))
                 .thenReturn(rule());
+        when(generationJobService.executeMutation(
+                org.mockito.ArgumentMatchers.eq(1L),
+                org.mockito.ArgumentMatchers.<Supplier<BusinessRuleDto>>any()))
+                .thenAnswer(invocation -> invocation.<Supplier<BusinessRuleDto>>getArgument(1).get());
 
         mockMvc.perform(put("/api/business-rules/2")
                         .header("Authorization", "Bearer token")

@@ -12,6 +12,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 import com.greytest.dto.CreateTestCaseRequest;
 import com.greytest.dto.CoverageGapDto;
 import com.greytest.dto.TestCaseDto;
+import com.greytest.dto.GenerationProgressStage;
 import com.greytest.dto.agent.GenerationResponseDtos.GeneratedTestCaseDto;
 import com.greytest.entity.Project;
 import com.greytest.entity.BusinessRule;
@@ -34,8 +35,8 @@ import com.greytest.service.agent.LlmResponseException;
 /** Quan ly test case sinh tu test plan va review HITL. */
 @Service
 public class TestCaseService {
-    private final TestCaseRepository cases; private final TestPlanRepository plans; private final ProjectRepository projects; private final AIAgentService ai; private final BusinessRuleRepository rules; private final TransactionTemplate transactions;
-    public TestCaseService(TestCaseRepository cases, TestPlanRepository plans, ProjectRepository projects, AIAgentService ai, BusinessRuleRepository rules, PlatformTransactionManager transactionManager) { this.cases=cases; this.plans=plans; this.projects=projects; this.ai=ai; this.rules=rules; this.transactions=new TransactionTemplate(transactionManager); }
+    private final TestCaseRepository cases; private final TestPlanRepository plans; private final ProjectRepository projects; private final AIAgentService ai; private final BusinessRuleRepository rules; private final TransactionTemplate transactions; private final GenerationProgressService generationProgress;
+    public TestCaseService(TestCaseRepository cases, TestPlanRepository plans, ProjectRepository projects, AIAgentService ai, BusinessRuleRepository rules, PlatformTransactionManager transactionManager, GenerationProgressService generationProgress) { this.cases=cases; this.plans=plans; this.projects=projects; this.ai=ai; this.rules=rules; this.transactions=new TransactionTemplate(transactionManager); this.generationProgress=generationProgress; }
     @Transactional(readOnly=true) public List<TestCaseDto> list(Long projectId) { ensureProject(projectId); return plans.findByProjectId(projectId).stream().flatMap(p->cases.findByTestPlanId(p.getId()).stream()).sorted(Comparator.comparing(TestCase::getCaseCode, Comparator.nullsLast(String::compareTo))).map(this::dto).toList(); }
     // Regenerate được ở mọi pha từ PLAN_APPROVED trở đi: case cũ (kể cả case thủ công) bị thay
     // sạch, unit test cascade theo, status rollback về CASE_PENDING_REVIEW
@@ -55,8 +56,13 @@ public class TestCaseService {
             throw new LlmResponseException("Khong co Test Plan da approve de sinh Test Case.");
         }
 
+        List<List<TestPlan>> batches = planBatches(approvedPlans);
+        generationProgress.start(projectId, GenerationProgressStage.TEST_CASE, batches.size() + 1,
+                "Đã nhóm " + approvedPlans.size() + " Test Plan thành " + batches.size() + " batch.");
         List<GeneratedTestCaseDto> generatedCases = new ArrayList<>();
-        for (List<TestPlan> batch : planBatches(approvedPlans)) {
+        int batchNumber = 0;
+        try {
+        for (List<TestPlan> batch : batches) {
             Set<Long> batchPlanIds = batch.stream()
                     .map(TestPlan::getId)
                     .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
@@ -72,13 +78,28 @@ public class TestCaseService {
                 throw new LlmResponseException("AI chua sinh du Test Case cho moi Test Plan da approve.");
             }
             generatedCases.addAll(validBatch);
+            batchNumber++;
+            generationProgress.advance(projectId, GenerationProgressStage.TEST_CASE,
+                    "Batch " + batchNumber + "/" + batches.size() + ": đã kiểm tra "
+                            + validBatch.size() + " Test Case hợp lệ.");
         }
 
         Set<Long> expectedPlanIds = approvedPlans.stream()
                 .map(TestPlan::getId)
                 .collect(java.util.stream.Collectors.toSet());
-        return transactions.execute(status -> persistGenerated(
+        List<TestCaseDto> saved = transactions.execute(status -> persistGenerated(
                 projectId, expectedPlanIds, deduplicate(generatedCases, approvedPlans)));
+        generationProgress.complete(projectId, GenerationProgressStage.TEST_CASE,
+                "Hoàn tất: đã lưu " + (saved == null ? 0 : saved.size()) + " Test Case.");
+        return saved;
+        } catch (RuntimeException exception) {
+            String failureLocation = batchNumber < batches.size()
+                    ? "Dừng ở batch " + (batchNumber + 1) + "."
+                    : "Dừng ở bước kiểm tra và lưu Test Case.";
+            generationProgress.fail(projectId, GenerationProgressStage.TEST_CASE,
+                    failureLocation + " Sinh Test Case thất bại; xem thông báo lỗi để biết chi tiết.");
+            throw exception;
+        }
     }
 
     /**
@@ -89,6 +110,9 @@ public class TestCaseService {
         ensureCanGenerate(project);
         TestPlan plan = requireApprovedPlan(projectId, planId);
         PlanSnapshot expectedPlan = snapshot(plan);
+        generationProgress.start(projectId, GenerationProgressStage.TEST_CASE, 2,
+                "Bắt đầu sinh lại Test Case cho " + plan.getPlanCode() + ".");
+        try {
         var response = ai.generateTestCases(projectId, Set.of(planId));
         List<GeneratedTestCaseDto> generatedCases = response.cases();
         if (generatedCases.isEmpty()
@@ -99,8 +123,18 @@ public class TestCaseService {
             throw new LlmResponseException(
                     "AI phai sinh Test Case chi cho Test Plan " + plan.getPlanCode() + ".");
         }
-        return transactions.execute(status -> persistRegeneratedPlan(
+        generationProgress.advance(projectId, GenerationProgressStage.TEST_CASE,
+                "Đã nhận và kiểm tra " + generatedCases.size() + " Test Case từ AI.");
+        List<TestCaseDto> saved = transactions.execute(status -> persistRegeneratedPlan(
                 projectId, expectedPlan, deduplicate(generatedCases, List.of(plan))));
+        generationProgress.complete(projectId, GenerationProgressStage.TEST_CASE,
+                "Hoàn tất sinh lại " + (saved == null ? 0 : saved.size()) + " Test Case.");
+        return saved;
+        } catch (RuntimeException exception) {
+            generationProgress.fail(projectId, GenerationProgressStage.TEST_CASE,
+                    "Sinh lại " + plan.getPlanCode() + " thất bại; xem thông báo lỗi để biết chi tiết.");
+            throw exception;
+        }
     }
 
     private List<TestCaseDto> persistGenerated(

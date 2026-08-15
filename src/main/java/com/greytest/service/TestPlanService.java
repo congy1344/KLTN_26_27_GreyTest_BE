@@ -13,6 +13,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import com.greytest.dto.CreateTestPlanRequest;
+import com.greytest.dto.GenerationProgressStage;
 import com.greytest.dto.TestPlanDto;
 import com.greytest.dto.UpdateTestPlanRequest;
 import com.greytest.dto.agent.GenerationResponseDtos.GeneratedTestPlanDto;
@@ -45,18 +46,21 @@ public class TestPlanService {
     private final BusinessRuleRepository businessRuleRepository;
     private final ProjectRepository projectRepository;
     private final AIAgentService aiAgentService;
+    private final GenerationProgressService generationProgressService;
 
     public TestPlanService(
             TestPlanRepository testPlanRepository,
             TestPlanCoveredRuleRepository testPlanCoveredRuleRepository,
             BusinessRuleRepository businessRuleRepository,
             ProjectRepository projectRepository,
-            AIAgentService aiAgentService) {
+            AIAgentService aiAgentService,
+            GenerationProgressService generationProgressService) {
         this.testPlanRepository = testPlanRepository;
         this.testPlanCoveredRuleRepository = testPlanCoveredRuleRepository;
         this.businessRuleRepository = businessRuleRepository;
         this.projectRepository = projectRepository;
         this.aiAgentService = aiAgentService;
+        this.generationProgressService = generationProgressService;
     }
 
     @Transactional(readOnly = true)
@@ -85,12 +89,21 @@ public class TestPlanService {
             throw new InvalidProjectStatusException("Can co it nhat mot Business Rule APPROVED truoc khi sinh Test Plan.");
         }
 
+        List<List<BusinessRule>> batches = methodBatches(approvedRules);
+        generationProgressService.start(projectId, GenerationProgressStage.TEST_PLAN, batches.size() + 1,
+                "Đã nhóm " + approvedRules.size() + " Business Rule thành " + batches.size() + " batch.");
         List<GeneratedTestPlanDto> generatedPlans = new ArrayList<>();
-        for (List<BusinessRule> batch : methodBatches(approvedRules)) {
+        int batchNumber = 0;
+        try {
+        for (List<BusinessRule> batch : batches) {
             Set<Long> batchRuleIds = ruleIds(batch);
             TestPlanResponseDto response = aiAgentService.generateTestPlan(projectId, batchRuleIds);
             ensureBatchMatchesMethods(response.plans(), rulesByMethod(batch));
             generatedPlans.addAll(response.plans());
+            batchNumber++;
+            generationProgressService.advance(projectId, GenerationProgressStage.TEST_PLAN,
+                    "Batch " + batchNumber + "/" + batches.size() + ": nhận "
+                            + response.plans().size() + " Test Plan từ AI.");
         }
 
         List<GeneratedPlanDraft> validPlanDrafts = buildGeneratedPlanDrafts(projectId, generatedPlans, approvedRules);
@@ -112,7 +125,17 @@ public class TestPlanService {
                 .toList();
         project.setStatus(ProjectStatus.PLAN_PENDING_REVIEW);
         projectRepository.save(project);
+        generationProgressService.completeAfterCommit(projectId, GenerationProgressStage.TEST_PLAN,
+                "Hoàn tất: đã lưu " + created.size() + " Test Plan và liên kết Business Rule.");
         return created;
+        } catch (RuntimeException exception) {
+            String failureLocation = batchNumber < batches.size()
+                    ? "Dừng ở batch " + (batchNumber + 1) + "."
+                    : "Dừng ở bước kiểm tra và lưu Test Plan.";
+            generationProgressService.fail(projectId, GenerationProgressStage.TEST_PLAN,
+                    failureLocation + " Sinh Test Plan thất bại; xem thông báo lỗi để biết chi tiết.");
+            throw exception;
+        }
     }
 
     @Transactional

@@ -3,6 +3,7 @@ package com.greytest.controller;
 import java.util.List;
 
 import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -16,10 +17,13 @@ import org.springframework.web.bind.annotation.RestController;
 
 import com.greytest.dto.BusinessRuleDto;
 import com.greytest.dto.BusinessRuleReviewDto;
+import com.greytest.dto.GenerationJobAcceptedDto;
+import com.greytest.dto.GenerationProgressStage;
 import com.greytest.dto.CreateBusinessRuleRequest;
 import com.greytest.dto.UpdateBusinessRuleRequest;
 import com.greytest.service.AuthService;
 import com.greytest.service.BusinessRuleService;
+import com.greytest.service.GenerationJobService;
 import com.greytest.service.ProjectService;
 
 import jakarta.validation.Valid;
@@ -30,14 +34,17 @@ public class BusinessRuleController {
     private final BusinessRuleService businessRuleService;
     private final AuthService authService;
     private final ProjectService projectService;
+    private final GenerationJobService generationJobService;
 
     public BusinessRuleController(
             BusinessRuleService businessRuleService,
             AuthService authService,
-            ProjectService projectService) {
+            ProjectService projectService,
+            GenerationJobService generationJobService) {
         this.businessRuleService = businessRuleService;
         this.authService = authService;
         this.projectService = projectService;
+        this.generationJobService = generationJobService;
     }
 
     @GetMapping("/api/projects/{projectId}/business-rules")
@@ -55,15 +62,18 @@ public class BusinessRuleController {
             @RequestHeader("Authorization") String authorization,
             @Valid @RequestBody CreateBusinessRuleRequest request) {
         requireAccess(projectId, authorization);
-        return businessRuleService.create(projectId, request);
+        return generationJobService.executeMutation(projectId, () -> businessRuleService.create(projectId, request));
     }
 
     @PostMapping("/api/projects/{projectId}/business-rules/generate")
-    public List<BusinessRuleDto> generate(
+    public ResponseEntity<GenerationJobAcceptedDto> generate(
             @PathVariable Long projectId,
             @RequestHeader("Authorization") String authorization) {
         requireAccess(projectId, authorization);
-        return businessRuleService.generate(projectId);
+        return ResponseEntity.accepted().body(generationJobService.submit(
+                projectId,
+                GenerationProgressStage.BUSINESS_RULE,
+                () -> businessRuleService.generate(projectId)));
     }
 
     @PostMapping("/api/projects/{projectId}/business-rules/review")
@@ -71,7 +81,7 @@ public class BusinessRuleController {
             @PathVariable Long projectId,
             @RequestHeader("Authorization") String authorization) {
         requireAccess(projectId, authorization);
-        return businessRuleService.review(projectId);
+        return generationJobService.executeMutation(projectId, () -> businessRuleService.review(projectId));
     }
 
     @PostMapping("/api/projects/{projectId}/business-rules/approve")
@@ -79,7 +89,7 @@ public class BusinessRuleController {
             @PathVariable Long projectId,
             @RequestHeader("Authorization") String authorization) {
         requireAccess(projectId, authorization);
-        return businessRuleService.approve(projectId);
+        return generationJobService.executeMutation(projectId, () -> businessRuleService.approve(projectId));
     }
 
     @PutMapping("/api/business-rules/{ruleId}")
@@ -87,16 +97,18 @@ public class BusinessRuleController {
             @PathVariable Long ruleId,
             @RequestHeader("Authorization") String authorization,
             @Valid @RequestBody UpdateBusinessRuleRequest request) {
-        requireAccess(businessRuleService.projectIdForRule(ruleId), authorization);
-        return businessRuleService.update(ruleId, request);
+        Long projectId = businessRuleService.projectIdForRule(ruleId);
+        requireAccess(projectId, authorization);
+        return generationJobService.executeMutation(projectId, () -> businessRuleService.update(ruleId, request));
     }
 
     @PostMapping("/api/business-rules/{ruleId}/accept-suggestion")
     public BusinessRuleDto acceptSuggestion(
             @PathVariable Long ruleId,
             @RequestHeader("Authorization") String authorization) {
-        requireAccess(businessRuleService.projectIdForRule(ruleId), authorization);
-        return businessRuleService.acceptSuggestion(ruleId);
+        Long projectId = businessRuleService.projectIdForRule(ruleId);
+        requireAccess(projectId, authorization);
+        return generationJobService.executeMutation(projectId, () -> businessRuleService.acceptSuggestion(ruleId));
     }
 
     @DeleteMapping("/api/business-rules/{ruleId}")
@@ -104,8 +116,9 @@ public class BusinessRuleController {
     public void delete(
             @PathVariable Long ruleId,
             @RequestHeader("Authorization") String authorization) {
-        requireAccess(businessRuleService.projectIdForRule(ruleId), authorization);
-        businessRuleService.delete(ruleId);
+        Long projectId = businessRuleService.projectIdForRule(ruleId);
+        requireAccess(projectId, authorization);
+        generationJobService.executeMutation(projectId, () -> businessRuleService.delete(ruleId));
     }
 
     private void requireAccess(Long projectId, String authorization) {

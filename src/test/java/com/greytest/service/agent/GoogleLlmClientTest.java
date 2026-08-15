@@ -12,7 +12,12 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 
 import org.junit.jupiter.api.Test;
@@ -173,6 +178,132 @@ class GoogleLlmClientTest {
             assertThat(client.complete("Prompt text")).contains("\"rules\"");
             assertThat(client.complete("Prompt text")).contains("\"rules\"");
             assertThat(apiKeys).containsExactly("primary-key", "fallback-key", "fallback-key");
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void concurrentCallsReserveDifferentStartingKeys() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
+        ExecutorService serverExecutor = Executors.newFixedThreadPool(2);
+        ExecutorService callers = Executors.newFixedThreadPool(2);
+        CountDownLatch requestsArrived = new CountDownLatch(2);
+        List<String> apiKeys = new CopyOnWriteArrayList<>();
+        server.setExecutor(serverExecutor);
+        server.createContext("/", exchange -> {
+            apiKeys.add(exchange.getRequestHeaders().getFirst("x-goog-api-key"));
+            requestsArrived.countDown();
+            try {
+                requestsArrived.await(2, TimeUnit.SECONDS);
+                byte[] bytes = "{\"output_text\":\"{\\\"rules\\\":[]}\"}"
+                        .getBytes(StandardCharsets.UTF_8);
+                exchange.sendResponseHeaders(200, bytes.length);
+                exchange.getResponseBody().write(bytes);
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+            } finally {
+                exchange.close();
+            }
+        });
+        server.start();
+        try {
+            GoogleLlmClient client = client(
+                    "primary-key",
+                    "fallback-key",
+                    URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/v1beta/interactions"));
+
+            var first = callers.submit(() -> client.complete("Prompt one"));
+            var second = callers.submit(() -> client.complete("Prompt two"));
+            assertThat(first.get(5, TimeUnit.SECONDS)).contains("rules");
+            assertThat(second.get(5, TimeUnit.SECONDS)).contains("rules");
+
+            assertThat(apiKeys).containsExactlyInAnyOrder("primary-key", "fallback-key");
+        } finally {
+            server.stop(0);
+            callers.shutdownNow();
+            serverExecutor.shutdownNow();
+        }
+    }
+
+    @Test
+    void lateSuccessCannotClearCooldownSetByConcurrentQuotaResponse() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
+        ExecutorService serverExecutor = Executors.newFixedThreadPool(2);
+        ExecutorService callers = Executors.newFixedThreadPool(2);
+        CountDownLatch quotaRecorded = new CountDownLatch(1);
+        AtomicInteger requestCount = new AtomicInteger();
+        server.setExecutor(serverExecutor);
+        server.createContext("/", exchange -> {
+            requestCount.incrementAndGet();
+            String request = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            boolean quotaRequest = request.contains("quota prompt");
+            try {
+                if (quotaRequest) {
+                    quotaRecorded.countDown();
+                } else {
+                    quotaRecorded.await(2, TimeUnit.SECONDS);
+                }
+                String response = quotaRequest
+                        ? "{\"error\":{\"message\":\"Please retry in 30s.\"}}"
+                        : "{\"output_text\":\"{\\\"rules\\\":[]}\"}";
+                byte[] bytes = response.getBytes(StandardCharsets.UTF_8);
+                exchange.sendResponseHeaders(quotaRequest ? 429 : 200, bytes.length);
+                exchange.getResponseBody().write(bytes);
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+            } finally {
+                exchange.close();
+            }
+        });
+        server.start();
+        try {
+            GoogleLlmClient client = client(
+                    "only-key",
+                    URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/v1beta/interactions"));
+
+            var success = callers.submit(() -> client.complete("success prompt"));
+            var limited = callers.submit(() -> client.complete("quota prompt"));
+            assertThat(success.get(5, TimeUnit.SECONDS)).contains("rules");
+            assertThatThrownBy(() -> limited.get(5, TimeUnit.SECONDS))
+                    .hasCauseInstanceOf(LlmResponseException.class);
+
+            assertThatThrownBy(() -> client.complete("third prompt"))
+                    .isInstanceOf(LlmResponseException.class)
+                    .hasMessageContaining("thoi gian cho quota");
+            assertThat(requestCount).hasValue(2);
+        } finally {
+            server.stop(0);
+            callers.shutdownNow();
+            serverExecutor.shutdownNow();
+        }
+    }
+
+    @Test
+    void exposesGeminiRetryDelayAfterEveryConfiguredKeyIsLimited() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
+        List<String> apiKeys = new CopyOnWriteArrayList<>();
+        server.createContext("/", exchange -> {
+            apiKeys.add(exchange.getRequestHeaders().getFirst("x-goog-api-key"));
+            String response = "{\"error\":{\"message\":\"Please retry in 3.5s.\"}}";
+            byte[] bytes = response.getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(429, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+        server.start();
+        try {
+            GoogleLlmClient client = client(
+                    "primary-key",
+                    "fallback-key",
+                    URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/v1beta/interactions"));
+
+            assertThatThrownBy(() -> client.complete("Prompt text"))
+                    .isInstanceOfSatisfying(LlmResponseException.class, exception -> {
+                        assertThat(exception.isRetryable()).isTrue();
+                        assertThat(exception.getRetryAfterMillis()).isGreaterThanOrEqualTo(3_500);
+                    });
+            assertThat(apiKeys).containsExactly("primary-key", "fallback-key");
         } finally {
             server.stop(0);
         }

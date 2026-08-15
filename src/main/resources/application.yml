@@ -45,6 +45,12 @@ llm:
   provider: ${LLM_PROVIDER:mock}
   api-key: ${LLM_API_KEY:}
   api-key-fallback: ${LLM_API_KEY1:}
+  api-key-2: ${LLM_API_KEY2:}
+  api-key-3: ${LLM_API_KEY3:}
+  api-key-4: ${LLM_API_KEY4:}
+  api-key-5: ${LLM_API_KEY5:}
+  api-key-6: ${LLM_API_KEY6:}
+  api-key-7: ${LLM_API_KEY7:}
   model: ${LLM_MODEL:gpt-4o-mini}
   openai-model: ${LLM_OPENAI_MODEL:${LLM_MODEL:gpt-4o-mini}}
   google-model: ${LLM_GOOGLE_MODEL:${LLM_MODEL:gemini-3.5-flash}}

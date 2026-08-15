@@ -9,6 +9,7 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 import com.greytest.dto.UnitTestDto;
+import com.greytest.dto.GenerationProgressStage;
 import com.greytest.dto.agent.GenerationResponseDtos.GeneratedUnitTestDto;
 import com.greytest.entity.Project;
 import com.greytest.entity.TestCase;
@@ -29,17 +30,27 @@ import com.greytest.service.agent.LlmResponseException;
 /** Sinh va luu unit test JUnit/Mockito tu test case da duyet. */
 @Service
 public class UnitTestService {
-    private final UnitTestRepository units; private final TestCaseRepository cases; private final TestPlanRepository plans; private final ProjectRepository projects; private final AIAgentService ai; private final UnitTestFileService files; private final TransactionTemplate transactions;
-    public UnitTestService(UnitTestRepository units, TestCaseRepository cases, TestPlanRepository plans, ProjectRepository projects, AIAgentService ai, UnitTestFileService files, PlatformTransactionManager transactionManager){this.units=units;this.cases=cases;this.plans=plans;this.projects=projects;this.ai=ai;this.files=files;this.transactions=new TransactionTemplate(transactionManager);}
+    private final UnitTestRepository units; private final TestCaseRepository cases; private final TestPlanRepository plans; private final ProjectRepository projects; private final AIAgentService ai; private final UnitTestFileService files; private final TransactionTemplate transactions; private final GenerationProgressService generationProgress;
+    public UnitTestService(UnitTestRepository units, TestCaseRepository cases, TestPlanRepository plans, ProjectRepository projects, AIAgentService ai, UnitTestFileService files, PlatformTransactionManager transactionManager, GenerationProgressService generationProgress){this.units=units;this.cases=cases;this.plans=plans;this.projects=projects;this.ai=ai;this.files=files;this.transactions=new TransactionTemplate(transactionManager);this.generationProgress=generationProgress;}
     @Transactional(readOnly=true) public List<UnitTestDto> list(Long projectId){ensure(projectId); return cases.findAll().stream().filter(c->approvedCase(c,projectId)).map(c->units.findByTestCaseId(c.getId())).filter(java.util.Objects::nonNull).map(this::dto).toList();}
     public List<UnitTestDto> generate(Long projectId){
         Project project=ensure(projectId);
         ensureCanGenerate(project);
         var approved=approvedCases(projectId);
         if(approved.isEmpty()) throw new LlmResponseException("Khong co Test Case da approve de sinh Unit Test.");
+        startProgress(projectId, approved, "Bắt đầu sinh Unit Test từ Test Case đã approve.");
+        try {
         var generated=generateBatches(projectId,approved);
         var expectedIds=approved.stream().map(TestCase::getId).collect(java.util.stream.Collectors.toSet());
-        return transactions.execute(status->persistGenerated(projectId,expectedIds,generated));
+        List<UnitTestDto> saved=transactions.execute(status->persistGenerated(projectId,expectedIds,generated));
+        generationProgress.completeAfterCommit(projectId, GenerationProgressStage.UNIT_TEST,
+                "Hoàn tất: đã lưu " + (saved == null ? 0 : saved.size()) + " Unit Test.");
+        return saved;
+        } catch(RuntimeException exception){
+            generationProgress.fail(projectId, GenerationProgressStage.UNIT_TEST,
+                    "Sinh Unit Test thất bại; xem thông báo lỗi để biết chi tiết.");
+            throw exception;
+        }
     }
     /** Sinh Unit Test chỉ cho case vòng mới, giữ nguyên toàn bộ output các vòng trước. */
     public List<UnitTestDto> generateSupplemental(Long projectId,List<Long> caseIds){
@@ -48,11 +59,23 @@ public class UnitTestService {
         var targetIds=new java.util.HashSet<>(caseIds);
         var target=caseIds.stream().map(id->cases.findById(id).orElse(null)).filter(java.util.Objects::nonNull).filter(c->approvedCase(c,projectId)).toList();
         if(target.size()!=targetIds.size()) throw new InvalidProjectStatusException("Test Case bổ sung không hợp lệ.");
+        startProgress(projectId, target, "Bắt đầu sinh Unit Test bổ sung cho coverage gap.");
+        try {
         var generated=generateBatches(projectId,target);
-        return transactions.execute(status->persistSupplemental(projectId,targetIds,generated));
+        List<UnitTestDto> saved=transactions.execute(status->persistSupplemental(projectId,targetIds,generated));
+        generationProgress.completeAfterCommit(projectId, GenerationProgressStage.UNIT_TEST,
+                "Hoàn tất: đã lưu " + (saved == null ? 0 : saved.size()) + " Unit Test bổ sung.");
+        return saved;
+        } catch(RuntimeException exception){
+            generationProgress.fail(projectId, GenerationProgressStage.UNIT_TEST,
+                    "Sinh Unit Test bổ sung thất bại; xem thông báo lỗi để biết chi tiết.");
+            throw exception;
+        }
     }
     private List<GeneratedUnitTestDto> generateBatches(Long projectId,List<TestCase> target){
         List<GeneratedUnitTestDto> generated=new ArrayList<>();
+        int batchNumber=0;
+        int totalBatches=batchCount(target.size());
         for(int start=0;start<target.size();start+=GenerationContextBuilder.MAX_UNIT_TEST_CASES){
             var batch=target.subList(start,Math.min(start+GenerationContextBuilder.MAX_UNIT_TEST_CASES,target.size()));
             Set<Long> ids=batch.stream().map(TestCase::getId).collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
@@ -62,9 +85,18 @@ public class UnitTestService {
             if(valid.isEmpty()||generatedIds.size()!=valid.size()||!generatedIds.equals(ids))
                 throw new LlmResponseException("AI chua sinh du Unit Test cho moi Test Case da approve.");
             generated.addAll(valid);
+            batchNumber++;
+            generationProgress.advance(projectId, GenerationProgressStage.UNIT_TEST,
+                    "Batch " + batchNumber + "/" + totalBatches + ": đã kiểm tra "
+                            + valid.size() + " Unit Test hợp lệ.");
         }
         return uniqueMethodNames(generated,Set.of());
     }
+    private void startProgress(Long projectId,List<TestCase> target,String message){
+        generationProgress.start(projectId,GenerationProgressStage.UNIT_TEST,batchCount(target.size())+1,
+                message+" Tổng cộng "+target.size()+" Test Case.");
+    }
+    private int batchCount(int itemCount){return (itemCount+GenerationContextBuilder.MAX_UNIT_TEST_CASES-1)/GenerationContextBuilder.MAX_UNIT_TEST_CASES;}
     private List<GeneratedUnitTestDto> uniqueMethodNames(List<GeneratedUnitTestDto> generated,Set<String> existingKeys){
         Set<String> used=new java.util.HashSet<>(existingKeys);
         List<GeneratedUnitTestDto> unique=new ArrayList<>();
