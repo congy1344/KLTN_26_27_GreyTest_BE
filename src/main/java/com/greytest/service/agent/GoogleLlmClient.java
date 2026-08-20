@@ -15,6 +15,7 @@ import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
@@ -45,6 +46,7 @@ public class GoogleLlmClient implements LlmClient {
     private final int maxTokens;
     private final Duration timeout;
     private final URI endpoint;
+    private final LlmUsageRecorder usageRecorder;
     private final AtomicInteger activeKeyIndex = new AtomicInteger();
     private final AtomicLongArray cooldownUntilMillis;
 
@@ -63,7 +65,8 @@ public class GoogleLlmClient implements LlmClient {
             @Value("${llm.temperature:0.3}") double temperature,
             @Value("${llm.max-tokens:4096}") int maxTokens,
             @Value("${llm.timeout-seconds:60}") long timeoutSeconds,
-            @Value("${llm.google-url:https://generativelanguage.googleapis.com/v1beta/interactions}") String endpoint) {
+            @Value("${llm.google-url:https://generativelanguage.googleapis.com/v1beta/interactions}") String endpoint,
+            ObjectProvider<LlmUsageRecorder> usageRecorderProvider) {
         this(
                 objectMapper,
                 HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(timeoutSeconds)).build(),
@@ -75,7 +78,8 @@ public class GoogleLlmClient implements LlmClient {
                 temperature,
                 maxTokens,
                 Duration.ofSeconds(timeoutSeconds),
-                URI.create(endpoint));
+                URI.create(endpoint),
+                usageRecorderProvider.getIfAvailable(LlmUsageRecorder::noop));
     }
 
     GoogleLlmClient(
@@ -103,6 +107,20 @@ public class GoogleLlmClient implements LlmClient {
             int maxTokens,
             Duration timeout,
             URI endpoint) {
+        this(objectMapper, httpClient, apiKeys, model, temperature, maxTokens, timeout, endpoint,
+                LlmUsageRecorder.noop());
+    }
+
+    GoogleLlmClient(
+            ObjectMapper objectMapper,
+            HttpClient httpClient,
+            List<String> apiKeys,
+            String model,
+            double temperature,
+            int maxTokens,
+            Duration timeout,
+            URI endpoint,
+            LlmUsageRecorder usageRecorder) {
         this.objectMapper = objectMapper;
         this.httpClient = httpClient;
         this.apiKeys = List.copyOf(apiKeys);
@@ -112,6 +130,7 @@ public class GoogleLlmClient implements LlmClient {
         this.maxTokens = maxTokens;
         this.timeout = timeout;
         this.endpoint = endpoint;
+        this.usageRecorder = usageRecorder;
     }
 
     @Override
@@ -140,10 +159,23 @@ public class GoogleLlmClient implements LlmClient {
                     .POST(HttpRequest.BodyPublishers.ofString(body))
                     .build();
             try {
+                long startedAt = System.nanoTime();
                 HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
                 int status = response.statusCode();
                 if (status >= 200 && status < 300) {
-                    return outputText(response.body());
+                    JsonNode root = responseRoot(response.body());
+                    String output = "";
+                    try {
+                        output = outputText(response.body());
+                        return output;
+                    } finally {
+                        usageRecorder.record(
+                                prompt,
+                                "google",
+                                root.path("model").asText(model),
+                                LlmTokenUsage.fromGoogle(root, prompt, output),
+                                Duration.ofNanos(System.nanoTime() - startedAt).toMillis());
+                    }
                 }
                 if (quotaExceeded(status, response.body())) {
                     lastQuotaResponse = response.body();
@@ -352,6 +384,14 @@ public class GoogleLlmClient implements LlmClient {
         ArrayNode required = schema.putArray("required");
         for (String name : names) {
             required.add(name);
+        }
+    }
+
+    private JsonNode responseRoot(String responseBody) {
+        try {
+            return objectMapper.readTree(responseBody);
+        } catch (JsonProcessingException exception) {
+            throw new LlmResponseException("Google Gemini response khong phai JSON hop le.", exception);
         }
     }
 

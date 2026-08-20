@@ -8,6 +8,7 @@ import java.net.http.HttpResponse;
 import java.time.Duration;
 
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
@@ -34,6 +35,7 @@ public class OpenAiLlmClient implements LlmClient {
     private final int maxTokens;
     private final Duration timeout;
     private final URI endpoint;
+    private final LlmUsageRecorder usageRecorder;
 
     @Autowired
     public OpenAiLlmClient(
@@ -43,7 +45,8 @@ public class OpenAiLlmClient implements LlmClient {
             @Value("${llm.temperature:0.3}") double temperature,
             @Value("${llm.max-tokens:4096}") int maxTokens,
             @Value("${llm.timeout-seconds:60}") long timeoutSeconds,
-            @Value("${llm.openai-url:https://api.openai.com/v1/responses}") String endpoint) {
+            @Value("${llm.openai-url:https://api.openai.com/v1/responses}") String endpoint,
+            ObjectProvider<LlmUsageRecorder> usageRecorderProvider) {
         this(
                 objectMapper,
                 HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(timeoutSeconds)).build(),
@@ -52,7 +55,8 @@ public class OpenAiLlmClient implements LlmClient {
                 temperature,
                 maxTokens,
                 Duration.ofSeconds(timeoutSeconds),
-                URI.create(endpoint));
+                URI.create(endpoint),
+                usageRecorderProvider.getIfAvailable(LlmUsageRecorder::noop));
     }
 
     OpenAiLlmClient(
@@ -64,6 +68,20 @@ public class OpenAiLlmClient implements LlmClient {
             int maxTokens,
             Duration timeout,
             URI endpoint) {
+        this(objectMapper, httpClient, apiKey, model, temperature, maxTokens, timeout, endpoint,
+                LlmUsageRecorder.noop());
+    }
+
+    OpenAiLlmClient(
+            ObjectMapper objectMapper,
+            HttpClient httpClient,
+            String apiKey,
+            String model,
+            double temperature,
+            int maxTokens,
+            Duration timeout,
+            URI endpoint,
+            LlmUsageRecorder usageRecorder) {
         this.objectMapper = objectMapper;
         this.httpClient = httpClient;
         this.apiKey = apiKey;
@@ -72,6 +90,7 @@ public class OpenAiLlmClient implements LlmClient {
         this.maxTokens = maxTokens;
         this.timeout = timeout;
         this.endpoint = endpoint;
+        this.usageRecorder = usageRecorder;
     }
 
     @Override
@@ -87,13 +106,26 @@ public class OpenAiLlmClient implements LlmClient {
                 .build();
 
         try {
+            long startedAt = System.nanoTime();
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
             if (response.statusCode() < 200 || response.statusCode() >= 300) {
                 int status = response.statusCode();
                 throw new LlmResponseException("OpenAI API loi HTTP "
                         + status + ": " + snippet(response.body()), status == 429 || status >= 500);
             }
-            return outputText(response.body());
+            JsonNode root = responseRoot(response.body());
+            String output = "";
+            try {
+                output = outputText(response.body());
+                return output;
+            } finally {
+                usageRecorder.record(
+                        prompt,
+                        "openai",
+                        root.path("model").asText(model),
+                        LlmTokenUsage.fromOpenAi(root, prompt, output),
+                        Duration.ofNanos(System.nanoTime() - startedAt).toMillis());
+            }
         } catch (IOException exception) {
             throw new LlmResponseException("Khong goi duoc OpenAI API.", exception, true);
         } catch (InterruptedException exception) {
@@ -112,6 +144,14 @@ public class OpenAiLlmClient implements LlmClient {
             return objectMapper.writeValueAsString(root);
         } catch (JsonProcessingException exception) {
             throw new LlmResponseException("Khong tao duoc request OpenAI.", exception);
+        }
+    }
+
+    private JsonNode responseRoot(String responseBody) {
+        try {
+            return objectMapper.readTree(responseBody);
+        } catch (JsonProcessingException exception) {
+            throw new LlmResponseException("OpenAI response khong phai JSON hop le.", exception);
         }
     }
 
