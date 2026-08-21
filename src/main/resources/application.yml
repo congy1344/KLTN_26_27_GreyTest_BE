@@ -62,7 +62,7 @@ llm:
   # Test case/unit test JSON tiếng Việt rất tốn token; 4096 từng gây cắt cụt response giữa chừng
   max-tokens: ${LLM_MAX_TOKENS:16384}
   timeout-seconds: ${LLM_TIMEOUT_SECONDS:60}
-  openai-url: ${LLM_OPENAI_URL:https://api.openai.com/v1/responses}
+  openai-url: ${LLM_OPENAI_URL:https://api.openai.com/v1/chat/completions}
   google-url: ${LLM_GOOGLE_URL:https://generativelanguage.googleapis.com/v1beta/interactions}
   usage:
     enabled: ${LLM_USAGE_ENABLED:false}

@@ -110,6 +110,12 @@ public class GenerationProgressService {
         if (state != null) state.fail(message, clock.instant());
     }
 
+    /** Chỉ ghi lỗi nếu worker chưa nhận được trạng thái kết thúc từ service nghiệp vụ. */
+    public void failIfActive(Long projectId, GenerationProgressStage stage, String message) {
+        ProgressState state = states.get(new ProgressKey(projectId, stage));
+        if (state != null) state.failIfActive(message, clock.instant());
+    }
+
     public void log(Long projectId, GenerationProgressStage stage, String message) {
         ProgressState state = states.get(new ProgressKey(projectId, stage));
         if (state != null) state.note(message, clock.instant());
@@ -185,6 +191,10 @@ public class GenerationProgressService {
                     : safeMessage(message);
             updatedAt = now;
             addLog(message, now);
+        }
+
+        private synchronized void failIfActive(String message, Instant now) {
+            if (isActive()) fail(message, now);
         }
 
         private synchronized void note(String message, Instant now) {

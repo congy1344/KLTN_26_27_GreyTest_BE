@@ -19,7 +19,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 /**
- * LLM client that calls OpenAI Responses API when real AI testing is enabled.
+ * LLM client that calls an OpenAI-compatible Chat Completions API.
  */
 @Service
 @ConditionalOnProperty(prefix = "llm", name = "provider", havingValue = "openai")
@@ -45,7 +45,7 @@ public class OpenAiLlmClient implements LlmClient {
             @Value("${llm.temperature:0.3}") double temperature,
             @Value("${llm.max-tokens:4096}") int maxTokens,
             @Value("${llm.timeout-seconds:60}") long timeoutSeconds,
-            @Value("${llm.openai-url:https://api.openai.com/v1/responses}") String endpoint,
+            @Value("${llm.openai-url:https://api.openai.com/v1/chat/completions}") String endpoint,
             ObjectProvider<LlmUsageRecorder> usageRecorderProvider) {
         this(
                 objectMapper,
@@ -137,9 +137,11 @@ public class OpenAiLlmClient implements LlmClient {
     private String requestBody(String prompt) {
         ObjectNode root = objectMapper.createObjectNode();
         root.put("model", model);
-        root.put("input", prompt);
+        root.putArray("messages").addObject()
+                .put("role", "user")
+                .put("content", prompt);
         root.put("temperature", temperature);
-        root.put("max_output_tokens", maxTokens);
+        root.put("max_tokens", maxTokens);
         try {
             return objectMapper.writeValueAsString(root);
         } catch (JsonProcessingException exception) {
@@ -158,30 +160,13 @@ public class OpenAiLlmClient implements LlmClient {
     private String outputText(String responseBody) {
         try {
             JsonNode root = objectMapper.readTree(responseBody);
-            String outputText = root.path("output_text").asText("");
-            if (!outputText.isBlank()) {
-                return outputText;
-            }
-            JsonNode output = root.path("output");
-            if (output.isArray()) {
-                for (JsonNode item : output) {
-                    String text = contentText(item.path("content"));
-                    if (!text.isBlank()) return text;
-                }
-            }
+            String outputText = root.path("choices").path(0).path("message").path("content").asText("");
+            if (outputText.isBlank()) outputText = root.path("output_text").asText("");
+            if (!outputText.isBlank()) return outputText;
             throw new LlmResponseException("OpenAI response khong co text output.");
         } catch (JsonProcessingException exception) {
             throw new LlmResponseException("OpenAI response khong phai JSON hop le.", exception);
         }
-    }
-
-    private String contentText(JsonNode content) {
-        if (!content.isArray()) return "";
-        for (JsonNode item : content) {
-            String text = item.path("text").asText("");
-            if (!text.isBlank()) return text;
-        }
-        return "";
     }
 
     private String snippet(String body) {

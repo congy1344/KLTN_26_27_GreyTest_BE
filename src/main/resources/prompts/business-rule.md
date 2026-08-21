@@ -22,6 +22,7 @@ Rules:
 - For SWITCH, include every supported case mapping and default behavior in the same rule when source proves them.
 - For loops, describe the source-proven collection/range processing behavior, including empty/skip behavior when applicable; do not merely say that a loop executes.
 - Do not create a separate rule whose only meaning is that processing continues, a condition is false, or validation passed. Those are test outcomes, not independent Business Rules.
+- For each decision id, return at most one rule item. If a decision has validation, state transition, persistence, or other observable facets, combine them into that single rule description; never return two items with the same decision id.
 - Do not omit, duplicate, or invent decision ids.
 - If branches is empty, branch_id must be null and generate only directly observable rules.
 - Never infer behavior outside the source.
@@ -30,8 +31,14 @@ Rules:
 - Do not force every category, describe implementation details, or create stylistic variants of an existing rule.
 - Follow the method order in the context.
 - If a method without branches has no observable business behavior, return no rule for it instead of fabricating one.
-- Before returning JSON, silently verify that no observable behavior is missing and remove redundant rules.
+- Before returning JSON, build a checklist of every unique decision id in branches, then verify that rules contains each checklist id exactly once in branch_id.
+- If the checklist contains `IF-1`, the response is invalid unless exactly one rule has `"branch_id":"IF-1"`; apply the same check to every other decision id.
+- Silently verify that no observable behavior is missing and remove redundant rules.
 - Do not create duplicate or overlapping rules in the same response.
+- Completeness checklist: scan the whole method source, not only branches. Include directly observable validation and exceptions (for example orElseThrow/throw and exact type/message), normalization and defaults (trim, lowercase, fallback values), arithmetic bounds (Math.min/Math.max), threshold comparisons, state changes, persistence, and calls that produce observable side effects.
+- When a decision has several observable facets, combine the condition, threshold/formula, state transition, persistence, and side effects in the one rule for that decision. Do not omit a side effect merely because another service performs it.
+- For methods with no control-flow branches, still return rules for independently testable behavior proven directly by the source; branch_id remains null.
+- Language contract: the appended # Output language section is authoritative. Every natural-language description in one response must use that one language only. Technical identifiers, exception names, enum values, method names, code, and file paths stay unchanged. Do not copy English prose from the source into a Vietnamese response or Vietnamese prose into an English response.
 
 Output schema:
 - Root object has "rules".

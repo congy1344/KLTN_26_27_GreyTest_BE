@@ -53,7 +53,7 @@ class LlmUsageFailureRecordingTest {
                     0.3,
                     512,
                     Duration.ofSeconds(5),
-                    URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/v1/responses"),
+                    URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/v1/chat/completions"),
                     recorder);
 
             assertThatThrownBy(() -> client.complete("# Prompt: unit-test"))

@@ -60,6 +60,7 @@ public class GenerationContextBuilder {
     public static final int MAX_TEST_CASE_PLANS = 5;
     // ponytail: Unit Test co source code dai hon metadata, giu batch nho de tranh timeout.
     public static final int MAX_UNIT_TEST_CASES = 5;
+    public static final int MAX_UNIT_TEST_RETRY_CASES = 2;
     private static final int MAX_UNIT_TEST_REFERENCES = 10;
     public static final int MAX_REVIEW_RULES = 10;
 

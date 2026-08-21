@@ -22,10 +22,12 @@ public record LlmTokenUsage(
         JsonNode usage = root.path("usage");
         if (!usage.isObject()) return estimated(prompt, output);
 
-        long input = usage.path("input_tokens").asLong(0);
-        long outputCount = usage.path("output_tokens").asLong(0);
-        long cached = usage.path("input_tokens_details").path("cached_tokens").asLong(0);
-        long reasoning = usage.path("output_tokens_details").path("reasoning_tokens").asLong(0);
+        long input = firstLong(usage, "input_tokens", "prompt_tokens");
+        long outputCount = firstLong(usage, "output_tokens", "completion_tokens");
+        long cached = firstLong(usage.path("input_tokens_details"), "cached_tokens");
+        if (cached == 0) cached = firstLong(usage.path("prompt_tokens_details"), "cached_tokens");
+        long reasoning = firstLong(usage.path("output_tokens_details"), "reasoning_tokens");
+        if (reasoning == 0) reasoning = firstLong(usage.path("completion_tokens_details"), "reasoning_tokens");
         long total = usage.path("total_tokens").asLong(input + outputCount);
         if (input == 0 && outputCount == 0 && total == 0) return estimated(prompt, output);
         return new LlmTokenUsage(input, cached, outputCount, reasoning, total, UsageSource.PROVIDER);

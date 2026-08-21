@@ -147,7 +147,7 @@ public class GenerationJobService {
         } catch (RuntimeException exception) {
             log.warn("Background AI generation failed for project {} stage {}: {}",
                     projectId, stage, exception.getMessage());
-            progressService.fail(projectId, stage, userMessage(exception));
+            progressService.failIfActive(projectId, stage, userMessage(exception));
         } finally {
             GenerationJobContext.clear();
             LocaleContextHolder.setLocale(previousLocale);

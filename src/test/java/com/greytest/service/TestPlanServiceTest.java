@@ -14,6 +14,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
@@ -49,6 +50,16 @@ class TestPlanServiceTest {
     @Mock private ProjectRepository projectRepository;
     @Mock private AIAgentService aiAgentService;
     @Mock private GenerationProgressService generationProgressService;
+    @BeforeEach
+    void configureSemanticRetryMock() {
+        org.mockito.Mockito.lenient().when(aiAgentService.generateTestPlan(
+                        org.mockito.ArgumentMatchers.anyLong(),
+                        org.mockito.ArgumentMatchers.anySet(),
+                        org.mockito.ArgumentMatchers.anyString()))
+                .thenAnswer(invocation -> {
+                    throw new LlmResponseException(invocation.getArgument(2));
+                });
+    }
 
     @Test
     void generatePersistsValidAiPlansAndDeletesOldPlans() {
@@ -101,6 +112,51 @@ class TestPlanServiceTest {
                 .containsExactly("TP-001", "TP-002", "TP-003", "TP-004", "TP-005", "TP-006");
         verify(aiAgentService).generateTestPlan(1L, Set.of(1L, 2L, 3L, 4L, 5L));
         verify(aiAgentService).generateTestPlan(1L, Set.of(6L));
+        assertThat(project.getStatus()).isEqualTo(ProjectStatus.PLAN_PENDING_REVIEW);
+    }
+
+    @Test
+    void generateRetriesCurrentBatchWhenAiMissesApprovedRule() {
+        Project project = mockProject(ProjectStatus.BR_APPROVED);
+        List<BusinessRule> rules = List.of(approvedRule(7L, 11L), approvedRule(8L, 11L));
+        when(businessRuleRepository.findByProjectIdAndStatus(1L, ReviewStatus.APPROVED)).thenReturn(rules);
+        when(aiAgentService.generateTestPlan(1L, Set.of(7L, 8L))).thenReturn(new TestPlanResponseDto(List.of(
+                generatedPlan(11L, 7L, List.of(7L), "Plan 7"))));
+        when(aiAgentService.generateTestPlan(
+                eq(1L), eq(Set.of(7L, 8L)), org.mockito.ArgumentMatchers.contains("[7, 8]")))
+                .thenReturn(new TestPlanResponseDto(List.of(
+                        generatedPlan(11L, 7L, List.of(7L), "Plan 7"),
+                        generatedPlan(11L, 8L, List.of(8L), "Plan 8"))));
+        when(testPlanRepository.findByProjectId(1L)).thenReturn(List.of());
+        mockTestPlanSaveAll();
+        mockProjectSave();
+
+        assertThat(service().generate(1L)).hasSize(2);
+        verify(aiAgentService).generateTestPlan(1L, Set.of(7L, 8L));
+        verify(aiAgentService).generateTestPlan(
+                eq(1L), eq(Set.of(7L, 8L)), org.mockito.ArgumentMatchers.contains("[7, 8]"));
+        assertThat(project.getStatus()).isEqualTo(ProjectStatus.PLAN_PENDING_REVIEW);
+    }
+
+    @Test
+    void generateRetriesWhenCoveredRuleIdsContainNull() {
+        Project project = mockProject(ProjectStatus.BR_APPROVED);
+        List<BusinessRule> rules = List.of(approvedRule(7L, 11L), approvedRule(8L, 11L));
+        when(businessRuleRepository.findByProjectIdAndStatus(1L, ReviewStatus.APPROVED)).thenReturn(rules);
+        when(aiAgentService.generateTestPlan(1L, Set.of(7L, 8L))).thenReturn(new TestPlanResponseDto(List.of(
+                generatedPlan(11L, 7L, java.util.Arrays.asList(7L, null), "Invalid plan"))));
+        when(aiAgentService.generateTestPlan(
+                eq(1L), eq(Set.of(7L, 8L)), org.mockito.ArgumentMatchers.contains("covered_rule_ids")))
+                .thenReturn(new TestPlanResponseDto(List.of(
+                        generatedPlan(11L, 7L, List.of(7L), "Plan 7"),
+                        generatedPlan(11L, 8L, List.of(8L), "Plan 8"))));
+        when(testPlanRepository.findByProjectId(1L)).thenReturn(List.of());
+        mockTestPlanSaveAll();
+        mockProjectSave();
+
+        assertThat(service().generate(1L)).hasSize(2);
+        verify(aiAgentService).generateTestPlan(
+                eq(1L), eq(Set.of(7L, 8L)), org.mockito.ArgumentMatchers.contains("covered_rule_ids"));
         assertThat(project.getStatus()).isEqualTo(ProjectStatus.PLAN_PENDING_REVIEW);
     }
 

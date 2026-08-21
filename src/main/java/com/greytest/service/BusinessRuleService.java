@@ -13,7 +13,9 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import com.greytest.dto.BusinessRuleDto;
 import com.greytest.dto.BusinessRuleReviewDto;
@@ -50,6 +52,7 @@ public class BusinessRuleService {
     // ponytail: tam luu suggestion trong review_note; tach cot rieng khi can lich su review.
     private static final String SUGGESTION_MARKER = "\nAI_SUGGESTION:";
     private static final String SOURCE_BRANCH_MARKER = "SOURCE_BRANCH:";
+    private static final int MAX_SEMANTIC_ATTEMPTS = 2;
 
     private final BusinessRuleRepository businessRuleRepository;
     private final ProjectRepository projectRepository;
@@ -57,6 +60,7 @@ public class BusinessRuleService {
     private final JavaMethodRepository javaMethodRepository;
     private final AIAgentService aiAgentService;
     private final GenerationProgressService generationProgressService;
+    private final TransactionTemplate transactions;
 
     public BusinessRuleService(
             BusinessRuleRepository businessRuleRepository,
@@ -64,13 +68,15 @@ public class BusinessRuleService {
             JavaClassRepository javaClassRepository,
             JavaMethodRepository javaMethodRepository,
             AIAgentService aiAgentService,
-            GenerationProgressService generationProgressService) {
+            GenerationProgressService generationProgressService,
+            PlatformTransactionManager transactionManager) {
         this.businessRuleRepository = businessRuleRepository;
         this.projectRepository = projectRepository;
         this.javaClassRepository = javaClassRepository;
         this.javaMethodRepository = javaMethodRepository;
         this.aiAgentService = aiAgentService;
         this.generationProgressService = generationProgressService;
+        this.transactions = new TransactionTemplate(transactionManager);
     }
 
     @Transactional(readOnly = true)
@@ -154,7 +160,6 @@ public class BusinessRuleService {
         projectRepository.save(project);
     }
 
-    @Transactional
     public List<BusinessRuleDto> generate(Long projectId) {
         Project project = ensureProjectExists(projectId);
         ensureBusinessRuleEditable(project);
@@ -169,11 +174,22 @@ public class BusinessRuleService {
         }
 
         List<BusinessRule> existingRules = businessRuleRepository.findByProjectId(projectId);
+        boolean backfillAiRules = project.getStatus() == ProjectStatus.BR_PENDING_REVIEW
+                && existingRules.stream().anyMatch(rule -> rule.getSource() == RuleSource.AI_GENERATED
+                        && !Boolean.TRUE.equals(rule.getIsModified()));
         Set<Long> uncoveredMethodIds = serviceMethods.stream()
-                .filter(method -> needsGeneration(method, existingRules))
+                .filter(method -> backfillAiRules || needsGeneration(method, existingRules))
                 .map(JavaMethod::getId)
                 .collect(Collectors.toCollection(HashSet::new));
-        if (uncoveredMethodIds.isEmpty()) return List.of();
+        if (uncoveredMethodIds.isEmpty()) {
+            // Nếu lần chạy trước đã lưu đủ BR nhưng chưa kịp cập nhật project status,
+            // retry chỉ cần hoàn tất bước chuyển trạng thái, không gọi LLM lại.
+            if (project.getStatus() == ProjectStatus.ANALYZED && !existingRules.isEmpty()) {
+                project.setStatus(ProjectStatus.BR_PENDING_REVIEW);
+                projectRepository.save(project);
+            }
+            return List.of();
+        }
 
         List<Set<Long>> methodBatches = serviceMethodBatches(projectId, uncoveredMethodIds);
         generationProgressService.start(projectId, GenerationProgressStage.BUSINESS_RULE,
@@ -186,15 +202,7 @@ public class BusinessRuleService {
         int batchNumber = 0;
         try {
         for (Set<Long> activeMethodIds : methodBatches) {
-            BusinessRuleResponseDto response = aiAgentService.generateBusinessRules(projectId, activeMethodIds);
-            if (response.rules().stream()
-                    .filter(java.util.Objects::nonNull)
-                    .map(GeneratedBusinessRuleDto::methodId)
-                    .anyMatch(methodId -> methodId == null || !activeMethodIds.contains(methodId))) {
-                throw new LlmResponseException(
-                        "AI tra ve Business Rule nam ngoai Service method dang phan tich: " + activeMethodIds + ".");
-            }
-            ensureBranchCoverage(activeMethodIds, response.rules());
+            BusinessRuleResponseDto response = generateValidatedBusinessRules(projectId, activeMethodIds);
             List<GeneratedBusinessRuleDto> orderedRules = new ArrayList<>();
             for (Long methodId : activeMethodIds) {
                 response.rules().stream()
@@ -203,14 +211,15 @@ public class BusinessRuleService {
                         .sorted(Comparator.comparingInt(rule -> branchOrder(methodId, rule.branchId())))
                         .forEach(orderedRules::add);
             }
-            List<BusinessRuleDto> batch = saveGeneratedRules(
+            List<BusinessRuleDto> batch = saveGeneratedRulesInTransaction(
                     projectId,
                     orderedRules,
                     RuleSource.AI_GENERATED,
                     activeMethodIds,
                     Set.of(),
                     existingRuleKeys,
-                    firstRuleNumber + created.size());
+                    firstRuleNumber + created.size(),
+                    backfillAiRules);
             created.addAll(batch);
             batchNumber++;
             generationProgressService.advance(projectId, GenerationProgressStage.BUSINESS_RULE,
@@ -226,8 +235,12 @@ public class BusinessRuleService {
             String failureLocation = batchNumber < methodBatches.size()
                     ? "Dừng ở batch " + (batchNumber + 1) + "."
                     : "Dừng ở bước kiểm tra và lưu Business Rule.";
+            String persistedSummary = created.isEmpty()
+                    ? "Chưa lưu được Business Rule nào."
+                    : "Đã lưu " + created.size() + " Business Rule từ các batch trước.";
             generationProgressService.fail(projectId, GenerationProgressStage.BUSINESS_RULE,
-                    failureLocation + " Sinh Business Rule thất bại; xem thông báo lỗi để biết chi tiết.");
+                    failureLocation + " " + persistedSummary
+                            + " Sinh Business Rule thất bại; xem thông báo lỗi để biết chi tiết.");
             throw exception;
         }
     }
@@ -356,6 +369,25 @@ public class BusinessRuleService {
         return reviewed;
     }
 
+    private List<BusinessRuleDto> saveGeneratedRulesInTransaction(
+            Long projectId,
+            List<GeneratedBusinessRuleDto> generatedRules,
+            RuleSource source,
+            Set<Long> validMethodIds,
+            Set<Long> blockedMethodIds,
+            Set<String> existingRuleKeys,
+            int firstRuleNumber,
+            boolean replaceAiGenerated) {
+        return transactions.execute(status -> saveGeneratedRules(
+                projectId,
+                generatedRules,
+                source,
+                validMethodIds,
+                blockedMethodIds,
+                existingRuleKeys,
+                firstRuleNumber,
+                replaceAiGenerated));
+    }
     private List<BusinessRuleDto> saveGeneratedRules(
             Long projectId,
             List<GeneratedBusinessRuleDto> generatedRules,
@@ -363,12 +395,35 @@ public class BusinessRuleService {
             Set<Long> validMethodIds,
             Set<Long> blockedMethodIds,
             Set<String> existingRuleKeys,
-            int firstRuleNumber) {
+            int firstRuleNumber,
+            boolean replaceAiGenerated) {
         List<BusinessRuleDto> created = new ArrayList<>();
         int ruleNumber = firstRuleNumber;
+        Map<String, BusinessRule> existingByKey = businessRuleRepository.findByProjectId(projectId).stream()
+                .filter(rule -> rule.getMethodId() != null)
+                .collect(Collectors.toMap(
+                        rule -> sourceBranchId(rule.getReviewNote()) != null
+                                ? branchKey(rule.getMethodId(), sourceBranchId(rule.getReviewNote()))
+                                : descriptionKey(rule.getDescription()),
+                        rule -> rule,
+                        (first, ignored) -> first));
         for (GeneratedBusinessRuleDto generatedRule : generatedRules) {
             if (!isUsableGeneratedRule(generatedRule, validMethodIds, blockedMethodIds)) continue;
             String key = generatedRuleKey(generatedRule);
+            BusinessRule existing = existingByKey.get(key);
+            if (replaceAiGenerated && existing != null
+                    && existing.getSource() == RuleSource.AI_GENERATED
+                    && !Boolean.TRUE.equals(existing.getIsModified())) {
+                existing.setDescription(generatedRule.description().trim());
+                existing.setStatus(ReviewStatus.PENDING_REVIEW);
+                existing.setIsModified(false);
+                existing.setReviewNote(withSourceBranch(
+                        generatedRule.branchId(),
+                        "AI category: " + generatedRule.category() + ". User review/chinh sua truoc khi approve."));
+                existingRuleKeys.add(key);
+                created.add(toDto(businessRuleRepository.save(existing)));
+                continue;
+            }
             if (!existingRuleKeys.add(key)) continue;
 
             BusinessRule rule = new BusinessRule();
@@ -451,6 +506,50 @@ public class BusinessRuleService {
                 .filter(java.util.Objects::nonNull)
                 .collect(Collectors.toSet());
         return !coveredBranches.containsAll(expectedDecisions);
+    }
+
+    /**
+     * Sinh va kiem tra Business Rule, cho phep AI tu sua mot lan khi JSON hop le
+     * nhung noi dung thieu, trung, hoac gan sai decision cua source.
+     */
+    private BusinessRuleResponseDto generateValidatedBusinessRules(
+            Long projectId,
+            Set<Long> activeMethodIds) {
+        LlmResponseException lastValidationError = null;
+        for (int attempt = 1; attempt <= MAX_SEMANTIC_ATTEMPTS; attempt++) {
+            BusinessRuleResponseDto response = lastValidationError == null
+                    ? aiAgentService.generateBusinessRules(projectId, activeMethodIds)
+                    : aiAgentService.generateBusinessRules(
+                            projectId, activeMethodIds, lastValidationError.getMessage());
+            try {
+                validateGeneratedBusinessRules(activeMethodIds, response);
+                return response;
+            } catch (LlmResponseException exception) {
+                lastValidationError = exception;
+                if (attempt == MAX_SEMANTIC_ATTEMPTS) {
+                    throw exception;
+                }
+                GenerationJobContext.log(
+                        "AI chua bao phu dung control-flow. Dang tu sinh lai batch hien tai (lan 2/2).");
+            }
+        }
+        throw lastValidationError;
+    }
+
+    private void validateGeneratedBusinessRules(
+            Set<Long> activeMethodIds,
+            BusinessRuleResponseDto response) {
+        if (response == null || response.rules() == null) {
+            throw new LlmResponseException("AI khong tra ve danh sach Business Rule hop le.");
+        }
+        if (response.rules().stream()
+                .filter(java.util.Objects::nonNull)
+                .map(GeneratedBusinessRuleDto::methodId)
+                .anyMatch(methodId -> methodId == null || !activeMethodIds.contains(methodId))) {
+            throw new LlmResponseException(
+                    "AI tra ve Business Rule nam ngoai Service method dang phan tich: " + activeMethodIds + ".");
+        }
+        ensureBranchCoverage(activeMethodIds, response.rules());
     }
 
     private void ensureBranchCoverage(

@@ -41,6 +41,8 @@ import com.greytest.service.agent.LlmResponseException;
 @Service
 public class TestPlanService {
 
+    private static final int MAX_SEMANTIC_ATTEMPTS = 2;
+
     private final TestPlanRepository testPlanRepository;
     private final TestPlanCoveredRuleRepository testPlanCoveredRuleRepository;
     private final BusinessRuleRepository businessRuleRepository;
@@ -97,8 +99,7 @@ public class TestPlanService {
         try {
         for (List<BusinessRule> batch : batches) {
             Set<Long> batchRuleIds = ruleIds(batch);
-            TestPlanResponseDto response = aiAgentService.generateTestPlan(projectId, batchRuleIds);
-            ensureBatchMatchesMethods(response.plans(), rulesByMethod(batch));
+            TestPlanResponseDto response = generateValidatedTestPlans(projectId, batchRuleIds, rulesByMethod(batch));
             generatedPlans.addAll(response.plans());
             batchNumber++;
             generationProgressService.advance(projectId, GenerationProgressStage.TEST_PLAN,
@@ -136,6 +137,37 @@ public class TestPlanService {
                     failureLocation + " Sinh Test Plan thất bại; xem thông báo lỗi để biết chi tiết.");
             throw exception;
         }
+    }
+
+    /**
+     * Sinh va kiem tra coverage cua mot batch Test Plan, tu sua semantic mot lan.
+     */
+    private TestPlanResponseDto generateValidatedTestPlans(
+            Long projectId,
+            Set<Long> batchRuleIds,
+            Map<Long, Set<Long>> expectedRulesByMethod) {
+        LlmResponseException lastValidationError = null;
+        for (int attempt = 1; attempt <= MAX_SEMANTIC_ATTEMPTS; attempt++) {
+            TestPlanResponseDto response = lastValidationError == null
+                    ? aiAgentService.generateTestPlan(projectId, batchRuleIds)
+                    : aiAgentService.generateTestPlan(
+                            projectId, batchRuleIds, lastValidationError.getMessage());
+            try {
+                if (response == null || response.plans() == null) {
+                    throw new LlmResponseException("AI khong tra ve danh sach Test Plan hop le.");
+                }
+                ensureBatchMatchesMethods(response.plans(), expectedRulesByMethod);
+                return response;
+            } catch (LlmResponseException exception) {
+                lastValidationError = exception;
+                if (attempt == MAX_SEMANTIC_ATTEMPTS) {
+                    throw exception;
+                }
+                GenerationJobContext.log(
+                        "AI chua cover du Business Rule cho batch hien tai. Dang tu sinh lai batch (lan 2/2).");
+            }
+        }
+        throw lastValidationError;
     }
 
     @Transactional
@@ -307,6 +339,11 @@ public class TestPlanService {
                 throw new LlmResponseException("AI tra ve Test Plan nam ngoai batch method: " + expectedRulesByMethod.keySet());
             }
             Set<Long> expectedRuleIds = expectedRulesByMethod.get(plan.methodId());
+            if (plan.coveredRuleIds() == null
+                    || plan.coveredRuleIds().stream().anyMatch(java.util.Objects::isNull)) {
+                throw new LlmResponseException(
+                        "AI tra ve covered_rule_ids co gia tri null cho method " + plan.methodId() + ".");
+            }
             Set<Long> coveredRuleIds = plan.coveredRuleIds() == null
                     ? Set.of()
                     : new TreeSet<>(plan.coveredRuleIds());

@@ -117,6 +117,28 @@ class GenerationJobServiceTest {
     }
 
     @Test
+    void keepsDetailedFailureRecordedByArtifactService() {
+        ManualExecutor executor = new ManualExecutor();
+        GenerationProgressService progress = new GenerationProgressService();
+        GenerationJobService jobs = new GenerationJobService(executor, progress);
+        jobs.submit(1L, GenerationProgressStage.BUSINESS_RULE, () -> {
+            progress.start(1L, GenerationProgressStage.BUSINESS_RULE, 2, "Đang sinh.");
+            progress.fail(1L, GenerationProgressStage.BUSINESS_RULE,
+                    "Dừng ở batch 2. Đã lưu 1 Business Rule từ các batch trước.");
+            throw new IllegalStateException("database unavailable");
+        });
+
+        executor.runNext();
+
+        var snapshot = progress.get(1L, GenerationProgressStage.BUSINESS_RULE);
+        assertThat(snapshot.status()).isEqualTo(GenerationProgressStatus.FAILED);
+        assertThat(snapshot.steps().get(0).errorMessage())
+                .contains("Đã lưu 1 Business Rule từ các batch trước.");
+        assertThat(snapshot.logs().get(snapshot.logs().size() - 1).message())
+                .doesNotContain("Tác vụ AI không thể hoàn tất");
+    }
+
+    @Test
     void convertsRawQuotaFailureIntoFriendlyProgressMessage() {
         ManualExecutor executor = new ManualExecutor();
         GenerationProgressService progress = new GenerationProgressService();

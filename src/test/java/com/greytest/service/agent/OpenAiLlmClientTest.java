@@ -13,6 +13,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import org.junit.jupiter.api.Test;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
 
@@ -21,7 +22,7 @@ class OpenAiLlmClientTest {
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Test
-    void callsResponsesApiAndReturnsOutputText() throws Exception {
+    void callsChatCompletionsApiAndReturnsMessageContent() throws Exception {
         HttpServer server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
         AtomicReference<String> authorization = new AtomicReference<>();
         AtomicReference<String> requestBody = new AtomicReference<>();
@@ -30,6 +31,7 @@ class OpenAiLlmClientTest {
             requestBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
             String response = """
                     {
+                      "choices": [{"message": {"content": "chat-result"}}],
                       "output_text": "{\\"rules\\":[{\\"method_id\\":1,\\"description\\":\\"Input phai hop le.\\",\\"category\\":\\"VALIDATION\\"}]}"
                     }
                     """;
@@ -48,13 +50,19 @@ class OpenAiLlmClientTest {
                     0.3,
                     512,
                     Duration.ofSeconds(5),
-                    URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/v1/responses"));
+                    URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/v1/chat/completions"));
 
             String output = client.complete("Prompt text");
 
-            assertThat(output).contains("\"rules\"");
+            assertThat(output).isEqualTo("chat-result");
             assertThat(authorization.get()).isEqualTo("Bearer test-key");
-            assertThat(requestBody.get()).contains("\"model\":\"gpt-4o-mini\"", "\"input\":\"Prompt text\"");
+            JsonNode body = objectMapper.readTree(requestBody.get());
+            assertThat(body.path("model").asText()).isEqualTo("gpt-4o-mini");
+            assertThat(body.path("messages").path(0).path("role").asText()).isEqualTo("user");
+            assertThat(body.path("messages").path(0).path("content").asText()).isEqualTo("Prompt text");
+            assertThat(body.path("max_tokens").asInt()).isEqualTo(512);
+            assertThat(body.has("input")).isFalse();
+            assertThat(body.has("max_output_tokens")).isFalse();
         } finally {
             server.stop(0);
         }
@@ -70,7 +78,7 @@ class OpenAiLlmClientTest {
                 0.3,
                 512,
                 Duration.ofSeconds(5),
-                URI.create("http://127.0.0.1:1/v1/responses"));
+                URI.create("http://127.0.0.1:1/v1/chat/completions"));
 
         assertThatThrownBy(() -> client.complete("Prompt text"))
                 .isInstanceOf(LlmResponseException.class)

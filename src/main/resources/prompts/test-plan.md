@@ -10,6 +10,8 @@ Rules:
 - A plan may cover one or multiple Business Rules when they belong to the same methodId.
 - Copy method_id exactly from Context -> approvedBusinessRules[] -> methodId.
 - The union of covered_rule_ids for a methodId must contain every Business Rule id for that methodId in this batch.
+- Before returning JSON, build a checklist of every approved Business Rule id in this batch and verify that the union of covered_rule_ids contains every checklist id exactly once or more.
+- If a previous response is marked invalid, regenerate the full plans array and fix every missing rule id named in the correction; do not stop after adding only one missing plan.
 - approvedBusinessRules[].sourceBranchId identifies one control-flow decision such as `IF-1`, `SWITCH-1`, or `FOR-1`; group plans by that business decision. Concrete outcomes are covered later by Test Cases.
 - rule_id is the anchor Business Rule id: use the smallest id in covered_rule_ids.
 - Do not create one plan per Business Rule when one scenario can cover several rules.

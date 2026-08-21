@@ -36,6 +36,30 @@ class LlmTokenUsageTest {
     }
 
     @Test
+    void readsChatCompletionsUsageDetails() throws Exception {
+        JsonNode response = objectMapper.readTree("""
+                {
+                  "usage": {
+                    "prompt_tokens": 120,
+                    "prompt_tokens_details": {"cached_tokens": 20},
+                    "completion_tokens": 45,
+                    "completion_tokens_details": {"reasoning_tokens": 15},
+                    "total_tokens": 165
+                  }
+                }
+                """);
+
+        LlmTokenUsage usage = LlmTokenUsage.fromOpenAi(response, "prompt", "output");
+
+        assertThat(usage.inputTokens()).isEqualTo(120);
+        assertThat(usage.cachedInputTokens()).isEqualTo(20);
+        assertThat(usage.outputTokens()).isEqualTo(45);
+        assertThat(usage.reasoningTokens()).isEqualTo(15);
+        assertThat(usage.totalTokens()).isEqualTo(165);
+        assertThat(usage.source()).isEqualTo(LlmTokenUsage.UsageSource.PROVIDER);
+    }
+
+    @Test
     void readsGoogleUsageMetadata() throws Exception {
         JsonNode response = objectMapper.readTree("""
                 {

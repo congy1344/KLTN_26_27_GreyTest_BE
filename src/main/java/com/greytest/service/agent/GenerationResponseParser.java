@@ -28,7 +28,7 @@ public class GenerationResponseParser {
             throw new LlmResponseException("LLM response rong.");
         }
         try {
-            T parsed = objectMapper.readValue(jsonPayload(response), responseType);
+            T parsed = objectMapper.readValue(normalizeJsonNumericSuffixes(jsonPayload(response)), responseType);
             if (parsed == null) {
                 throw new LlmResponseException("LLM response khong dung schema: payload null");
             }
@@ -52,6 +52,42 @@ public class GenerationResponseParser {
         if (text.startsWith("{")) return text;
         String extracted = firstJsonObject(text);
         return extracted.isBlank() ? text : extracted;
+    }
+
+    /**
+     * Một số model viết số theo cú pháp Java (ví dụ {@code 1001L}) dù đã được
+     * yêu cầu trả JSON. Chỉ bỏ hậu tố số ở ngoài chuỗi để giữ nguyên dữ liệu text.
+     */
+    private String normalizeJsonNumericSuffixes(String text) {
+        StringBuilder normalized = new StringBuilder(text.length());
+        boolean inString = false;
+        boolean escaped = false;
+        for (int index = 0; index < text.length(); index++) {
+            char current = text.charAt(index);
+            if (inString) {
+                normalized.append(current);
+                if (escaped) {
+                    escaped = false;
+                } else if (current == '\\') {
+                    escaped = true;
+                } else if (current == '"') {
+                    inString = false;
+                }
+                continue;
+            }
+            if (current == '"') {
+                inString = true;
+                normalized.append(current);
+                continue;
+            }
+            if ((current == 'L' || current == 'l' || current == 'F' || current == 'f'
+                    || current == 'D' || current == 'd')
+                    && index > 0 && Character.isDigit(text.charAt(index - 1))) {
+                continue;
+            }
+            normalized.append(current);
+        }
+        return normalized.toString();
     }
 
     private String stripCodeFence(String text) {
