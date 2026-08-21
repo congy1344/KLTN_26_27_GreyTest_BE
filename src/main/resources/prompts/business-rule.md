@@ -8,9 +8,14 @@ Rules:
 - Use only method id values from Context -> classes[] -> methods[] -> id.
 - Do not invent method_id. Do not use class id.
 - Do not invent behavior, validation, exceptions, or outcomes.
-- Derive rules only from direct evidence in the method source, signature, and annotations.
-- Do not infer behavior from controllers, repositories, tests, or other services.
+- Derive rules from direct evidence in the method source, signature, annotations, and the relation entries that point to the selected Service.
+- Do not infer behavior from unrelated controllers, repositories, tests, or other services. A relation entry may be used only to explain a call that is already visible in the selected method source.
 - Each rule must describe business intent, not repeat code.
+- If the method directly invokes a collaborator, repository, service, or client (for example statisticsClient.updateStatistics(...)), treat that invocation as an observable side effect and include it when independently testable.
+- Preserve the collaborator method name exactly as shown in source. Do not invent a remote endpoint, retry, transaction, fallback outcome, or persistence guarantee unless the context explicitly proves it.
+- serviceRepositoryRelations and controllerServiceRelations are supporting evidence only; they do not create extra target methods or extra rules by themselves.
+- dependencyCalls is method-scoped evidence. Use its collaborator/callee method and endpoint only when the same invocation is visible in that method source.
+- Do not turn a dependencyCalls item into a standalone rule unless the call is an independently testable observable side effect of the selected method.
 - Use categories: VALIDATION, BUSINESS_LOGIC, SIDE_EFFECT.
 - Context -> classes[0] -> methods contains up to three methods from the same Service class.
 - The method includes a deterministic control-flow checklist extracted from its source: IF, SWITCH, TERNARY, FOR, FOREACH, WHILE, and DO_WHILE.

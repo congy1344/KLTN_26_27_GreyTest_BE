@@ -1,15 +1,24 @@
 package com.greytest.service.agent;
 
+import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+
+import com.github.javaparser.JavaParser;
+import com.github.javaparser.ast.CompilationUnit;
+import com.github.javaparser.ast.body.FieldDeclaration;
+import com.github.javaparser.ast.body.MethodDeclaration;
+import com.github.javaparser.ast.expr.MethodCallExpr;
 
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import com.greytest.dto.AnalysisResultDto;
 import com.greytest.dto.ControllerServiceRelationDto;
+import com.greytest.dto.EndpointDto;
 import com.greytest.dto.CoverageGapDto;
 import com.greytest.dto.ExistingTestDto;
 import com.greytest.dto.JavaClassDto;
@@ -21,6 +30,7 @@ import com.greytest.dto.agent.GenerationContextDtos.BusinessRuleGenerationContex
 import com.greytest.dto.agent.GenerationContextDtos.BusinessRuleReviewContextDto;
 import com.greytest.dto.agent.GenerationContextDtos.ClassContextDto;
 import com.greytest.dto.agent.GenerationContextDtos.CoverageRefinementContextDto;
+import com.greytest.dto.agent.GenerationContextDtos.DependencyCallContextDto;
 import com.greytest.dto.agent.GenerationContextDtos.ExistingTestContextDto;
 import com.greytest.dto.agent.GenerationContextDtos.GeneratedUnitTestContextDto;
 import com.greytest.dto.agent.GenerationContextDtos.MethodContextDto;
@@ -62,6 +72,9 @@ public class GenerationContextBuilder {
     public static final int MAX_UNIT_TEST_CASES = 5;
     public static final int MAX_UNIT_TEST_RETRY_CASES = 2;
     private static final int MAX_UNIT_TEST_REFERENCES = 10;
+    private static final int MAX_GENERATION_RELATIONS = 40;
+    private static final int MAX_GENERATION_DEPENDENCIES = 40;
+    private record CollaboratorCallEvidence(String collaboratorName, String calleeMethodName, int argumentCount) {}
     public static final int MAX_REVIEW_RULES = 10;
 
     private final AnalysisService analysisService;
@@ -137,15 +150,191 @@ public class GenerationContextBuilder {
             throw new IllegalArgumentException(
                     "Business Rule context chi duoc chua method hop le cua dung mot Service.");
         }
+        List<DependencyCallContextDto> dependencyCalls = dependencyCalls(analysis, targetServices, requestedIds);
         return new BusinessRuleGenerationContextDto(
                 project(analysis),
                 summary(analysis.projectId(), analysis),
                 classes(analysis, requestedIds),
-                List.of(),
-                List.of(),
+                relevantServiceRelations(analysis, targetServices, dependencyCalls),
+                relevantControllerServiceRelations(analysis, targetServices, requestedIds),
+                dependencyCalls,
                 List.of());
     }
 
+    private List<ServiceRelationDto> relevantServiceRelations(
+            AnalysisResultDto analysis,
+            List<JavaClassDto> targetServices,
+            List<DependencyCallContextDto> dependencyCalls) {
+        Set<String> targetServiceNames = targetServices.stream()
+                .map(JavaClassDto::qualifiedName)
+                .collect(java.util.stream.Collectors.toSet());
+        Set<String> dependencyTypes = dependencyCalls.stream()
+                .flatMap(call -> java.util.stream.Stream.of(call.calleeQualifiedName(), call.collaboratorType()))
+                .filter(java.util.Objects::nonNull)
+                .map(this::simpleName)
+                .collect(java.util.stream.Collectors.toSet());
+        return serviceRelations(analysis).stream()
+                .filter(relation -> targetServiceNames.contains(relation.serviceQualifiedName()))
+                .filter(relation -> dependencyTypes.contains(simpleName(relation.repositoryQualifiedName())))
+                .sorted(Comparator.comparing(ServiceRelationDto::serviceQualifiedName,
+                                Comparator.nullsLast(String::compareTo))
+                        .thenComparing(ServiceRelationDto::repositoryQualifiedName,
+                                Comparator.nullsLast(String::compareTo))
+                        .thenComparing(ServiceRelationDto::id, Comparator.nullsLast(Long::compareTo)))
+                .limit(MAX_GENERATION_RELATIONS)
+                .toList();
+    }
+
+    private List<ControllerServiceRelationDto> relevantControllerServiceRelations(
+            AnalysisResultDto analysis,
+            List<JavaClassDto> targetServices,
+            Set<Long> targetMethodIds) {
+        Set<String> targetServiceNames = targetServices.stream()
+                .map(JavaClassDto::qualifiedName)
+                .collect(java.util.stream.Collectors.toSet());
+        Map<String, Long> methodNameCounts = targetServices.stream()
+                .flatMap(javaClass -> javaClass.methods().stream())
+                .collect(java.util.stream.Collectors.groupingBy(
+                        JavaMethodDto::methodName, java.util.stream.Collectors.counting()));
+        Set<String> targetMethodNames = targetServices.stream()
+                .flatMap(javaClass -> javaClass.methods().stream())
+                .filter(method -> targetMethodIds.contains(method.id()))
+                .filter(method -> methodNameCounts.getOrDefault(method.methodName(), 0L) == 1L)
+                .map(JavaMethodDto::methodName)
+                .collect(java.util.stream.Collectors.toSet());
+        return controllerServiceRelations(analysis).stream()
+                .filter(relation -> targetServiceNames.contains(relation.serviceQualifiedName()))
+                .filter(relation -> targetMethodNames.contains(relation.serviceMethodName()))
+                .sorted(Comparator.comparing(ControllerServiceRelationDto::controllerQualifiedName,
+                                Comparator.nullsLast(String::compareTo))
+                        .thenComparing(ControllerServiceRelationDto::controllerMethodName,
+                                Comparator.nullsLast(String::compareTo))
+                        .thenComparing(ControllerServiceRelationDto::serviceQualifiedName,
+                                Comparator.nullsLast(String::compareTo))
+                        .thenComparing(ControllerServiceRelationDto::serviceMethodName,
+                                Comparator.nullsLast(String::compareTo))
+                        .thenComparing(ControllerServiceRelationDto::id, Comparator.nullsLast(Long::compareTo)))
+                .limit(MAX_GENERATION_RELATIONS)
+                .toList();
+    }
+
+    private List<DependencyCallContextDto> dependencyCalls(
+            AnalysisResultDto analysis,
+            List<JavaClassDto> targetServices,
+            Set<Long> targetMethodIds) {
+        Map<String, List<JavaClassDto>> classesBySimpleName = new LinkedHashMap<>();
+        analysis.classes().stream()
+                .filter(javaClass -> javaClass.className() != null)
+                .forEach(javaClass -> classesBySimpleName
+                        .computeIfAbsent(javaClass.className(), ignored -> new ArrayList<>())
+                        .add(javaClass));
+
+        List<DependencyCallContextDto> result = new ArrayList<>();
+        for (JavaClassDto caller : targetServices) {
+            Map<String, String> fieldTypes = fieldTypes(caller.sourceCode());
+            for (JavaMethodDto method : caller.methods()) {
+                if (!targetMethodIds.contains(method.id())) continue;
+                Set<String> seen = new java.util.HashSet<>();
+                for (CollaboratorCallEvidence call : collaboratorCalls(method.sourceCode())) {
+                    String collaboratorName = call.collaboratorName();
+                    String calleeMethodName = call.calleeMethodName();
+                    String collaboratorType = fieldTypes.get(collaboratorName);
+                    if (collaboratorType == null) continue;
+                    String key = collaboratorName + ":" + calleeMethodName + ":" + call.argumentCount();
+                    if (!seen.add(key)) continue;
+
+                    List<JavaClassDto> candidates = classesBySimpleName.getOrDefault(
+                            simpleName(collaboratorType), List.of());
+                    JavaClassDto callee = candidates.size() == 1 ? candidates.get(0) : null;
+                    List<JavaMethodDto> calleeMethods = callee == null ? List.of()
+                            : callee.methods().stream()
+                                    .filter(candidate -> calleeMethodName.equals(candidate.methodName()))
+                                    .filter(candidate -> candidate.parameters().size() == call.argumentCount())
+                                    .toList();
+                    JavaMethodDto calleeMethod = calleeMethods.size() == 1 ? calleeMethods.get(0) : null;
+                    EndpointDto endpoint = calleeMethod == null || calleeMethod.endpoints().size() != 1
+                            ? null
+                            : calleeMethod.endpoints().get(0);
+                    result.add(new DependencyCallContextDto(
+                            method.id(),
+                            caller.qualifiedName(),
+                            collaboratorName,
+                            collaboratorType,
+                            callee == null ? null : callee.className(),
+                            callee == null ? null : callee.qualifiedName(),
+                            calleeMethod == null ? calleeMethodName : calleeMethod.methodName(),
+                            endpoint == null ? null : endpoint.httpMethod(),
+                            endpoint == null ? null : endpoint.path()));
+                    if (result.size() >= MAX_GENERATION_DEPENDENCIES) break;
+                }
+                if (result.size() >= MAX_GENERATION_DEPENDENCIES) break;
+            }
+            if (result.size() >= MAX_GENERATION_DEPENDENCIES) break;
+        }
+        return result.stream()
+                .sorted(Comparator.comparing(DependencyCallContextDto::callerMethodId,
+                                Comparator.nullsLast(Long::compareTo))
+                        .thenComparing(DependencyCallContextDto::collaboratorName)
+                        .thenComparing(DependencyCallContextDto::calleeMethodName,
+                                Comparator.nullsLast(String::compareTo)))
+                .limit(MAX_GENERATION_DEPENDENCIES)
+                .toList();
+    }
+
+    private List<CollaboratorCallEvidence> collaboratorCalls(String sourceCode) {
+        if (sourceCode == null || sourceCode.isBlank()) return List.of();
+        try {
+            var parsed = new JavaParser().parseMethodDeclaration(sourceCode);
+            MethodDeclaration method = parsed.getResult().orElse(null);
+            if (!parsed.isSuccessful() || method == null) return List.of();
+            return method.findAll(MethodCallExpr.class).stream()
+                    .filter(call -> collaboratorName(call) != null)
+                    .map(call -> new CollaboratorCallEvidence(
+                            collaboratorName(call),
+                            call.getNameAsString(),
+                            call.getArguments().size()))
+                    .toList();
+        } catch (RuntimeException ignored) {
+            return List.of();
+        }
+    }
+    private String collaboratorName(MethodCallExpr call) {
+        return call.getScope()
+                .map(scope -> {
+                    if (scope.isNameExpr()) return scope.asNameExpr().getNameAsString();
+                    if (scope.isFieldAccessExpr() && scope.asFieldAccessExpr().getScope().isThisExpr()) {
+                        return scope.asFieldAccessExpr().getNameAsString();
+                    }
+                    return null;
+                })
+                .orElse(null);
+    }
+
+    private Map<String, String> fieldTypes(String sourceCode) {
+        if (sourceCode == null || sourceCode.isBlank()) return Map.of();
+        try {
+            var parsed = new JavaParser().parse(sourceCode);
+            CompilationUnit unit = parsed.getResult().orElse(null);
+            if (!parsed.isSuccessful() || unit == null) return Map.of();
+            Map<String, String> result = new LinkedHashMap<>();
+            for (FieldDeclaration field : unit.findAll(FieldDeclaration.class)) {
+                String type = field.getElementType().asString();
+                field.getVariables().forEach(variable -> result.put(variable.getNameAsString(), type));
+            }
+            return result;
+        } catch (RuntimeException ignored) {
+            return Map.of();
+        }
+    }
+
+    private String simpleName(String typeName) {
+        if (typeName == null || typeName.isBlank()) return "";
+        String raw = typeName;
+        int genericStart = raw.indexOf('<');
+        if (genericStart >= 0) raw = raw.substring(0, genericStart);
+        int lastDot = raw.lastIndexOf('.');
+        return lastDot >= 0 ? raw.substring(lastDot + 1) : raw;
+    }
     /** Context cho AI review Business Rule user da nhap. */
     @Transactional(readOnly = true)
     public BusinessRuleReviewContextDto buildBusinessRuleReviewContext(Long projectId) {

@@ -78,14 +78,66 @@ class GenerationContextBuilderTest {
         assertThat(first.length()).isLessThan(10_000);
         assertThat(context.analysis().totalClasses()).isEqualTo(2);
         assertThat(context.existingTests()).isEmpty();
-        assertThat(context.serviceRepositoryRelations()).isEmpty();
+        assertThat(context.serviceRepositoryRelations()).extracting("serviceQualifiedName")
+                .containsExactly("demo.UserService");
         assertThat(context.controllerServiceRelations()).isEmpty();
+        assertThat(context.dependencyCalls()).singleElement().satisfies(call -> {
+            assertThat(call.collaboratorName()).isEqualTo("repository");
+            assertThat(call.collaboratorType()).isEqualTo("UserRepository");
+            assertThat(call.calleeMethodName()).isEqualTo("save");
+        });
         assertThat(context.classes()).extracting("qualifiedName").containsExactly("demo.UserService");
         assertThat(context.classes().get(0).methods()).extracting("methodName").containsExactly("updateUser");
     }
 
     @Test
     void sendsUpToThreeBusinessRuleMethodsPerRequest() {
+
+    @Test
+    void resolvesClientCallAndEndpointForSelectedMethod() {
+        mockCommonInputs();
+        AnalysisResultDto base = analysis();
+        JavaMethodDto updateMethod = new JavaMethodDto(
+                12L, "updateUser", "User", List.of(), List.of(), "PUBLIC",
+                "void updateUser() { this.statisticsClient.updateStatistics(); }",
+                14, 16, List.of(), List.of());
+        JavaClassDto service = new JavaClassDto(
+                10L, "demo", "UserService", "demo.UserService", "SERVICE",
+                "src/main/java/demo/UserService.java",
+                "class UserService { private StatisticsServiceClient statisticsClient; }",
+                List.of(), List.of(updateMethod));
+        JavaMethodDto clientMethod = new JavaMethodDto(
+                80L, "updateStatistics", "void", List.of(), List.of(), "PUBLIC",
+                "void updateStatistics() {}",
+                4, 5, List.of(),
+                List.of(new EndpointDto(81L, "PUT", "/statistics/{accountName}", null, null, "updateStatistics")));
+        JavaClassDto client = new JavaClassDto(
+                80L, "demo.client", "StatisticsServiceClient",
+                "demo.client.StatisticsServiceClient", "OTHER",
+                "src/main/java/demo/client/StatisticsServiceClient.java",
+                "interface StatisticsServiceClient { void updateStatistics(); }",
+                List.of(), List.of(clientMethod));
+        AnalysisResultDto enriched = new AnalysisResultDto(
+                base.projectId(), base.projectName(), base.status(),
+                base.totalClasses() + 1, base.totalMethods() + 1, base.totalEndpoints() + 1,
+                base.totalRelations(), base.totalControllerServiceRelations(),
+                base.existingTestFiles(), base.totalProductionFiles(), base.parsedProductionFiles(),
+                base.failedParseFiles(), base.failedParseFilePaths(),
+                List.of(base.classes().get(0), service, client),
+                base.relations(), base.controllerServiceRelations());
+        when(analysisService.getAnalysisResult(1L)).thenReturn(enriched);
+
+        BusinessRuleGenerationContextDto context = builder.buildBusinessRuleGenerationContext(1L);
+
+        assertThat(context.dependencyCalls()).singleElement().satisfies(call -> {
+            assertThat(call.calleeQualifiedName()).isEqualTo("demo.client.StatisticsServiceClient");
+            assertThat(call.calleeMethodName()).isEqualTo("updateStatistics");
+            assertThat(call.httpMethod()).isEqualTo("PUT");
+            assertThat(call.endpointPath()).isEqualTo("/statistics/{accountName}");
+        });
+    }
+    @Test
+    void sendsOneBusinessRuleMethodPerRequest() {
         when(analysisService.getAnalysisResult(1L)).thenReturn(analysisWithServiceMethods(21));
         when(manifestService.exportManifest(1L)).thenReturn(manifest());
         when(existingTestService.list(1L)).thenReturn(List.of());
@@ -323,7 +375,7 @@ class GenerationContextBuilderTest {
                 "demo.UserService",
                 "SERVICE",
                 "src/main/java/demo/UserService.java",
-                null,
+                "class UserService { private UserRepository repository; }",
                 List.of(),
                 List.of(serviceMethod, new JavaMethodDto(
                         12L,
@@ -332,7 +384,7 @@ class GenerationContextBuilderTest {
                         List.of(),
                         List.of(),
                         "PUBLIC",
-                        "User updateUser() { return null; }",
+                        "User updateUser() { String note = \"repository.fake(\"; /* repository.bad( */ return repository.save(new User()); }",
                         14,
                         16,
                         List.of(),

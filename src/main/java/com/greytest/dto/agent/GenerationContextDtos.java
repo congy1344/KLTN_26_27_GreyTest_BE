@@ -127,12 +127,25 @@ public final class GenerationContextDtos {
             String sourceCode) {
     }
 
+    public record DependencyCallContextDto(
+            Long callerMethodId,
+            String callerClassQualifiedName,
+            String collaboratorName,
+            String collaboratorType,
+            String calleeClassName,
+            String calleeQualifiedName,
+            String calleeMethodName,
+            String httpMethod,
+            String endpointPath) {
+    }
+
     public record BusinessRuleGenerationContextDto(
             ProjectContextDto project,
             AnalysisSummaryDto analysis,
             List<ClassContextDto> classes,
             List<ServiceRelationDto> serviceRepositoryRelations,
             List<ControllerServiceRelationDto> controllerServiceRelations,
+            List<DependencyCallContextDto> dependencyCalls,
             List<ExistingTestContextDto> existingTests) {
     }
 
