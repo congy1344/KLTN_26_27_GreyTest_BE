@@ -17,6 +17,7 @@ import com.greytest.service.CoverageRefinementService;
 import com.greytest.service.CoverageService;
 import com.greytest.service.GenerationJobService;
 import com.greytest.service.ProjectService;
+import com.greytest.entity.AuthUser;
 
 class CoverageControllerTest {
 
@@ -24,13 +25,21 @@ class CoverageControllerTest {
     void rejectsCoverageMutationsWhileAnAiJobOwnsTheProject() {
         CoverageService coverage = mock(CoverageService.class);
         GenerationJobService jobs = mock(GenerationJobService.class);
+        AuthService auth = mock(AuthService.class);
+        AuthUser actor = new AuthUser();
+        actor.setId(10L);
+        when(auth.currentUser("Bearer token")).thenReturn(actor);
         CoverageController controller = new CoverageController(
                 coverage,
-                mock(AuthService.class),
+                auth,
                 mock(ProjectService.class),
                 mock(CoverageRefinementService.class),
                 jobs);
         when(jobs.executeMutation(eq(1L), any(Supplier.class)))
+                .thenThrow(new GenerationInProgressException("AI đang chạy."));
+        when(jobs.executeAiMutation(
+                eq(1L), eq(10L), eq(com.greytest.entity.enums.ActivityAction.COVERAGE_REFINEMENT),
+                any(Supplier.class)))
                 .thenThrow(new GenerationInProgressException("AI đang chạy."));
 
         var jacoco = new MockMultipartFile("file", "jacoco.xml", "application/xml", new byte[] {1});

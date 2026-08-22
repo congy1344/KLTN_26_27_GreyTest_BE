@@ -3,6 +3,7 @@ package com.greytest.service.agent;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.nio.file.Files;
@@ -15,6 +16,7 @@ import java.util.stream.LongStream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.context.i18n.LocaleContextHolder;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.greytest.dto.AnalysisManifestDto;
@@ -24,6 +26,9 @@ import com.greytest.dto.agent.GenerationContextDtos.ProjectContextDto;
 import com.greytest.dto.agent.GenerationResponseDtos.BusinessRuleResponseDto;
 import com.greytest.dto.agent.GenerationResponseDtos.TestCaseResponseDto;
 import com.greytest.dto.agent.GenerationResponseDtos.UnitTestResponseDto;
+import com.greytest.entity.Project;
+import com.greytest.repository.ProjectRepository;
+import com.greytest.service.UsageQuotaService;
 
 import jakarta.validation.Validation;
 import jakarta.validation.Validator;
@@ -178,7 +183,11 @@ class AgentGatewayTest {
         GenerationContextBuilder contextBuilder = mock(GenerationContextBuilder.class);
         when(contextBuilder.buildBusinessRuleGenerationContext(1L)).thenReturn(context());
         AiContextLogService contextLogService = new AiContextLogService(objectMapper, tempDir.toString());
-        AIAgentService service = new AIAgentService(contextBuilder, promptManager, mockLlmClient, parser, contextLogService);
+        AIAgentService service = new AIAgentService(
+                contextBuilder, promptManager, mockLlmClient, parser, contextLogService,
+                mock(com.greytest.repository.ProjectRepository.class),
+                mock(com.greytest.service.UsageQuotaService.class),
+                new LlmResponseCache("mock", "", "mock-model", 20));
 
         BusinessRuleResponseDto response = service.generateBusinessRules(1L);
 
@@ -197,11 +206,74 @@ class AgentGatewayTest {
     }
 
     @Test
+    void aiAgentReservesQuotaAndActivityForEveryLlmGatewayCall(@TempDir Path tempDir) {
+        GenerationContextBuilder contextBuilder = mock(GenerationContextBuilder.class);
+        when(contextBuilder.buildBusinessRuleGenerationContext(1L)).thenReturn(context());
+        Project project = new Project();
+        project.setId(1L);
+        project.setOwnerUserId(42L);
+        ProjectRepository projects = mock(ProjectRepository.class);
+        when(projects.findById(1L)).thenReturn(java.util.Optional.of(project));
+        UsageQuotaService quota = mock(UsageQuotaService.class);
+        AIAgentService service = new AIAgentService(
+                contextBuilder, promptManager, mockLlmClient, parser,
+                new AiContextLogService(objectMapper, tempDir.toString()), projects, quota,
+                new LlmResponseCache("mock", "", "mock-model", 20));
+
+        service.generateBusinessRules(1L);
+
+        verify(quota).consumeLlmCall(
+                org.mockito.ArgumentMatchers.eq(42L),
+                org.mockito.ArgumentMatchers.eq(1L),
+                org.mockito.ArgumentMatchers.argThat(metadata -> "business-rule".equals(metadata.get("prompt"))));
+    }
+
+    @Test
+    void aiAgentReusesSuccessfulResponseWithoutCallingGatewayOrQuotaAgain(@TempDir Path tempDir) {
+        GenerationContextBuilder contextBuilder = mock(GenerationContextBuilder.class);
+        when(contextBuilder.buildBusinessRuleGenerationContext(1L)).thenReturn(context());
+        Project project = new Project();
+        project.setId(1L);
+        project.setOwnerUserId(42L);
+        ProjectRepository projects = mock(ProjectRepository.class);
+        when(projects.findById(1L)).thenReturn(java.util.Optional.of(project));
+        UsageQuotaService quota = mock(UsageQuotaService.class);
+        LlmClient client = mock(LlmClient.class);
+        when(client.complete(org.mockito.ArgumentMatchers.anyString()))
+                .thenReturn(mockLlmClient.complete("# Prompt: business-rule"));
+        AIAgentService service = new AIAgentService(
+                contextBuilder, promptManager, client, parser,
+                new AiContextLogService(objectMapper, tempDir.toString()), projects, quota,
+                new LlmResponseCache("mock", "", "mock-model", 20));
+
+        TransactionSynchronizationManager.setActualTransactionActive(true);
+        TransactionSynchronizationManager.initSynchronization();
+        try {
+            service.generateBusinessRules(1L);
+            TransactionSynchronizationManager.getSynchronizations()
+                    .forEach(synchronization -> synchronization.afterCommit());
+        } finally {
+            TransactionSynchronizationManager.clearSynchronization();
+            TransactionSynchronizationManager.setActualTransactionActive(false);
+        }
+        service.generateBusinessRules(1L);
+
+        verify(client, org.mockito.Mockito.times(1)).complete(org.mockito.ArgumentMatchers.anyString());
+        verify(quota, org.mockito.Mockito.times(1)).consumeLlmCall(
+                org.mockito.ArgumentMatchers.eq(42L),
+                org.mockito.ArgumentMatchers.eq(1L),
+                org.mockito.ArgumentMatchers.anyMap());
+    }
+
+    @Test
     void aiAgentUsesSystemLanguageWithoutTranslatingTechnicalTokens(@TempDir Path tempDir) {
         GenerationContextBuilder contextBuilder = mock(GenerationContextBuilder.class);
         AIAgentService service = new AIAgentService(
                 contextBuilder, promptManager, mockLlmClient, parser,
-                new AiContextLogService(objectMapper, tempDir.toString()));
+                new AiContextLogService(objectMapper, tempDir.toString()),
+                mock(com.greytest.repository.ProjectRepository.class),
+                mock(com.greytest.service.UsageQuotaService.class),
+                new LlmResponseCache("mock", "", "mock-model", 20));
 
         try {
             LocaleContextHolder.setLocale(Locale.ENGLISH);

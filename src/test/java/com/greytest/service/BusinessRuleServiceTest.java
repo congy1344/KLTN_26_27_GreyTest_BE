@@ -76,24 +76,21 @@ class BusinessRuleServiceTest {
     }
 
     @Test
-    void generateHandlesEachMethodInItsOwnRequest() {
+    void generateGroupsUpToThreeMethodsInOneRequest() {
         mockProject();
         mockProjectSave();
         mockServiceMethods(method(11L, "createUser"), method(12L, "updateUser"));
         when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of());
-        when(aiAgentService.generateBusinessRules(1L, Set.of(11L))).thenReturn(
+        when(aiAgentService.generateBusinessRules(1L, Set.of(11L, 12L))).thenReturn(
                 new BusinessRuleResponseDto(List.of(
-                        new GeneratedBusinessRuleDto(11L, "User moi phai co email hop le.", "VALIDATION"))));
-        when(aiAgentService.generateBusinessRules(1L, Set.of(12L))).thenReturn(
-                new BusinessRuleResponseDto(List.of(
+                        new GeneratedBusinessRuleDto(11L, "User moi phai co email hop le.", "VALIDATION"),
                         new GeneratedBusinessRuleDto(12L, "Chi cap nhat user dang ton tai.", "BUSINESS_LOGIC"))));
         mockBusinessRuleSave();
 
         List<BusinessRuleDto> rules = service().generate(1L);
 
         assertThat(rules).extracting(BusinessRuleDto::methodId).containsExactly(11L, 12L);
-        verify(aiAgentService).generateBusinessRules(1L, Set.of(11L));
-        verify(aiAgentService).generateBusinessRules(1L, Set.of(12L));
+        verify(aiAgentService).generateBusinessRules(1L, Set.of(11L, 12L));
     }
 
     @Test
@@ -121,8 +118,8 @@ class BusinessRuleServiceTest {
                 method(11L, "m11"), method(12L, "m12"), method(13L, "m13"),
                 method(14L, "m14"), method(15L, "m15"), method(16L, "m16"));
         when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of());
-        when(aiAgentService.generateBusinessRules(1L, Set.of(11L))).thenReturn(new BusinessRuleResponseDto(List.of(
-                new GeneratedBusinessRuleDto(12L, "Rule ngoai batch hien tai.", "BUSINESS_LOGIC"))));
+        when(aiAgentService.generateBusinessRules(1L, Set.of(11L, 12L, 13L))).thenReturn(new BusinessRuleResponseDto(List.of(
+                new GeneratedBusinessRuleDto(14L, "Rule ngoai batch hien tai.", "BUSINESS_LOGIC"))));
 
         assertThatThrownBy(() -> service().generate(1L))
                 .isInstanceOf(com.greytest.service.agent.LlmResponseException.class)
@@ -165,8 +162,7 @@ class BusinessRuleServiceTest {
         service().generate(1L);
 
         assertThat(requestedBatches).containsExactly(
-                List.of(11L),
-                List.of(12L),
+                List.of(11L, 12L),
                 List.of(21L));
     }
 

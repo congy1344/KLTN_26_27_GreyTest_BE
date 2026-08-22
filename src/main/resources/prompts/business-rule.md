@@ -12,7 +12,7 @@ Rules:
 - Do not infer behavior from controllers, repositories, tests, or other services.
 - Each rule must describe business intent, not repeat code.
 - Use categories: VALIDATION, BUSINESS_LOGIC, SIDE_EFFECT.
-- Context -> classes[0] -> methods contains exactly one Service method.
+- Context -> classes[0] -> methods contains up to three methods from the same Service class.
 - The method includes a deterministic control-flow checklist extracted from its source: IF, SWITCH, TERNARY, FOR, FOREACH, WHILE, and DO_WHILE.
 - branches[].branchId is an outcome id. Legacy IF outcomes use `IF-n-TRUE/FALSE`; all other outcomes use `DECISION-ID::OUTCOME`, for example `SWITCH-1::CASE-1` or `FOR-1::ENTER`.
 - Derive the decision id by removing the final `-TRUE/-FALSE` from legacy IF ids or everything from `::` onward from modern outcome ids.

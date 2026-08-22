@@ -1,8 +1,10 @@
 package com.greytest.service;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -30,6 +32,7 @@ import com.greytest.service.agent.LlmResponseException;
 /** Sinh va luu unit test JUnit/Mockito tu test case da duyet. */
 @Service
 public class UnitTestService {
+    private static final int MAX_UNIT_TEST_RECOVERY_CALLS = 4;
     private final UnitTestRepository units; private final TestCaseRepository cases; private final TestPlanRepository plans; private final ProjectRepository projects; private final AIAgentService ai; private final UnitTestFileService files; private final TransactionTemplate transactions; private final GenerationProgressService generationProgress;
     public UnitTestService(UnitTestRepository units, TestCaseRepository cases, TestPlanRepository plans, ProjectRepository projects, AIAgentService ai, UnitTestFileService files, PlatformTransactionManager transactionManager, GenerationProgressService generationProgress){this.units=units;this.cases=cases;this.plans=plans;this.projects=projects;this.ai=ai;this.files=files;this.transactions=new TransactionTemplate(transactionManager);this.generationProgress=generationProgress;}
     @Transactional(readOnly=true) public List<UnitTestDto> list(Long projectId){ensure(projectId); return cases.findAll().stream().filter(c->approvedCase(c,projectId)).map(c->units.findByTestCaseId(c.getId())).filter(java.util.Objects::nonNull).map(this::dto).toList();}
@@ -79,11 +82,8 @@ public class UnitTestService {
         for(int start=0;start<target.size();start+=GenerationContextBuilder.MAX_UNIT_TEST_CASES){
             var batch=target.subList(start,Math.min(start+GenerationContextBuilder.MAX_UNIT_TEST_CASES,target.size()));
             Set<Long> ids=batch.stream().map(TestCase::getId).collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
-            var valid=ai.generateUnitTests(projectId,ids).unitTests().stream()
-                    .filter(x->ids.contains(x.caseId())&&valid(x,projectId)).toList();
-            var generatedIds=valid.stream().map(GeneratedUnitTestDto::caseId).collect(java.util.stream.Collectors.toSet());
-            if(valid.isEmpty()||generatedIds.size()!=valid.size()||!generatedIds.equals(ids))
-                throw new LlmResponseException("AI chua sinh du Unit Test cho moi Test Case da approve.");
+            var valid=generateBatchWithRecovery(projectId,ids,batchNumber+1,totalBatches,
+                    new RecoveryBudget(MAX_UNIT_TEST_RECOVERY_CALLS),false);
             generated.addAll(valid);
             batchNumber++;
             generationProgress.advance(projectId, GenerationProgressStage.UNIT_TEST,
@@ -91,6 +91,80 @@ public class UnitTestService {
                             + valid.size() + " Unit Test hợp lệ.");
         }
         return uniqueMethodNames(generated,Set.of());
+    }
+    private List<GeneratedUnitTestDto> generateBatchWithRecovery(
+            Long projectId,Set<Long> requestedIds,int batchNumber,int totalBatches,
+            RecoveryBudget recoveryBudget,boolean recoveryCall){
+        if(recoveryCall&&!recoveryBudget.tryConsume()){
+            throw new LlmResponseException("Không thể sinh Unit Test hợp lệ cho Test Case ID " + requestedIds
+                    + " vì đã hết giới hạn " + MAX_UNIT_TEST_RECOVERY_CALLS
+                    + " lượt phục hồi sau khi tự chia batch.");
+        }
+        var response=ai.generateUnitTests(projectId,requestedIds);
+        Map<Long,List<GeneratedUnitTestDto>> candidates=response.unitTests().stream()
+                .filter(java.util.Objects::nonNull)
+                .filter(test->requestedIds.contains(test.caseId()))
+                .filter(test->valid(test,projectId)&&validJavaSource(test))
+                .collect(java.util.stream.Collectors.groupingBy(
+                        GeneratedUnitTestDto::caseId,LinkedHashMap::new,java.util.stream.Collectors.toList()));
+        Map<Long,GeneratedUnitTestDto> accepted=new LinkedHashMap<>();
+        requestedIds.forEach(id->{
+            List<GeneratedUnitTestDto> matches=candidates.getOrDefault(id,List.of());
+            if(matches.size()==1) accepted.put(id,matches.get(0));
+        });
+        List<Long> unresolved=requestedIds.stream().filter(id->!accepted.containsKey(id)).toList();
+        if(unresolved.isEmpty()) return new ArrayList<>(accepted.values());
+        if(requestedIds.size()==1){
+            if(!recoveryCall){
+                generationProgress.log(projectId,GenerationProgressStage.UNIT_TEST,
+                        "Batch " + batchNumber + "/" + totalBatches + " có Unit Test thiếu hoặc hỏng cho Test Case ID "
+                                + unresolved + ". Hệ thống đang thử lại riêng case này.");
+                return generateBatchWithRecovery(projectId,requestedIds,batchNumber,totalBatches,recoveryBudget,true);
+            }
+            Long caseId=requestedIds.iterator().next();
+            throw new LlmResponseException("Không thể sinh Unit Test hợp lệ cho Test Case ID " + caseId
+                    + " sau khi đã tự chia batch và thử lại.");
+        }
+        generationProgress.log(projectId,GenerationProgressStage.UNIT_TEST,
+                "Batch " + batchNumber + "/" + totalBatches + " thiếu hoặc hỏng Unit Test cho Test Case ID "
+                        + unresolved + ". Hệ thống đang tự chia nhóm và chỉ thử lại các case này.");
+        int middle=Math.max(1,unresolved.size()/2);
+        List<List<Long>> recoveryGroups=unresolved.size()==1
+                ? List.of(unresolved)
+                : List.of(unresolved.subList(0,middle),unresolved.subList(middle,unresolved.size()));
+        for(List<Long> group:recoveryGroups){
+            Set<Long> groupIds=new LinkedHashSet<>(group);
+            generateBatchWithRecovery(projectId,groupIds,batchNumber,totalBatches,recoveryBudget,true)
+                    .forEach(test->accepted.put(test.caseId(),test));
+        }
+        return requestedIds.stream().map(accepted::get).toList();
+    }
+    private boolean validJavaSource(GeneratedUnitTestDto test){
+        if(test.sourceCode()==null||test.sourceCode().isBlank()) return false;
+        try{
+            var configuration=new com.github.javaparser.ParserConfiguration()
+                    .setLanguageLevel(com.github.javaparser.ParserConfiguration.LanguageLevel.JAVA_21);
+            var result=new com.github.javaparser.JavaParser(configuration).parse(test.sourceCode());
+            var unit=result.getResult().filter(ignored->result.isSuccessful()).orElse(null);
+            if(unit==null) return false;
+            return unit.findAll(com.github.javaparser.ast.body.ClassOrInterfaceDeclaration.class).stream()
+                    .filter(type->test.testClassName().equals(type.getNameAsString()))
+                    .flatMap(type->type.getMethodsByName(test.testMethodName()).stream())
+                    .anyMatch(method->method.getAnnotations().stream()
+                            .anyMatch(annotation->annotation.getNameAsString().equals("Test")
+                                    || annotation.getNameAsString().endsWith(".Test")));
+        }catch(RuntimeException exception){
+            return false;
+        }
+    }
+    private static final class RecoveryBudget{
+        private int remainingCalls;
+        private RecoveryBudget(int remainingCalls){this.remainingCalls=remainingCalls;}
+        private boolean tryConsume(){
+            if(remainingCalls<=0) return false;
+            remainingCalls--;
+            return true;
+        }
     }
     private void startProgress(Long projectId,List<TestCase> target,String message){
         generationProgress.start(projectId,GenerationProgressStage.UNIT_TEST,batchCount(target.size())+1,

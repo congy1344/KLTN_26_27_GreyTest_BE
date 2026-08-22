@@ -100,6 +100,12 @@ public class GlobalExceptionHandler {
                 .body(new ErrorResponse("LLM_ERROR", e.getMessage()));
     }
 
+    @ExceptionHandler(UsageQuotaExceededException.class)
+    public ResponseEntity<ErrorResponse> handleUsageQuotaExceeded(UsageQuotaExceededException e) {
+        return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
+                .body(new ErrorResponse("USAGE_QUOTA_EXCEEDED", e.getMessage()));
+    }
+
     @ExceptionHandler(StorageException.class)
     public ResponseEntity<ErrorResponse> handleStorage(StorageException e) {
         log.error("Lỗi lưu trữ file", e);

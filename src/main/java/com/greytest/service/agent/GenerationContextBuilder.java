@@ -53,8 +53,8 @@ public class GenerationContextBuilder {
     private static final String SERVICE_CLASS_TYPE = "SERVICE";
     // ponytail: cap theo method de prompt khong phinh vo han; thay bang token-aware chunking khi can LLM that.
     private static final int MAX_METHOD_SOURCE_CHARS = 4_000;
-    // Mỗi request BR chỉ chứa một method để checklist nhánh và response không bị trộn.
-    public static final int MAX_GENERATION_METHODS = 1;
+    // Gom toi da ba method cung Service de giam so request nhung van giu prompt gon.
+    public static final int MAX_GENERATION_METHODS = 3;
     public static final int MAX_TEST_PLAN_METHODS = 5;
     // ponytail: batch co dinh giu moi request nho; doi sang countTokens neu mot plan don le vuot context.
     public static final int MAX_TEST_CASE_PLANS = 5;

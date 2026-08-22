@@ -35,6 +35,11 @@ public class AuthController {
         return authService.login(request);
     }
 
+    @PostMapping("/admin/login")
+    public LoginResponse adminLogin(@Valid @RequestBody LoginRequest request) {
+        return authService.adminLogin(request);
+    }
+
     @GetMapping("/me")
     public AuthUserDto me(@RequestHeader("Authorization") String authorization) {
         return authService.toDto(authService.currentUser(authorization));

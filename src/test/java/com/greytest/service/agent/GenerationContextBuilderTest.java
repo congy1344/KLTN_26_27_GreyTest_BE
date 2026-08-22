@@ -85,7 +85,7 @@ class GenerationContextBuilderTest {
     }
 
     @Test
-    void sendsOneBusinessRuleMethodPerRequest() {
+    void sendsUpToThreeBusinessRuleMethodsPerRequest() {
         when(analysisService.getAnalysisResult(1L)).thenReturn(analysisWithServiceMethods(21));
         when(manifestService.exportManifest(1L)).thenReturn(manifest());
         when(existingTestService.list(1L)).thenReturn(List.of());
@@ -98,9 +98,9 @@ class GenerationContextBuilderTest {
         BusinessRuleGenerationContextDto second = builder.buildBusinessRuleGenerationContext(1L);
 
         assertThat(first.classes().get(0).methods()).extracting("id")
-                .containsExactly(1L);
+                .containsExactly(1L, 2L, 3L);
         assertThat(second.classes().get(0).methods()).extracting("id")
-                .containsExactly(6L);
+                .containsExactly(6L, 7L, 8L);
     }
 
     @Test

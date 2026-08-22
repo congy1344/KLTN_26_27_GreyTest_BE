@@ -170,7 +170,7 @@ public class GoogleLlmClient implements LlmClient {
             throw new LlmResponseException(
                     "Google Gemini API loi HTTP 429: "
                             + (lastQuotaResponse == null ? "Tat ca API key dang trong thoi gian cho quota." : snippet(lastQuotaResponse)),
-                    true,
+                    false,
                     Math.max(retryAfterMillis, remainingCooldown));
         }
         throw new LlmResponseException("Khong co Google Gemini API key kha dung.");

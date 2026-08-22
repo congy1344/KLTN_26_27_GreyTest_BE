@@ -37,4 +37,12 @@ class GlobalExceptionHandlerTest {
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
         assertThat(response.getBody().code()).isEqualTo("GENERATION_IN_PROGRESS");
     }
+
+    @Test
+    void exceededUsageQuotaReturnsTooManyRequests() {
+        var response = handler.handleUsageQuotaExceeded(new UsageQuotaExceededException("Đã hết quota"));
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.TOO_MANY_REQUESTS);
+        assertThat(response.getBody().code()).isEqualTo("USAGE_QUOTA_EXCEEDED");
+    }
 }

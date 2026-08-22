@@ -6,11 +6,17 @@ import java.util.function.Consumer;
 public final class GenerationJobContext {
 
     private static final ThreadLocal<Consumer<String>> LOG_CONSUMER = new ThreadLocal<>();
+    private static final ThreadLocal<Long> ACTOR_USER_ID = new ThreadLocal<>();
 
     private GenerationJobContext() {}
 
-    public static void bind(Consumer<String> logConsumer) {
+    public static void bind(Long actorUserId, Consumer<String> logConsumer) {
+        ACTOR_USER_ID.set(actorUserId);
         LOG_CONSUMER.set(logConsumer);
+    }
+
+    public static Long actorUserId() {
+        return ACTOR_USER_ID.get();
     }
 
     public static void log(String message) {
@@ -20,5 +26,6 @@ public final class GenerationJobContext {
 
     public static void clear() {
         LOG_CONSUMER.remove();
+        ACTOR_USER_ID.remove();
     }
 }

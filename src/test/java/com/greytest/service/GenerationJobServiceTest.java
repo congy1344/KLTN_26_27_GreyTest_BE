@@ -2,6 +2,8 @@ package com.greytest.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 
 import java.util.ArrayDeque;
 import java.util.Queue;
@@ -13,8 +15,28 @@ import com.greytest.dto.GenerationProgressStage;
 import com.greytest.dto.GenerationProgressStatus;
 import com.greytest.exception.GenerationInProgressException;
 import com.greytest.service.agent.LlmResponseException;
+import com.greytest.repository.ProjectRepository;
+import com.greytest.entity.enums.ActivityAction;
 
 class GenerationJobServiceTest {
+
+    @Test
+    void attributesGenerationAndWorkerContextToAuthenticatedActor() {
+        ManualExecutor executor = new ManualExecutor();
+        UserActivityService activity = mock(UserActivityService.class);
+        GenerationJobService jobs = new GenerationJobService(
+                executor, new GenerationProgressService(), mock(ProjectRepository.class), activity);
+        java.util.concurrent.atomic.AtomicReference<Long> actorInWorker = new java.util.concurrent.atomic.AtomicReference<>();
+
+        jobs.submit(1L, 99L, GenerationProgressStage.TEST_PLAN,
+                () -> actorInWorker.set(GenerationJobContext.actorUserId()));
+        executor.runNext();
+
+        assertThat(actorInWorker.get()).isEqualTo(99L);
+        verify(activity).record(
+                99L, ActivityAction.GENERATE_TEST_PLAN, 1L,
+                java.util.Map.of("stage", "TEST_PLAN"));
+    }
 
     @Test
     void returnsImmediatelyAndRunsQueuedTaskLater() {
@@ -111,6 +133,25 @@ class GenerationJobServiceTest {
         assertThat(snapshot.steps().get(0).errorMessage())
                 .contains("Gemini đang giới hạn")
                 .doesNotContain("raw-json");
+    }
+
+    @Test
+    void keepsActionableUnitTestRecoveryFailureInProgressMessage() {
+        ManualExecutor executor = new ManualExecutor();
+        GenerationProgressService progress = new GenerationProgressService();
+        GenerationJobService jobs = new GenerationJobService(executor, progress);
+        jobs.submit(1L, GenerationProgressStage.UNIT_TEST, () -> {
+            progress.start(1L, GenerationProgressStage.UNIT_TEST, 1, "Dang sinh Unit Test.");
+            throw new LlmResponseException(
+                    "Khong the sinh Unit Test hop le cho Test Case ID 258 sau khi da tu chia batch va thu lai.");
+        });
+
+        executor.runNext();
+
+        var snapshot = progress.get(1L, GenerationProgressStage.UNIT_TEST);
+        assertThat(snapshot.steps().get(0).errorMessage())
+                .contains("Test Case ID 258")
+                .doesNotContain("chua phan hoi on dinh");
     }
 
     private static final class ManualExecutor implements Executor {

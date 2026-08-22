@@ -68,6 +68,7 @@ class TestPlanControllerTest {
         when(authService.currentUser("Bearer token")).thenReturn(user);
         when(generationJobService.submit(
                 org.mockito.ArgumentMatchers.eq(1L),
+                org.mockito.ArgumentMatchers.eq(10L),
                 org.mockito.ArgumentMatchers.eq(GenerationProgressStage.TEST_PLAN),
                 org.mockito.ArgumentMatchers.any(Runnable.class)))
                 .thenReturn(new GenerationJobAcceptedDto(

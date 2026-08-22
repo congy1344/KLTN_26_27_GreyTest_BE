@@ -1,0 +1,15 @@
+package com.greytest.entity.enums;
+
+public enum ActivityAction {
+    GENERATE_BUSINESS_RULE,
+    REVIEW_BUSINESS_RULE,
+    GENERATE_TEST_PLAN,
+    GENERATE_TEST_CASE,
+    GENERATE_UNIT_TEST,
+    COVERAGE_REFINEMENT,
+    LLM_CALL,
+    ADMIN_STATUS_CHANGE,
+    ADMIN_ROLE_CHANGE,
+    ADMIN_QUOTA_CHANGE
+}
+

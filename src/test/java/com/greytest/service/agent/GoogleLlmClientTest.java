@@ -300,7 +300,7 @@ class GoogleLlmClientTest {
 
             assertThatThrownBy(() -> client.complete("Prompt text"))
                     .isInstanceOfSatisfying(LlmResponseException.class, exception -> {
-                        assertThat(exception.isRetryable()).isTrue();
+                        assertThat(exception.isRetryable()).isFalse();
                         assertThat(exception.getRetryAfterMillis()).isGreaterThanOrEqualTo(3_500);
                     });
             assertThat(apiKeys).containsExactly("primary-key", "fallback-key");

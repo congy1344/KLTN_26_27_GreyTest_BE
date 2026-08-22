@@ -36,6 +36,10 @@ greytest:
     path: ${GREYTEST_STORAGE_PATH:./storage}
   auth:
     token-secret: ${GREYTEST_AUTH_TOKEN_SECRET:}
+  usage:
+    default-monthly-llm-quota: ${GREYTEST_DEFAULT_MONTHLY_LLM_QUOTA:100}
+  llm-cache:
+    max-entries: ${GREYTEST_LLM_CACHE_MAX_ENTRIES:500}
   ai-context-log-path: ${GREYTEST_AI_CONTEXT_LOG_PATH:../log}
   ai-context-log-enabled: ${GREYTEST_AI_CONTEXT_LOG_ENABLED:false}
   ai-context-log-console-enabled: ${GREYTEST_AI_CONTEXT_LOG_CONSOLE_ENABLED:false}

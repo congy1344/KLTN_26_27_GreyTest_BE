@@ -17,6 +17,8 @@ import com.greytest.service.CoverageService;
 import com.greytest.service.CoverageRefinementService;
 import com.greytest.service.GenerationJobService;
 import com.greytest.service.ProjectService;
+import com.greytest.entity.AuthUser;
+import com.greytest.entity.enums.ActivityAction;
 
 @RestController
 public class CoverageController {
@@ -56,11 +58,15 @@ public class CoverageController {
     @PostMapping("/api/projects/{projectId}/coverage/refine")
     public CoverageRefinementDto refine(@PathVariable Long projectId,
             @RequestHeader("Authorization") String authorization) {
-        access(projectId, authorization);
-        return jobs.executeMutation(projectId, () -> refinement.start(projectId));
+        AuthUser actor = access(projectId, authorization);
+        return jobs.executeAiMutation(
+                projectId, actor.getId(), ActivityAction.COVERAGE_REFINEMENT,
+                () -> refinement.start(projectId));
     }
 
-    private void access(Long id, String authorization) {
-        projects.requireAccess(id, auth.currentUser(authorization));
+    private AuthUser access(Long id, String authorization) {
+        AuthUser user = auth.currentUser(authorization);
+        projects.requireAccess(id, user);
+        return user;
     }
 }

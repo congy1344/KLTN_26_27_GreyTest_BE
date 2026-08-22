@@ -23,6 +23,7 @@ import com.greytest.service.AuthService;
 import com.greytest.service.GenerationJobService;
 import com.greytest.service.ProjectService;
 import com.greytest.service.TestPlanService;
+import com.greytest.entity.AuthUser;
 
 import jakarta.validation.Valid;
 
@@ -57,9 +58,10 @@ public class TestPlanController {
     public ResponseEntity<GenerationJobAcceptedDto> generate(
             @PathVariable Long projectId,
             @RequestHeader("Authorization") String authorization) {
-        requireAccess(projectId, authorization);
+        AuthUser actor = requireAccess(projectId, authorization);
         return ResponseEntity.accepted().body(generationJobService.submit(
                 projectId,
+                actor.getId(),
                 GenerationProgressStage.TEST_PLAN,
                 () -> testPlanService.generate(projectId)));
     }
@@ -102,7 +104,9 @@ public class TestPlanController {
         generationJobService.executeMutation(projectId, () -> testPlanService.delete(planId));
     }
 
-    private void requireAccess(Long projectId, String authorization) {
-        projectService.requireAccess(projectId, authService.currentUser(authorization));
+    private AuthUser requireAccess(Long projectId, String authorization) {
+        AuthUser user = authService.currentUser(authorization);
+        projectService.requireAccess(projectId, user);
+        return user;
     }
 }

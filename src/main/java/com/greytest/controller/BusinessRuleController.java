@@ -25,6 +25,8 @@ import com.greytest.service.AuthService;
 import com.greytest.service.BusinessRuleService;
 import com.greytest.service.GenerationJobService;
 import com.greytest.service.ProjectService;
+import com.greytest.entity.AuthUser;
+import com.greytest.entity.enums.ActivityAction;
 
 import jakarta.validation.Valid;
 
@@ -69,9 +71,10 @@ public class BusinessRuleController {
     public ResponseEntity<GenerationJobAcceptedDto> generate(
             @PathVariable Long projectId,
             @RequestHeader("Authorization") String authorization) {
-        requireAccess(projectId, authorization);
+        AuthUser actor = requireAccess(projectId, authorization);
         return ResponseEntity.accepted().body(generationJobService.submit(
                 projectId,
+                actor.getId(),
                 GenerationProgressStage.BUSINESS_RULE,
                 () -> businessRuleService.generate(projectId)));
     }
@@ -80,8 +83,10 @@ public class BusinessRuleController {
     public BusinessRuleReviewDto review(
             @PathVariable Long projectId,
             @RequestHeader("Authorization") String authorization) {
-        requireAccess(projectId, authorization);
-        return generationJobService.executeMutation(projectId, () -> businessRuleService.review(projectId));
+        AuthUser actor = requireAccess(projectId, authorization);
+        return generationJobService.executeAiMutation(
+                projectId, actor.getId(), ActivityAction.REVIEW_BUSINESS_RULE,
+                () -> businessRuleService.review(projectId));
     }
 
     @PostMapping("/api/projects/{projectId}/business-rules/approve")
@@ -121,7 +126,9 @@ public class BusinessRuleController {
         generationJobService.executeMutation(projectId, () -> businessRuleService.delete(ruleId));
     }
 
-    private void requireAccess(Long projectId, String authorization) {
-        projectService.requireAccess(projectId, authService.currentUser(authorization));
+    private AuthUser requireAccess(Long projectId, String authorization) {
+        AuthUser user = authService.currentUser(authorization);
+        projectService.requireAccess(projectId, user);
+        return user;
     }
 }

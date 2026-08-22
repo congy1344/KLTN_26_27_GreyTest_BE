@@ -24,6 +24,7 @@ import com.greytest.entity.enums.UserRole;
 import com.greytest.exception.AuthException;
 import com.greytest.repository.AuthUserRepository;
 
+/** Quản lý đăng ký, đăng nhập và xác thực phiên làm việc của GreyTest. */
 @Service
 public class AuthService {
 
@@ -63,11 +64,21 @@ public class AuthService {
 
     @Transactional(readOnly = true)
     public LoginResponse login(LoginRequest request) {
-        AuthUser user = userRepository.findByEmailIgnoreCase(normalizeEmail(request.email()))
-                .orElseThrow(() -> unauthorized("Email hoac mat khau khong dung"));
-        if (!Boolean.TRUE.equals(user.getEnabled())
-                || !passwordEncoder.matches(request.password(), user.getPasswordHash())) {
-            throw unauthorized("Email hoac mat khau khong dung");
+        AuthUser user = authenticate(request);
+        if (user.getRole() == UserRole.ADMIN) {
+            throw new AuthException("ADMIN_LOGIN_REQUIRED",
+                    "Tai khoan quan tri phai dang nhap tai cong dang nhap Admin",
+                    HttpStatus.FORBIDDEN);
+        }
+        return new LoginResponse(issueToken(user), toDto(user));
+    }
+
+    @Transactional(readOnly = true)
+    public LoginResponse adminLogin(LoginRequest request) {
+        AuthUser user = authenticate(request);
+        // Luồng quản trị chỉ cấp phiên sau khi xác nhận đúng role ADMIN.
+        if (user.getRole() != UserRole.ADMIN) {
+            throw new AuthException("ADMIN_ACCESS_DENIED", "Tai khoan khong co quyen quan tri", HttpStatus.FORBIDDEN);
         }
         return new LoginResponse(issueToken(user), toDto(user));
     }
@@ -133,6 +144,16 @@ public class AuthService {
 
     private AuthException unauthorized(String message) {
         return new AuthException("AUTH_ERROR", message, HttpStatus.UNAUTHORIZED);
+    }
+
+    private AuthUser authenticate(LoginRequest request) {
+        AuthUser user = userRepository.findByEmailIgnoreCase(normalizeEmail(request.email()))
+                .orElseThrow(() -> unauthorized("Email hoac mat khau khong dung"));
+        if (!Boolean.TRUE.equals(user.getEnabled())
+                || !passwordEncoder.matches(request.password(), user.getPasswordHash())) {
+            throw unauthorized("Email hoac mat khau khong dung");
+        }
+        return user;
     }
 
     private boolean constantTimeEquals(String expected, String actual) {
