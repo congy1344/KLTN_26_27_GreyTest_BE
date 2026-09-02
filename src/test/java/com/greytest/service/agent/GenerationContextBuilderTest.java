@@ -92,7 +92,22 @@ class GenerationContextBuilderTest {
 
     @Test
     void sendsUpToThreeBusinessRuleMethodsPerRequest() {
+        when(analysisService.getAnalysisResult(1L)).thenReturn(analysisWithServiceMethods(21));
+        when(manifestService.exportManifest(1L)).thenReturn(manifest());
+        when(existingTestService.list(1L)).thenReturn(List.of());
+        List<BusinessRule> coveredRules = LongStream.rangeClosed(1, 5)
+                .mapToObj(id -> ruleEntity(id, id, ReviewStatus.APPROVED))
+                .toList();
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(), coveredRules);
 
+        BusinessRuleGenerationContextDto first = builder.buildBusinessRuleGenerationContext(1L);
+        BusinessRuleGenerationContextDto second = builder.buildBusinessRuleGenerationContext(1L);
+
+        assertThat(first.classes().get(0).methods()).extracting("id")
+                .containsExactly(1L, 2L, 3L);
+        assertThat(second.classes().get(0).methods()).extracting("id")
+                .containsExactly(6L, 7L, 8L);
+    }
     @Test
     void resolvesClientCallAndEndpointForSelectedMethod() {
         mockCommonInputs();
@@ -226,25 +241,6 @@ class GenerationContextBuilderTest {
             assertThat(call.calleeQualifiedName()).isNull();
             assertThat(call.calleeServiceSourceCode()).isNull();
         });
-    }
-
-    @Test
-    void sendsOneBusinessRuleMethodPerRequest() {
-        when(analysisService.getAnalysisResult(1L)).thenReturn(analysisWithServiceMethods(21));
-        when(manifestService.exportManifest(1L)).thenReturn(manifest());
-        when(existingTestService.list(1L)).thenReturn(List.of());
-        List<BusinessRule> coveredRules = LongStream.rangeClosed(1, 5)
-                .mapToObj(id -> ruleEntity(id, id, ReviewStatus.APPROVED))
-                .toList();
-        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(), coveredRules);
-
-        BusinessRuleGenerationContextDto first = builder.buildBusinessRuleGenerationContext(1L);
-        BusinessRuleGenerationContextDto second = builder.buildBusinessRuleGenerationContext(1L);
-
-        assertThat(first.classes().get(0).methods()).extracting("id")
-                .containsExactly(1L, 2L, 3L);
-        assertThat(second.classes().get(0).methods()).extracting("id")
-                .containsExactly(6L, 7L, 8L);
     }
 
     @Test

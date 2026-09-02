@@ -488,6 +488,16 @@ class UnitTestServiceTest {
         verify(units, never()).saveAll(org.mockito.ArgumentMatchers.anyList());
     }
 
+    private static TestCase approvedCase(Long id, Long planId) {
+        TestCase testCase = new TestCase();
+        testCase.setId(id);
+        testCase.setTestPlanId(planId);
+        testCase.setCaseCode("TC-" + id);
+        testCase.setTraceSource("BR-1 -> TP-1");
+        testCase.setStatus(ReviewStatus.APPROVED);
+        return testCase;
+    }
+
     private GeneratedUnitTestDto generated(Long caseId, String sourceCode) {
         return new GeneratedUnitTestDto(caseId, "ServiceTest", "case" + caseId,
                 "demo", "NEW_TEST", sourceCode);

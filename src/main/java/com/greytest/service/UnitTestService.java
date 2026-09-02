@@ -158,6 +158,11 @@ public class UnitTestService {
         }
         return requestedIds.stream().map(accepted::get).toList();
     }
+    private static com.github.javaparser.JavaParser javaParser() {
+        return new com.github.javaparser.JavaParser(new com.github.javaparser.ParserConfiguration()
+                .setLanguageLevel(com.github.javaparser.ParserConfiguration.LanguageLevel.JAVA_21));
+    }
+
     private boolean validJavaSource(GeneratedUnitTestDto test){
         if(test.sourceCode()==null||test.sourceCode().isBlank()) return false;
         try{
@@ -215,7 +220,7 @@ public class UnitTestService {
     private String renameMethod(String source,String testClassName,String oldName,String newName){
         if(oldName.equals(newName)) return source;
         try{
-            var result=new com.github.javaparser.JavaParser().parse(source);
+            var result=javaParser().parse(source);
             var unit=result.getResult().filter(ignored->result.isSuccessful()).orElse(null);
             if(unit!=null){
                 var targetType=unit.getTypes().stream()
@@ -270,7 +275,7 @@ public class UnitTestService {
     private GeneratedUnitTestDto normalizeCandidate(GeneratedUnitTestDto candidate){
         if(candidate==null||candidate.sourceCode()==null||candidate.sourceCode().isBlank())return candidate;
         try{
-            var result=new com.github.javaparser.JavaParser().parse(candidate.sourceCode());
+            var result=javaParser().parse(candidate.sourceCode());
             var unit=result.getResult().filter(ignored->result.isSuccessful()).orElse(null);
             if(unit==null)return candidate;
             var targetType=unit.getTypes().stream()
@@ -295,7 +300,7 @@ public class UnitTestService {
      */
     private boolean hasInitializedReferencedFixtures(GeneratedUnitTestDto test) {
         try {
-            var parsed = new com.github.javaparser.JavaParser().parse(test.sourceCode());
+            var parsed = javaParser().parse(test.sourceCode());
             var unit = parsed.getResult().filter(ignored -> parsed.isSuccessful()).orElse(null);
             if (unit == null) return false;
             var targetType = unit.getTypes().stream()
@@ -549,7 +554,7 @@ public class UnitTestService {
     }
     private boolean containsExactlyOneRequestedTest(GeneratedUnitTestDto test){
         try{
-            var result=new com.github.javaparser.JavaParser().parse(test.sourceCode());
+            var result=javaParser().parse(test.sourceCode());
             var unit=result.getResult().filter(ignored->result.isSuccessful()).orElse(null);
             if(unit==null)return false;
             var packageName=unit.getPackageDeclaration()

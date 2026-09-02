@@ -128,22 +128,25 @@ class BusinessRuleServiceTest {
 
         assertThat(rules).extracting(BusinessRuleDto::methodId).containsExactly(11L, 12L);
         verify(aiAgentService).generateBusinessRules(1L, Set.of(11L, 12L));
-    }
-    @Test
+    }    @Test
     void generateKeepsEarlierCommittedBatchWhenLaterBatchFails() {
         mockProject();
-        mockServiceMethods(method(11L, "firstMethod"), method(12L, "secondMethod"));
+        mockServiceMethods(
+                method(11L, "firstMethod"), method(12L, "secondMethod"),
+                method(13L, "thirdMethod"), method(14L, "fourthMethod"));
         when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of());
-        when(aiAgentService.generateBusinessRules(1L, Set.of(11L))).thenReturn(
+        when(aiAgentService.generateBusinessRules(1L, Set.of(11L, 12L, 13L))).thenReturn(
                 new BusinessRuleResponseDto(List.of(
-                        new GeneratedBusinessRuleDto(11L, "Rule cho method dau.", "BUSINESS_LOGIC"))));
-        when(aiAgentService.generateBusinessRules(1L, Set.of(12L))).thenReturn(
+                        new GeneratedBusinessRuleDto(11L, "Rule cho method dau.", "BUSINESS_LOGIC"),
+                        new GeneratedBusinessRuleDto(12L, "Rule cho method hai.", "BUSINESS_LOGIC"),
+                        new GeneratedBusinessRuleDto(13L, "Rule cho method ba.", "BUSINESS_LOGIC"))));
+        when(aiAgentService.generateBusinessRules(1L, Set.of(14L))).thenReturn(
                 new BusinessRuleResponseDto(List.of(
-                        new GeneratedBusinessRuleDto(12L, "Rule cho method sau.", "BUSINESS_LOGIC"))));
+                        new GeneratedBusinessRuleDto(14L, "Rule cho method sau.", "BUSINESS_LOGIC"))));
         AtomicLong saveCount = new AtomicLong();
         when(businessRuleRepository.save(any(BusinessRule.class))).thenAnswer(invocation -> {
             BusinessRule rule = invocation.getArgument(0);
-            if (saveCount.incrementAndGet() == 2) throw new IllegalStateException("database unavailable");
+            if (saveCount.incrementAndGet() == 4) throw new IllegalStateException("database unavailable");
             rule.setId(100L);
             return rule;
         });
@@ -154,19 +157,16 @@ class BusinessRuleServiceTest {
         verify(generationProgressService).fail(
                 org.mockito.ArgumentMatchers.eq(1L),
                 org.mockito.ArgumentMatchers.eq(com.greytest.dto.GenerationProgressStage.BUSINESS_RULE),
-                org.mockito.ArgumentMatchers.contains("Đã lưu 1 Business Rule từ các batch trước."));
+                org.mockito.ArgumentMatchers.contains("Đã lưu 3 Business Rule từ các batch trước."));
         verify(transactionManager).commit(transactionStatus);
         verify(transactionManager).rollback(transactionStatus);
-    }
-
-    @Test
+    }    @Test
     void retrySkipsPersistedBatchesAndStartsAtFailedMethod() {
         mockProject();
         mockProjectSave();
         mockServiceMethods(
-                method(11L, "firstMethod"),
-                method(12L, "failedMethod"),
-                method(13L, "remainingMethod"));
+                method(11L, "firstMethod"), method(12L, "secondMethod"),
+                method(13L, "thirdMethod"), method(14L, "failedMethod"));
         List<BusinessRule> persistedRules = new ArrayList<>();
         when(businessRuleRepository.findByProjectId(1L))
                 .thenAnswer(ignored -> List.copyOf(persistedRules));
@@ -177,16 +177,15 @@ class BusinessRuleServiceTest {
             persistedRules.add(rule);
             return rule;
         });
-        when(aiAgentService.generateBusinessRules(1L, Set.of(11L))).thenReturn(
+        when(aiAgentService.generateBusinessRules(1L, Set.of(11L, 12L, 13L))).thenReturn(
                 new BusinessRuleResponseDto(List.of(
-                        new GeneratedBusinessRuleDto(11L, "Rule da luu.", "BUSINESS_LOGIC"))));
-        when(aiAgentService.generateBusinessRules(1L, Set.of(12L)))
+                        new GeneratedBusinessRuleDto(11L, "Rule da luu 1.", "BUSINESS_LOGIC"),
+                        new GeneratedBusinessRuleDto(12L, "Rule da luu 2.", "BUSINESS_LOGIC"),
+                        new GeneratedBusinessRuleDto(13L, "Rule da luu 3.", "BUSINESS_LOGIC"))));
+        when(aiAgentService.generateBusinessRules(1L, Set.of(14L)))
                 .thenThrow(new com.greytest.service.agent.LlmResponseException("batch failed"))
                 .thenReturn(new BusinessRuleResponseDto(List.of(
-                        new GeneratedBusinessRuleDto(12L, "Rule cua batch loi.", "BUSINESS_LOGIC"))));
-        when(aiAgentService.generateBusinessRules(1L, Set.of(13L))).thenReturn(
-                new BusinessRuleResponseDto(List.of(
-                        new GeneratedBusinessRuleDto(13L, "Rule con lai.", "BUSINESS_LOGIC"))));
+                        new GeneratedBusinessRuleDto(14L, "Rule cua batch loi.", "BUSINESS_LOGIC"))));
 
         assertThatThrownBy(() -> service().generate(1L))
                 .isInstanceOf(com.greytest.service.agent.LlmResponseException.class)
@@ -194,12 +193,10 @@ class BusinessRuleServiceTest {
 
         List<BusinessRuleDto> resumed = service().generate(1L);
 
-        assertThat(resumed).extracting(BusinessRuleDto::methodId).containsExactly(12L, 13L);
-        verify(aiAgentService, times(1)).generateBusinessRules(1L, Set.of(11L));
-        verify(aiAgentService, times(2)).generateBusinessRules(1L, Set.of(12L));
-        verify(aiAgentService, times(1)).generateBusinessRules(1L, Set.of(13L));
+        assertThat(resumed).extracting(BusinessRuleDto::methodId).containsExactly(14L);
+        verify(aiAgentService, times(1)).generateBusinessRules(1L, Set.of(11L, 12L, 13L));
+        verify(aiAgentService, times(2)).generateBusinessRules(1L, Set.of(14L));
     }
-
     @Test
     void retryFinalizesStatusWhenRulesWereSavedBeforeFinalStatusFailure() {
         Project project = new Project();
