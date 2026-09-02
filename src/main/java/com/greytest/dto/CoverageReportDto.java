@@ -7,6 +7,7 @@ import java.util.List;
 public record CoverageReportDto(
         Long id,
         Long projectId,
+        String servicePath,
         int round,
         BigDecimal lineCoverage,
         BigDecimal branchCoverage,

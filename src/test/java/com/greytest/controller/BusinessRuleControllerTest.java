@@ -49,13 +49,16 @@ class BusinessRuleControllerTest {
     void listChecksProjectAccess() throws Exception {
         AuthUser user = user();
         when(authService.currentUser("Bearer token")).thenReturn(user);
-        when(businessRuleService.list(1L)).thenReturn(List.of(rule()));
+        when(businessRuleService.list(1L, "account-service")).thenReturn(List.of(rule()));
 
-        mockMvc.perform(get("/api/projects/1/business-rules").header("Authorization", "Bearer token"))
+        mockMvc.perform(get("/api/projects/1/business-rules")
+                        .param("servicePath", "account-service")
+                        .header("Authorization", "Bearer token"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[0].ruleCode").value("BR-001"));
 
         verify(projectService).requireAccess(1L, user);
+        verify(businessRuleService).list(1L, "account-service");
     }
 
     @Test

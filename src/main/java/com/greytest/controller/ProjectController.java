@@ -17,9 +17,11 @@ import org.springframework.web.multipart.MultipartFile;
 
 import com.greytest.dto.GithubCloneRequest;
 import com.greytest.dto.ProjectDto;
+import com.greytest.dto.ProjectServiceDto;
 import com.greytest.service.AuthService;
 import com.greytest.service.GenerationJobService;
 import com.greytest.service.ProjectService;
+import com.greytest.service.ProjectServiceScopeService;
 
 import jakarta.validation.Valid;
 
@@ -30,14 +32,17 @@ public class ProjectController {
     private final ProjectService projectService;
     private final AuthService authService;
     private final GenerationJobService generationJobService;
+    private final ProjectServiceScopeService projectServiceScopes;
 
     public ProjectController(
             ProjectService projectService,
             AuthService authService,
-            GenerationJobService generationJobService) {
+            GenerationJobService generationJobService,
+            ProjectServiceScopeService projectServiceScopes) {
         this.projectService = projectService;
         this.authService = authService;
         this.generationJobService = generationJobService;
+        this.projectServiceScopes = projectServiceScopes;
     }
 
     @PostMapping("/upload")
@@ -67,6 +72,15 @@ public class ProjectController {
             @RequestHeader("Authorization") String authorization) {
         return projectService.getById(id, authService.currentUser(authorization));
     }
+
+    @GetMapping("/{id}/services")
+    public List<ProjectServiceDto> services(
+            @PathVariable Long id,
+            @RequestHeader("Authorization") String authorization) {
+        projectService.requireAccess(id, authService.currentUser(authorization));
+        return projectServiceScopes.list(id);
+    }
+
 
     @DeleteMapping("/{id}")
     public ResponseEntity<Void> delete(

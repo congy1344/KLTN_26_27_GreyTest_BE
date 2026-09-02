@@ -88,6 +88,42 @@ class UnitTestServiceTest {
     }
 
     @Test
+    void retriesWhenGeneratedTestUsesUninitializedFixture() {
+        Project project = new Project();
+        project.setId(1L);
+        project.setStatus(ProjectStatus.CASE_APPROVED);
+        TestPlan plan = new TestPlan();
+        plan.setId(20L);
+        plan.setProjectId(1L);
+        TestCase testCase = approvedCase(31L, 20L);
+
+        GeneratedUnitTestDto invalid = new GeneratedUnitTestDto(
+                31L, "ServiceTest", "case31", "demo", "NEW_TEST",
+                "package demo; class ServiceTest { private Object fixture; private static Object staticFixture; private Object nullFixture = null; private Object ctorFixture; private Object ctorLocalFixture; private Object loopFixture; void case31(Object value) { fixture = new Object(); } ServiceTest(Object ctorFixture) { ctorFixture = new Object(); } ServiceTest() { Object ctorLocalFixture = new Object(); ctorLocalFixture = new Object(); } "
+                        + "@org.junit.jupiter.api.Test void case31() { fixture.toString(); staticFixture.toString(); nullFixture.toString(); ctorFixture.toString(); ctorLocalFixture.toString(); for (Object loopFixture : new Object[0]) { loopFixture.toString(); } loopFixture.toString(); } "
+                        + "@org.junit.jupiter.api.BeforeEach void initializeLater() { Runnable init = () -> fixture = new Object(); } }");
+
+        when(projects.findById(1L)).thenReturn(Optional.of(project));
+        when(projects.findByIdForUpdate(1L)).thenReturn(Optional.of(project));
+        when(cases.findAll()).thenReturn(List.of(testCase));
+        when(cases.findById(31L)).thenReturn(Optional.of(testCase));
+        when(plans.findById(20L)).thenReturn(Optional.of(plan));
+        when(ai.generateUnitTests(1L, Set.of(31L)))
+                .thenReturn(new UnitTestResponseDto(List.of(invalid)))
+                .thenReturn(new UnitTestResponseDto(List.of(
+                        new GeneratedUnitTestDto(31L, "ServiceTest", "case31",
+                                "demo", "NEW_TEST", validSource("ServiceTest", "case31")))));
+        when(units.saveAll(org.mockito.ArgumentMatchers.anyList()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        var result = service.generate(1L);
+
+        assertThat(result).singleElement().extracting("testMethodName").isEqualTo("case31");
+        verify(ai, org.mockito.Mockito.times(2)).generateUnitTests(1L, Set.of(31L));
+        verify(units).saveAll(org.mockito.ArgumentMatchers.anyList());
+    }
+
+    @Test
     void generationBatchesApprovedCasesToKeepLlmRequestsBounded() {
         Project project = new Project();
         project.setId(1L);
@@ -380,7 +416,7 @@ class UnitTestServiceTest {
     }
 
     @Test
-    void supplementalRenamesMethodNameAlreadyPresentInExportedTests() {
+    void supplementalRenamesOnlyMetadataTestMethodWhenHelpersShareName() {
         Project project = new Project();
         project.setId(1L);
         project.setStatus(ProjectStatus.CASE_APPROVED);
@@ -408,7 +444,11 @@ class UnitTestServiceTest {
         when(units.findByTestCaseId(30L)).thenReturn(oldUnit);
         when(ai.generateUnitTests(1L, Set.of(31L))).thenReturn(new UnitTestResponseDto(List.of(
                 new GeneratedUnitTestDto(31L, "ServiceTest", "sameScenario",
-                        "demo", "NEW_TEST", validSource("ServiceTest", "sameScenario")))));
+                        "demo", "NEW_TEST", "package demo; "
+                                + "class OtherTest { void sameScenario(){} } "
+                                + "class ServiceTest { void sameScenario(String value){} "
+                                + "@org.junit.jupiter.api.Test void sameScenario(){} "
+                                + "class Nested { void sameScenario(){} } }"))));
         when(units.saveAll(org.mockito.ArgumentMatchers.anyList())).thenAnswer(invocation -> invocation.getArgument(0));
 
         var result = service.generateSupplemental(1L, List.of(31L));
@@ -416,7 +456,11 @@ class UnitTestServiceTest {
         assertThat(result).singleElement()
                 .satisfies(test -> {
                     assertThat(test.testMethodName()).isEqualTo("sameScenarioCase31");
-                    assertThat(test.sourceCode()).contains("void sameScenarioCase31()");
+                    assertThat(test.sourceCode())
+                            .contains("@org.junit.jupiter.api.Test", "void sameScenarioCase31()")
+                            .contains("void sameScenario(String value)")
+                            .contains("class Nested")
+                            .doesNotContain("void sameScenarioCase31(String value)");
                 });
     }
 

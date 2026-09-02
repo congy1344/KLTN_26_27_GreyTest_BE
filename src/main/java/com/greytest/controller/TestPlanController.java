@@ -11,6 +11,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -49,39 +50,45 @@ public class TestPlanController {
     @GetMapping("/api/projects/{projectId}/test-plans")
     public List<TestPlanDto> list(
             @PathVariable Long projectId,
+            @RequestParam(required = false) String servicePath,
             @RequestHeader("Authorization") String authorization) {
         requireAccess(projectId, authorization);
-        return testPlanService.list(projectId);
+        return testPlanService.list(projectId, servicePath);
     }
 
     @PostMapping("/api/projects/{projectId}/test-plans/generate")
     public ResponseEntity<GenerationJobAcceptedDto> generate(
             @PathVariable Long projectId,
+            @RequestParam(required = false) String servicePath,
             @RequestHeader("Authorization") String authorization) {
         AuthUser actor = requireAccess(projectId, authorization);
         return ResponseEntity.accepted().body(generationJobService.submit(
                 projectId,
                 actor.getId(),
                 GenerationProgressStage.TEST_PLAN,
-                () -> testPlanService.generate(projectId)));
+                () -> testPlanService.generate(projectId, servicePath)));
     }
 
     @PostMapping("/api/projects/{projectId}/test-plans")
     @ResponseStatus(HttpStatus.CREATED)
     public TestPlanDto create(
             @PathVariable Long projectId,
+            @RequestParam(required = false) String servicePath,
             @RequestHeader("Authorization") String authorization,
             @Valid @RequestBody CreateTestPlanRequest request) {
         requireAccess(projectId, authorization);
-        return generationJobService.executeMutation(projectId, () -> testPlanService.create(projectId, request));
+        return generationJobService.executeMutation(
+                projectId, () -> testPlanService.create(projectId, servicePath, request));
     }
 
     @PostMapping("/api/projects/{projectId}/test-plans/approve")
     public List<TestPlanDto> approve(
             @PathVariable Long projectId,
+            @RequestParam(required = false) String servicePath,
             @RequestHeader("Authorization") String authorization) {
         requireAccess(projectId, authorization);
-        return generationJobService.executeMutation(projectId, () -> testPlanService.approve(projectId));
+        return generationJobService.executeMutation(
+                projectId, () -> testPlanService.approve(projectId, servicePath));
     }
 
     @PutMapping("/api/test-plans/{planId}")

@@ -43,9 +43,9 @@ class CoverageControllerTest {
                 .thenThrow(new GenerationInProgressException("AI đang chạy."));
 
         var jacoco = new MockMultipartFile("file", "jacoco.xml", "application/xml", new byte[] {1});
-        assertThatThrownBy(() -> controller.upload(1L, jacoco, "Bearer token"))
+        assertThatThrownBy(() -> controller.upload(1L, jacoco, "account-service", "Bearer token"))
                 .isInstanceOf(GenerationInProgressException.class);
-        assertThatThrownBy(() -> controller.refine(1L, "Bearer token"))
+        assertThatThrownBy(() -> controller.refine(1L, "account-service", "Bearer token"))
                 .isInstanceOf(GenerationInProgressException.class);
     }
 }

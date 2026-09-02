@@ -52,7 +52,7 @@ public class BusinessRuleService {
     // ponytail: tam luu suggestion trong review_note; tach cot rieng khi can lich su review.
     private static final String SUGGESTION_MARKER = "\nAI_SUGGESTION:";
     private static final String SOURCE_BRANCH_MARKER = "SOURCE_BRANCH:";
-    private static final int MAX_SEMANTIC_ATTEMPTS = 2;
+    private static final int MAX_SEMANTIC_ATTEMPTS = 3;
 
     private final BusinessRuleRepository businessRuleRepository;
     private final ProjectRepository projectRepository;
@@ -61,6 +61,8 @@ public class BusinessRuleService {
     private final AIAgentService aiAgentService;
     private final GenerationProgressService generationProgressService;
     private final TransactionTemplate transactions;
+    private ServiceScopeResolver scopeResolver;
+    private ServicePipelineStatusService scopedStatuses;
 
     public BusinessRuleService(
             BusinessRuleRepository businessRuleRepository,
@@ -79,10 +81,37 @@ public class BusinessRuleService {
         this.transactions = new TransactionTemplate(transactionManager);
     }
 
+    @org.springframework.beans.factory.annotation.Autowired
+    public BusinessRuleService(
+            BusinessRuleRepository businessRuleRepository,
+            ProjectRepository projectRepository,
+            JavaClassRepository javaClassRepository,
+            JavaMethodRepository javaMethodRepository,
+            AIAgentService aiAgentService,
+            GenerationProgressService generationProgressService,
+            PlatformTransactionManager transactionManager,
+            ServiceScopeResolver scopeResolver,
+            ServicePipelineStatusService scopedStatuses) {
+        this(businessRuleRepository, projectRepository, javaClassRepository, javaMethodRepository,
+                aiAgentService, generationProgressService, transactionManager);
+        this.scopeResolver = scopeResolver;
+        this.scopedStatuses = scopedStatuses;
+    }
+
     @Transactional(readOnly = true)
     public List<BusinessRuleDto> list(Long projectId) {
         ensureProjectExists(projectId);
         return businessRuleRepository.findByProjectId(projectId).stream()
+                .sorted(Comparator.comparing(BusinessRule::getRuleCode, Comparator.nullsLast(String::compareTo)))
+                .map(this::toDto)
+                .toList();
+    }
+
+    @Transactional(readOnly = true)
+    public List<BusinessRuleDto> list(Long projectId, String servicePath) {
+        Set<Long> methodIds = scopeResolver.resolve(projectId, servicePath).methodIds();
+        return businessRuleRepository.findByProjectId(projectId).stream()
+                .filter(rule -> methodIds.contains(rule.getMethodId()))
                 .sorted(Comparator.comparing(BusinessRule::getRuleCode, Comparator.nullsLast(String::compareTo)))
                 .map(this::toDto)
                 .toList();
@@ -95,13 +124,25 @@ public class BusinessRuleService {
                 .getProjectId();
     }
 
+
+    @Transactional
+    public BusinessRuleDto create(Long projectId, String servicePath, CreateBusinessRuleRequest request) {
+        Set<Long> methodIds = scopeResolver.resolve(projectId, servicePath).methodIds();
+        if (!methodIds.contains(request.methodId())) {
+            throw new IllegalArgumentException("Service method khong thuoc servicePath da chon.");
+        }
+        return create(projectId, request);
+    }
+
     @Transactional
     public BusinessRuleDto create(Long projectId, CreateBusinessRuleRequest request) {
         Project project = ensureProjectExists(projectId);
         ensureBusinessRuleEditable(project);
         String description = request.description().trim();
         List<BusinessRule> existingRules = businessRuleRepository.findByProjectId(projectId);
-        ensureUniqueDescription(existingRules, null, description);
+        ensureUniqueDescription(existingRules.stream()
+                .filter(rule -> request.methodId().equals(rule.getMethodId()))
+                .toList(), null, description);
 
         Long validMethodId = requireProjectServiceMethod(projectId, request.methodId());
         String sourceBranchId = requireSourceBranch(validMethodId, request.sourceBranchId());
@@ -130,7 +171,9 @@ public class BusinessRuleService {
         Project project = ensureProjectExists(rule.getProjectId());
         ensureBusinessRuleEditable(project);
         String description = request.description().trim();
-        ensureUniqueDescription(businessRuleRepository.findByProjectId(rule.getProjectId()), ruleId, description);
+        ensureUniqueDescription(businessRuleRepository.findByProjectId(rule.getProjectId()).stream()
+                .filter(existing -> request.methodId().equals(existing.getMethodId()))
+                .toList(), ruleId, description);
 
         String sourceBranchId = request.methodId().equals(rule.getMethodId())
                 ? sourceBranchId(rule.getReviewNote())
@@ -161,10 +204,24 @@ public class BusinessRuleService {
     }
 
     public List<BusinessRuleDto> generate(Long projectId) {
-        Project project = ensureProjectExists(projectId);
-        ensureBusinessRuleEditable(project);
+        return generate(projectId, null, null);
+    }
 
-        List<JavaMethod> serviceMethods = serviceMethods(projectId);
+    public List<BusinessRuleDto> generate(Long projectId, String servicePath) {
+        var scope = scopeResolver.resolve(projectId, servicePath);
+        return generate(projectId, scope.methodIds(), scopedStatuses.status(projectId, scope));
+    }
+
+    private List<BusinessRuleDto> generate(
+            Long projectId,
+            Set<Long> scopedMethodIds,
+            ProjectStatus scopedStatus) {
+        Project project = ensureProjectExists(projectId);
+        ensureBusinessRuleEditable(scopedStatus == null ? project.getStatus() : scopedStatus);
+
+        List<JavaMethod> serviceMethods = serviceMethods(projectId).stream()
+                .filter(method -> scopedMethodIds == null || scopedMethodIds.contains(method.getId()))
+                .toList();
         Set<Long> validMethodIds = serviceMethods.stream()
                 .map(JavaMethod::getId)
                 .collect(Collectors.toSet());
@@ -173,8 +230,11 @@ public class BusinessRuleService {
                     "Project chua co service method nao de AI sinh Business Rule. Hay kiem tra ket qua Analysis.");
         }
 
-        List<BusinessRule> existingRules = businessRuleRepository.findByProjectId(projectId);
-        boolean backfillAiRules = project.getStatus() == ProjectStatus.BR_PENDING_REVIEW
+        List<BusinessRule> existingRules = businessRuleRepository.findByProjectId(projectId).stream()
+                .filter(rule -> scopedMethodIds == null || scopedMethodIds.contains(rule.getMethodId()))
+                .toList();
+        ProjectStatus effectiveStatus = scopedStatus == null ? project.getStatus() : scopedStatus;
+        boolean backfillAiRules = effectiveStatus == ProjectStatus.BR_PENDING_REVIEW
                 && existingRules.stream().anyMatch(rule -> rule.getSource() == RuleSource.AI_GENERATED
                         && !Boolean.TRUE.equals(rule.getIsModified()));
         Set<Long> uncoveredMethodIds = serviceMethods.stream()
@@ -198,7 +258,7 @@ public class BusinessRuleService {
                         + methodBatches.size() + " batch.");
         List<BusinessRuleDto> created = new ArrayList<>();
         Set<String> existingRuleKeys = ruleKeys(existingRules);
-        int firstRuleNumber = nextRuleNumber(existingRules);
+        int firstRuleNumber = nextRuleNumber(businessRuleRepository.findByProjectId(projectId));
         int batchNumber = 0;
         try {
         for (Set<Long> activeMethodIds : methodBatches) {
@@ -246,11 +306,26 @@ public class BusinessRuleService {
     }
 
     @Transactional
-    public BusinessRuleReviewDto review(Long projectId) {
-        Project project = ensureProjectExists(projectId);
-        ensureBusinessRuleEditable(project);
+    public BusinessRuleReviewDto review(Long projectId, String servicePath) {
+        var scope = scopeResolver.resolve(projectId, servicePath);
+        return review(projectId, scope.methodIds(), scopedStatuses.status(projectId, scope));
+    }
 
-        List<BusinessRule> existingRules = businessRuleRepository.findByProjectId(projectId);
+    @Transactional
+    public BusinessRuleReviewDto review(Long projectId) {
+        return review(projectId, null, null);
+    }
+
+    private BusinessRuleReviewDto review(
+            Long projectId,
+            Set<Long> scopedMethodIds,
+            ProjectStatus scopedStatus) {
+        Project project = ensureProjectExists(projectId);
+        ensureBusinessRuleEditable(scopedStatus == null ? project.getStatus() : scopedStatus);
+
+        List<BusinessRule> existingRules = businessRuleRepository.findByProjectId(projectId).stream()
+                .filter(rule -> scopedMethodIds == null || scopedMethodIds.contains(rule.getMethodId()))
+                .toList();
         List<BusinessRule> dirtyRules = existingRules.stream()
                 .filter(rule -> Boolean.TRUE.equals(rule.getIsModified()))
                 .toList();
@@ -267,7 +342,10 @@ public class BusinessRuleService {
                     .sorted(Comparator.comparing(BusinessRule::getRuleCode, Comparator.nullsLast(String::compareTo)))
                     .limit(GenerationContextBuilder.MAX_REVIEW_RULES)
                     .toList();
-            BusinessRuleReviewResponseDto response = aiAgentService.reviewBusinessRules(projectId);
+            BusinessRuleReviewResponseDto response = scopedMethodIds == null
+                    ? aiAgentService.reviewBusinessRules(projectId)
+                    : aiAgentService.reviewBusinessRules(projectId,
+                            activeRules.stream().map(BusinessRule::getId).collect(Collectors.toSet()));
             List<ReviewedBusinessRuleDto> reviewedBatch = applyReviewSuggestions(
                     response.reviewedRules(),
                     activeRules);
@@ -292,7 +370,9 @@ public class BusinessRuleService {
         if (suggestion == null) {
             throw new IllegalArgumentException("Business Rule khong co goi y AI de ap dung.");
         }
-        ensureUniqueDescription(businessRuleRepository.findByProjectId(rule.getProjectId()), ruleId, suggestion);
+        ensureUniqueDescription(businessRuleRepository.findByProjectId(rule.getProjectId()).stream()
+                .filter(existing -> rule.getMethodId().equals(existing.getMethodId()))
+                .toList(), ruleId, suggestion);
         rule.setDescription(suggestion);
         rule.setSource(RuleSource.USER_MODIFIED);
         rule.setStatus(ReviewStatus.PENDING_REVIEW);
@@ -306,17 +386,26 @@ public class BusinessRuleService {
     }
 
     @Transactional
+    public List<BusinessRuleDto> approve(Long projectId, String servicePath) {
+        return approve(projectId, scopeResolver.resolve(projectId, servicePath).methodIds());
+    }
+
+    @Transactional
     public List<BusinessRuleDto> approve(Long projectId) {
+        return approve(projectId, (Set<Long>) null);
+    }
+
+    private List<BusinessRuleDto> approve(Long projectId, Set<Long> scopedMethodIds) {
         Project project = ensureProjectExists(projectId);
-        if (project.getStatus() != ProjectStatus.BR_PENDING_REVIEW) {
-            throw new InvalidProjectStatusException("Chi co the approve Business Rule dang cho review.");
-        }
-        List<BusinessRule> rules = businessRuleRepository.findByProjectId(projectId);
+        List<BusinessRule> rules = businessRuleRepository.findByProjectId(projectId).stream()
+                .filter(rule -> scopedMethodIds == null || scopedMethodIds.contains(rule.getMethodId()))
+                .toList();
         if (rules.isEmpty()) {
             throw new InvalidProjectStatusException("Can co it nhat mot Business Rule truoc khi approve.");
         }
         ensureNoDuplicateDecisions(rules);
         List<String> missingBranches = serviceMethods(projectId).stream()
+                .filter(method -> scopedMethodIds == null || scopedMethodIds.contains(method.getId()))
                 .flatMap(method -> {
                     Set<String> covered = rules.stream()
                             .filter(rule -> method.getId().equals(rule.getMethodId()))
@@ -404,7 +493,7 @@ public class BusinessRuleService {
                 .collect(Collectors.toMap(
                         rule -> sourceBranchId(rule.getReviewNote()) != null
                                 ? branchKey(rule.getMethodId(), sourceBranchId(rule.getReviewNote()))
-                                : descriptionKey(rule.getDescription()),
+                                : methodRuleKey(rule.getMethodId(), rule.getDescription()),
                         rule -> rule,
                         (first, ignored) -> first));
         for (GeneratedBusinessRuleDto generatedRule : generatedRules) {
@@ -520,7 +609,9 @@ public class BusinessRuleService {
             BusinessRuleResponseDto response = lastValidationError == null
                     ? aiAgentService.generateBusinessRules(projectId, activeMethodIds)
                     : aiAgentService.generateBusinessRules(
-                            projectId, activeMethodIds, lastValidationError.getMessage());
+                            projectId,
+                            activeMethodIds,
+                            semanticCorrection(activeMethodIds, lastValidationError.getMessage()));
             try {
                 validateGeneratedBusinessRules(activeMethodIds, response);
                 return response;
@@ -530,10 +621,27 @@ public class BusinessRuleService {
                     throw exception;
                 }
                 GenerationJobContext.log(
-                        "AI chua bao phu dung control-flow. Dang tu sinh lai batch hien tai (lan 2/2).");
+                        "AI chua bao phu dung control-flow. Dang tu sinh lai batch hien tai (lan "
+                                + (attempt + 1) + "/" + MAX_SEMANTIC_ATTEMPTS + ").");
             }
         }
         throw lastValidationError;
+    }
+
+    private String semanticCorrection(Set<Long> activeMethodIds, String validationError) {
+        String branchChecklist = activeMethodIds.stream()
+                .sorted()
+                .map(methodId -> {
+                    Set<String> expected = requiredDecisionIds(methodId);
+                    return expected.isEmpty()
+                            ? "method_id " + methodId + ": no decision; branch_id must be null"
+                            : "method_id " + methodId + ": required branch_id values " + expected;
+                })
+                .collect(Collectors.joining("; "));
+        return validationError
+                + "\nExpected branch checklist: " + branchChecklist
+                + "\nEvery required branch_id must appear exactly once. "
+                + "Use branch_id null only for independently testable behavior outside every decision.";
     }
 
     private void validateGeneratedBusinessRules(
@@ -591,7 +699,7 @@ public class BusinessRuleService {
                     throw new LlmResponseException(
                             "AI gan branch_id cho method khong co quyet dinh control-flow: " + rule.methodId());
                 }
-            } else if (branchId == null || !expected.contains(branchId)) {
+            } else if (branchId != null && !expected.contains(branchId)) {
                 throw new LlmResponseException(
                         "AI tra ve branch_id khong thuoc source method " + rule.methodId() + ": " + rule.branchId());
             }
@@ -690,8 +798,8 @@ public class BusinessRuleService {
             String branchId = sourceBranchId(rule.getReviewNote());
             if (branchId != null && rule.getMethodId() != null) {
                 keys.add(branchKey(rule.getMethodId(), branchId));
-            } else if (rule.getDescription() != null) {
-                keys.add(descriptionKey(rule.getDescription()));
+            } else if (rule.getMethodId() != null && rule.getDescription() != null) {
+                keys.add(methodRuleKey(rule.getMethodId(), rule.getDescription()));
             }
         }
         return keys;
@@ -760,8 +868,12 @@ public class BusinessRuleService {
     private String generatedRuleKey(GeneratedBusinessRuleDto rule) {
         String branchId = decisionId(rule.branchId());
         return branchId == null
-                ? descriptionKey(rule.description())
+                ? methodRuleKey(rule.methodId(), rule.description())
                 : branchKey(rule.methodId(), branchId);
+    }
+
+    private String methodRuleKey(Long methodId, String description) {
+        return "method:" + methodId + ":" + descriptionKey(description);
     }
 
     private String branchKey(Long methodId, String branchId) {
@@ -862,7 +974,11 @@ public class BusinessRuleService {
     // Cho phép quay lại sửa BR ở mọi pha sau (regenerate); dữ liệu pha sau bị ảnh hưởng
     // sẽ được DB cascade dọn và status rollback về BR_PENDING_REVIEW
     private void ensureBusinessRuleEditable(Project project) {
-        if (project.getStatus() == ProjectStatus.UPLOADED || project.getStatus() == ProjectStatus.FAILED) {
+        ensureBusinessRuleEditable(project.getStatus());
+    }
+
+    private void ensureBusinessRuleEditable(ProjectStatus status) {
+        if (status == ProjectStatus.UPLOADED || status == ProjectStatus.FAILED) {
             throw new InvalidProjectStatusException(
                     "Chi co the thao tac Business Rule sau khi project da ANALYZED.");
         }

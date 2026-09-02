@@ -11,6 +11,12 @@ public interface CoverageReportRepository extends JpaRepository<CoverageReport, 
     List<CoverageReport> findByProjectId(Long projectId);
 
     Optional<CoverageReport> findTopByProjectIdOrderByIdDesc(Long projectId);
+    List<CoverageReport> findByProjectIdAndServicePath(Long projectId, String servicePath);
+
+    Optional<CoverageReport> findTopByProjectIdAndServicePathOrderByIdDesc(Long projectId, String servicePath);
+
+    void deleteByProjectIdAndServicePath(Long projectId, String servicePath);
+
 
     // Re-analyze: source đổi nên lịch sử coverage cũ hết ý nghĩa
     void deleteByProjectId(Long projectId);

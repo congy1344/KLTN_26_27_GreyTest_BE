@@ -43,6 +43,9 @@ class ProjectControllerTest {
 
     @MockBean
     private GenerationJobService generationJobService;
+    @MockBean
+    private com.greytest.service.ProjectServiceScopeService projectServiceScopes;
+
 
     private ProjectDto sampleDto() {
         return new ProjectDto(1L, "demo", SourceType.ZIP, null, ProjectStatus.ANALYZED, LocalDateTime.now(), null, true);
@@ -88,6 +91,24 @@ class ProjectControllerTest {
         mockMvc.perform(get("/api/projects/1").header("Authorization", "Bearer token"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.name").value("demo"));
+    }
+
+    @Test
+    void servicesReturnsModuleScopedStatuses() throws Exception {
+        AuthUser user = user();
+        when(authService.currentUser("Bearer token")).thenReturn(user);
+        when(projectServiceScopes.list(1L)).thenReturn(java.util.List.of(
+                new com.greytest.dto.ProjectServiceDto(
+                        "account-service", "account-service", ProjectStatus.BR_APPROVED)));
+
+        mockMvc.perform(get("/api/projects/1/services")
+                        .header("Authorization", "Bearer token"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].servicePath").value("account-service"))
+                .andExpect(jsonPath("$[0].status").value("BR_APPROVED"));
+
+        verify(projectService).requireAccess(1L, user);
+        verify(projectServiceScopes).list(1L);
     }
 
     @Test

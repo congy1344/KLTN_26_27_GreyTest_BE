@@ -238,8 +238,13 @@ public class GenerationProgressService {
                     stepStatus = GenerationProgressStepStatus.WAITING;
                 }
                 int stepPercent = stepStatus == GenerationProgressStepStatus.COMPLETED ? 100 : 0;
+                String stepLabel = status == GenerationProgressStatus.FAILED
+                        && stepLabels.size() == 1
+                        && "Đang chờ worker xử lý".equals(stepLabels.get(index))
+                        ? "Khởi tạo tác vụ"
+                        : stepLabels.get(index);
                 snapshots.add(new GenerationProgressStepDto(
-                        index + 1, stepLabels.get(index), stepStatus, stepPercent, errorMessage));
+                        index + 1, stepLabel, stepStatus, stepPercent, errorMessage));
             }
             return List.copyOf(snapshots);
         }

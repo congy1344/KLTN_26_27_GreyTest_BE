@@ -40,29 +40,39 @@ public class CoverageController {
 
     @PostMapping("/api/projects/{projectId}/coverage/upload")
     public ResponseEntity<CoverageReportDto> upload(@PathVariable Long projectId,
-            @RequestParam("file") MultipartFile file, @RequestHeader("Authorization") String authorization) {
+            @RequestParam("file") MultipartFile file, @RequestParam(required = false) String servicePath,
+            @RequestHeader("Authorization") String authorization) {
         access(projectId, authorization);
         return ResponseEntity.status(HttpStatus.CREATED)
-                .body(jobs.executeMutation(projectId, () -> service.upload(projectId, file)));
+                .body(jobs.executeMutation(projectId, () -> service.upload(projectId, servicePath, file)));
     }
 
     /** Trả 204 khi project chưa có coverage report nào. */
     @GetMapping("/api/projects/{projectId}/coverage")
     public ResponseEntity<CoverageReportDto> latest(@PathVariable Long projectId,
+            @RequestParam(required = false) String servicePath,
             @RequestHeader("Authorization") String authorization) {
         access(projectId, authorization);
-        return service.latest(projectId).map(ResponseEntity::ok)
+        return service.latest(projectId, servicePath).map(ResponseEntity::ok)
                 .orElseGet(() -> ResponseEntity.noContent().build());
+    }
+
+    @GetMapping("/api/projects/{projectId}/coverage/history")
+    public java.util.List<CoverageReportDto> history(@PathVariable Long projectId,
+            @RequestParam(required = false) String servicePath,
+            @RequestHeader("Authorization") String authorization) {
+        access(projectId, authorization);
+        return service.history(projectId, servicePath);
     }
 
     @PostMapping("/api/projects/{projectId}/coverage/refine")
     public CoverageRefinementDto refine(@PathVariable Long projectId,
+            @RequestParam(required = false) String servicePath,
             @RequestHeader("Authorization") String authorization) {
         AuthUser actor = access(projectId, authorization);
         return jobs.executeAiMutation(
                 projectId, actor.getId(), ActivityAction.COVERAGE_REFINEMENT,
-                () -> refinement.start(projectId));
-    }
+                () -> refinement.start(projectId, servicePath));    }
 
     private AuthUser access(Long id, String authorization) {
         AuthUser user = auth.currentUser(authorization);

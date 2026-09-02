@@ -41,4 +41,20 @@ public class CoverageRefinementService {
         var tests = unitTests.generateSupplemental(projectId, cases.stream().map(caseDto -> caseDto.id()).toList());
         return new CoverageRefinementDto(round, cases, tests);
     }
+
+    @Transactional
+    public CoverageRefinementDto start(Long projectId, String servicePath) {
+        var report = coverage.latest(projectId, servicePath)
+                .orElseThrow(() -> new InvalidProjectStatusException("Chưa có JaCoCo report để bắt đầu vòng mới."));
+        var refinableGaps = report.gaps().stream().filter(gap -> gap.refinable()).toList();
+        if (refinableGaps.isEmpty()) {
+            throw new InvalidProjectStatusException(
+                    "Không còn coverage gap thuộc phạm vi Service Unit Test của GreyTest.");
+        }
+        int round = report.round() + 1;
+        var cases = testCases.generateSupplemental(projectId, servicePath, refinableGaps, round);
+        var tests = unitTests.generateSupplemental(
+                projectId, servicePath, cases.stream().map(caseDto -> caseDto.id()).toList());
+        return new CoverageRefinementDto(round, cases, tests);
+    }
 }

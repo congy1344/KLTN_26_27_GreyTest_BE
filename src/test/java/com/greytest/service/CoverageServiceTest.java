@@ -57,6 +57,8 @@ class CoverageServiceTest {
     @Mock private ProjectRepository projects;
     @Mock private FileStorageService storage;
     @Mock private MultipartFile file;
+    @Mock private ServiceScopeResolver scopeResolver;
+    @Mock private ServicePipelineStatusService scopedStatuses;
 
     @InjectMocks private CoverageService service;
 
@@ -97,6 +99,25 @@ class CoverageServiceTest {
         verify(storage, never()).storeCoverageXml(any(), any());
     }
 
+    @Test
+    void nestedSingleModuleKeepsLegacyRootCoverageHistory() {
+        var scope = new ServiceScopeResolver.ServiceScope(
+                "orders", java.util.Set.of(1L), java.util.Set.of(11L));
+        var legacy = report(1L, "70.00");
+        when(scopeResolver.resolve(5L, "orders")).thenReturn(scope);
+        when(scopeResolver.listScopes(5L)).thenReturn(List.of(scope));
+        when(reports.findByProjectIdAndServicePath(5L, "orders")).thenReturn(List.of());
+        when(reports.findByProjectIdAndServicePath(5L, ".")).thenReturn(List.of(legacy));
+        when(details.findByReportId(1L)).thenReturn(List.of());
+        when(classes.findByProjectId(5L)).thenReturn(List.of());
+        when(plans.findByProjectId(5L)).thenReturn(List.of());
+
+        var dto = service.latest(5L, "orders").orElseThrow();
+
+        assertThat(dto.servicePath()).isEqualTo("orders");
+        assertThat(dto.round()).isEqualTo(1);
+        assertThat(dto.lineCoverage()).isEqualTo(new BigDecimal("70.00"));
+    }
     @Test
     void latestTraVeSoVongVaSoLieuVongTruoc() {
         Project project = new Project();

@@ -74,6 +74,8 @@ public class GenerationContextBuilder {
     private static final int MAX_UNIT_TEST_REFERENCES = 10;
     private static final int MAX_GENERATION_RELATIONS = 40;
     private static final int MAX_GENERATION_DEPENDENCIES = 40;
+    // ponytail: chỉ kèm vài callee Service để giữ prompt có giới hạn; tăng khi benchmark chứng minh cần.
+    private static final int MAX_CROSS_SERVICE_SOURCES = 5;
     private record CollaboratorCallEvidence(String collaboratorName, String calleeMethodName, int argumentCount) {}
     public static final int MAX_REVIEW_RULES = 10;
 
@@ -230,6 +232,7 @@ public class GenerationContextBuilder {
                         .add(javaClass));
 
         List<DependencyCallContextDto> result = new ArrayList<>();
+        int detailedServiceCalls = 0;
         for (JavaClassDto caller : targetServices) {
             Map<String, String> fieldTypes = fieldTypes(caller.sourceCode());
             for (JavaMethodDto method : caller.methods()) {
@@ -255,6 +258,19 @@ public class GenerationContextBuilder {
                     EndpointDto endpoint = calleeMethod == null || calleeMethod.endpoints().size() != 1
                             ? null
                             : calleeMethod.endpoints().get(0);
+                    String calleeServiceSourceCode = null;
+                    if (detailedServiceCalls < MAX_CROSS_SERVICE_SOURCES
+                            && callee != null
+                            && calleeMethod != null
+                            && SERVICE_CLASS_TYPE.equals(callee.classType())
+                            && !java.util.Objects.equals(caller.qualifiedName(), callee.qualifiedName())) {
+                        calleeServiceSourceCode = completeMethodSource(calleeMethod.sourceCode());
+                        if (calleeServiceSourceCode != null && !calleeServiceSourceCode.isBlank()) {
+                            detailedServiceCalls++;
+                        } else {
+                            calleeServiceSourceCode = null;
+                        }
+                    }
                     result.add(new DependencyCallContextDto(
                             method.id(),
                             caller.qualifiedName(),
@@ -264,7 +280,8 @@ public class GenerationContextBuilder {
                             callee == null ? null : callee.qualifiedName(),
                             calleeMethod == null ? calleeMethodName : calleeMethod.methodName(),
                             endpoint == null ? null : endpoint.httpMethod(),
-                            endpoint == null ? null : endpoint.path()));
+                            endpoint == null ? null : endpoint.path(),
+                            calleeServiceSourceCode));
                     if (result.size() >= MAX_GENERATION_DEPENDENCIES) break;
                 }
                 if (result.size() >= MAX_GENERATION_DEPENDENCIES) break;
@@ -338,8 +355,15 @@ public class GenerationContextBuilder {
     /** Context cho AI review Business Rule user da nhap. */
     @Transactional(readOnly = true)
     public BusinessRuleReviewContextDto buildBusinessRuleReviewContext(Long projectId) {
+        return buildBusinessRuleReviewContext(projectId, Set.of());
+    }
+
+    @Transactional(readOnly = true)
+    public BusinessRuleReviewContextDto buildBusinessRuleReviewContext(Long projectId, Set<Long> targetRuleIds) {
         AnalysisResultDto analysis = analysisService.getAnalysisResult(projectId);
-        List<BusinessRuleContextDto> allRules = businessRules(projectId);
+        List<BusinessRuleContextDto> allRules = businessRules(projectId).stream()
+                .filter(rule -> targetRuleIds == null || targetRuleIds.isEmpty() || targetRuleIds.contains(rule.id()))
+                .toList();
         List<BusinessRuleContextDto> dirtyRules = allRules.stream()
                 .filter(rule -> Boolean.TRUE.equals(rule.isModified()))
                 .limit(MAX_REVIEW_RULES)
@@ -441,6 +465,11 @@ public class GenerationContextBuilder {
         List<TestPlanContextItemDto> targetPlans = approvedTestPlans(projectId).stream()
                 .filter(plan -> plan.coveredRuleIds().stream().anyMatch(targetRuleIds::contains))
                 .toList();
+        Set<Long> targetClassIds = analysis.classes().stream()
+                .filter(javaClass -> javaClass.methods().stream()
+                        .anyMatch(method -> gapMethodIds.contains(method.id())))
+                .map(JavaClassDto::id)
+                .collect(java.util.stream.Collectors.toSet());
         return new CoverageRefinementContextDto(
                 project(analysis),
                 summary(projectId, analysis),
@@ -448,7 +477,7 @@ public class GenerationContextBuilder {
                 targetRules,
                 targetPlans,
                 approvedTestCases(targetPlans),
-                existingTests(projectId, false),
+                relevantExistingTests(projectId, gapMethodIds, targetClassIds),
                 round,
                 gaps);
     }
@@ -490,7 +519,7 @@ public class GenerationContextBuilder {
         return new UnitTestContextDto(
                 project(analysis),
                 summary(projectId, analysis),
-                classes(analysis, targetMethodIds),
+                classes(analysis, targetMethodIds, true),
                 targetRules,
                 targetPlans,
                 targetCases,
@@ -533,15 +562,21 @@ public class GenerationContextBuilder {
     }
 
     private List<ClassContextDto> classes(AnalysisResultDto analysis, Set<Long> selectedMethodIds) {
+        return classes(analysis, selectedMethodIds, false);
+    }
+
+    private List<ClassContextDto> classes(
+            AnalysisResultDto analysis, Set<Long> selectedMethodIds, boolean includeClassSource) {
         return analysis.classes().stream()
-                .map(javaClass -> classContext(javaClass, selectedMethodIds))
+                .map(javaClass -> classContext(javaClass, selectedMethodIds, includeClassSource))
                 .filter(javaClass -> !javaClass.methods().isEmpty())
                 .sorted(Comparator.comparing(ClassContextDto::filePath, Comparator.nullsLast(String::compareTo))
                         .thenComparing(ClassContextDto::qualifiedName))
                 .toList();
     }
 
-    private ClassContextDto classContext(JavaClassDto javaClass, Set<Long> selectedMethodIds) {
+    private ClassContextDto classContext(
+            JavaClassDto javaClass, Set<Long> selectedMethodIds, boolean includeClassSource) {
         List<MethodContextDto> methods = javaClass.methods().stream()
                 .filter(method -> selectedMethodIds.contains(method.id()))
                 .map(method -> methodContext(javaClass, method))
@@ -555,6 +590,7 @@ public class GenerationContextBuilder {
                 javaClass.qualifiedName(),
                 javaClass.classType(),
                 javaClass.filePath(),
+                includeClassSource ? trimmed(javaClass.sourceCode()) : null,
                 javaClass.annotations(),
                 methods);
     }
@@ -746,6 +782,14 @@ public class GenerationContextBuilder {
             return sourceCode;
         }
         return sourceCode.substring(0, MAX_METHOD_SOURCE_CHARS) + "\n/* truncated */";
+    }
+
+    /** Chỉ dùng source callee đầy đủ để tránh suy luận invariant từ đoạn bị cắt. */
+    private String completeMethodSource(String sourceCode) {
+        if (sourceCode == null || sourceCode.length() > MAX_METHOD_SOURCE_CHARS) {
+            return null;
+        }
+        return sourceCode;
     }
 
     private String sourceBranchId(String reviewNote) {

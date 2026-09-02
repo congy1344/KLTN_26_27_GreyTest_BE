@@ -80,6 +80,82 @@ class UnitTestFileServiceTest {
         assertThat(merged.get(0).sourceCode()).contains("khong phai java", "gop thu cong");
     }
 
+    @Test
+    void chiLoaiFieldTrungTrongDeclarationNhieuBien() {
+        String source1 = "package com.example; class UserServiceTest { Object repository; void first(){} }";
+        String source2 = "package com.example; class UserServiceTest { Object repository, auditRepository; void second(){} }";
+
+        var source = service.mergeByClass(List.of(
+                test(1L, "first", source1), test(2L, "second", source2))).get(0).sourceCode();
+
+        assertThat(countOf(source, "repository;")).isEqualTo(1);
+        assertThat(source).contains("auditRepository");
+    }
+
+    @Test
+    void mergeDungTestClassKhiHelperClassDungTruoc() {
+        String source1 = "package com.example; class Support {} class UserServiceTest { void first(){} }";
+        String source2 = "package com.example; class Support {} class UserServiceTest { void second(){} }";
+
+        var source = service.mergeByClass(List.of(
+                test(1L, "first", source1), test(2L, "second", source2))).get(0).sourceCode();
+
+        assertThat(source).contains("void first()", "void second()");
+    }
+
+    @Test
+    void giuLaiHelperMethodOverloadKhacSignature() {
+        String source1 = "package com.example; class UserServiceTest { Object build(){return null;} void first(){} }";
+        String source2 = "package com.example; class UserServiceTest { Object build(String id){return null;} void second(){} }";
+
+        var source = service.mergeByClass(List.of(
+                test(1L, "first", source1), test(2L, "second", source2))).get(0).sourceCode();
+
+        assertThat(source).contains("build()", "build(String id)", "void second()");
+    }
+
+    @Test
+    void loaiHelperMethodTrungSauTypeErasure() {
+        String source1 = "package com.example; class UserServiceTest { "
+                + "void build(java.util.List<String> values){} void first(){} }";
+        String source2 = "package com.example; class UserServiceTest { "
+                + "void build(java.util.List<Integer> values){} void second(){} }";
+
+        var source = service.mergeByClass(List.of(
+                test(1L, "first", source1), test(2L, "second", source2))).get(0).sourceCode();
+
+        assertThat(countOf(source, "void build(")).isEqualTo(1);
+        assertThat(source).contains("void second()");
+    }
+
+    @Test
+    void coiVarargsVaArrayLaCungSignature() {
+        String source1 = "package com.example; class UserServiceTest { "
+                + "void build(String... values){} void first(){} }";
+        String source2 = "package com.example; class UserServiceTest { "
+                + "void build(String[] values){} void second(){} }";
+
+        var source = service.mergeByClass(List.of(
+                test(1L, "first", source1), test(2L, "second", source2))).get(0).sourceCode();
+
+        assertThat(countOf(source, "void build(")).isEqualTo(1);
+        assertThat(source).contains("void second()");
+    }
+
+    @Test
+    void xoaTypeVariableKhiSoSanhSignature() {
+        String source1 = "package com.example; class UserServiceTest { "
+                + "<T> void convert(T value){} void first(){} }";
+        String source2 = "package com.example; class UserServiceTest { "
+                + "<U> void convert(U value){} void second(){} }";
+
+        var source = service.mergeByClass(List.of(
+                test(1L, "first", source1), test(2L, "second", source2))).get(0).sourceCode();
+
+        assertThat(countOf(source, "void convert(")).isEqualTo(1);
+        assertThat(source).contains("void second()");
+    }
+
     private int countOf(String text, String token) {
         return text.split(java.util.regex.Pattern.quote(token), -1).length - 1;
     }

@@ -49,6 +49,7 @@ public class TestPlanService {
     private final ProjectRepository projectRepository;
     private final AIAgentService aiAgentService;
     private final GenerationProgressService generationProgressService;
+    private ServiceScopeResolver scopeResolver;
 
     public TestPlanService(
             TestPlanRepository testPlanRepository,
@@ -65,6 +66,20 @@ public class TestPlanService {
         this.generationProgressService = generationProgressService;
     }
 
+    @org.springframework.beans.factory.annotation.Autowired
+    public TestPlanService(
+            TestPlanRepository testPlanRepository,
+            TestPlanCoveredRuleRepository testPlanCoveredRuleRepository,
+            BusinessRuleRepository businessRuleRepository,
+            ProjectRepository projectRepository,
+            AIAgentService aiAgentService,
+            GenerationProgressService generationProgressService,
+            ServiceScopeResolver scopeResolver) {
+        this(testPlanRepository, testPlanCoveredRuleRepository, businessRuleRepository,
+                projectRepository, aiAgentService, generationProgressService);
+        this.scopeResolver = scopeResolver;
+    }
+
     @Transactional(readOnly = true)
     public List<TestPlanDto> list(Long projectId) {
         ensureProjectExists(projectId);
@@ -74,6 +89,17 @@ public class TestPlanService {
                 .toList();
     }
 
+
+    @Transactional(readOnly = true)
+    public List<TestPlanDto> list(Long projectId, String servicePath) {
+        Set<Long> methodIds = scopeResolver.resolve(projectId, servicePath).methodIds();
+        Set<Long> ruleIds = businessRuleRepository.findByProjectId(projectId).stream()
+                .filter(rule -> methodIds.contains(rule.getMethodId()))
+                .map(BusinessRule::getId).collect(Collectors.toSet());
+        return testPlanRepository.findByProjectId(projectId).stream()
+                .filter(plan -> ruleIds.contains(plan.getBusinessRuleId()))
+                .map(this::toDto).toList();
+    }
     @Transactional(readOnly = true)
     public Long projectIdForPlan(Long planId) {
         return testPlanRepository.findById(planId)
@@ -83,10 +109,20 @@ public class TestPlanService {
 
     @Transactional
     public List<TestPlanDto> generate(Long projectId) {
-        Project project = ensureProjectExists(projectId);
-        ensureCanGenerate(project);
+        return generate(projectId, (Set<Long>) null);
+    }
 
-        List<BusinessRule> approvedRules = businessRuleRepository.findByProjectIdAndStatus(projectId, ReviewStatus.APPROVED);
+    public List<TestPlanDto> generate(Long projectId, String servicePath) {
+        return generate(projectId, scopeResolver.resolve(projectId, servicePath).methodIds());
+    }
+
+    private List<TestPlanDto> generate(Long projectId, Set<Long> scopedMethodIds) {
+        Project project = ensureProjectExists(projectId);
+        if (scopedMethodIds == null) ensureCanGenerate(project);
+
+        List<BusinessRule> approvedRules = businessRuleRepository
+                .findByProjectIdAndStatus(projectId, ReviewStatus.APPROVED).stream()
+                .filter(rule -> scopedMethodIds == null || scopedMethodIds.contains(rule.getMethodId())).toList();
         if (approvedRules.isEmpty()) {
             throw new InvalidProjectStatusException("Can co it nhat mot Business Rule APPROVED truoc khi sinh Test Plan.");
         }
@@ -107,12 +143,18 @@ public class TestPlanService {
                             + response.plans().size() + " Test Plan từ AI.");
         }
 
-        List<GeneratedPlanDraft> validPlanDrafts = buildGeneratedPlanDrafts(projectId, generatedPlans, approvedRules);
+        Set<Long> approvedRuleIds = approvedRules.stream().map(BusinessRule::getId).collect(Collectors.toSet());
+        List<TestPlan> oldPlans = testPlanRepository.findByProjectId(projectId).stream()
+                .filter(plan -> approvedRuleIds.contains(plan.getBusinessRuleId()))
+                .toList();
+        Set<Long> oldPlanIds = oldPlans.stream().map(TestPlan::getId).collect(Collectors.toSet());
+        List<TestPlan> remainingPlans = testPlanRepository.findByProjectId(projectId).stream()
+                .filter(plan -> !oldPlanIds.contains(plan.getId())).toList();
+        List<GeneratedPlanDraft> validPlanDrafts = buildGeneratedPlanDrafts(
+                projectId, generatedPlans, approvedRules, nextPlanNumber(remainingPlans));
         if (validPlanDrafts.isEmpty()) {
             throw new LlmResponseException("AI khong tra ve Test Plan hop le cho Business Rule da approve.");
         }
-
-        List<TestPlan> oldPlans = testPlanRepository.findByProjectId(projectId);
         if (!oldPlans.isEmpty()) {
             testPlanRepository.deleteAll(oldPlans);
             testPlanRepository.flush();
@@ -168,6 +210,18 @@ public class TestPlanService {
             }
         }
         throw lastValidationError;
+    }
+
+
+    @Transactional
+    public TestPlanDto create(Long projectId, String servicePath, CreateTestPlanRequest request) {
+        Set<Long> methodIds = scopeResolver.resolve(projectId, servicePath).methodIds();
+        BusinessRule rule = businessRuleRepository.findById(request.businessRuleId())
+                .orElseThrow(() -> new IllegalArgumentException("Khong tim thay Business Rule"));
+        if (!methodIds.contains(rule.getMethodId())) {
+            throw new IllegalArgumentException("Business Rule khong thuoc servicePath da chon.");
+        }
+        return create(projectId, request);
     }
 
     @Transactional
@@ -228,12 +282,30 @@ public class TestPlanService {
     }
 
     @Transactional
+    public List<TestPlanDto> approve(Long projectId, String servicePath) {
+        return approve(projectId, scopeResolver.resolve(projectId, servicePath).methodIds());
+    }
+
+    @Transactional
     public List<TestPlanDto> approve(Long projectId) {
+        return approve(projectId, (Set<Long>) null);
+    }
+
+    private List<TestPlanDto> approve(Long projectId, Set<Long> scopedMethodIds) {
         Project project = ensureProjectExists(projectId);
-        if (project.getStatus() != ProjectStatus.PLAN_PENDING_REVIEW) {
+        if (scopedMethodIds == null && project.getStatus() != ProjectStatus.PLAN_PENDING_REVIEW) {
             throw new InvalidProjectStatusException("Chi co the approve Test Plan dang cho review.");
         }
-        List<TestPlan> plans = testPlanRepository.findByProjectId(projectId);
+        List<TestPlan> projectPlans = testPlanRepository.findByProjectId(projectId);
+        List<TestPlan> plans;
+        if (scopedMethodIds == null) {
+            plans = projectPlans;
+        } else {
+            Set<Long> ruleIds = businessRuleRepository.findByProjectId(projectId).stream()
+                    .filter(rule -> scopedMethodIds.contains(rule.getMethodId()))
+                    .map(BusinessRule::getId).collect(Collectors.toSet());
+            plans = projectPlans.stream().filter(plan -> ruleIds.contains(plan.getBusinessRuleId())).toList();
+        }
         if (plans.isEmpty()) {
             throw new InvalidProjectStatusException("Can co it nhat mot Test Plan truoc khi approve.");
         }
@@ -249,11 +321,12 @@ public class TestPlanService {
     private List<GeneratedPlanDraft> buildGeneratedPlanDrafts(
             Long projectId,
             List<GeneratedTestPlanDto> generatedPlans,
-            List<BusinessRule> approvedRules) {
+            List<BusinessRule> approvedRules,
+            int firstPlanNumber) {
         Set<Long> approvedRuleIds = approvedRules.stream()
                 .map(BusinessRule::getId)
                 .collect(Collectors.toSet());
-        int[] planNumber = {1};
+        int[] planNumber = {firstPlanNumber};
         return generatedPlans.stream()
                 .filter(plan -> isUsableGeneratedPlan(plan, approvedRuleIds))
                 .map(plan -> new GeneratedPlanDraft(

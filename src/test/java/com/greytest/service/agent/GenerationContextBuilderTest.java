@@ -134,8 +134,100 @@ class GenerationContextBuilderTest {
             assertThat(call.calleeMethodName()).isEqualTo("updateStatistics");
             assertThat(call.httpMethod()).isEqualTo("PUT");
             assertThat(call.endpointPath()).isEqualTo("/statistics/{accountName}");
+            assertThat(call.calleeServiceSourceCode()).isNull();
         });
     }
+
+    @Test
+    void includesResolvedServiceSourceForCrossServiceInvariant() {
+        AnalysisResultDto base = analysis();
+        JavaMethodDto orderMethod = new JavaMethodDto(
+                90L, "placeOrder", "void", List.of(), List.of(), "PUBLIC",
+                "void placeOrder() { try { paymentService.charge(); } catch (PaymentFailedException exception) { rollbackInventory(); throw exception; } }",
+                10, 12, List.of(), List.of());
+        JavaClassDto orderService = new JavaClassDto(
+                90L, "demo.order", "OrderService", "demo.order.OrderService", "SERVICE",
+                "order-service/src/main/java/demo/order/OrderService.java",
+                "class OrderService { private PaymentService paymentService; }",
+                List.of(), List.of(orderMethod));
+        JavaMethodDto paymentMethod = new JavaMethodDto(
+                91L, "charge", "void", List.of(), List.of("PaymentFailedException"), "PUBLIC",
+                "void charge() { if (gateway.isRejected()) throw new PaymentFailedException(); }",
+                8, 10, List.of(), List.of());
+        JavaClassDto paymentService = new JavaClassDto(
+                91L, "demo.payment", "PaymentService", "demo.payment.PaymentService", "SERVICE",
+                "payment-service/src/main/java/demo/payment/PaymentService.java",
+                "class PaymentService { void charge() {} }",
+                List.of(), List.of(paymentMethod));
+        AnalysisResultDto enriched = new AnalysisResultDto(
+                base.projectId(), base.projectName(), base.status(),
+                base.totalClasses() + 2, base.totalMethods() + 2, base.totalEndpoints(),
+                base.totalRelations(), base.totalControllerServiceRelations(),
+                base.existingTestFiles(), base.totalProductionFiles() + 2, base.parsedProductionFiles() + 2,
+                base.failedParseFiles(), base.failedParseFilePaths(),
+                List.of(base.classes().get(0), orderService, paymentService),
+                base.relations(), base.controllerServiceRelations());
+        when(analysisService.getAnalysisResult(1L)).thenReturn(enriched);
+
+        BusinessRuleGenerationContextDto context =
+                builder.buildBusinessRuleGenerationContext(1L, Set.of(90L));
+
+        assertThat(context.dependencyCalls()).singleElement().satisfies(call -> {
+            assertThat(call.calleeQualifiedName()).isEqualTo("demo.payment.PaymentService");
+            assertThat(call.calleeMethodName()).isEqualTo("charge");
+            assertThat(call.calleeServiceSourceCode()).contains("gateway.isRejected()")
+                    .contains("PaymentFailedException");
+        });
+
+        JavaMethodDto longPaymentMethod = new JavaMethodDto(
+                92L, "charge", "void", List.of(), List.of(), "PUBLIC",
+                "void charge() { String payload = \"" + "x".repeat(4_100) + "\"; }",
+                8, 10, List.of(), List.of());
+        JavaClassDto longPaymentService = new JavaClassDto(
+                92L, "demo.payment", "PaymentService", "demo.payment.PaymentService", "SERVICE",
+                "payment-service/src/main/java/demo/payment/PaymentService.java",
+                "class PaymentService { void charge() {} }",
+                List.of(), List.of(longPaymentMethod));
+        AnalysisResultDto withLongCalleeSource = new AnalysisResultDto(
+                base.projectId(), base.projectName(), base.status(),
+                base.totalClasses() + 2, base.totalMethods() + 2, base.totalEndpoints(),
+                base.totalRelations(), base.totalControllerServiceRelations(),
+                base.existingTestFiles(), base.totalProductionFiles() + 2, base.parsedProductionFiles() + 2,
+                base.failedParseFiles(), base.failedParseFilePaths(),
+                List.of(base.classes().get(0), orderService, longPaymentService),
+                base.relations(), base.controllerServiceRelations());
+        when(analysisService.getAnalysisResult(1L)).thenReturn(withLongCalleeSource);
+
+        BusinessRuleGenerationContextDto longSourceContext =
+                builder.buildBusinessRuleGenerationContext(1L, Set.of(90L));
+
+        assertThat(longSourceContext.dependencyCalls()).singleElement()
+                .satisfies(call -> assertThat(call.calleeServiceSourceCode()).isNull());
+
+        JavaClassDto duplicatePaymentService = new JavaClassDto(
+                93L, "demo.legacy", "PaymentService", "demo.legacy.PaymentService", "SERVICE",
+                "legacy-service/src/main/java/demo/legacy/PaymentService.java",
+                "class PaymentService { void charge() {} }",
+                List.of(), List.of(paymentMethod));
+        AnalysisResultDto withAmbiguousCallee = new AnalysisResultDto(
+                base.projectId(), base.projectName(), base.status(),
+                base.totalClasses() + 3, base.totalMethods() + 3, base.totalEndpoints(),
+                base.totalRelations(), base.totalControllerServiceRelations(),
+                base.existingTestFiles(), base.totalProductionFiles() + 3, base.parsedProductionFiles() + 3,
+                base.failedParseFiles(), base.failedParseFilePaths(),
+                List.of(base.classes().get(0), orderService, paymentService, duplicatePaymentService),
+                base.relations(), base.controllerServiceRelations());
+        when(analysisService.getAnalysisResult(1L)).thenReturn(withAmbiguousCallee);
+
+        BusinessRuleGenerationContextDto ambiguousContext =
+                builder.buildBusinessRuleGenerationContext(1L, Set.of(90L));
+
+        assertThat(ambiguousContext.dependencyCalls()).singleElement().satisfies(call -> {
+            assertThat(call.calleeQualifiedName()).isNull();
+            assertThat(call.calleeServiceSourceCode()).isNull();
+        });
+    }
+
     @Test
     void sendsOneBusinessRuleMethodPerRequest() {
         when(analysisService.getAnalysisResult(1L)).thenReturn(analysisWithServiceMethods(21));
@@ -280,6 +372,7 @@ class GenerationContextBuilderTest {
         assertThat(context.approvedTestPlans().get(0).coveredRuleIds()).containsExactly(7L, 8L);
         assertThat(context.approvedTestCases()).extracting("caseCode").containsExactly("TC-000", "TC-001");
         assertThat(context.existingTests()).extracting("sourceCode").containsExactly("class UserServiceTest {}");
+        assertThat(context.classes().get(0).sourceCode()).contains("private UserRepository repository");
 
         var refinement = builder.buildUnitTestContext(1L, Set.of(30L));
         assertThat(refinement.approvedTestCases()).extracting("caseCode").containsExactly("TC-001");

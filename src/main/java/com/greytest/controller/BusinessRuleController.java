@@ -13,6 +13,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.ResponseStatus;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import com.greytest.dto.BusinessRuleDto;
@@ -52,49 +53,55 @@ public class BusinessRuleController {
     @GetMapping("/api/projects/{projectId}/business-rules")
     public List<BusinessRuleDto> list(
             @PathVariable Long projectId,
+            @RequestParam(required = false) String servicePath,
             @RequestHeader("Authorization") String authorization) {
         requireAccess(projectId, authorization);
-        return businessRuleService.list(projectId);
+        return businessRuleService.list(projectId, servicePath);
     }
 
     @PostMapping("/api/projects/{projectId}/business-rules")
     @ResponseStatus(HttpStatus.CREATED)
     public BusinessRuleDto create(
             @PathVariable Long projectId,
+            @RequestParam(required = false) String servicePath,
             @RequestHeader("Authorization") String authorization,
             @Valid @RequestBody CreateBusinessRuleRequest request) {
         requireAccess(projectId, authorization);
-        return generationJobService.executeMutation(projectId, () -> businessRuleService.create(projectId, request));
+        return generationJobService.executeMutation(
+                projectId, () -> businessRuleService.create(projectId, servicePath, request));
     }
 
     @PostMapping("/api/projects/{projectId}/business-rules/generate")
     public ResponseEntity<GenerationJobAcceptedDto> generate(
             @PathVariable Long projectId,
+            @RequestParam(required = false) String servicePath,
             @RequestHeader("Authorization") String authorization) {
         AuthUser actor = requireAccess(projectId, authorization);
         return ResponseEntity.accepted().body(generationJobService.submit(
                 projectId,
                 actor.getId(),
                 GenerationProgressStage.BUSINESS_RULE,
-                () -> businessRuleService.generate(projectId)));
+                () -> businessRuleService.generate(projectId, servicePath)));
     }
 
     @PostMapping("/api/projects/{projectId}/business-rules/review")
     public BusinessRuleReviewDto review(
             @PathVariable Long projectId,
+            @RequestParam(required = false) String servicePath,
             @RequestHeader("Authorization") String authorization) {
         AuthUser actor = requireAccess(projectId, authorization);
         return generationJobService.executeAiMutation(
                 projectId, actor.getId(), ActivityAction.REVIEW_BUSINESS_RULE,
-                () -> businessRuleService.review(projectId));
-    }
+                () -> businessRuleService.review(projectId, servicePath));    }
 
     @PostMapping("/api/projects/{projectId}/business-rules/approve")
     public List<BusinessRuleDto> approve(
             @PathVariable Long projectId,
+            @RequestParam(required = false) String servicePath,
             @RequestHeader("Authorization") String authorization) {
         requireAccess(projectId, authorization);
-        return generationJobService.executeMutation(projectId, () -> businessRuleService.approve(projectId));
+        return generationJobService.executeMutation(
+                projectId, () -> businessRuleService.approve(projectId, servicePath));
     }
 
     @PutMapping("/api/business-rules/{ruleId}")

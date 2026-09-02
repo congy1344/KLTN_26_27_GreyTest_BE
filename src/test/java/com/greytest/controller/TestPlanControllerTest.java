@@ -53,13 +53,16 @@ class TestPlanControllerTest {
     void listReturnsTestPlans() throws Exception {
         AuthUser user = user();
         when(authService.currentUser("Bearer token")).thenReturn(user);
-        when(testPlanService.list(1L)).thenReturn(List.of(plan()));
+        when(testPlanService.list(1L, "account-service")).thenReturn(List.of(plan()));
 
-        mockMvc.perform(get("/api/projects/1/test-plans").header("Authorization", "Bearer token"))
+        mockMvc.perform(get("/api/projects/1/test-plans")
+                        .param("servicePath", "account-service")
+                        .header("Authorization", "Bearer token"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[0].planCode").value("TP-001"));
 
         verify(projectService).requireAccess(1L, user);
+        verify(testPlanService).list(1L, "account-service");
     }
 
     @Test

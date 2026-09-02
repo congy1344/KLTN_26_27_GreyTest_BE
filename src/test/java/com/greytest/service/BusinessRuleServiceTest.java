@@ -57,6 +57,8 @@ class BusinessRuleServiceTest {
     @Mock private GenerationProgressService generationProgressService;
     @Mock private PlatformTransactionManager transactionManager;
     @Mock private TransactionStatus transactionStatus;
+    @Mock private ServiceScopeResolver scopeResolver;
+    @Mock private ServicePipelineStatusService scopedStatuses;
 
     @BeforeEach
     void configureTransactions() {
@@ -110,6 +112,23 @@ class BusinessRuleServiceTest {
         verify(aiAgentService).generateBusinessRules(1L, Set.of(11L, 12L));
     }
 
+    @Test
+    void generateKeepsIdenticalMethodLevelRulesForDifferentMethods() {
+        mockProject();
+        mockProjectSave();
+        mockServiceMethods(method(11L, "createUser"), method(12L, "updateUser"));
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of());
+        when(aiAgentService.generateBusinessRules(1L, Set.of(11L, 12L))).thenReturn(
+                new BusinessRuleResponseDto(List.of(
+                        new GeneratedBusinessRuleDto(11L, "Tai khoan duoc cap nhat.", "BUSINESS_LOGIC"),
+                        new GeneratedBusinessRuleDto(12L, "Tai khoan duoc cap nhat.", "BUSINESS_LOGIC"))));
+        mockBusinessRuleSave();
+
+        List<BusinessRuleDto> rules = service().generate(1L);
+
+        assertThat(rules).extracting(BusinessRuleDto::methodId).containsExactly(11L, 12L);
+        verify(aiAgentService).generateBusinessRules(1L, Set.of(11L, 12L));
+    }
     @Test
     void generateKeepsEarlierCommittedBatchWhenLaterBatchFails() {
         mockProject();
@@ -327,7 +346,7 @@ class BusinessRuleServiceTest {
     }
 
     @Test
-    void generateRetriesWhenControlFlowMethodContainsUnassignedRule() {
+    void generateAcceptsMethodLevelRuleAlongsideBranchRules() {
         mockProject();
         mockProjectSave();
         JavaMethod branchedMethod = method(11L, "calculateItemTotal");
@@ -347,31 +366,15 @@ class BusinessRuleServiceTest {
                         new GeneratedBusinessRuleDto(11L, "Unit price khong duoc null.", "VALIDATION", "IF-1"),
                         new GeneratedBusinessRuleDto(11L, "Unit price phai duong.", "VALIDATION", "IF-2"),
                         new GeneratedBusinessRuleDto(11L, "Quantity phai nam trong gioi han.", "VALIDATION", "IF-3"),
-                        new GeneratedBusinessRuleDto(11L, "Tong tien bang unit price nhan quantity.", "BUSINESS_LOGIC"))))
-                .thenReturn(new BusinessRuleResponseDto(List.of(
-                        new GeneratedBusinessRuleDto(11L, "Unit price khong duoc null.", "VALIDATION", "IF-1"),
-                        new GeneratedBusinessRuleDto(11L, "Unit price phai duong.", "VALIDATION", "IF-2"),
-                        new GeneratedBusinessRuleDto(11L, "Quantity phai nam trong gioi han.", "VALIDATION", "IF-3"))));
-        when(aiAgentService.generateBusinessRules(
-                org.mockito.ArgumentMatchers.eq(1L),
-                org.mockito.ArgumentMatchers.eq(Set.of(11L)),
-                org.mockito.ArgumentMatchers.contains("khong thuoc source method")))
-                .thenReturn(new BusinessRuleResponseDto(List.of(
-                        new GeneratedBusinessRuleDto(11L, "Unit price khong duoc null.", "VALIDATION", "IF-1"),
-                        new GeneratedBusinessRuleDto(11L, "Unit price phai duong.", "VALIDATION", "IF-2"),
-                        new GeneratedBusinessRuleDto(11L, "Quantity phai nam trong gioi han.", "VALIDATION", "IF-3"))));
+                        new GeneratedBusinessRuleDto(11L, "Tong tien bang unit price nhan quantity.", "BUSINESS_LOGIC"))));
         mockBusinessRuleSave();
 
         List<BusinessRuleDto> rules = service().generate(1L);
 
-        assertThat(rules).hasSize(3);
+        assertThat(rules).hasSize(4);
         assertThat(rules).extracting(BusinessRuleDto::sourceBranchId)
-                .containsExactly("IF-1", "IF-2", "IF-3");
+                .containsExactly("IF-1", "IF-2", "IF-3", null);
         verify(aiAgentService).generateBusinessRules(1L, Set.of(11L));
-        verify(aiAgentService).generateBusinessRules(
-                org.mockito.ArgumentMatchers.eq(1L),
-                org.mockito.ArgumentMatchers.eq(Set.of(11L)),
-                org.mockito.ArgumentMatchers.contains("khong thuoc source method"));
     }
 
     @Test
@@ -489,7 +492,7 @@ class BusinessRuleServiceTest {
         when(aiAgentService.generateBusinessRules(
                 org.mockito.ArgumentMatchers.eq(1L),
                 org.mockito.ArgumentMatchers.eq(Set.of(11L)),
-                org.mockito.ArgumentMatchers.contains("IF-1")))
+                org.mockito.ArgumentMatchers.contains("Expected branch checklist: method_id 11: required branch_id values [IF-1]")))
                 .thenReturn(new BusinessRuleResponseDto(List.of(
                         new GeneratedBusinessRuleDto(
                                 11L, "Tra ve user theo trang thai ton tai.", "BUSINESS_LOGIC", "IF-1"))));
@@ -505,7 +508,7 @@ class BusinessRuleServiceTest {
     }
 
     @Test
-    void generateStopsAfterOneSemanticRetry() {
+    void generateStopsAfterThreeSemanticRetries() {
         mockProject();
         JavaMethod branchedMethod = method(11L, "findUser");
         branchedMethod.setSourceCode("""
@@ -523,14 +526,15 @@ class BusinessRuleServiceTest {
         when(aiAgentService.generateBusinessRules(
                 org.mockito.ArgumentMatchers.eq(1L),
                 org.mockito.ArgumentMatchers.eq(Set.of(11L)),
-                org.mockito.ArgumentMatchers.contains("IF-1")))
+                org.mockito.ArgumentMatchers.contains("Expected branch checklist: method_id 11: required branch_id values [IF-1]")))
+                .thenReturn(new BusinessRuleResponseDto(List.of()))
                 .thenReturn(new BusinessRuleResponseDto(List.of()));
 
         assertThatThrownBy(() -> service().generate(1L))
                 .isInstanceOf(com.greytest.service.agent.LlmResponseException.class)
                 .hasMessageContaining("IF-1");
         verify(aiAgentService).generateBusinessRules(1L, Set.of(11L));
-        verify(aiAgentService).generateBusinessRules(
+        verify(aiAgentService, times(2)).generateBusinessRules(
                 org.mockito.ArgumentMatchers.eq(1L),
                 org.mockito.ArgumentMatchers.eq(Set.of(11L)),
                 org.mockito.ArgumentMatchers.contains("IF-1"));
@@ -901,6 +905,46 @@ class BusinessRuleServiceTest {
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("Business Rule da ton tai");
     }
+    @Test
+    void createAllowsSameDescriptionForAnotherServiceMethod() {
+        mockProject();
+        mockProjectSave();
+        mockProjectServiceMethod(22L);
+        BusinessRule accountRule = rule(7L, 11L, "Entity phai ton tai.");
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(accountRule));
+        when(scopeResolver.resolve(1L, "auth-service")).thenReturn(
+                new ServiceScopeResolver.ServiceScope("auth-service", Set.of(20L), Set.of(22L)));
+        mockBusinessRuleSave();
+
+        BusinessRuleDto created = scopedService().create(1L, "auth-service",
+                new CreateBusinessRuleRequest(22L, "Entity phai ton tai."));
+
+        assertThat(created.methodId()).isEqualTo(22L);
+        assertThat(created.description()).isEqualTo("Entity phai ton tai.");
+    }
+
+    @Test
+    void scopedGenerateUsesSelectedServiceStatusInsteadOfGlobalStatus() {
+        Project project = new Project();
+        project.setId(1L);
+        project.setStatus(ProjectStatus.BR_PENDING_REVIEW);
+        when(projectRepository.findById(1L)).thenReturn(Optional.of(project));
+        JavaMethod authMethod = method(22L, "authenticate");
+        mockServiceMethods(authMethod);
+        BusinessRule existing = rule(8L, 22L, "User phai ton tai.");
+        existing.setSource(RuleSource.AI_GENERATED);
+        existing.setStatus(ReviewStatus.APPROVED);
+        existing.setIsModified(false);
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(existing));
+        var scope = new ServiceScopeResolver.ServiceScope(
+                "auth-service", Set.of(20L), Set.of(22L));
+        when(scopeResolver.resolve(1L, "auth-service")).thenReturn(scope);
+        when(scopedStatuses.status(1L, scope)).thenReturn(ProjectStatus.BR_APPROVED);
+
+        assertThat(scopedService().generate(1L, "auth-service")).isEmpty();
+
+        verifyNoInteractions(aiAgentService);
+    }
 
     @Test
     void createRejectsSecondRuleForSameSourceDecision() {
@@ -1027,6 +1071,18 @@ class BusinessRuleServiceTest {
                 aiAgentService,
                 generationProgressService,
                 transactionManager);
+    }
+    private BusinessRuleService scopedService() {
+        return new BusinessRuleService(
+                businessRuleRepository,
+                projectRepository,
+                javaClassRepository,
+                javaMethodRepository,
+                aiAgentService,
+                generationProgressService,
+                transactionManager,
+                scopeResolver,
+                scopedStatuses);
     }
 
     private void mockProject() {

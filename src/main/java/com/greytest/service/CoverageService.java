@@ -6,6 +6,7 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
@@ -71,6 +72,8 @@ public class CoverageService {
     private final TestCaseRepository cases;
     private final ProjectRepository projects;
     private final FileStorageService storage;
+    private ServiceScopeResolver scopeResolver;
+    private ServicePipelineStatusService scopedStatuses;
 
     public CoverageService(JacocoXmlParser parser, CoverageReportRepository reports,
             CoverageDetailRepository details, JavaClassRepository classes, JavaMethodRepository methods,
@@ -89,13 +92,40 @@ public class CoverageService {
         this.storage = storage;
     }
 
+    @org.springframework.beans.factory.annotation.Autowired
+    public CoverageService(JacocoXmlParser parser, CoverageReportRepository reports,
+            CoverageDetailRepository details, JavaClassRepository classes, JavaMethodRepository methods,
+            BusinessRuleRepository rules, TestPlanRepository plans, TestPlanCoveredRuleRepository coveredRules,
+            TestCaseRepository cases, ProjectRepository projects, FileStorageService storage,
+            ServiceScopeResolver scopeResolver, ServicePipelineStatusService scopedStatuses) {
+        this(parser, reports, details, classes, methods, rules, plans, coveredRules, cases, projects, storage);
+        this.scopeResolver = scopeResolver;
+        this.scopedStatuses = scopedStatuses;
+    }
+
+    public CoverageReportDto upload(Long projectId, String servicePath, MultipartFile file) {
+        return upload(projectId, scopeResolver.resolve(projectId, servicePath), file);
+    }
+
+
     @Transactional
     public CoverageReportDto upload(Long projectId, MultipartFile file) {
+        return upload(projectId, (ServiceScopeResolver.ServiceScope) null, file);
+    }
+
+    private CoverageReportDto upload(Long projectId, ServiceScopeResolver.ServiceScope scope, MultipartFile file) {
         Project project = ensure(projectId);
-        if (project.getStatus() != ProjectStatus.TEST_GENERATED
-                && project.getStatus() != ProjectStatus.COVERAGE_ANALYZED
-                && project.getStatus() != ProjectStatus.COMPLETED) {
-            throw new InvalidProjectStatusException("Chỉ upload coverage sau khi đã sinh Unit Test.");
+        if (scope == null) {
+            if (project.getStatus() != ProjectStatus.TEST_GENERATED
+                    && project.getStatus() != ProjectStatus.COVERAGE_ANALYZED
+                    && project.getStatus() != ProjectStatus.COMPLETED) {
+                throw new InvalidProjectStatusException("Chỉ upload coverage sau khi đã sinh Unit Test.");
+            }
+        } else {
+            ProjectStatus status = scopedStatuses.status(projectId, scope);
+            if (status != ProjectStatus.TEST_GENERATED && status != ProjectStatus.COVERAGE_ANALYZED) {
+                throw new InvalidProjectStatusException("Module chỉ upload coverage sau khi đã sinh Unit Test.");
+            }
         }
         Path xmlPath = storage.storeCoverageXml(projectId, file);
         ParsedReport parsed = parseStoredXml(xmlPath);
@@ -105,36 +135,83 @@ public class CoverageService {
         report.setTotalLines(parsed.totalLines());
         report.setCoveredLines(parsed.coveredLines());
         report.setTotalBranches(parsed.totalBranches());
+        report.setServicePath(scope == null ? "." : scope.servicePath());
         report.setCoveredBranches(parsed.coveredBranches());
         report.setLineCoverage(percent(parsed.coveredLines(), parsed.totalLines()));
         report.setBranchCoverage(percent(parsed.coveredBranches(), parsed.totalBranches()));
-        report.setRequirementCoverage(calculateRequirementCoverage(projectId));
+        report.setRequirementCoverage(calculateRequirementCoverage(projectId, scope));
         report.setXmlFilePath(xmlPath.toString());
         reports.save(report);
 
-        List<CoverageDetail> saved = details.saveAll(matchMethods(projectId, report.getId(), parsed.methods()));
+        List<CoverageDetail> saved = details.saveAll(matchMethods(projectId, scope, report.getId(), parsed.methods()));
         // Upload lại vẫn giữ status COMPLETED nếu project đã hoàn tất
         if (project.getStatus() != ProjectStatus.COMPLETED) {
             project.setStatus(ProjectStatus.COVERAGE_ANALYZED);
             projects.save(project);
         }
-        return toDto(report, saved, projectId);
+        return toDto(report, saved, projectId, scope);
     }
 
     @Transactional(readOnly = true)
     public Optional<CoverageReportDto> latest(Long projectId) {
         ensure(projectId);
         return reports.findTopByProjectIdOrderByIdDesc(projectId)
-                .map(report -> toDto(report, details.findByReportId(report.getId()), projectId));
+                .map(report -> toDto(report, details.findByReportId(report.getId()), projectId, null));
     }
+
+    @Transactional(readOnly = true)
+    public Optional<CoverageReportDto> latest(Long projectId, String servicePath) {
+        ServiceScopeResolver.ServiceScope scope = scopeResolver.resolve(projectId, servicePath);
+        return reportsForScope(projectId, scope).stream()
+                .max(Comparator.comparing(CoverageReport::getId))
+                .map(report -> toDto(report, details.findByReportId(report.getId()), projectId, scope));
+    }
+
+    @Transactional(readOnly = true)
+    public List<CoverageReportDto> history(Long projectId, String servicePath) {
+        ServiceScopeResolver.ServiceScope scope = scopeResolver.resolve(projectId, servicePath);
+        return reportsForScope(projectId, scope).stream()
+                .map(report -> toDto(report, details.findByReportId(report.getId()), projectId, scope))
+                .toList();
+    }
+
+    private List<CoverageReport> reportsForScope(
+            Long projectId,
+            ServiceScopeResolver.ServiceScope scope) {
+        List<CoverageReport> scopedReports = new ArrayList<>(
+                reports.findByProjectIdAndServicePath(projectId, scope.servicePath()));
+        // V20 không thể suy ra module path từ coverage_report cũ. Với project chỉ có
+        // một nested module, report "." chắc chắn thuộc module duy nhất đó.
+        if (!".".equals(scope.servicePath()) && scopeResolver.listScopes(projectId).size() == 1) {
+            scopedReports.addAll(reports.findByProjectIdAndServicePath(projectId, "."));
+        }
+        return scopedReports.stream()
+                .sorted(Comparator.comparing(CoverageReport::getId))
+                .toList();
+    }
+
 
     /** % Business Rule đã duyệt có ít nhất 1 Test Case (qua test_plan_covered_rule). */
     @Transactional(readOnly = true)
     public BigDecimal calculateRequirementCoverage(Long projectId) {
-        var approvedRules = rules.findByProjectIdAndStatus(projectId, ReviewStatus.APPROVED);
+        return calculateRequirementCoverage(projectId, (ServiceScopeResolver.ServiceScope) null);
+    }
+
+    @Transactional(readOnly = true)
+    public BigDecimal calculateRequirementCoverage(Long projectId, String servicePath) {
+        return calculateRequirementCoverage(projectId, scopeResolver.resolve(projectId, servicePath));
+    }
+
+    private BigDecimal calculateRequirementCoverage(
+            Long projectId,
+            ServiceScopeResolver.ServiceScope scope) {
+        var approvedRules = rules.findByProjectIdAndStatus(projectId, ReviewStatus.APPROVED).stream()
+                .filter(rule -> scope == null || scope.methodIds().contains(rule.getMethodId()))
+                .toList();
         if (approvedRules.isEmpty()) {
             return BigDecimal.valueOf(100).setScale(2, RoundingMode.HALF_UP);
         }
+        Set<Long> approvedRuleIds = approvedRules.stream().map(com.greytest.entity.BusinessRule::getId).collect(Collectors.toSet());
         List<Long> planIdsWithCases = plans.findByProjectId(projectId).stream()
                 .map(TestPlan::getId)
                 .filter(planId -> !cases.findByTestPlanId(planId).isEmpty())
@@ -152,8 +229,8 @@ public class CoverageService {
      * của class + tên method, khử overload bằng vị trí dòng. Method không khớp thì
      * bỏ qua (không có tên hiển thị); tổng coverage vẫn đúng nhờ counter cấp report.
      */
-    private List<CoverageDetail> matchMethods(Long projectId, Long reportId, List<ParsedMethod> parsedMethods) {
-        Map<String, Long> classIdByName = classes.findByProjectId(projectId).stream()
+    private List<CoverageDetail> matchMethods(Long projectId, ServiceScopeResolver.ServiceScope scope, Long reportId, List<ParsedMethod> parsedMethods) {
+        Map<String, Long> classIdByName = classes.findByProjectId(projectId).stream().filter(javaClass->scope==null||scope.classIds().contains(javaClass.getId()))
                 .collect(Collectors.toMap(JavaClass::getQualifiedName, JavaClass::getId, (a, b) -> a));
         List<Long> classIds = List.copyOf(new HashSet<>(classIdByName.values()));
         Map<Long, List<JavaMethod>> methodsByClassId = classIds.isEmpty() ? Map.of()
@@ -197,8 +274,8 @@ public class CoverageService {
         return detail;
     }
 
-    private CoverageReportDto toDto(CoverageReport report, List<CoverageDetail> reportDetails, Long projectId) {
-        Map<Long, JavaClass> classById = classes.findByProjectId(projectId).stream()
+    private CoverageReportDto toDto(CoverageReport report, List<CoverageDetail> reportDetails, Long projectId, ServiceScopeResolver.ServiceScope scope) {
+        Map<Long, JavaClass> classById = classes.findByProjectId(projectId).stream().filter(javaClass->scope==null||scope.classIds().contains(javaClass.getId()))
                 .collect(Collectors.toMap(JavaClass::getId, Function.identity()));
         List<Long> methodIds = reportDetails.stream().map(CoverageDetail::getMethodId).toList();
         Map<Long, JavaMethod> methodById = methodIds.isEmpty() ? Map.of()
@@ -211,11 +288,11 @@ public class CoverageService {
                 .flatMap(Optional::stream)
                 .filter(rule -> rule.getStatus() == ReviewStatus.APPROVED)
                 .map(rule -> rule.getMethodId())
+                .filter(methodId -> scope == null || scope.methodIds().contains(methodId))
                 .collect(Collectors.toSet());
         // Vòng upload thứ mấy + số liệu vòng liền trước để hiển thị tiến bộ sau khi đóng gap
-        List<CoverageReport> history = reports.findByProjectId(projectId).stream()
-                .sorted(Comparator.comparing(CoverageReport::getId))
-                .toList();
+        List<CoverageReport> history = scope == null
+                ? reports.findByProjectId(projectId) : reportsForScope(projectId, scope);
         int round = history.stream().map(CoverageReport::getId).toList().indexOf(report.getId()) + 1;
         CoverageReport previous = round > 1 ? history.get(round - 2) : null;
         Map<Long, CoverageDetail> previousDetailByMethod = previous == null ? Map.of()
@@ -227,7 +304,8 @@ public class CoverageService {
                 .map(d -> toGap(d, previousDetailByMethod.get(d.getMethodId()),
                         methodById.get(d.getMethodId()), classById, refinableMethodIds))
                 .toList();
-        return new CoverageReportDto(report.getId(), report.getProjectId(), round <= 0 ? 1 : round,
+        String resolvedServicePath = scope == null ? report.getServicePath() : scope.servicePath();
+        return new CoverageReportDto(report.getId(), report.getProjectId(), resolvedServicePath, round <= 0 ? 1 : round,
                 report.getLineCoverage(), report.getBranchCoverage(), report.getRequirementCoverage(),
                 previous == null ? null : previous.getLineCoverage(),
                 previous == null ? null : previous.getBranchCoverage(),

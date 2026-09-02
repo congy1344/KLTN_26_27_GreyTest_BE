@@ -28,11 +28,28 @@ class GenerationProgressServiceTest {
         GenerationProgressDto queued = service.get(9L, GenerationProgressStage.TEST_PLAN);
         assertThat(queued.status()).isEqualTo(GenerationProgressStatus.QUEUED);
         assertThat(queued.steps()).singleElement()
-                .satisfies(step -> assertThat(step.status()).isEqualTo(GenerationProgressStepStatus.WAITING));
+                .satisfies(step -> {
+                    assertThat(step.label()).isEqualTo("Đang chờ worker xử lý");
+                    assertThat(step.status()).isEqualTo(GenerationProgressStepStatus.WAITING);
+                });
 
         service.start(9L, GenerationProgressStage.TEST_PLAN, 2, "Worker bắt đầu.");
         assertThat(service.get(9L, GenerationProgressStage.TEST_PLAN).status())
                 .isEqualTo(GenerationProgressStatus.RUNNING);
+    }
+
+    @Test
+    void renamesQueuedStepWhenWorkerFailsBeforeStarting() {
+        service.queue(9L, GenerationProgressStage.TEST_PLAN, "Đã vào hàng đợi.");
+        service.fail(9L, GenerationProgressStage.TEST_PLAN, "Tác vụ AI không thể hoàn tất.");
+
+        GenerationProgressDto failed = service.get(9L, GenerationProgressStage.TEST_PLAN);
+
+        assertThat(failed.steps()).singleElement().satisfies(step -> {
+            assertThat(step.label()).isEqualTo("Khởi tạo tác vụ");
+            assertThat(step.status()).isEqualTo(GenerationProgressStepStatus.FAILED);
+            assertThat(step.percent()).isZero();
+        });
     }
 
     @Test
@@ -84,6 +101,7 @@ class GenerationProgressServiceTest {
         assertThat(failed.status()).isEqualTo(GenerationProgressStatus.FAILED);
         assertThat(failed.percent()).isZero();
         assertThat(failed.steps().get(0).status()).isEqualTo(GenerationProgressStepStatus.FAILED);
+        assertThat(failed.steps().get(0).label()).isEqualTo("Sinh Unit Test - batch 1/2");
         assertThat(failed.steps().get(0).errorMessage()).isEqualTo("LLM không phản hồi.");
         assertThat(failed.logs()).extracting(log -> log.message())
                 .containsExactly("Sinh lại Unit Test.", "LLM không phản hồi.");

@@ -25,6 +25,9 @@ public class CoverageReport {
     private Long id;
 
     private Long projectId;
+    @Column(nullable = false)
+    private String servicePath = ".";
+
 
     private BigDecimal lineCoverage;
 

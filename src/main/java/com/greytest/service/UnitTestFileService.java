@@ -53,14 +53,16 @@ public class UnitTestFileService {
     private String mergeSources(List<UnitTest> tests) {
         try {
             CompilationUnit base = parse(tests.get(0).getSourceCode());
-            TypeDeclaration<?> baseType = firstType(base);
-            Set<String> methodNames = baseType.getMethods().stream()
-                    .map(MethodDeclaration::getNameAsString).collect(Collectors.toCollection(HashSet::new));
+            String testClassName = tests.get(0).getTestClassName();
+            TypeDeclaration<?> baseType = typeByName(base, testClassName);
+            Set<String> methodSignatures = baseType.getMethods().stream()
+                    .map(this::methodSignature).collect(Collectors.toCollection(HashSet::new));
             Set<String> fieldNames = baseType.getFields().stream()
                     .flatMap(field -> field.getVariables().stream().map(VariableDeclarator::getNameAsString))
                     .collect(Collectors.toCollection(HashSet::new));
             for (int i = 1; i < tests.size(); i++) {
-                appendMembers(base, baseType, parse(tests.get(i).getSourceCode()), methodNames, fieldNames);
+                appendMembers(base, baseType, parse(tests.get(i).getSourceCode()), testClassName,
+                        methodSignatures, fieldNames);
             }
             return base.toString();
         } catch (Exception exception) {
@@ -72,29 +74,65 @@ public class UnitTestFileService {
     }
 
     private void appendMembers(CompilationUnit base, TypeDeclaration<?> baseType, CompilationUnit next,
-            Set<String> methodNames, Set<String> fieldNames) {
+            String testClassName, Set<String> methodSignatures, Set<String> fieldNames) {
         next.getImports().forEach(imp -> {
             if (!base.getImports().contains(imp)) {
                 base.addImport(imp.clone());
             }
         });
-        TypeDeclaration<?> nextType = firstType(next);
+        TypeDeclaration<?> nextType = typeByName(next, testClassName);
         for (BodyDeclaration<?> member : nextType.getMembers()) {
-            if (member instanceof MethodDeclaration method && !methodNames.add(method.getNameAsString())) {
-                continue; // method trùng tên (setup/helper) đã có ở file gốc
+            if (member instanceof MethodDeclaration method
+                    && !methodSignatures.add(methodSignature(method))) {
+                continue; // method cùng signature (setup/helper) đã có ở file gốc
             }
-            if (member instanceof FieldDeclaration field && field.getVariables().stream()
-                    .anyMatch(variable -> !fieldNames.add(variable.getNameAsString()))) {
-                continue; // field mock/service đã khai báo
+            if (member instanceof FieldDeclaration field) {
+                FieldDeclaration uniqueFields = field.clone();
+                uniqueFields.getVariables().removeIf(
+                        variable -> !fieldNames.add(variable.getNameAsString()));
+                if (!uniqueFields.getVariables().isEmpty()) {
+                    baseType.addMember(uniqueFields);
+                }
+                continue;
             }
             baseType.addMember(member.clone());
         }
     }
 
-    /** getPrimaryType() không dùng được khi parse từ string (không có tên file) nên lấy type đầu tiên. */
-    private TypeDeclaration<?> firstType(CompilationUnit unit) {
-        return unit.getTypes().stream().findFirst()
-                .orElseThrow(() -> new IllegalStateException("File khong co class"));
+    private TypeDeclaration<?> typeByName(CompilationUnit unit, String testClassName) {
+        return unit.getTypes().stream()
+                .filter(type -> type.getNameAsString().equals(testClassName))
+                .findFirst()
+                .orElseThrow(() -> new IllegalStateException("Khong tim thay test class " + testClassName));
+    }
+
+    private String methodSignature(MethodDeclaration method) {
+        Map<String, String> typeVariables = method.getTypeParameters().stream()
+                .collect(Collectors.toMap(
+                        parameter -> parameter.getNameAsString(),
+                        parameter -> parameter.getTypeBound().isEmpty()
+                                ? "Object"
+                                : erasedType(parameter.getTypeBound().get(0))));
+        return method.getNameAsString() + "(" + method.getParameters().stream()
+                .map(parameter -> eraseTypeVariables(erasedType(parameter.getType()), typeVariables)
+                        + (parameter.isVarArgs() ? "[]" : ""))
+                .collect(Collectors.joining(",")) + ")";
+    }
+
+    private String eraseTypeVariables(String type, Map<String, String> typeVariables) {
+        String erased = type;
+        for (var entry : typeVariables.entrySet()) {
+            erased = erased.replaceAll("(?<![A-Za-z0-9_$])" + java.util.regex.Pattern.quote(entry.getKey())
+                    + "(?![A-Za-z0-9_$])", java.util.regex.Matcher.quoteReplacement(entry.getValue()));
+        }
+        return erased;
+    }
+
+    private String erasedType(com.github.javaparser.ast.type.Type type) {
+        var erased = type.clone();
+        erased.findAll(com.github.javaparser.ast.type.ClassOrInterfaceType.class)
+                .forEach(classType -> classType.removeTypeArguments());
+        return erased.asString();
     }
 
     private CompilationUnit parse(String source) {

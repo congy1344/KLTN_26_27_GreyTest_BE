@@ -47,6 +47,7 @@ public final class GenerationContextDtos {
             String qualifiedName,
             String classType,
             String filePath,
+            String sourceCode,
             List<RelevantAnnotationDto> annotations,
             List<MethodContextDto> methods) {
     }
@@ -136,7 +137,8 @@ public final class GenerationContextDtos {
             String calleeQualifiedName,
             String calleeMethodName,
             String httpMethod,
-            String endpointPath) {
+            String endpointPath,
+            String calleeServiceSourceCode) {
     }
 
     public record BusinessRuleGenerationContextDto(
