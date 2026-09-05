@@ -40,6 +40,9 @@ greytest:
     default-monthly-llm-quota: ${GREYTEST_DEFAULT_MONTHLY_LLM_QUOTA:100}
   llm-cache:
     max-entries: ${GREYTEST_LLM_CACHE_MAX_ENTRIES:500}
+  llm-batch:
+    # Claude chạy tối đa 2 batch đồng thời để giảm thời gian nhưng tránh dồn rate limit.
+    concurrency: ${GREYTEST_LLM_BATCH_CONCURRENCY:2}
   ai-context-log-path: ${GREYTEST_AI_CONTEXT_LOG_PATH:../log}
   ai-context-log-enabled: ${GREYTEST_AI_CONTEXT_LOG_ENABLED:false}
   ai-context-log-console-enabled: ${GREYTEST_AI_CONTEXT_LOG_CONSOLE_ENABLED:false}
@@ -61,6 +64,13 @@ llm:
   temperature: ${LLM_TEMPERATURE:0.3}
   # Test case/unit test JSON tiếng Việt rất tốn token; 4096 từng gây cắt cụt response giữa chừng
   max-tokens: ${LLM_MAX_TOKENS:16384}
+  stage-max-tokens:
+    business-rule: ${LLM_MAX_TOKENS_BUSINESS_RULE:4096}
+    business-rule-review: ${LLM_MAX_TOKENS_BUSINESS_RULE_REVIEW:4096}
+    test-plan: ${LLM_MAX_TOKENS_TEST_PLAN:6144}
+    test-case: ${LLM_MAX_TOKENS_TEST_CASE:8192}
+    unit-test: ${LLM_MAX_TOKENS_UNIT_TEST:12288}
+    coverage-refinement: ${LLM_MAX_TOKENS_COVERAGE_REFINEMENT:6144}
   timeout-seconds: ${LLM_TIMEOUT_SECONDS:60}
   openai-url: ${LLM_OPENAI_URL:https://api.openai.com/v1/chat/completions}
   google-url: ${LLM_GOOGLE_URL:https://generativelanguage.googleapis.com/v1beta/interactions}

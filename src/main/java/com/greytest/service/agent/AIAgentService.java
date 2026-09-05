@@ -11,6 +11,7 @@ import org.springframework.context.i18n.LocaleContextHolder;
 import org.springframework.stereotype.Service;
 
 import com.greytest.dto.CoverageGapDto;
+import com.greytest.dto.agent.GenerationContextDtos.UnitTestContextDto;
 import com.greytest.dto.agent.GenerationResponseDtos.BusinessRuleResponseDto;
 import com.greytest.dto.agent.GenerationResponseDtos.BusinessRuleReviewResponseDto;
 import com.greytest.dto.agent.GenerationResponseDtos.TestCaseResponseDto;
@@ -33,6 +34,7 @@ public class AIAgentService {
     private static final int MALFORMED_JSON_MAX_ATTEMPTS = 3;
     private static final int EXHAUSTED_POOL_MAX_ATTEMPTS = 3;
     private static final long EXHAUSTED_POOL_DELAY_MILLIS = 30_000L;
+    private static final String UNIT_TEST_SEMANTIC_ERROR = "Unit Test semantic validation failed: ";
 
     private final GenerationContextBuilder contextBuilder;
     private final PromptManager promptManager;
@@ -43,6 +45,7 @@ public class AIAgentService {
     private final UsageQuotaService quotaService;
     private final LlmResponseCache responseCache;
     private final ProjectJavaVersionDetector javaVersionDetector;
+    private final LlmStageTokenLimits stageTokenLimits;
 
     public AIAgentService(
             GenerationContextBuilder contextBuilder,
@@ -51,7 +54,7 @@ public class AIAgentService {
             GenerationResponseParser responseParser,
             AiContextLogService contextLogService) {
         this(contextBuilder, promptManager, llmClient, responseParser, contextLogService,
-                null, null, null, null);
+                null, null, null, null, LlmStageTokenLimits.defaults());
     }
 
     public AIAgentService(
@@ -64,7 +67,7 @@ public class AIAgentService {
             UsageQuotaService quotaService,
             LlmResponseCache responseCache) {
         this(contextBuilder, promptManager, llmClient, responseParser, contextLogService,
-                projectRepository, quotaService, responseCache, null);
+                projectRepository, quotaService, responseCache, null, LlmStageTokenLimits.defaults());
     }
 
     public AIAgentService(
@@ -75,11 +78,10 @@ public class AIAgentService {
             AiContextLogService contextLogService,
             ProjectJavaVersionDetector javaVersionDetector) {
         this(contextBuilder, promptManager, llmClient, responseParser, contextLogService,
-                null, null, null, javaVersionDetector);
+                null, null, null, javaVersionDetector, LlmStageTokenLimits.defaults());
     }
 
     /** Constructor Spring dung de tao agent day du voi quota, cache va Java-version detector. */
-    @org.springframework.beans.factory.annotation.Autowired
     public AIAgentService(
             GenerationContextBuilder contextBuilder,
             PromptManager promptManager,
@@ -90,6 +92,24 @@ public class AIAgentService {
             UsageQuotaService quotaService,
             LlmResponseCache responseCache,
             ProjectJavaVersionDetector javaVersionDetector) {
+        this(contextBuilder, promptManager, llmClient, responseParser, contextLogService,
+                projectRepository, quotaService, responseCache, javaVersionDetector,
+                LlmStageTokenLimits.defaults());
+    }
+
+    /** Constructor Spring dùng giới hạn output riêng cho từng công đoạn AI. */
+    @org.springframework.beans.factory.annotation.Autowired
+    public AIAgentService(
+            GenerationContextBuilder contextBuilder,
+            PromptManager promptManager,
+            LlmClient llmClient,
+            GenerationResponseParser responseParser,
+            AiContextLogService contextLogService,
+            ProjectRepository projectRepository,
+            UsageQuotaService quotaService,
+            LlmResponseCache responseCache,
+            ProjectJavaVersionDetector javaVersionDetector,
+            LlmStageTokenLimits stageTokenLimits) {
         this.contextBuilder = contextBuilder;
         this.promptManager = promptManager;
         this.llmClient = llmClient;
@@ -99,6 +119,7 @@ public class AIAgentService {
         this.quotaService = quotaService;
         this.responseCache = responseCache;
         this.javaVersionDetector = javaVersionDetector;
+        this.stageTokenLimits = stageTokenLimits;
     }
 
     public BusinessRuleResponseDto generateBusinessRules(Long projectId) {
@@ -175,7 +196,7 @@ public class AIAgentService {
 
     private <T> T call(String promptName, Long projectId, Object context, Class<T> responseType, String correction) {
         String prompt = promptManager.render(promptName, Map.of("context_json", context));
-        prompt += javaVersionInstruction(promptName, projectId);
+        prompt += javaVersionInstruction(promptName, projectId, context);
         if (correction != null && !correction.isBlank()) {
             String correctionGuidance = "test-plan".equals(promptName)
                     ? "Regenerate the full plans array. Keep method_id and rule_id valid, and make the union of covered_rule_ids cover every approved Business Rule in this batch."
@@ -191,6 +212,7 @@ public class AIAgentService {
             if (cachedResponse.isPresent()) {
                 try {
                     T parsed = responseParser.parse(cachedResponse.get(), responseType);
+                    validateSemanticOutput(promptName, projectId, context, parsed);
                     GenerationJobContext.log("Da tai su dung ket qua AI da sinh truoc do (100%).");
                     return parsed;
                 } catch (LlmResponseException exception) {
@@ -214,9 +236,10 @@ public class AIAgentService {
                             Map.of("prompt", promptName, "attempt", attempt));
                 }
 
-                String response = llmClient.complete(attemptPrompt);
+                String response = llmClient.complete(attemptPrompt, stageTokenLimits.optionsFor(promptName));
                 contextLogService.writeResponse(promptName, attempt, response);
                 T parsed = responseParser.parse(response, responseType);
+                validateSemanticOutput(promptName, projectId, context, parsed);
                 if (responseCache != null) {
                     responseCache.putAfterSuccessfulTransaction(prompt, response);
                 }
@@ -226,13 +249,35 @@ public class AIAgentService {
                 if (!exception.isRetryable() || attempt >= maxAttemptsFor(exception)) {
                     throw exception;
                 }
-                if (isMalformedJson(exception)) {
+                if (isUnitTestSemanticError(exception)) {
+                    attemptPrompt = prompt + "\n\n# Unit Test semantic correction\n"
+                            + exception.getMessage().substring(UNIT_TEST_SEMANTIC_ERROR.length())
+                            + "\nRegenerate the complete unit_tests array. Production source is authoritative; "
+                            + "replace every fragile assertion described above and return strict JSON only.";
+                    continue;
+                } else if (isMalformedJson(exception)) {
                     attemptPrompt = prompt + "\n\n# JSON correction\nThe previous response was not valid JSON. Regenerate the complete response as strict RFC 8259 JSON. Check every quote, comma, object and array brace; do not add or omit braces, and do not use markdown fences or Java literals.";
                 }
                 waitBeforeRetry(promptName, attempt, exception);
             }
         }
         throw new LlmResponseException("Khong the parse LLM response.");
+    }
+
+    private <T> void validateSemanticOutput(String promptName, Long projectId, Object context, T parsed) {
+        if (!"unit-test".equals(promptName)
+                || !(context instanceof UnitTestContextDto unitTestContext)
+                || !(parsed instanceof UnitTestResponseDto unitTestResponse)) return;
+        List<String> sourcePaths = unitTestContext.classes().stream()
+                .map(com.greytest.dto.agent.GenerationContextDtos.ClassContextDto::filePath)
+                .toList();
+        ProjectJavaVersionDetector.TestFramework framework = javaVersionDetector == null
+                ? null : javaVersionDetector.detectTestFramework(projectId, sourcePaths)
+                        .map(ProjectJavaVersionDetector.TestFrameworkInfo::framework).orElse(null);
+        GeneratedUnitTestSemanticValidator.validate(unitTestContext, unitTestResponse, framework)
+                .ifPresent(problem -> {
+                    throw new LlmResponseException(UNIT_TEST_SEMANTIC_ERROR + problem, true);
+                });
     }
 
     private void waitBeforeRetry(String promptName, int attempt, LlmResponseException exception) {
@@ -278,18 +323,44 @@ public class AIAgentService {
                         .contains("khong phai json hop le");
     }
 
-    private String javaVersionInstruction(String promptName, Long projectId) {
+    private static boolean isUnitTestSemanticError(LlmResponseException exception) {
+        return exception.getMessage() != null && exception.getMessage().startsWith(UNIT_TEST_SEMANTIC_ERROR);
+    }
+
+    private String javaVersionInstruction(String promptName, Long projectId, Object context) {
         if (!"unit-test".equals(promptName) || javaVersionDetector == null) return "";
+        StringBuilder instruction = new StringBuilder();
+        List<String> sourcePaths = context instanceof UnitTestContextDto unitTestContext
+                ? unitTestContext.classes().stream()
+                        .map(com.greytest.dto.agent.GenerationContextDtos.ClassContextDto::filePath)
+                        .toList()
+                : List.of();
         try {
-            return javaVersionDetector.detect(projectId)
+            instruction.append(javaVersionDetector.detect(projectId, sourcePaths)
                     .map(info -> "\n\n# Java compatibility detected\nBuild file `" + info.buildFile()
                             + "` declares Java " + info.version() + ". Use only syntax and APIs available in Java "
                             + info.version() + ".")
-                    .orElse("\n\n# Java compatibility detected\nNo Java version was found in the build files. Use Java 8-compatible syntax and APIs.");
+                    .orElse("\n\n# Java compatibility detected\nNo Java version was found in the build files. Use Java 8-compatible syntax and APIs."));
         } catch (RuntimeException exception) {
             log.warn("Cannot detect Java version for project {}", projectId, exception);
-            return "\n\n# Java compatibility detected\nJava version detection failed. Use Java 8-compatible syntax and APIs.";
+            instruction.append("\n\n# Java compatibility detected\nJava version detection failed. Use Java 8-compatible syntax and APIs.");
         }
+        try {
+            javaVersionDetector.detectTestFramework(projectId, sourcePaths).ifPresent(info -> {
+                instruction.append("\n\n# Test framework detected\nBuild file `")
+                        .append(info.buildFile()).append("` requires ");
+                if (info.framework() == ProjectJavaVersionDetector.TestFramework.JUNIT4) {
+                    instruction.append("JUnit 4 only. Use org.junit.Test, org.junit.Before and org.junit.Assert only; "
+                            + "never import org.junit.jupiter. For exceptions use try/fail/catch (portable to JUnit 4.12). "
+                            + "JUnit 4 assertion messages are the first argument.");
+                } else {
+                    instruction.append("JUnit 5 only. Use org.junit.jupiter.api consistently; never mix org.junit.* lifecycle/test annotations.");
+                }
+            });
+        } catch (RuntimeException exception) {
+            log.warn("Cannot detect test framework for project {}", projectId, exception);
+        }
+        return instruction.toString();
     }
 
     String languageInstruction() {

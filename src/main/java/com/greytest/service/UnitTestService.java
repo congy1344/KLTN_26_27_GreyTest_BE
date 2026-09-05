@@ -34,13 +34,17 @@ import com.greytest.service.agent.LlmResponseException;
 public class UnitTestService {
     private static final int MAX_UNIT_TEST_RECOVERY_CALLS = 4;
     private final UnitTestRepository units; private final TestCaseRepository cases; private final TestPlanRepository plans; private final ProjectRepository projects; private final AIAgentService ai; private final UnitTestFileService files; private final TransactionTemplate transactions; private final GenerationProgressService generationProgress;
-    private ServiceScopeResolver scopeResolver; private ServicePipelineStatusService scopedArtifacts;
+    private ServiceScopeResolver scopeResolver; private ServicePipelineStatusService scopedArtifacts; private LlmBatchExecutor batchExecutor;
     public UnitTestService(UnitTestRepository units, TestCaseRepository cases, TestPlanRepository plans, ProjectRepository projects, AIAgentService ai, UnitTestFileService files, PlatformTransactionManager transactionManager, GenerationProgressService generationProgress){this.units=units;this.cases=cases;this.plans=plans;this.projects=projects;this.ai=ai;this.files=files;this.transactions=new TransactionTemplate(transactionManager);this.generationProgress=generationProgress;}
     @org.springframework.beans.factory.annotation.Autowired
-    public UnitTestService(UnitTestRepository units,TestCaseRepository cases,TestPlanRepository plans,ProjectRepository projects,AIAgentService ai,UnitTestFileService files,PlatformTransactionManager transactionManager,GenerationProgressService generationProgress,ServiceScopeResolver scopeResolver,ServicePipelineStatusService scopedArtifacts){
+    public UnitTestService(UnitTestRepository units,TestCaseRepository cases,TestPlanRepository plans,ProjectRepository projects,AIAgentService ai,UnitTestFileService files,PlatformTransactionManager transactionManager,GenerationProgressService generationProgress,ServiceScopeResolver scopeResolver,ServicePipelineStatusService scopedArtifacts,LlmBatchExecutor batchExecutor){
         this(units,cases,plans,projects,ai,files,transactionManager,generationProgress);
         this.scopeResolver=scopeResolver;
         this.scopedArtifacts=scopedArtifacts;
+        this.batchExecutor=batchExecutor;
+    }
+    public UnitTestService(UnitTestRepository units,TestCaseRepository cases,TestPlanRepository plans,ProjectRepository projects,AIAgentService ai,UnitTestFileService files,PlatformTransactionManager transactionManager,GenerationProgressService generationProgress,ServiceScopeResolver scopeResolver,ServicePipelineStatusService scopedArtifacts){
+        this(units,cases,plans,projects,ai,files,transactionManager,generationProgress,scopeResolver,scopedArtifacts,null);
     }
 
     @Transactional(readOnly=true) public List<UnitTestDto> list(Long projectId){ensure(projectId); return cases.findAll().stream().filter(c->approvedCase(c,projectId)).map(c->units.findByTestCaseId(c.getId())).filter(java.util.Objects::nonNull).map(this::dto).toList();}
@@ -61,9 +65,11 @@ public class UnitTestService {
                 "Hoàn tất: đã lưu " + (saved == null ? 0 : saved.size()) + " Unit Test.");
         return saved;
         } catch(RuntimeException exception){
+            int failedBatch=LlmBatchExecutor.failedBatch(exception,0);
             generationProgress.fail(projectId, GenerationProgressStage.UNIT_TEST,
-                    "Sinh Unit Test thất bại; xem thông báo lỗi để biết chi tiết.");
-            throw exception;
+                    (failedBatch>0?"Dừng ở batch " + failedBatch + ". ":"")
+                            + "Sinh Unit Test thất bại; xem thông báo lỗi để biết chi tiết.");
+            throw LlmBatchExecutor.originalFailure(exception);
         }
     }
     /** Sinh Unit Test chỉ cho case vòng mới, giữ nguyên toàn bộ output các vòng trước. */
@@ -89,25 +95,30 @@ public class UnitTestService {
                 "Hoàn tất: đã lưu " + (saved == null ? 0 : saved.size()) + " Unit Test bổ sung.");
         return saved;
         } catch(RuntimeException exception){
+            int failedBatch=LlmBatchExecutor.failedBatch(exception,0);
             generationProgress.fail(projectId, GenerationProgressStage.UNIT_TEST,
-                    "Sinh Unit Test bổ sung thất bại; xem thông báo lỗi để biết chi tiết.");
-            throw exception;
+                    (failedBatch>0?"Dừng ở batch " + failedBatch + ". ":"")
+                            + "Sinh Unit Test bổ sung thất bại; xem thông báo lỗi để biết chi tiết.");
+            throw LlmBatchExecutor.originalFailure(exception);
         }
     }
     private List<GeneratedUnitTestDto> generateBatches(Long projectId,List<TestCase> target){
         List<GeneratedUnitTestDto> generated=new ArrayList<>();
-        int batchNumber=0;
         int totalBatches=batchCount(target.size());
+        List<Set<Long>> batches=new ArrayList<>();
         for(int start=0;start<target.size();start+=GenerationContextBuilder.MAX_UNIT_TEST_CASES){
             var batch=target.subList(start,Math.min(start+GenerationContextBuilder.MAX_UNIT_TEST_CASES,target.size()));
             Set<Long> ids=batch.stream().map(TestCase::getId).collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
-            var valid=generateBatchWithRecovery(projectId,ids,batchNumber+1,totalBatches,
-                    new RecoveryBudget(MAX_UNIT_TEST_RECOVERY_CALLS),false);
+            batches.add(ids);
+        }
+        List<List<GeneratedUnitTestDto>> generatedBatches=LlmBatchExecutor.mapOrSequential(batchExecutor,batches,ids ->
+                generateBatchWithRecovery(projectId,ids,batches.indexOf(ids)+1,totalBatches,
+                        new RecoveryBudget(MAX_UNIT_TEST_RECOVERY_CALLS),false),
+                (completedBatch,valid)->generationProgress.advance(projectId, GenerationProgressStage.UNIT_TEST,
+                        "Batch " + completedBatch + "/" + totalBatches + ": đã kiểm tra "
+                                + valid.size() + " Unit Test hợp lệ."));
+        for(List<GeneratedUnitTestDto> valid:generatedBatches){
             generated.addAll(valid);
-            batchNumber++;
-            generationProgress.advance(projectId, GenerationProgressStage.UNIT_TEST,
-                    "Batch " + batchNumber + "/" + totalBatches + ": đã kiểm tra "
-                            + valid.size() + " Unit Test hợp lệ.");
         }
         return uniqueMethodNames(generated,Set.of());
     }
@@ -597,11 +608,16 @@ public class UnitTestService {
     private boolean approvedCase(TestCase c,Long projectId){TestPlan p=plans.findById(c.getTestPlanId()).orElse(null); return p!=null&&projectId.equals(p.getProjectId())&&c.getStatus()==ReviewStatus.APPROVED;}
     private UnitTest from(GeneratedUnitTestDto x){UnitTest u=new UnitTest();u.setTestCaseId(x.caseId());u.setTestClassName(x.testClassName());u.setTestMethodName(x.testMethodName());u.setPackageName(x.packageName());u.setGenerationType(x.generationType());u.setSourceCode(withTraceComment(x));u.setFilePath("src/test/java/"+x.packageName().replace('.','/')+"/"+x.testClassName()+".java"); return u;}
     private String withTraceComment(GeneratedUnitTestDto x){
-        if(x.sourceCode().contains("// GreyTest trace:")) return x.sourceCode();
+        String source = sanitizeSourceCode(x.sourceCode());
+        if(source.contains("// GreyTest trace:")) return source;
         TestCase testCase=cases.findById(x.caseId()).orElse(null);
-        if(testCase==null) return x.sourceCode();
+        if(testCase==null) return source;
         String trace="// GreyTest trace: "+testCase.getCaseCode()+" | "+testCase.getTraceSource();
-        return trace+"\n"+x.sourceCode();
+        return trace+"\n"+source;
+    }
+    private String sanitizeSourceCode(String source){
+        if(source==null) return "";
+        return source.replace("org.mockito.Matchers", "org.mockito.ArgumentMatchers");
     }
     private UnitTest from(GeneratedUnitTestDto x,String generationType){UnitTest u=from(x);u.setGenerationType(generationType);return u;}
     /** Gộp unit test theo test class thành file hoàn chỉnh như trong project thật. */
@@ -628,37 +644,11 @@ public class UnitTestService {
 
     /** Đóng gói toàn bộ file test đã gộp thành ZIP để user tải về chạy JaCoCo local. */
     @Transactional(readOnly=true) public byte[] zipFiles(Long projectId){
-        var mergedFiles=listFiles(projectId);
-        var bos=new java.io.ByteArrayOutputStream();
-        try(var zos=new java.util.zip.ZipOutputStream(bos)){
-            for(var f:mergedFiles){
-                zos.putNextEntry(new java.util.zip.ZipEntry(safeEntryName(f.filePath())));
-                zos.write(f.sourceCode().getBytes(java.nio.charset.StandardCharsets.UTF_8));
-                zos.closeEntry();
-            }
-        }catch(java.io.IOException e){throw new com.greytest.exception.StorageException("Khong tao duoc ZIP unit test",e);}
-        return bos.toByteArray();
+        return files.createCoverageArchive(listFiles(projectId));
     }
 
     @Transactional(readOnly=true) public byte[] zipFiles(Long projectId,String servicePath){
-        var mergedFiles=listFiles(projectId,servicePath);
-        var bos=new java.io.ByteArrayOutputStream();
-        try(var zos=new java.util.zip.ZipOutputStream(bos)){
-            for(var f:mergedFiles){
-                zos.putNextEntry(new java.util.zip.ZipEntry(safeEntryName(f.filePath())));
-                zos.write(f.sourceCode().getBytes(java.nio.charset.StandardCharsets.UTF_8));
-                zos.closeEntry();
-            }
-        }catch(java.io.IOException e){throw new com.greytest.exception.StorageException("Khong tao duoc ZIP unit test",e);}
-        return bos.toByteArray();
-    }
-
-    private String safeEntryName(String filePath){
-        if(filePath==null||filePath.isBlank()) throw new com.greytest.exception.StorageException("Duong dan Unit Test khong hop le",null);
-        var root=java.nio.file.Path.of("src","test","java");
-        var path=java.nio.file.Path.of(filePath).normalize();
-        if(path.isAbsolute()||!path.startsWith(root)) throw new com.greytest.exception.StorageException("Duong dan Unit Test khong hop le",null);
-        return path.toString().replace('\\','/');
+        return files.createCoverageArchive(listFiles(projectId,servicePath));
     }
 
     private Project ensure(Long id){return projects.findById(id).orElseThrow(()->new ProjectNotFoundException(id));}

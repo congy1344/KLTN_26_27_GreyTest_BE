@@ -36,14 +36,21 @@ import com.greytest.service.agent.LlmResponseException;
 @Service
 public class TestCaseService {
     private final TestCaseRepository cases; private final TestPlanRepository plans; private final ProjectRepository projects; private final AIAgentService ai; private final BusinessRuleRepository rules; private final TransactionTemplate transactions; private final GenerationProgressService generationProgress;
-    private ServiceScopeResolver scopeResolver;
+    private ServiceScopeResolver scopeResolver; private LlmBatchExecutor batchExecutor;
     public TestCaseService(TestCaseRepository cases, TestPlanRepository plans, ProjectRepository projects, AIAgentService ai, BusinessRuleRepository rules, PlatformTransactionManager transactionManager, GenerationProgressService generationProgress) { this.cases=cases; this.plans=plans; this.projects=projects; this.ai=ai; this.rules=rules; this.transactions=new TransactionTemplate(transactionManager); this.generationProgress=generationProgress; }
     @org.springframework.beans.factory.annotation.Autowired
     public TestCaseService(TestCaseRepository cases, TestPlanRepository plans, ProjectRepository projects,
             AIAgentService ai, BusinessRuleRepository rules, PlatformTransactionManager transactionManager,
-            GenerationProgressService generationProgress, ServiceScopeResolver scopeResolver) {
+            GenerationProgressService generationProgress, ServiceScopeResolver scopeResolver,
+            LlmBatchExecutor batchExecutor) {
         this(cases, plans, projects, ai, rules, transactionManager, generationProgress);
         this.scopeResolver=scopeResolver;
+        this.batchExecutor=batchExecutor;
+    }
+    public TestCaseService(TestCaseRepository cases, TestPlanRepository plans, ProjectRepository projects,
+            AIAgentService ai, BusinessRuleRepository rules, PlatformTransactionManager transactionManager,
+            GenerationProgressService generationProgress, ServiceScopeResolver scopeResolver) {
+        this(cases, plans, projects, ai, rules, transactionManager, generationProgress, scopeResolver, null);
     }
 
     @Transactional(readOnly=true) public List<TestCaseDto> list(Long projectId) { ensureProject(projectId); return plans.findByProjectId(projectId).stream().flatMap(p->cases.findByTestPlanId(p.getId()).stream()).sorted(Comparator.comparing(TestCase::getCaseCode, Comparator.nullsLast(String::compareTo))).map(this::dto).toList(); }
@@ -73,28 +80,16 @@ public class TestCaseService {
         generationProgress.start(projectId, GenerationProgressStage.TEST_CASE, batches.size() + 1,
                 "Đã nhóm " + approvedPlans.size() + " Test Plan thành " + batches.size() + " batch.");
         List<GeneratedTestCaseDto> generatedCases = new ArrayList<>();
-        int batchNumber = 0;
         try {
-        for (List<TestPlan> batch : batches) {
-            Set<Long> batchPlanIds = batch.stream()
-                    .map(TestPlan::getId)
-                    .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
-            var response = ai.generateTestCases(projectId, batchPlanIds);
-            List<GeneratedTestCaseDto> validBatch = response.cases().stream()
-                    .filter(testCase -> batchPlanIds.contains(testCase.planId()))
-                    .filter(testCase -> isValid(testCase, projectId))
-                    .toList();
-            Set<Long> generatedPlanIds = validBatch.stream()
-                    .map(GeneratedTestCaseDto::planId)
-                    .collect(java.util.stream.Collectors.toSet());
-            if (validBatch.isEmpty() || !generatedPlanIds.equals(batchPlanIds)) {
-                throw new LlmResponseException("AI chua sinh du Test Case cho moi Test Plan da approve.");
-            }
+        List<List<GeneratedTestCaseDto>> generatedBatches = LlmBatchExecutor.mapOrSequential(batchExecutor, batches,
+                batch -> generateValidatedBatch(projectId, batch),
+                (batchNumber, validBatch) -> generationProgress.advance(
+                        projectId,
+                        GenerationProgressStage.TEST_CASE,
+                        "Batch " + batchNumber + "/" + batches.size() + ": đã kiểm tra "
+                                + validBatch.size() + " Test Case hợp lệ."));
+        for (List<GeneratedTestCaseDto> validBatch : generatedBatches) {
             generatedCases.addAll(validBatch);
-            batchNumber++;
-            generationProgress.advance(projectId, GenerationProgressStage.TEST_CASE,
-                    "Batch " + batchNumber + "/" + batches.size() + ": đã kiểm tra "
-                            + validBatch.size() + " Test Case hợp lệ.");
         }
 
         Set<Long> expectedPlanIds = approvedPlans.stream()
@@ -106,13 +101,32 @@ public class TestCaseService {
                 "Hoàn tất: đã lưu " + (saved == null ? 0 : saved.size()) + " Test Case.");
         return saved;
         } catch (RuntimeException exception) {
-            String failureLocation = batchNumber < batches.size()
-                    ? "Dừng ở batch " + (batchNumber + 1) + "."
+            int failedBatch = LlmBatchExecutor.failedBatch(exception, 0);
+            String failureLocation = failedBatch > 0
+                    ? "Dừng ở batch " + failedBatch + "."
                     : "Dừng ở bước kiểm tra và lưu Test Case.";
             generationProgress.fail(projectId, GenerationProgressStage.TEST_CASE,
                     failureLocation + " Sinh Test Case thất bại; xem thông báo lỗi để biết chi tiết.");
-            throw exception;
+            throw LlmBatchExecutor.originalFailure(exception);
         }
+    }
+
+    private List<GeneratedTestCaseDto> generateValidatedBatch(Long projectId, List<TestPlan> batch) {
+        Set<Long> batchPlanIds = batch.stream()
+                .map(TestPlan::getId)
+                .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
+        var response = ai.generateTestCases(projectId, batchPlanIds);
+        List<GeneratedTestCaseDto> validBatch = response.cases().stream()
+                .filter(testCase -> batchPlanIds.contains(testCase.planId()))
+                .filter(testCase -> isValid(testCase, projectId))
+                .toList();
+        Set<Long> generatedPlanIds = validBatch.stream()
+                .map(GeneratedTestCaseDto::planId)
+                .collect(java.util.stream.Collectors.toSet());
+        if (validBatch.isEmpty() || !generatedPlanIds.equals(batchPlanIds)) {
+            throw new LlmResponseException("AI chua sinh du Test Case cho moi Test Plan da approve.");
+        }
+        return validBatch;
     }
 
     /**

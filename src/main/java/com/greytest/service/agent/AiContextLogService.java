@@ -6,6 +6,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.concurrent.atomic.AtomicLong;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -24,6 +25,7 @@ import lombok.extern.slf4j.Slf4j;
 public class AiContextLogService {
 
     private static final DateTimeFormatter FILE_TIME = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss-SSS");
+    private static final AtomicLong FILE_SEQUENCE = new AtomicLong();
 
     private final ObjectMapper objectMapper;
     private final Path logDir;
@@ -54,7 +56,7 @@ public class AiContextLogService {
         try {
             String contextJson = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(context);
             Files.createDirectories(logDir);
-            Path file = logDir.resolve(FILE_TIME.format(LocalDateTime.now()) + "-" + safeName(promptName) + ".log");
+            Path file = logDir.resolve(uniquePrefix() + "-" + safeName(promptName) + ".log");
             Files.writeString(file, content(promptName, contextJson, prompt), StandardCharsets.UTF_8);
             log.info("AI context/prompt saved to {} ({} bytes)", file.toAbsolutePath(), Files.size(file));
             if (consoleEnabled) {
@@ -71,7 +73,7 @@ public class AiContextLogService {
         if (!enabled) return;
         try {
             Files.createDirectories(logDir);
-            Path file = logDir.resolve(FILE_TIME.format(LocalDateTime.now()) + "-"
+            Path file = logDir.resolve(uniquePrefix() + "-"
                     + safeName(promptName) + "-response-" + attempt + ".log");
             Files.writeString(file, response == null ? "" : response, StandardCharsets.UTF_8);
             log.info("AI response saved to {} ({} bytes)", file.toAbsolutePath(), Files.size(file));
@@ -99,6 +101,10 @@ public class AiContextLogService {
 
     private String safeName(String value) {
         return value.replaceAll("[^a-zA-Z0-9-]", "-");
+    }
+
+    private String uniquePrefix() {
+        return FILE_TIME.format(LocalDateTime.now()) + "-" + FILE_SEQUENCE.incrementAndGet();
     }
 
     static Path resolveLogDir(String logPath, Path cwd) {

@@ -95,6 +95,11 @@ public class OpenAiLlmClient implements LlmClient {
 
     @Override
     public String complete(String prompt) {
+        return complete(prompt, new LlmRequestOptions(maxTokens));
+    }
+
+    @Override
+    public String complete(String prompt, LlmRequestOptions options) {
         if (apiKey == null || apiKey.isBlank()) {
             throw new LlmResponseException("LLM_API_KEY chua duoc cau hinh.");
         }
@@ -102,7 +107,7 @@ public class OpenAiLlmClient implements LlmClient {
                 .timeout(timeout)
                 .header("Authorization", "Bearer " + apiKey)
                 .header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString(requestBody(prompt)))
+                .POST(HttpRequest.BodyPublishers.ofString(requestBody(prompt, options.maxTokens())))
                 .build();
 
         try {
@@ -134,14 +139,14 @@ public class OpenAiLlmClient implements LlmClient {
         }
     }
 
-    private String requestBody(String prompt) {
+    private String requestBody(String prompt, int requestMaxTokens) {
         ObjectNode root = objectMapper.createObjectNode();
         root.put("model", model);
         root.putArray("messages").addObject()
                 .put("role", "user")
                 .put("content", prompt);
         root.put("temperature", temperature);
-        root.put("max_tokens", maxTokens);
+        root.put("max_tokens", requestMaxTokens);
         try {
             return objectMapper.writeValueAsString(root);
         } catch (JsonProcessingException exception) {

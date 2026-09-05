@@ -1,6 +1,7 @@
 package com.greytest.service;
 
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 /** Truyền callback log của job theo worker thread mà không làm LLM client phụ thuộc module nghiệp vụ. */
 public final class GenerationJobContext {
@@ -27,5 +28,21 @@ public final class GenerationJobContext {
     public static void clear() {
         LOG_CONSUMER.remove();
         ACTOR_USER_ID.remove();
+    }
+
+    /**
+     * Sao chép actor và callback log sang worker khác, sau đó luôn dọn ThreadLocal.
+     */
+    public static <T> Supplier<T> wrap(Supplier<T> task) {
+        Long actorUserId = ACTOR_USER_ID.get();
+        Consumer<String> logConsumer = LOG_CONSUMER.get();
+        return () -> {
+            bind(actorUserId, logConsumer);
+            try {
+                return task.get();
+            } finally {
+                clear();
+            }
+        };
     }
 }

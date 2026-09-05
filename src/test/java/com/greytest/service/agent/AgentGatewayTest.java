@@ -21,9 +21,16 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.greytest.dto.AnalysisManifestDto;
 import com.greytest.dto.agent.GenerationContextDtos.AnalysisSummaryDto;
+import com.greytest.dto.agent.GenerationContextDtos.BusinessRuleContextDto;
 import com.greytest.dto.agent.GenerationContextDtos.BusinessRuleGenerationContextDto;
+import com.greytest.dto.agent.GenerationContextDtos.ClassContextDto;
+import com.greytest.dto.agent.GenerationContextDtos.MethodContextDto;
 import com.greytest.dto.agent.GenerationContextDtos.ProjectContextDto;
+import com.greytest.dto.agent.GenerationContextDtos.TestCaseContextItemDto;
+import com.greytest.dto.agent.GenerationContextDtos.TestPlanContextItemDto;
+import com.greytest.dto.agent.GenerationContextDtos.UnitTestContextDto;
 import com.greytest.dto.agent.GenerationResponseDtos.BusinessRuleResponseDto;
+import com.greytest.dto.agent.GenerationResponseDtos.GeneratedUnitTestDto;
 import com.greytest.dto.agent.GenerationResponseDtos.TestCaseResponseDto;
 import com.greytest.dto.agent.GenerationResponseDtos.UnitTestResponseDto;
 import com.greytest.entity.Project;
@@ -71,7 +78,10 @@ class AgentGatewayTest {
                 "Never import two types with the same simple name",
                 "Java 8-compatible",
                 "do not use `List.of`, `Set.of`, `Map.of`",
-                "Prefer JUnit 5 assertions",
+                        "detected JUnit framework's built-in assertions",
+                "null selector never reaches",
+                "MimeMessageHelper(message, true)",
+                "ASCII-only subject",
                 "Initialize every fixture",
                 "never call a method or getter on a fixture field before assigning it",
                 "Match test dependency wiring to the production class",
@@ -89,6 +99,7 @@ class AgentGatewayTest {
                 "at the exact threshold",
                 "immediately below and immediately above",
                 "Do not generate duplicate scenarios",
+                "Never use null as input for a normal Java enum/string SWITCH default outcome",
                 "`preconditions`, `test_data`, and `expected_result` are all equivalent");
     }
 
@@ -98,6 +109,7 @@ class AgentGatewayTest {
 
         assertThat(prompt).contains(
                 "Completeness checklist",
+                "never describe null as reaching the default branch",
                 "orElseThrow/throw",
                 "Math.min/Math.max",
                 "Language contract",
@@ -239,6 +251,34 @@ class AgentGatewayTest {
     }
 
     @Test
+    void aiAgentRetriesUnitTestWhenSemanticValidatorFindsWrongSwitchException(@TempDir Path tempDir) throws Exception {
+        GenerationContextBuilder contextBuilder = mock(GenerationContextBuilder.class);
+        when(contextBuilder.buildUnitTestContext(1L, java.util.Set.of(40L))).thenReturn(unitTestContext());
+        LlmClient client = mock(LlmClient.class);
+        String invalid = objectMapper.writeValueAsString(new UnitTestResponseDto(List.of(
+                generatedUnitTest("@org.junit.Test(expected=IllegalArgumentException.class) "
+                        + "public void testCase(){ service.findReadyToNotify(null); }"))));
+        String valid = objectMapper.writeValueAsString(new UnitTestResponseDto(List.of(
+                generatedUnitTest("@org.junit.Test(expected=NullPointerException.class) "
+                        + "public void testCase(){ service.findReadyToNotify(null); }"))));
+        when(client.complete(org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.any(LlmRequestOptions.class))).thenReturn(invalid, valid);
+        AIAgentService service = new AIAgentService(
+                contextBuilder, promptManager, client, parser,
+                new AiContextLogService(objectMapper, tempDir.toString()));
+
+        UnitTestResponseDto response = service.generateUnitTests(1L, java.util.Set.of(40L));
+
+        assertThat(response.unitTests()).singleElement()
+                .satisfies(test -> assertThat(test.sourceCode()).contains("NullPointerException"));
+        var prompts = org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(client, org.mockito.Mockito.times(2)).complete(
+                prompts.capture(), org.mockito.ArgumentMatchers.any(LlmRequestOptions.class));
+        assertThat(prompts.getAllValues().get(1)).contains(
+                "Unit Test semantic correction", "throws NullPointerException before default");
+    }
+
+    @Test
     void aiAgentReservesQuotaAndActivityForEveryLlmGatewayCall(@TempDir Path tempDir) {
         GenerationContextBuilder contextBuilder = mock(GenerationContextBuilder.class);
         when(contextBuilder.buildBusinessRuleGenerationContext(1L)).thenReturn(context());
@@ -272,7 +312,8 @@ class AgentGatewayTest {
         when(projects.findById(1L)).thenReturn(java.util.Optional.of(project));
         UsageQuotaService quota = mock(UsageQuotaService.class);
         LlmClient client = mock(LlmClient.class);
-        when(client.complete(org.mockito.ArgumentMatchers.anyString()))
+        when(client.complete(org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.any(LlmRequestOptions.class)))
                 .thenReturn(mockLlmClient.complete("# Prompt: business-rule"));
         AIAgentService service = new AIAgentService(
                 contextBuilder, promptManager, client, parser,
@@ -291,7 +332,8 @@ class AgentGatewayTest {
         }
         service.generateBusinessRules(1L);
 
-        verify(client, org.mockito.Mockito.times(1)).complete(org.mockito.ArgumentMatchers.anyString());
+        verify(client, org.mockito.Mockito.times(1)).complete(org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.any(LlmRequestOptions.class));
         verify(quota, org.mockito.Mockito.times(1)).consumeLlmCall(
                 org.mockito.ArgumentMatchers.eq(42L),
                 org.mockito.ArgumentMatchers.eq(1L),
@@ -449,5 +491,29 @@ class AgentGatewayTest {
                 List.of(),
                 List.of(),
                 List.of());
+    }
+
+    private UnitTestContextDto unitTestContext() {
+        MethodContextDto method = new MethodContextDto(
+                10L, "demo.Service", "findReadyToNotify", "Object", List.of(), List.of(),
+                "public", "public Object findReadyToNotify(Type type) { switch(type) { default: throw new IllegalArgumentException(); } }",
+                1, 2, List.of(), List.of(), List.of());
+        ClassContextDto javaClass = new ClassContextDto(
+                1L, "demo", "Service", "demo.Service", "SERVICE", "src/main/java/demo/Service.java",
+                null, List.of(), List.of(method));
+        BusinessRuleContextDto rule = new BusinessRuleContextDto(
+                20L, 10L, "BR-001", "rule", null, "AI", "APPROVED", false, "SWITCH-1");
+        TestPlanContextItemDto plan = new TestPlanContextItemDto(
+                30L, 20L, List.of(20L), "TP-001", "plan", "plan", "EXCEPTION", "APPROVED", false);
+        TestCaseContextItemDto testCase = new TestCaseContextItemDto(
+                40L, 30L, "TC-001", "EXCEPTION", "case", "setup", Map.of(),
+                "throws", "HIGH", "BR-001 -> TP-001", "APPROVED", false);
+        return new UnitTestContextDto(null, null, List.of(javaClass), List.of(rule), List.of(plan),
+                List.of(testCase), List.of(), List.of(), List.of());
+    }
+
+    private GeneratedUnitTestDto generatedUnitTest(String testMethod) {
+        String source = "package demo; class ServiceTest { Service service; " + testMethod + " }";
+        return new GeneratedUnitTestDto(40L, "ServiceTest", "testCase", "demo", "NEW_TEST", source);
     }
 }

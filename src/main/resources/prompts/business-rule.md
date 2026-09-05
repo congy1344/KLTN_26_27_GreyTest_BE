@@ -32,6 +32,7 @@ Rules:
 - For each decision rule, set branch_id to the decision id such as `IF-1`, `SWITCH-1`, `TERNARY-1`, or `FOR-1`; never copy an outcome suffix into branch_id.
 - One rule must express the complete source-proven business constraint or processing decision and summarize all observable outcomes of that decision.
 - For SWITCH, include every supported case mapping and default behavior in the same rule when source proves them.
+- For a normal Java enum/string SWITCH, never describe null as reaching the default branch. A null selector throws `NullPointerException` before case matching unless source explicitly handles null first.
 - For loops, describe the source-proven collection/range processing behavior, including empty/skip behavior when applicable; do not merely say that a loop executes.
 - Do not create a separate rule whose only meaning is that processing continues, a condition is false, or validation passed. Those are test outcomes, not independent Business Rules.
 - For each decision id, return at most one rule item. If a decision has validation, state transition, persistence, or other observable facets, combine them into that single rule description; never return two items with the same decision id.

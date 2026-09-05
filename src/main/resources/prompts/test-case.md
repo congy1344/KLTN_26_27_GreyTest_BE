@@ -16,6 +16,7 @@ Rules:
 - Every approved Test Plan must still have at least one test case for traceability.
 - trace_source must name the concrete BR code(s), their decision-level sourceBranchId values when present, the Test Plan code, and the specific source outcome id covered by the case when applicable.
 - For every control-flow decision referenced by a Business Rule, use classes[].methods[].branches to generate cases for every reachable and relevant IF, SWITCH, TERNARY, FOR, FOREACH, WHILE, and DO_WHILE outcome.
+- Never use null as input for a normal Java enum/string SWITCH default outcome. Null throws `NullPointerException` before case matching unless source explicitly handles it. Cover a SWITCH default only when context proves a non-null input can reach it; do not fabricate an unreachable default scenario.
 - Use test_type only: HAPPY_PATH, BOUNDARY, EXCEPTION, EDGE.
 - Never output NEGATIVE. Use EXCEPTION for invalid input or an unmet condition, whether the method throws or handles it normally. Use EDGE only for unusual or rare situations.
 - Use priority: HIGH, MEDIUM, LOW.

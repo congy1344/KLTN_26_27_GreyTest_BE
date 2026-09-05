@@ -2,7 +2,13 @@ package com.greytest.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.zip.ZipInputStream;
 
 import org.junit.jupiter.api.Test;
 
@@ -154,6 +160,79 @@ class UnitTestFileServiceTest {
 
         assertThat(countOf(source, "void convert(")).isEqualTo(1);
         assertThat(source).contains("void second()");
+    }
+
+    @Test
+    void archiveKemScriptTaoJacocoXmlMaKhongCanThemCauHinhJacocoVaoPom() throws IOException {
+        var mergedFile = new com.greytest.dto.UnitTestFileDto(
+                "src/test/java/com/example/UserServiceTest.java",
+                "UserServiceTest",
+                "com.example",
+                1,
+                List.of("TC-001"),
+                "package com.example; class UserServiceTest {}");
+
+        Map<String, String> entries = zipEntries(service.createCoverageArchive(List.of(mergedFile)));
+
+        assertThat(entries).containsKeys(
+                "src/test/java/com/example/UserServiceTest.java",
+                "run-greytest-coverage.cmd",
+                "run-greytest-coverage.sh",
+                "README-GREYTEST.txt");
+        assertThat(entries.get("run-greytest-coverage.cmd"))
+                .contains("jacoco-maven-plugin:0.8.15:prepare-agent")
+                .contains("jacoco-maven-plugin:0.8.15:report")
+                .contains("cd /d \"%~dp0\"", "call %MAVEN_COMMAND%", "%*")
+                .contains("-Djacoco.propertyName=greytestJacocoArgLine")
+                .contains("-DargLine=@{greytestJacocoArgLine} %GREYTEST_JVM_ARGS%")
+                .contains("clean test-compile")
+                .contains("-DfailIfNoTests=true")
+                .contains("src\\test\\java\\*.java", "target\\test-classes\\*.class")
+                .contains("-Dtest=com.example.UserServiceTest")
+                .contains("target\\site\\jacoco\\jacoco.xml");
+        assertThat(entries.get("run-greytest-coverage.sh"))
+                .contains("jacoco-maven-plugin:0.8.15:prepare-agent")
+                .contains("-Djacoco.propertyName=greytestJacocoArgLine")
+                .contains("-DargLine=@{greytestJacocoArgLine} ${GREYTEST_JVM_ARGS:-}")
+                .contains("src/test/java", "target/test-classes", "*.java", "*.class")
+                .contains("-Dtest=com.example.UserServiceTest")
+                .contains("-DfailIfNoTests=true")
+                .contains("target/site/jacoco/jacoco.xml");
+        assertThat(entries.get("README-GREYTEST.txt"))
+                .contains("run-greytest-coverage.cmd", "src/test/java", "GREYTEST_JVM_ARGS", "khong gan trung JaCoCo agent");
+    }
+
+    @Test
+    void archiveTuChoiDuongDanTestThoatKhoiThuMucChoPhep() {
+        var mergedFile = new com.greytest.dto.UnitTestFileDto(
+                "../OutsideTest.java", "OutsideTest", "", 1, List.of("TC-001"), "class OutsideTest {}");
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(
+                () -> service.createCoverageArchive(List.of(mergedFile)))
+                .hasMessageContaining("Duong dan Unit Test khong hop le");
+    }
+
+    @Test
+    void archiveGiuNguyenSourceThayViThayChuoiMockitoLamHongCode() throws IOException {
+        String source = "import org.mockito.Matchers; class LegacyTest { "
+                + "String text = \"org.mockito.Matchers\"; Object value = Matchers.any(); }";
+        var file = new com.greytest.dto.UnitTestFileDto(
+                "src/test/java/LegacyTest.java", "LegacyTest", "", 1, List.of("TC-001"), source);
+
+        Map<String, String> entries = zipEntries(service.createCoverageArchive(List.of(file)));
+
+        assertThat(entries.get("src/test/java/LegacyTest.java")).isEqualTo(source);
+    }
+
+    private Map<String, String> zipEntries(byte[] archive) throws IOException {
+        Map<String, String> entries = new LinkedHashMap<>();
+        try (var input = new ZipInputStream(new ByteArrayInputStream(archive), StandardCharsets.UTF_8)) {
+            java.util.zip.ZipEntry entry;
+            while ((entry = input.getNextEntry()) != null) {
+                entries.put(entry.getName(), new String(input.readAllBytes(), StandardCharsets.UTF_8));
+            }
+        }
+        return entries;
     }
 
     private int countOf(String text, String token) {

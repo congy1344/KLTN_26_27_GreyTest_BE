@@ -84,4 +84,30 @@ class OpenAiLlmClientTest {
                 .isInstanceOf(LlmResponseException.class)
                 .hasMessageContaining("LLM_API_KEY");
     }
+
+    @Test
+    void usesPerRequestMaxTokens() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
+        AtomicReference<String> requestBody = new AtomicReference<>();
+        server.createContext("/", exchange -> {
+            requestBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            byte[] bytes = "{\"choices\":[{\"message\":{\"content\":\"{}\"}}]}"
+                    .getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+        server.start();
+        try {
+            OpenAiLlmClient client = new OpenAiLlmClient(objectMapper, HttpClient.newHttpClient(), "key",
+                    "claude-sonnet-4-6", 0.3, 16000, Duration.ofSeconds(5),
+                    URI.create("http://127.0.0.1:" + server.getAddress().getPort()));
+
+            client.complete("prompt", new LlmRequestOptions(4096));
+
+            assertThat(objectMapper.readTree(requestBody.get()).path("max_tokens").asInt()).isEqualTo(4096);
+        } finally {
+            server.stop(0);
+        }
+    }
 }
