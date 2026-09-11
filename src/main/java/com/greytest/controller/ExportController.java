@@ -28,9 +28,11 @@ public class ExportController {
 
     @GetMapping("/api/projects/{projectId}/export")
     public ResponseEntity<String> export(@PathVariable Long projectId,
-            @RequestParam("format") String format, @RequestHeader("Authorization") String authorization) {
+            @RequestParam("format") String format,
+            @RequestParam(required = false) String servicePath,
+            @RequestHeader("Authorization") String authorization) {
         projects.requireAccess(projectId, auth.currentUser(authorization));
-        String content = service.export(projectId, format);
+        String content = service.export(projectId, format, servicePath);
         boolean json = "json".equals(format);
         String fileName = "greytest-report-" + projectId + (json ? ".json" : ".md");
         return ResponseEntity.ok()

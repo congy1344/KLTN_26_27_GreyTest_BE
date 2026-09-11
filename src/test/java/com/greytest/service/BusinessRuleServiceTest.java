@@ -363,15 +363,59 @@ class BusinessRuleServiceTest {
                         new GeneratedBusinessRuleDto(11L, "Unit price khong duoc null.", "VALIDATION", "IF-1"),
                         new GeneratedBusinessRuleDto(11L, "Unit price phai duong.", "VALIDATION", "IF-2"),
                         new GeneratedBusinessRuleDto(11L, "Quantity phai nam trong gioi han.", "VALIDATION", "IF-3"),
-                        new GeneratedBusinessRuleDto(11L, "Tong tien bang unit price nhan quantity.", "BUSINESS_LOGIC"))));
+                        new GeneratedBusinessRuleDto(11L, "Tong tien bang unit price nhan quantity.", "BUSINESS_LOGIC", "STMT-1"))));
         mockBusinessRuleSave();
 
         List<BusinessRuleDto> rules = service().generate(1L);
 
         assertThat(rules).hasSize(4);
         assertThat(rules).extracting(BusinessRuleDto::sourceBranchId)
-                .containsExactly("IF-1", "IF-2", "IF-3", null);
+                .containsExactly("IF-1", "IF-2", "IF-3", "STMT-1");
         verify(aiAgentService).generateBusinessRules(1L, Set.of(11L));
+    }
+
+    @Test
+    void generateAcceptsStaticSourceAnchorForMethodLevelRule() {
+        mockProject();
+        JavaMethod branchlessMethod = method(11L, "getAppointmentById");
+        branchlessMethod.setSourceCode("""
+                public Appointment getAppointmentById(Long id) {
+                    return repository.findById(id).orElseThrow();
+                }
+                """);
+        mockServiceMethods(branchlessMethod);
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of());
+        when(aiAgentService.generateBusinessRules(1L, Set.of(11L))).thenReturn(
+                new BusinessRuleResponseDto(List.of(
+                        new GeneratedBusinessRuleDto(
+                                11L, "Lich hen phai ton tai theo id.", "VALIDATION", "STMT-1"))));
+        mockBusinessRuleSave();
+
+        assertThat(service().generate(1L)).extracting(BusinessRuleDto::sourceBranchId)
+                .containsExactly("STMT-1");
+    }
+
+    @Test
+    void generateRejectsDuplicateDescriptionsAcrossDecisionsInSameMethod() {
+        mockProject();
+        JavaMethod branchedMethod = method(11L, "validateAppointment");
+        branchedMethod.setSourceCode("""
+                public String validateAppointment(boolean patientValid, boolean doctorValid) {
+                    if (!patientValid) return "invalid";
+                    if (!doctorValid) return "invalid";
+                    return "valid";
+                }
+                """);
+        mockServiceMethods(branchedMethod);
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of());
+        when(aiAgentService.generateBusinessRules(1L, Set.of(11L))).thenReturn(
+                new BusinessRuleResponseDto(List.of(
+                        new GeneratedBusinessRuleDto(11L, "Appointment is invalid.", "VALIDATION", "IF-1"),
+                        new GeneratedBusinessRuleDto(11L, "Appointment is invalid.", "VALIDATION", "IF-2"))));
+
+        assertThatThrownBy(() -> service().generate(1L))
+                .isInstanceOf(com.greytest.service.agent.LlmResponseException.class)
+                .hasMessageContaining("trung Business Rule");
     }
 
     @Test
@@ -394,7 +438,7 @@ class BusinessRuleServiceTest {
 
         assertThatThrownBy(() -> service().generate(1L))
                 .isInstanceOf(com.greytest.service.agent.LlmResponseException.class)
-                .hasMessageContaining("khong thuoc source method");
+                .hasMessageContaining("source anchor khong thuoc method");
     }
 
     @Test
@@ -410,7 +454,7 @@ class BusinessRuleServiceTest {
 
         assertThatThrownBy(() -> service().generate(1L))
                 .isInstanceOf(com.greytest.service.agent.LlmResponseException.class)
-                .hasMessageContaining("gan branch_id cho method khong co quyet dinh");
+                .hasMessageContaining("source anchor khong thuoc method");
     }
 
     @Test

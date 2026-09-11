@@ -1,14 +1,11 @@
 package com.greytest.entity;
 
 import java.time.LocalDateTime;
-import java.util.List;
 
 import org.hibernate.annotations.CreationTimestamp;
 import org.hibernate.annotations.JdbcTypeCode;
-import org.hibernate.annotations.UpdateTimestamp;
 import org.hibernate.type.SqlTypes;
 
-import com.greytest.entity.enums.ProjectStatus;
 import com.greytest.entity.enums.SourceType;
 
 import jakarta.persistence.Column;
@@ -22,47 +19,43 @@ import jakarta.persistence.Table;
 import lombok.Getter;
 import lombok.Setter;
 
+/**
+ * Lưu trữ phiên bản snapshot source code của project (baseline hoặc candidate).
+ */
 @Entity
-@Table(name = "project")
+@Table(name = "source_revision")
 @Getter
 @Setter
-public class Project {
+public class SourceRevision {
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    private Long ownerUserId;
-
-    private String name;
+    @Column(nullable = false)
+    private Long projectId;
 
     @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
     private SourceType sourceType;
 
     private String sourceUrl;
 
+    private String branch;
+
+    private String commitSha;
+
+    @Column(nullable = false)
     private String storagePath;
 
-    @Enumerated(EnumType.STRING)
-    private ProjectStatus status;
+    private String contentHash;
 
-    private Integer totalProductionFiles;
-
-    private Integer parsedProductionFiles;
-
-    private Integer failedParseFiles;
+    private String logicalRoot;
 
     @JdbcTypeCode(SqlTypes.JSON)
-    private List<String> failedParseFilePaths;
-
-    private Long activeSourceRevisionId;
-
-    private Long activeSourceUpdateId;
+    private String analysisSnapshot;
 
     @CreationTimestamp
     @Column(updatable = false)
     private LocalDateTime createdAt;
-
-    @UpdateTimestamp
-    private LocalDateTime updatedAt;
 }

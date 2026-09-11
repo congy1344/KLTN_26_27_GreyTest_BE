@@ -3,6 +3,7 @@ package com.greytest.controller;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import com.greytest.dto.TraceabilityMatrixDto;
@@ -25,8 +26,9 @@ public class TraceabilityController {
 
     @GetMapping("/api/projects/{projectId}/traceability")
     public TraceabilityMatrixDto matrix(@PathVariable Long projectId,
+            @RequestParam(required = false) String servicePath,
             @RequestHeader("Authorization") String authorization) {
         projects.requireAccess(projectId, auth.currentUser(authorization));
-        return service.getMatrix(projectId);
+        return service.getMatrix(projectId, servicePath);
     }
 }

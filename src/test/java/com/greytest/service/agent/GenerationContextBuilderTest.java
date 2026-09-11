@@ -27,6 +27,8 @@ import com.greytest.dto.agent.GenerationContextDtos.BusinessRuleReviewContextDto
 import com.greytest.dto.agent.GenerationContextDtos.TestCaseContextDto;
 import com.greytest.dto.agent.GenerationContextDtos.TestPlanContextDto;
 import com.greytest.dto.CoverageGapDto;
+import com.greytest.dto.diff.MethodDiffItem;
+import com.greytest.dto.diff.MethodDiffType;
 import com.greytest.entity.BusinessRule;
 import com.greytest.entity.TestCase;
 import com.greytest.entity.TestPlan;
@@ -407,6 +409,116 @@ class GenerationContextBuilderTest {
         assertThat(context.existingApprovedTestCases()).hasSize(10);
         assertThat(context.existingTests()).singleElement()
                 .extracting("sourceCode").asString().hasSizeLessThan(5_000);
+    }
+
+    @Test
+    void unitTestContextIncludesImportedProductionTypeDeclarations() {
+        JavaMethodDto serviceMethod = new JavaMethodDto(
+                11L, "createAppointment", "Appointment", List.of(), List.of(), "PUBLIC",
+                "Appointment createAppointment() { return null; }", 10, 12, List.of(), List.of());
+        JavaClassDto service = new JavaClassDto(
+                10L, "demo", "AppointmentService", "demo.AppointmentService", "SERVICE",
+                "src/main/java/demo/AppointmentService.java",
+                "package demo; import demo.common.ResourceNotFoundException; import demo.model.Appointment; "
+                        + "class AppointmentService { Appointment createAppointment() { return null; } }",
+                List.of(), List.of(serviceMethod));
+        JavaClassDto appointment = new JavaClassDto(
+                20L, "demo.model", "Appointment", "demo.model.Appointment", "ENTITY",
+                "src/main/java/demo/model/Appointment.java",
+                "package demo.model; public class Appointment { private java.time.LocalTime appointmentTime; "
+                        + "public void setAppointmentTime(java.time.LocalTime value) {} }",
+                List.of(), List.of());
+        JavaClassDto exception = new JavaClassDto(
+                21L, "demo.common", "ResourceNotFoundException", "demo.common.ResourceNotFoundException", "OTHER",
+                "src/main/java/demo/common/ResourceNotFoundException.java",
+                "package demo.common; public class ResourceNotFoundException extends RuntimeException {}",
+                List.of(), List.of());
+        JavaClassDto defaultPackageType = new JavaClassDto(
+                22L, "", "LegacyType", "LegacyType", "OTHER",
+                "src/main/java/LegacyType.java", "class LegacyType {}", List.of(), List.of());
+        AnalysisResultDto enriched = new AnalysisResultDto(
+                1L, "demo", "ANALYZED", 4, 1, 0, 0, 0, 0, 4, 4, 0,
+                List.of(), List.of(service, appointment, exception, defaultPackageType), List.of(), List.of());
+        when(analysisService.getAnalysisResult(1L)).thenReturn(enriched);
+        when(existingTestService.list(1L)).thenReturn(List.of());
+        when(businessRuleRepository.findByProjectIdAndStatus(1L, ReviewStatus.APPROVED))
+                .thenReturn(List.of(ruleEntity(7L, 11L, ReviewStatus.APPROVED)));
+        when(testPlanRepository.findByProjectId(1L)).thenReturn(List.of(testPlan(20L, 7L, "TP-001")));
+        when(testPlanCoveredRuleRepository.findByTestPlanIdIn(List.of(20L)))
+                .thenReturn(List.of(coveredRule(20L, 7L)));
+        TestCase testCase = new TestCase();
+        testCase.setId(30L);
+        testCase.setTestPlanId(20L);
+        testCase.setCaseCode("TC-001");
+        testCase.setStatus(ReviewStatus.APPROVED);
+        when(testCaseRepository.findByTestPlanId(20L)).thenReturn(List.of(testCase));
+
+        var context = builder.buildUnitTestContext(1L, Set.of(30L));
+
+        assertThat(context.classes()).extracting("qualifiedName")
+                .contains("demo.AppointmentService", "demo.model.Appointment", "demo.common.ResourceNotFoundException");
+        assertThat(context.classes().stream()
+                .filter(javaClass -> "demo.model.Appointment".equals(javaClass.qualifiedName()))
+                .findFirst().orElseThrow().sourceCode())
+                .contains("setAppointmentTime", "LocalTime");
+    }
+
+    @Test
+    void unitTestContextUsesCandidateSourceForChangedMethod() {
+        mockCommonInputs();
+        when(businessRuleRepository.findByProjectIdAndStatus(1L, ReviewStatus.APPROVED))
+                .thenReturn(List.of(ruleEntity(7L, 11L, ReviewStatus.APPROVED)));
+        TestPlan plan = testPlan(20L, 7L, "TP-001");
+        TestCase testCase = new TestCase();
+        testCase.setId(30L);
+        testCase.setTestPlanId(20L);
+        testCase.setCaseCode("TC-001");
+        testCase.setPriority(Priority.HIGH);
+        testCase.setStatus(ReviewStatus.APPROVED);
+        when(testPlanRepository.findByProjectId(1L)).thenReturn(List.of(plan));
+        when(testPlanCoveredRuleRepository.findByTestPlanIdIn(List.of(20L)))
+                .thenReturn(List.of(coveredRule(20L, 7L)));
+        when(testCaseRepository.findByTestPlanId(20L)).thenReturn(List.of(testCase));
+
+        MethodDiffItem changedMethod = new MethodDiffItem(
+                "UserService", "demo.UserService", "createUser", "createUser(String)",
+                "demo.UserService#createUser(String)", MethodDiffType.MODIFIED, "Logic changed",
+                "User createUser(String email) { return null; }",
+                "User createUser(String email) { return repository.save(new User(email)); }",
+                List.of(), true);
+
+        var context = builder.buildUnitTestContext(1L, Set.of(30L), List.of(changedMethod));
+
+        assertThat(context.classes().get(0).methods().get(0).sourceCode())
+                .contains("repository.save(new User(email))");
+    }
+
+    @Test
+    void unitTestContextOmitsDeletedMethod() {
+        mockCommonInputs();
+        when(businessRuleRepository.findByProjectIdAndStatus(1L, ReviewStatus.APPROVED))
+                .thenReturn(List.of(ruleEntity(7L, 12L, ReviewStatus.APPROVED)));
+        TestPlan plan = testPlan(20L, 7L, "TP-001");
+        TestCase testCase = new TestCase();
+        testCase.setId(30L);
+        testCase.setTestPlanId(20L);
+        testCase.setCaseCode("TC-001");
+        testCase.setPriority(Priority.HIGH);
+        testCase.setStatus(ReviewStatus.APPROVED);
+        when(testPlanRepository.findByProjectId(1L)).thenReturn(List.of(plan));
+        when(testPlanCoveredRuleRepository.findByTestPlanIdIn(List.of(20L)))
+                .thenReturn(List.of(coveredRule(20L, 7L)));
+        when(testCaseRepository.findByTestPlanId(20L)).thenReturn(List.of(testCase));
+
+        MethodDiffItem deletedMethod = new MethodDiffItem(
+                "UserService", "demo.UserService", "updateUser", "updateUser()",
+                "demo.UserService#updateUser()", MethodDiffType.DELETED, "Method deleted",
+                "User updateUser() { return null; }", null, List.of(), true);
+
+        var context = builder.buildUnitTestContext(1L, Set.of(30L), List.of(deletedMethod));
+
+        assertThat(context.classes().get(0).methods()).extracting("methodName")
+                .doesNotContain("updateUser");
     }
 
     @Test

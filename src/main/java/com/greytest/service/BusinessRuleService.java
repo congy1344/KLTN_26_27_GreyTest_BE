@@ -633,15 +633,17 @@ public class BusinessRuleService {
                 .sorted()
                 .map(methodId -> {
                     Set<String> expected = requiredDecisionIds(methodId);
+                    Set<String> anchors = sourceAnchorIds(methodId);
                     return expected.isEmpty()
-                            ? "method_id " + methodId + ": no decision; branch_id must be null"
-                            : "method_id " + methodId + ": required branch_id values " + expected;
+                            ? "method_id " + methodId + ": no decision; source anchor values " + anchors
+                            : "method_id " + methodId + ": required branch_id values " + expected
+                                    + "; optional source anchor values " + anchors;
                 })
                 .collect(Collectors.joining("; "));
         return validationError
                 + "\nExpected branch checklist: " + branchChecklist
                 + "\nEvery required branch_id must appear exactly once. "
-                + "Use branch_id null only for independently testable behavior outside every decision.";
+                + "Use the matching STMT-* source anchor for independently testable behavior outside every decision.";
     }
 
     private void validateGeneratedBusinessRules(
@@ -685,6 +687,7 @@ public class BusinessRuleService {
         }
         Map<Long, Set<String>> returnedByMethod = new java.util.HashMap<>();
         Set<String> uniqueAssignments = new HashSet<>();
+        Map<Long, Set<String>> descriptionsByMethod = new java.util.HashMap<>();
         for (GeneratedBusinessRuleDto rule : generatedRules) {
             if (rule == null || rule.methodId() == null
                     || rule.description() == null || rule.description().isBlank()
@@ -692,16 +695,31 @@ public class BusinessRuleService {
                 throw new LlmResponseException(
                         "AI tra ve Business Rule nam ngoai Service method dang phan tich.");
             }
+            String normalizedDescription = descriptionKey(rule.description());
+            Set<String> methodDescriptions = descriptionsByMethod.computeIfAbsent(
+                    rule.methodId(), ignored -> new HashSet<>());
+            if (!methodDescriptions.add(normalizedDescription)) {
+                throw new LlmResponseException(
+                        "AI sinh trung Business Rule cho method " + rule.methodId()
+                                + ": mo ta trung lap giua cac decision.");
+            }
             Set<String> expected = requiredDecisionIds(rule.methodId());
             String branchId = decisionId(rule.branchId());
+            Set<String> sourceAnchors = sourceAnchorIds(rule.methodId());
             if (expected.isEmpty()) {
-                if (branchId != null) {
+                if (branchId != null && !sourceAnchors.contains(branchId)) {
                     throw new LlmResponseException(
-                            "AI gan branch_id cho method khong co quyet dinh control-flow: " + rule.methodId());
+                            "AI tra ve source anchor khong thuoc method " + rule.methodId() + ": " + rule.branchId());
                 }
-            } else if (branchId != null && !expected.contains(branchId)) {
+            } else if (branchId != null
+                    && !expected.contains(branchId)
+                    && !sourceAnchors.contains(branchId)) {
                 throw new LlmResponseException(
-                        "AI tra ve branch_id khong thuoc source method " + rule.methodId() + ": " + rule.branchId());
+                        "AI tra ve source anchor khong thuoc method " + rule.methodId() + ": " + rule.branchId());
+            }
+            if (branchId == null && !sourceAnchors.isEmpty()) {
+                throw new LlmResponseException(
+                        "AI chua gan source anchor cho Business Rule cua method " + rule.methodId() + ".");
             }
             String assignment = branchId == null
                     ? rule.methodId() + "\n" + descriptionKey(rule.description())
@@ -712,7 +730,9 @@ public class BusinessRuleService {
                                 + (branchId == null ? "." : ", quyet dinh " + branchId + "."));
             }
             if (branchId != null) {
-                returnedByMethod.computeIfAbsent(rule.methodId(), ignored -> new LinkedHashSet<>()).add(branchId);
+                if (expected.contains(branchId)) {
+                    returnedByMethod.computeIfAbsent(rule.methodId(), ignored -> new LinkedHashSet<>()).add(branchId);
+                }
             }
         }
         return returnedByMethod;
@@ -728,6 +748,7 @@ public class BusinessRuleService {
     private Set<String> decisionIds(JavaMethod method) {
         try {
             return MethodBranchAnalyzer.analyze(method.getSourceCode(), method.getLineStart()).stream()
+                    .filter(branch -> !"STATEMENT".equals(branch.kind()))
                     .map(com.greytest.dto.SourceBranchDto::branchId)
                     .map(this::decisionId)
                     .collect(Collectors.toCollection(LinkedHashSet::new));
@@ -738,10 +759,27 @@ public class BusinessRuleService {
         }
     }
 
+    private Set<String> sourceAnchorIds(Long methodId) {
+        JavaMethod method = javaMethodRepository.findById(methodId)
+                .orElseThrow(() -> new LlmResponseException(
+                        "Khong tim thay Service method " + methodId + " de xac minh source anchor."));
+        try {
+            return MethodBranchAnalyzer.analyze(method.getSourceCode(), method.getLineStart()).stream()
+                    .filter(branch -> "STATEMENT".equals(branch.kind()))
+                    .map(com.greytest.dto.SourceBranchDto::branchId)
+                    .collect(Collectors.toCollection(LinkedHashSet::new));
+        } catch (IllegalStateException exception) {
+            throw new InvalidProjectStatusException(
+                    "Khong the xac minh source anchor cua method " + method.getMethodName()
+                            + ". Hay phan tich lai project.");
+        }
+    }
+
     private int branchOrder(Long methodId, String branchId) {
         JavaMethod method = javaMethodRepository.findById(methodId).orElse(null);
         if (method == null || branchId == null) return Integer.MAX_VALUE;
         List<String> decisionIds = MethodBranchAnalyzer.analyze(method.getSourceCode(), method.getLineStart()).stream()
+                .filter(branch -> !"STATEMENT".equals(branch.kind()))
                 .map(com.greytest.dto.SourceBranchDto::branchId)
                 .map(this::decisionId)
                 .distinct()

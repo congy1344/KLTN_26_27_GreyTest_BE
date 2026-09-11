@@ -12,5 +12,7 @@ public interface TestPlanCoveredRuleRepository extends JpaRepository<TestPlanCov
 
     List<TestPlanCoveredRule> findByTestPlanId(Long testPlanId);
 
+    List<TestPlanCoveredRule> findByBusinessRuleId(Long businessRuleId);
+
     void deleteByTestPlanId(Long testPlanId);
 }

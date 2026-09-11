@@ -3,6 +3,8 @@ package com.greytest.service;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 import org.springframework.stereotype.Service;
@@ -40,11 +42,14 @@ public class ExportService {
     private final TestPlanRepository plans;
     private final TestCaseRepository cases;
     private final UnitTestRepository unitTests;
+    private final ServiceScopeResolver scopeResolver;
+    private final ServicePipelineStatusService scopedStatuses;
     private final ObjectMapper objectMapper;
 
     public ExportService(ProjectRepository projects, TraceabilityService traceability, CoverageService coverage,
             BusinessRuleRepository rules, TestPlanRepository plans, TestCaseRepository cases,
-            UnitTestRepository unitTests, ObjectMapper objectMapper) {
+            UnitTestRepository unitTests, ServiceScopeResolver scopeResolver,
+            ServicePipelineStatusService scopedStatuses, ObjectMapper objectMapper) {
         this.projects = projects;
         this.traceability = traceability;
         this.coverage = coverage;
@@ -52,30 +57,61 @@ public class ExportService {
         this.plans = plans;
         this.cases = cases;
         this.unitTests = unitTests;
+        this.scopeResolver = scopeResolver;
+        this.scopedStatuses = scopedStatuses;
         this.objectMapper = objectMapper;
     }
 
     @Transactional
     public String export(Long projectId, String format) {
+        return export(projectId, format, null);
+    }
+
+    @Transactional
+    public String export(Long projectId, String format, String servicePath) {
         if (!"json".equals(format) && !"markdown".equals(format)) {
             throw new IllegalArgumentException("format phải là json hoặc markdown");
         }
         Project project = projects.findById(projectId).orElseThrow(() -> new ProjectNotFoundException(projectId));
-        if (project.getStatus() != ProjectStatus.COVERAGE_ANALYZED && project.getStatus() != ProjectStatus.COMPLETED) {
+        if (servicePath != null) {
+            var scope = scopeResolver.resolve(projectId, servicePath);
+            ProjectStatus status = scopedStatuses.status(projectId, scope);
+            if (status != ProjectStatus.COVERAGE_ANALYZED && status != ProjectStatus.COMPLETED) {
+                throw new InvalidProjectStatusException("Chi xuat bao cao sau khi service da phan tich coverage.");
+            }
+        } else if (project.getStatus() != ProjectStatus.COVERAGE_ANALYZED && project.getStatus() != ProjectStatus.COMPLETED) {
             throw new InvalidProjectStatusException("Chỉ xuất báo cáo sau khi đã phân tích coverage.");
         }
         // Xuất báo cáo là bước cuối của pipeline
-        project.setStatus(ProjectStatus.COMPLETED);
-        projects.save(project);
-        ExportReportDto report = gather(project);
+        if (servicePath == null) {
+            project.setStatus(ProjectStatus.COMPLETED);
+            projects.save(project);
+        }
+        ExportReportDto report = gather(project, servicePath);
         return "json".equals(format) ? toJson(report) : toMarkdown(report);
     }
 
-    private ExportReportDto gather(Project project) {
-        TraceabilityMatrixDto matrix = traceability.getMatrix(project.getId());
-        CoverageReportDto cov = coverage.latest(project.getId()).orElse(null);
-        List<BusinessRule> projectRules = rules.findByProjectId(project.getId());
-        List<TestPlan> projectPlans = plans.findByProjectId(project.getId());
+    private ExportReportDto gather(Project project, String servicePath) {
+        TraceabilityMatrixDto matrix = servicePath == null
+                ? traceability.getMatrix(project.getId())
+                : traceability.getMatrix(project.getId(), servicePath);
+        CoverageReportDto cov = servicePath == null
+                ? coverage.latest(project.getId()).orElse(null)
+                : coverage.latest(project.getId(), servicePath).orElse(null);
+        List<BusinessRule> allRules = rules.findByProjectId(project.getId());
+        Set<Long> scopedRuleIds = servicePath == null ? null : scopeRuleIds(project.getId(), servicePath, allRules);
+        List<BusinessRule> projectRules = allRules.stream()
+                .filter(rule -> scopedRuleIds == null || scopedRuleIds.contains(rule.getId()))
+                .toList();
+        Set<Long> scopedPlanIds = servicePath == null ? null : matrix.rows().stream()
+                .map(TraceabilityRowDto::planId)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toSet());
+        List<TestPlan> projectPlans = plans.findByProjectId(project.getId()).stream()
+                .filter(plan -> scopedRuleIds == null
+                        || scopedRuleIds.contains(plan.getBusinessRuleId())
+                        || scopedPlanIds.contains(plan.getId()))
+                .toList();
         List<Long> planIds = projectPlans.stream().map(TestPlan::getId).toList();
         List<TestCase> projectCases = planIds.isEmpty() ? List.of() : cases.findByTestPlanIdIn(planIds);
         List<Long> caseIds = projectCases.stream().map(TestCase::getId).toList();
@@ -104,6 +140,14 @@ public class ExportService {
                 matrix.uncoveredRules().stream().map(TraceabilityRowDto::ruleCode).toList());
     }
 
+    private Set<Long> scopeRuleIds(Long projectId, String servicePath, List<BusinessRule> projectRules) {
+        Set<Long> methodIds = scopeResolver.resolve(projectId, servicePath).methodIds();
+        return projectRules.stream()
+                .filter(rule -> methodIds.contains(rule.getMethodId()))
+                .map(BusinessRule::getId)
+                .collect(Collectors.toSet());
+    }
+
     private String toJson(ExportReportDto report) {
         try {
             return objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(report);
@@ -115,74 +159,85 @@ public class ExportService {
     private String toMarkdown(ExportReportDto r) {
         StringBuilder md = new StringBuilder();
         md.append("# GreyTest Report — ").append(r.projectName()).append("\n\n");
+        md.append("## Coverage Overview\n\n");
+        md.append("| Metric | Value |\n| --- | --- |\n");
+        md.append("| Requirement Coverage | ").append(pct(r.requirementCoverage())).append(" |\n");
+        md.append("| Line Coverage | ").append(pct(r.lineCoverage())).append(" |\n");
+        md.append("| Branch Coverage | ").append(pct(r.branchCoverage())).append(" |\n\n");
         md.append("## Tóm tắt\n\n");
-        md.append("- Requirement Coverage: ").append(pct(r.requirementCoverage())).append('\n');
-        md.append("- Line Coverage: ").append(pct(r.lineCoverage())).append('\n');
-        md.append("- Branch Coverage: ").append(pct(r.branchCoverage())).append('\n');
-        md.append("- Business Rules: ").append(r.totalBusinessRules()).append('\n');
-        md.append("- Test Plans: ").append(r.totalTestPlans()).append('\n');
-        md.append("- Test Cases: ").append(r.totalTestCases()).append('\n');
-        md.append("- Unit Tests: ").append(r.totalUnitTests()).append("\n\n");
+        md.append("| Artifact | Total |\n| --- | ---: |\n");
+        md.append("| Business Rules | ").append(r.totalBusinessRules()).append(" |\n");
+        md.append("| Test Plans | ").append(r.totalTestPlans()).append(" |\n");
+        md.append("| Test Cases | ").append(r.totalTestCases()).append(" |\n");
+        md.append("| Unit Tests | ").append(r.totalUnitTests()).append(" |\n\n");
         md.append("## Business Rules\n\n");
         md.append("| Code | Status | Description |\n| --- | --- | --- |\n");
         r.businessRules().forEach(rule -> md.append("| ").append(cell(rule.ruleCode()))
                 .append(" | ").append(cell(rule.status()))
                 .append(" | ").append(cell(rule.description())).append(" |\n"));
         md.append("\n## Test Plans\n\n");
-        md.append("| Code | Type | Status | Title | Description |\n| --- | --- | --- | --- | --- |\n");
-        r.testPlans().forEach(plan -> md.append("| ").append(cell(plan.planCode()))
-                .append(" | ").append(cell(plan.testType()))
-                .append(" | ").append(cell(plan.status()))
-                .append(" | ").append(cell(plan.title()))
-                .append(" | ").append(cell(plan.description())).append(" |\n"));
+        r.testPlans().forEach(plan -> {
+            md.append("### ").append(cell(plan.planCode())).append(" — ").append(cell(plan.title())).append("\n\n");
+            md.append("| Field | Value |\n| --- | --- |\n");
+            field(md, "Type", plan.testType());
+            field(md, "Status", plan.status());
+            field(md, "Description", plan.description());
+            md.append("\n");
+        });
         md.append("\n## Test Cases\n\n");
-        md.append("| Code | Plan | Type | Priority | Status | Description | Preconditions | Test Data | Expected Result | Trace Source |\n");
-        md.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
-        r.testCases().forEach(testCase -> md.append("| ").append(cell(testCase.caseCode()))
-                .append(" | ").append(cell(testCase.planCode()))
-                .append(" | ").append(cell(testCase.testType()))
-                .append(" | ").append(cell(testCase.priority()))
-                .append(" | ").append(cell(testCase.status()))
-                .append(" | ").append(cell(testCase.description()))
-                .append(" | ").append(cell(testCase.preconditions()))
-                .append(" | ").append(cell(testCase.testData()))
-                .append(" | ").append(cell(testCase.expectedResult()))
-                .append(" | ").append(cell(testCase.traceSource())).append(" |\n"));
+        r.testCases().forEach(testCase -> {
+            md.append("### ").append(cell(testCase.caseCode())).append("\n\n");
+            md.append("| Field | Value |\n| --- | --- |\n");
+            field(md, "Plan", testCase.planCode());
+            field(md, "Type", testCase.testType());
+            field(md, "Priority", testCase.priority());
+            field(md, "Status", testCase.status());
+            field(md, "Description", testCase.description());
+            field(md, "Preconditions", testCase.preconditions());
+            field(md, "Test data", testCase.testData());
+            field(md, "Expected result", testCase.expectedResult());
+            field(md, "Trace source", testCase.traceSource());
+            md.append("\n");
+        });
         md.append("\n## Unit Tests\n\n");
-        md.append("| Test Case | Class | Method | Package | Generation | File |\n");
-        md.append("| --- | --- | --- | --- | --- | --- |\n");
-        r.unitTests().forEach(unitTest -> md.append("| ").append(cell(unitTest.caseCode()))
-                .append(" | ").append(cell(unitTest.testClassName()))
-                .append(" | ").append(cell(unitTest.testMethodName()))
-                .append(" | ").append(cell(unitTest.packageName()))
-                .append(" | ").append(cell(unitTest.generationType()))
-                .append(" | ").append(cell(unitTest.filePath())).append(" |\n"));
+        r.unitTests().forEach(unitTest -> {
+            md.append("### ").append(cell(unitTest.testClassName())).append("#")
+                    .append(cell(unitTest.testMethodName())).append("\n\n");
+            md.append("| Field | Value |\n| --- | --- |\n");
+            field(md, "Test case", unitTest.caseCode());
+            field(md, "Package", unitTest.packageName());
+            field(md, "Generation", unitTest.generationType());
+            field(md, "File", unitTest.filePath());
+            md.append("\n");
+        });
         md.append("\n## Traceability Matrix\n\n");
         md.append("| Business Rule | Test Plan | Test Case | Unit Test |\n");
         md.append("| --- | --- | --- | --- |\n");
-        for (TraceabilityRowDto row : r.traceability()) {
+        for (TraceabilityRowDto row : r.traceability().stream().filter(row -> row.unitTestId() != null).toList()) {
             md.append("| ").append(cell(row.ruleCode()))
                     .append(" | ").append(cell(row.planCode()))
                     .append(" | ").append(cell(row.caseCode()))
                     .append(" | ").append(cell(row.unitTestName())).append(" |\n");
         }
-        if (!r.uncoveredRuleCodes().isEmpty()) {
-            md.append("\n## Business Rule chưa được cover\n\n");
-            r.uncoveredRuleCodes().forEach(code -> md.append("- ").append(code).append('\n'));
-        }
         md.append("\n## Coverage Gaps\n\n");
         if (r.coverageGaps().isEmpty()) {
             md.append("Không phát hiện coverage gap.\n");
         } else {
+            md.append("| Location | Line | Branch | Risk | Suggestion |\n");
+            md.append("| --- | ---: | ---: | --- | --- |\n");
             for (CoverageGapDto gap : r.coverageGaps()) {
-                md.append("- **").append(gap.className()).append('.').append(gap.methodName())
-                        .append("** (line ").append(pct(gap.lineCoverage()))
-                        .append(", branch ").append(pct(gap.branchCoverage()))
-                        .append(", risk ").append(gap.risk()).append("): ")
-                        .append(gap.suggestion()).append('\n');
+                md.append("| ").append(cell(gap.className() + "." + gap.methodName()))
+                        .append(" | ").append(cell(pct(gap.lineCoverage())))
+                        .append(" | ").append(cell(pct(gap.branchCoverage())))
+                        .append(" | ").append(cell(gap.risk()))
+                        .append(" | ").append(cell(gap.suggestion())).append(" |\n");
             }
         }
         return md.toString();
+    }
+
+    private void field(StringBuilder md, String label, Object value) {
+        md.append("| ").append(label).append(" | ").append(cell(value)).append(" |\n");
     }
 
     private String pct(java.math.BigDecimal value) {

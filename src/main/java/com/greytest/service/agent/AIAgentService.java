@@ -17,6 +17,7 @@ import com.greytest.dto.agent.GenerationResponseDtos.BusinessRuleReviewResponseD
 import com.greytest.dto.agent.GenerationResponseDtos.TestCaseResponseDto;
 import com.greytest.dto.agent.GenerationResponseDtos.TestPlanResponseDto;
 import com.greytest.dto.agent.GenerationResponseDtos.UnitTestResponseDto;
+import com.greytest.dto.diff.MethodDiffItem;
 import com.greytest.repository.ProjectRepository;
 import com.greytest.service.GenerationJobContext;
 import com.greytest.service.UsageQuotaService;
@@ -180,6 +181,13 @@ public class AIAgentService {
 
     public UnitTestResponseDto generateUnitTests(Long projectId, Set<Long> caseIds) {
         return call("unit-test", projectId, contextBuilder.buildUnitTestContext(projectId, caseIds), UnitTestResponseDto.class, null);
+    }
+
+    public UnitTestResponseDto generateUnitTests(
+            Long projectId, Set<Long> caseIds, List<MethodDiffItem> changedMethods) {
+        return call("unit-test", projectId,
+                contextBuilder.buildUnitTestContext(projectId, caseIds, changedMethods),
+                UnitTestResponseDto.class, null);
     }
 
     private <T> T call(Long projectId, String promptName, Object context, Class<T> responseType) {

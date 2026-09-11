@@ -83,6 +83,17 @@ class GeneratedUnitTestSemanticValidatorTest {
     }
 
     @Test
+    void rejectsRemovedMockitoVerifyZeroInteractionsApi() {
+        String generatedSource = "class ServiceTest { @org.junit.Test public void testCase() { "
+                + "org.mockito.Mockito.verifyZeroInteractions(new Object()); } }";
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(
+                context("send", "public void send() {}"), response("testCase", generatedSource)))
+                .hasValueSatisfying(message -> assertThat(message)
+                        .contains("verifyNoInteractions", "verifyZeroInteractions"));
+    }
+
+    @Test
     void rejectsIllegalArgumentExpectationWhenNullReachesSwitchSelector() {
         String productionSource = """
                 public String findReadyToNotify(NotificationType type) {
@@ -400,6 +411,60 @@ class GeneratedUnitTestSemanticValidatorTest {
         assertThat(GeneratedUnitTestSemanticValidator.validate(
                 context("findReadyToNotify", productionSource),
                 response("rejectsNull", shadowElsewhere))).isEmpty();
+    }
+
+    @Test
+    void rejectsStubbingOrVerifyingOnInjectMocks() {
+        String stubbedSut = """
+                class ServiceTest {
+                    @org.mockito.InjectMocks
+                    Service service;
+                    @org.junit.Test public void testCase() {
+                        org.mockito.Mockito.when(service.internalMethod()).thenReturn("mocked");
+                    }
+                }
+                """;
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(
+                context("send", "public void send() {}"), response(stubbedSut)))
+                .hasValueSatisfying(message -> assertThat(message)
+                        .contains("Do not stub methods on the @InjectMocks instance 'service'"));
+    }
+
+    @Test
+    void rejectsDirectInvocationOfPrivateMethod() {
+        MethodContextDto publicMethod = new MethodContextDto(
+                10L, "demo.Service", "publicMethod", "void", List.of(), List.of(),
+                "PUBLIC", "public void publicMethod() {}", 1, 5, List.of(), List.of(), List.of());
+        MethodContextDto privateMethod = new MethodContextDto(
+                11L, "demo.Service", "privateHelper", "void", List.of(), List.of(),
+                "PRIVATE", "private void privateHelper() {}", 6, 10, List.of(), List.of(), List.of());
+        ClassContextDto javaClass = new ClassContextDto(
+                1L, "demo", "Service", "demo.Service", "SERVICE",
+                "src/main/java/demo/Service.java", null, List.of(), List.of(publicMethod, privateMethod));
+        BusinessRuleContextDto rule = new BusinessRuleContextDto(
+                20L, 11L, "BR-001", "rule", null, "AI", "APPROVED", false, "STMT-1");
+        TestPlanContextItemDto plan = new TestPlanContextItemDto(
+                30L, 20L, List.of(20L), "TP-001", "plan", "plan", "NORMAL", "APPROVED", false);
+        TestCaseContextItemDto testCase = new TestCaseContextItemDto(
+                40L, 30L, "TC-001", "NORMAL", "case", "setup", java.util.Map.of(),
+                "result", "HIGH", "BR-001 -> TP-001", "APPROVED", false);
+        UnitTestContextDto ctx = new UnitTestContextDto(null, null, List.of(javaClass), List.of(rule), List.of(plan),
+                List.of(testCase), List.of(), List.of(), List.of());
+
+        String callingPrivate = """
+                class ServiceTest {
+                    @org.mockito.InjectMocks
+                    Service service;
+                    @org.junit.Test public void testCase() {
+                        service.privateHelper();
+                    }
+                }
+                """;
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(ctx, response(callingPrivate)))
+                .hasValueSatisfying(message -> assertThat(message)
+                        .contains("Method 'privateHelper' is private in Service"));
     }
 
     private UnitTestContextDto context(String methodName, String methodSource) {

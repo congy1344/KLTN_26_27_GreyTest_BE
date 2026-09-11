@@ -617,7 +617,8 @@ public class UnitTestService {
     }
     private String sanitizeSourceCode(String source){
         if(source==null) return "";
-        return source.replace("org.mockito.Matchers", "org.mockito.ArgumentMatchers");
+        String normalized = source.startsWith("\uFEFF") ? source.substring(1) : source;
+        return normalized.replace("org.mockito.Matchers", "org.mockito.ArgumentMatchers");
     }
     private UnitTest from(GeneratedUnitTestDto x,String generationType){UnitTest u=from(x);u.setGenerationType(generationType);return u;}
     /** Gộp unit test theo test class thành file hoàn chỉnh như trong project thật. */

@@ -6,6 +6,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Stream;
 
 import com.github.javaparser.JavaParser;
 import com.github.javaparser.ast.CompilationUnit;
@@ -20,9 +21,11 @@ import com.greytest.dto.AnalysisResultDto;
 import com.greytest.dto.ControllerServiceRelationDto;
 import com.greytest.dto.EndpointDto;
 import com.greytest.dto.CoverageGapDto;
+import com.greytest.dto.diff.MethodDiffItem;
 import com.greytest.dto.ExistingTestDto;
 import com.greytest.dto.JavaClassDto;
 import com.greytest.dto.JavaMethodDto;
+import com.greytest.dto.MethodParamDto;
 import com.greytest.dto.ServiceRelationDto;
 import com.greytest.dto.agent.GenerationContextDtos.AnalysisSummaryDto;
 import com.greytest.dto.agent.GenerationContextDtos.BusinessRuleContextDto;
@@ -72,6 +75,8 @@ public class GenerationContextBuilder {
     public static final int MAX_UNIT_TEST_CASES = 5;
     public static final int MAX_UNIT_TEST_RETRY_CASES = 2;
     private static final int MAX_UNIT_TEST_REFERENCES = 10;
+    // ponytail: chi dua declaration lien quan truc tiep vao prompt; tang gioi han khi do phu type bi thieu.
+    private static final int MAX_UNIT_TEST_SUPPORTING_CLASSES = 12;
     private static final int MAX_GENERATION_RELATIONS = 40;
     private static final int MAX_GENERATION_DEPENDENCIES = 40;
     // ponytail: chỉ kèm vài callee Service để giữ prompt có giới hạn; tăng khi benchmark chứng minh cần.
@@ -519,13 +524,135 @@ public class GenerationContextBuilder {
         return new UnitTestContextDto(
                 project(analysis),
                 summary(projectId, analysis),
-                classes(analysis, targetMethodIds, true),
+                unitTestClasses(analysis, targetMethodIds),
                 targetRules,
                 targetPlans,
                 targetCases,
                 previousCases,
                 generatedUnitTests(previousCases).stream().limit(MAX_UNIT_TEST_REFERENCES).toList(),
                 relevantExistingTests(projectId, targetMethodIds, targetClassIds, true));
+    }
+
+    /** Context Unit Test cho source update, ghi de source cua method vua thay doi. */
+    @Transactional(readOnly = true)
+    public UnitTestContextDto buildUnitTestContext(
+            Long projectId, Set<Long> targetCaseIds, List<MethodDiffItem> changedMethods) {
+        UnitTestContextDto context = buildUnitTestContext(projectId, targetCaseIds);
+        if (changedMethods == null || changedMethods.isEmpty()) return context;
+        return new UnitTestContextDto(
+                context.project(),
+                context.analysis(),
+                replaceChangedMethodSources(context.classes(), changedMethods),
+                context.approvedBusinessRules(),
+                context.approvedTestPlans(),
+                context.approvedTestCases(),
+                context.existingApprovedTestCases(),
+                context.previousGeneratedUnitTests(),
+                context.existingTests());
+    }
+
+    private List<ClassContextDto> replaceChangedMethodSources(
+            List<ClassContextDto> classes, List<MethodDiffItem> changedMethods) {
+        return classes.stream().map(javaClass -> new ClassContextDto(
+                javaClass.id(),
+                javaClass.packageName(),
+                javaClass.className(),
+                javaClass.qualifiedName(),
+                javaClass.classType(),
+                javaClass.filePath(),
+                replaceChangedClassSource(javaClass, changedMethods),
+                javaClass.annotations(),
+                javaClass.methods().stream().map(method -> {
+                    MethodDiffItem changed = changedMethods.stream()
+                            .filter(diff -> java.util.Objects.equals(diff.methodKey(), methodKey(method)))
+                            .findFirst()
+                            .orElse(null);
+                    if (changed != null && (changed.afterSource() == null || changed.afterSource().isBlank())) {
+                        return null;
+                    }
+                    if (changed == null) {
+                        return method;
+                    }
+                    return new MethodContextDto(
+                            method.id(),
+                            method.classQualifiedName(),
+                            method.methodName(),
+                            method.returnType(),
+                            method.parameters(),
+                            method.throwsList(),
+                            method.visibility(),
+                            changed.afterSource(),
+                            method.lineStart(),
+                            method.lineEnd(),
+                            method.annotations(),
+                            method.endpoints(),
+                            method.branches());
+                }).filter(java.util.Objects::nonNull).toList()))
+                .toList();
+    }
+
+    private String replaceChangedClassSource(
+            ClassContextDto javaClass, List<MethodDiffItem> changedMethods) {
+        String source = javaClass.sourceCode();
+        for (MethodDiffItem changed : changedMethods) {
+            if (!java.util.Objects.equals(javaClass.qualifiedName(), changed.qualifiedClassName())) continue;
+            if (changed.beforeSource() == null || changed.afterSource() == null) return null;
+            if (source == null || !source.contains(changed.beforeSource())) return null;
+            source = source.replace(changed.beforeSource(), changed.afterSource());
+        }
+        return source;
+    }
+
+    private String methodKey(MethodContextDto method) {
+        String parameterTypes = method.parameters() == null ? ""
+                : method.parameters().stream().map(MethodParamDto::type).collect(java.util.stream.Collectors.joining(","));
+        return method.classQualifiedName() + "#" + method.methodName() + "(" + parameterTypes + ")";
+    }
+
+    private List<ClassContextDto> unitTestClasses(AnalysisResultDto analysis, Set<Long> targetMethodIds) {
+        List<ClassContextDto> targetClasses = classes(analysis, targetMethodIds, true);
+        Set<String> targetNames = targetClasses.stream()
+                .map(ClassContextDto::qualifiedName)
+                .collect(java.util.stream.Collectors.toSet());
+        List<JavaClassDto> supportingClasses = analysis.classes().stream()
+                .filter(javaClass -> javaClass.sourceCode() != null && !javaClass.sourceCode().isBlank())
+                .filter(javaClass -> !targetNames.contains(javaClass.qualifiedName()))
+                .filter(javaClass -> isUnitTestSupportingClass(javaClass, targetClasses))
+                .sorted(Comparator.comparingInt((JavaClassDto javaClass) ->
+                                isDirectlyImported(javaClass, targetClasses) ? 0 : 1)
+                        .thenComparing(JavaClassDto::filePath, Comparator.nullsLast(String::compareTo))
+                        .thenComparing(JavaClassDto::qualifiedName))
+                .limit(MAX_UNIT_TEST_SUPPORTING_CLASSES)
+                .toList();
+        return Stream.concat(
+                        targetClasses.stream(),
+                        supportingClasses.stream().map(javaClass -> classContext(javaClass, Set.of(), true)))
+                .toList();
+    }
+
+    private boolean isUnitTestSupportingClass(JavaClassDto javaClass, List<ClassContextDto> targetClasses) {
+        return targetClasses.stream().anyMatch(target ->
+                javaClass.packageName() != null
+                        && javaClass.packageName().equals(target.packageName())
+                        || isDirectlyImported(javaClass, target));
+    }
+
+    private boolean isDirectlyImported(JavaClassDto javaClass, List<ClassContextDto> targetClasses) {
+        return targetClasses.stream().anyMatch(target -> isDirectlyImported(javaClass, target));
+    }
+
+    private boolean isDirectlyImported(JavaClassDto javaClass, ClassContextDto targetClass) {
+        return targetClass.sourceCode() != null
+                && isImported(targetClass.sourceCode(), javaClass.qualifiedName());
+    }
+
+    private boolean isImported(String source, String qualifiedName) {
+        if (qualifiedName == null || qualifiedName.isBlank()) return false;
+        int lastDot = qualifiedName.lastIndexOf('.');
+        if (lastDot < 0) return false;
+        String packageName = qualifiedName.substring(0, lastDot);
+        return source.contains("import " + qualifiedName + ";")
+                || source.contains("import " + packageName + ".*;");
     }
 
     private List<GeneratedUnitTestContextDto> generatedUnitTests(List<TestCaseContextItemDto> testCases) {

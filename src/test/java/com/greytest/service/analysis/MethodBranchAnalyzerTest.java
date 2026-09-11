@@ -1,5 +1,7 @@
 package com.greytest.service.analysis;
 
+import java.util.List;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -24,11 +26,31 @@ class MethodBranchAnalyzerTest {
                 }
                 """, 40);
 
-        assertThat(branches).extracting(SourceBranchDto::branchId)
+        assertThat(decisionBranches(branches)).extracting(SourceBranchDto::branchId)
                 .containsExactly("IF-1-TRUE", "IF-1-FALSE", "IF-2-TRUE", "IF-2-FALSE");
-        assertThat(branches).extracting(SourceBranchDto::condition)
+        assertThat(decisionBranches(branches)).extracting(SourceBranchDto::condition)
                 .containsExactly("score >= 80", "score >= 80", "active", "active");
-        assertThat(branches.get(0).lineStart()).isEqualTo(41);
+        assertThat(branches.get(0).lineStart()).isEqualTo(42);
+    }
+
+    @Test
+    void usesExecutableStatementsInsteadOfConditionOrCommentLines() {
+        var branches = MethodBranchAnalyzer.analyze("""
+                public void create(boolean valid) {
+                    // The decision is documented here.
+                    if (valid) {
+                        repository.save();
+                    } else {
+                        throw new IllegalStateException(
+                                "invalid");
+                    }
+                }
+                """, 30);
+
+        assertThat(branches.get(0).lineStart()).isEqualTo(33);
+        assertThat(branches.get(0).lineEnd()).isEqualTo(33);
+        assertThat(branches.get(1).lineStart()).isEqualTo(35);
+        assertThat(branches.get(1).lineEnd()).isEqualTo(36);
     }
 
     @Test
@@ -42,7 +64,25 @@ class MethodBranchAnalyzerTest {
                 }
                 """, 1);
 
-        assertThat(branches).hasSize(2);
+        assertThat(decisionBranches(branches)).hasSize(2);
+    }
+
+    @Test
+    void exposesTopLevelExecutableStatementsAsSourceAnchors() {
+        var branches = MethodBranchAnalyzer.analyze("""
+                public Appointment getById(Long id) {
+                    Appointment appointment = repository.findById(id)
+                            .orElseThrow(() -> new NotFoundException());
+                    return enrichAppointmentResponse(appointment);
+                }
+                """, 100);
+
+        assertThat(branches).extracting(SourceBranchDto::branchId)
+                .containsExactly("STMT-1", "STMT-2");
+        assertThat(branches.get(0).lineStart()).isEqualTo(101);
+        assertThat(branches.get(0).lineEnd()).isEqualTo(102);
+        assertThat(branches.get(1).lineStart()).isEqualTo(103);
+        assertThat(branches.get(1).lineEnd()).isEqualTo(103);
     }
 
     @Test
@@ -62,7 +102,7 @@ class MethodBranchAnalyzerTest {
                         "SWITCH-1::CASE-1",
                         "SWITCH-1::CASE-2",
                         "SWITCH-1::DEFAULT");
-        assertThat(branches).extracting(SourceBranchDto::outcome)
+        assertThat(decisionBranches(branches)).extracting(SourceBranchDto::outcome)
                 .containsExactly("String text", "Integer number", "DEFAULT");
     }
 
@@ -79,16 +119,16 @@ class MethodBranchAnalyzerTest {
                 }
                 """, 20);
 
-        assertThat(branches).extracting(SourceBranchDto::branchId)
+        assertThat(decisionBranches(branches)).extracting(SourceBranchDto::branchId)
                 .containsExactly(
                         "SWITCH-1::CASE-1",
                         "SWITCH-1::CASE-2",
                         "SWITCH-1::DEFAULT",
                         "TERNARY-1::TRUE",
                         "TERNARY-1::FALSE");
-        assertThat(branches).extracting(SourceBranchDto::condition)
+        assertThat(decisionBranches(branches)).extracting(SourceBranchDto::condition)
                 .containsExactly("region", "region", "region", "amount == 0", "amount == 0");
-        assertThat(branches).extracting(SourceBranchDto::outcome)
+        assertThat(decisionBranches(branches)).extracting(SourceBranchDto::outcome)
                 .containsExactly("\"VN\"", "\"US\" | \"SG\"", "DEFAULT", "TRUE", "FALSE");
     }
 
@@ -104,12 +144,12 @@ class MethodBranchAnalyzerTest {
                 }
                 """, 1);
 
-        assertThat(branches).extracting(SourceBranchDto::branchId)
+        assertThat(decisionBranches(branches)).extracting(SourceBranchDto::branchId)
                 .containsExactly(
                         "SWITCH-1::CASE-1",
                         "SWITCH-1::CASE-2",
                         "SWITCH-1::NO_MATCH");
-        assertThat(branches).extracting(SourceBranchDto::outcome)
+        assertThat(decisionBranches(branches)).extracting(SourceBranchDto::outcome)
                 .containsExactly("1", "2", "NO_MATCH");
     }
 
@@ -124,9 +164,9 @@ class MethodBranchAnalyzerTest {
                 }
                 """, 1);
 
-        assertThat(branches).extracting(SourceBranchDto::branchId)
+        assertThat(decisionBranches(branches)).extracting(SourceBranchDto::branchId)
                 .containsExactly("SWITCH-1::CASE-1", "SWITCH-1::DEFAULT");
-        assertThat(branches).extracting(SourceBranchDto::outcome)
+        assertThat(decisionBranches(branches)).extracting(SourceBranchDto::outcome)
                 .containsExactly("\"ready\"", "DEFAULT");
     }
 
@@ -143,13 +183,13 @@ class MethodBranchAnalyzerTest {
                 }
                 """, 1);
 
-        assertThat(branches).extracting(SourceBranchDto::branchId)
+        assertThat(decisionBranches(branches)).extracting(SourceBranchDto::branchId)
                 .containsExactly(
                         "FOR-1::ENTER", "FOR-1::SKIP",
                         "FOREACH-1::ENTER", "FOREACH-1::SKIP",
                         "WHILE-1::ENTER", "WHILE-1::SKIP",
                         "DO_WHILE-1::REPEAT", "DO_WHILE-1::EXIT");
-        assertThat(branches).extracting(SourceBranchDto::condition)
+        assertThat(decisionBranches(branches)).extracting(SourceBranchDto::condition)
                 .containsExactly(
                         "index < limit", "index < limit",
                         "values", "values",
@@ -163,5 +203,9 @@ class MethodBranchAnalyzerTest {
                 "public void broken() { if (", 10))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("Khong parse duoc source method");
+    }
+
+    private List<SourceBranchDto> decisionBranches(List<SourceBranchDto> branches) {
+        return branches.stream().filter(branch -> !"STATEMENT".equals(branch.kind())).toList();
     }
 }

@@ -10,7 +10,12 @@ import com.github.javaparser.JavaParser;
 import com.github.javaparser.ParserConfiguration;
 import com.github.javaparser.ast.CompilationUnit;
 import com.github.javaparser.ast.Node;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.stream.Collectors;
+import com.github.javaparser.ast.body.FieldDeclaration;
 import com.github.javaparser.ast.body.MethodDeclaration;
+import com.greytest.dto.agent.GenerationContextDtos.ClassContextDto;
 import com.github.javaparser.ast.body.VariableDeclarator;
 import com.github.javaparser.ast.expr.Expression;
 import com.github.javaparser.ast.expr.InstanceOfExpr;
@@ -52,12 +57,117 @@ public final class GeneratedUnitTestSemanticValidator {
             if (test == null || test.sourceCode() == null) continue;
             MethodContextDto productionMethod = methodsByCaseId.get(test.caseId());
             validateFrameworkCompatibility(test, framework, problems);
+            validateRemovedMockitoApis(test, problems);
             validateMockedEnums(context, test, problems);
+            validateInjectMocksStubbing(test, problems);
+            validatePrivateMethodCalls(context, test, problems);
             validateContentCast(test, problems);
             validateMultipartAssumption(productionMethod, test, problems);
             validateNullSwitchExpectation(productionMethod, test, problems);
         }
         return problems.isEmpty() ? Optional.empty() : Optional.of(String.join(" ", problems));
+    }
+
+    private static void validateInjectMocksStubbing(
+            GeneratedUnitTestDto generatedTest, List<String> problems) {
+        if (generatedTest == null || generatedTest.sourceCode() == null) return;
+        Optional<CompilationUnit> parsed = parseCompilationUnit(generatedTest.sourceCode());
+        if (parsed.isEmpty()) return;
+        CompilationUnit cu = parsed.get();
+
+        Set<String> injectMockFieldNames = new HashSet<>();
+        for (FieldDeclaration field : cu.findAll(FieldDeclaration.class)) {
+            if (field.getAnnotationByName("InjectMocks").isPresent()) {
+                for (VariableDeclarator var : field.getVariables()) {
+                    injectMockFieldNames.add(var.getNameAsString());
+                }
+            }
+        }
+        if (injectMockFieldNames.isEmpty()) return;
+
+        for (MethodCallExpr call : cu.findAll(MethodCallExpr.class)) {
+            if ("when".equals(call.getNameAsString()) && !call.getArguments().isEmpty()) {
+                Expression arg = call.getArgument(0);
+                if (arg.isMethodCallExpr()) {
+                    arg.asMethodCallExpr().getScope().ifPresent(scope -> {
+                        if (scope.isNameExpr() && injectMockFieldNames.contains(scope.asNameExpr().getNameAsString())) {
+                            problems.add("Do not stub methods on the @InjectMocks instance '"
+                                    + scope.asNameExpr().getNameAsString()
+                                    + "'; @InjectMocks is the real class under test, only @Mock dependencies can be stubbed.");
+                        }
+                    });
+                }
+            }
+            if ("verify".equals(call.getNameAsString()) && !call.getArguments().isEmpty()) {
+                Expression arg = call.getArgument(0);
+                if (arg.isNameExpr() && injectMockFieldNames.contains(arg.asNameExpr().getNameAsString())) {
+                    problems.add("Do not verify methods on the @InjectMocks instance '"
+                            + arg.asNameExpr().getNameAsString()
+                            + "'; only @Mock dependencies can be verified.");
+                }
+            }
+        }
+    }
+
+    private static void validatePrivateMethodCalls(
+            UnitTestContextDto context,
+            GeneratedUnitTestDto generatedTest,
+            List<String> problems) {
+        if (context == null || context.classes() == null || generatedTest == null || generatedTest.sourceCode() == null) return;
+        Optional<CompilationUnit> parsed = parseCompilationUnit(generatedTest.sourceCode());
+        if (parsed.isEmpty()) return;
+        CompilationUnit cu = parsed.get();
+
+        Map<String, Set<String>> privateMethodsByClass = new HashMap<>();
+        for (ClassContextDto clazz : context.classes()) {
+            if (clazz.methods() == null) continue;
+            Set<String> privateMethods = clazz.methods().stream()
+                    .filter(m -> "PRIVATE".equalsIgnoreCase(m.visibility()))
+                    .map(MethodContextDto::methodName)
+                    .collect(Collectors.toSet());
+            if (!privateMethods.isEmpty()) {
+                privateMethodsByClass.put(clazz.className(), privateMethods);
+                if (clazz.qualifiedName() != null) {
+                    privateMethodsByClass.put(clazz.qualifiedName(), privateMethods);
+                }
+            }
+        }
+        if (privateMethodsByClass.isEmpty()) return;
+
+        Map<String, String> sutFieldToType = new HashMap<>();
+        for (FieldDeclaration field : cu.findAll(FieldDeclaration.class)) {
+            if (field.getAnnotationByName("InjectMocks").isPresent()) {
+                String typeName = field.getElementType().asString();
+                typeName = typeName.substring(typeName.lastIndexOf('.') + 1);
+                for (VariableDeclarator var : field.getVariables()) {
+                    sutFieldToType.put(var.getNameAsString(), typeName);
+                }
+            }
+        }
+
+        for (MethodCallExpr call : cu.findAll(MethodCallExpr.class)) {
+            String methodName = call.getNameAsString();
+            call.getScope().ifPresent(scope -> {
+                if (scope.isNameExpr()) {
+                    String varName = scope.asNameExpr().getNameAsString();
+                    String typeName = sutFieldToType.get(varName);
+                    if (typeName != null) {
+                        Set<String> privateMethods = privateMethodsByClass.get(typeName);
+                        if (privateMethods != null && privateMethods.contains(methodName)) {
+                            problems.add("Method '" + methodName + "' is private in " + typeName
+                                    + " and cannot be invoked directly in a unit test. Test it indirectly through public methods.");
+                        }
+                    }
+                }
+            });
+        }
+    }
+
+    private static void validateRemovedMockitoApis(
+            GeneratedUnitTestDto generatedTest, List<String> problems) {
+        if (generatedTest.sourceCode().matches("(?s).*\\bverifyZeroInteractions\\s*\\(.*")) {
+            problems.add("Mockito removed verifyZeroInteractions; use verifyNoInteractions instead.");
+        }
     }
 
     private static void validateMockedEnums(

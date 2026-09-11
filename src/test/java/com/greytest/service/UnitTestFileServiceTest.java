@@ -5,12 +5,15 @@ import static org.assertj.core.api.Assertions.assertThat;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.zip.ZipInputStream;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Assumptions;
 
 import com.greytest.entity.UnitTest;
 
@@ -77,13 +80,12 @@ class UnitTestFileServiceTest {
     }
 
     @Test
-    void parseLoiThiNoiThoCacFile() {
-        var merged = service.mergeByClass(List.of(
+    void parseLoiThiTuChoiKhongTaoFileJavaKhongChayDuoc() {
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> service.mergeByClass(List.of(
                 test(1L, "a", "khong phai java {{{"),
-                test(2L, "b", "cung khong phai java")));
-
-        assertThat(merged).hasSize(1);
-        assertThat(merged.get(0).sourceCode()).contains("khong phai java", "gop thu cong");
+                test(2L, "b", "cung khong phai java"))))
+                .isInstanceOf(com.greytest.exception.StorageException.class)
+                .hasMessageContaining("Khong gop duoc Unit Test");
     }
 
     @Test
@@ -107,6 +109,107 @@ class UnitTestFileServiceTest {
                 test(1L, "first", source1), test(2L, "second", source2))).get(0).sourceCode();
 
         assertThat(source).contains("void first()", "void second()");
+    }
+
+    @Test
+    void mergeKhongLapConstructorVaNestedClass() {
+        String source1 = "package com.example; class UserServiceTest { UserServiceTest(){} class Fixture {} void first(){} }";
+        String source2 = "package com.example; class UserServiceTest { UserServiceTest(){} class Fixture {} void second(){} }";
+
+        var source = service.mergeByClass(List.of(
+                test(1L, "first", source1), test(2L, "second", source2))).get(0).sourceCode();
+
+        assertThat(countOf(source, "UserServiceTest()")).isEqualTo(1);
+        assertThat(countOf(source, "class Fixture")).isEqualTo(1);
+    }
+
+    @Test
+    void mergeTuChoiNestedClassTrungTenNhungKhacNoiDung() {
+        String source1 = "package com.example; class UserServiceTest { class Fixture { String value = \"a b\"; } void first(){} }";
+        String source2 = "package com.example; class UserServiceTest { class Fixture { String value = \"ab\"; } void second(){} }";
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> service.mergeByClass(List.of(
+                test(1L, "first", source1), test(2L, "second", source2))))
+                .isInstanceOf(com.greytest.exception.StorageException.class)
+                .hasMessageContaining("Xung dot nested class");
+    }
+
+    @Test
+    void mergeGiuImportDauTienKhiHaiTestDungCungTenImportKhacPackage() {
+        String source1 = "package com.example; import a.Status; class UserServiceTest { Status firstStatus; void first(){} }";
+        String source2 = "package com.example; import b.Status; class UserServiceTest { Status secondStatus; void second(){ Status.valueOf(\"OK\"); } }";
+
+        var source = service.mergeByClass(List.of(
+                test(1L, "first", source1), test(2L, "second", source2))).get(0).sourceCode();
+
+        assertThat(source).contains("import a.Status;", "b.Status secondStatus;", "b.Status.valueOf(\"OK\")", "void first()", "void second()")
+                .doesNotContain("import b.Status;");
+    }
+
+    @Test
+    void mergeTuChoiHaiWildcardImportKhacPackage() {
+        String source1 = "package com.example; import a.*; class UserServiceTest { Status firstStatus; void first(){} }";
+        String source2 = "package com.example; import b.*; class UserServiceTest { Status secondStatus; void second(){} }";
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> service.mergeByClass(List.of(
+                test(1L, "first", source1), test(2L, "second", source2))))
+                .isInstanceOf(com.greytest.exception.StorageException.class)
+                .hasMessageContaining("Xung dot wildcard import");
+    }
+
+    @Test
+    void qualifiesExplicitImportWhenBaseFileUsesWildcardImport() {
+        String source1 = "package com.example; import a.*; class UserServiceTest { Status firstStatus; void first(){} }";
+        String source2 = "package com.example; import b.Status; class UserServiceTest { Status secondStatus; void second(){} }";
+
+        var source = service.mergeByClass(List.of(
+                test(1L, "first", source1), test(2L, "second", source2))).get(0).sourceCode();
+
+        assertThat(source).contains("import a.*;", "b.Status secondStatus")
+                .doesNotContain("import b.Status;");
+    }
+
+    @Test
+    void rejectsWildcardImportWhenBaseFileUsesExplicitImport() {
+        String source1 = "package com.example; import a.Status; class UserServiceTest { Status firstStatus; void first(){} }";
+        String source2 = "package com.example; import b.*; class UserServiceTest { Status secondStatus; void second(){} }";
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> service.mergeByClass(List.of(
+                test(1L, "first", source1), test(2L, "second", source2))))
+                .isInstanceOf(com.greytest.exception.StorageException.class)
+                .hasMessageContaining("wildcard");
+    }
+
+    @Test
+    void allowsStaticWildcardImportsAlongsideNormalImports() {
+        String source1 = "package com.example; import java.util.List; import static org.mockito.Mockito.*; "
+                + "class UserServiceTest { List<String> list; void first(){ when(null).thenReturn(null); } }";
+        String source2 = "package com.example; import java.util.Map; import static org.junit.jupiter.api.Assertions.*; "
+                + "class UserServiceTest { Map<String, String> map; void second(){ assertTrue(true); } }";
+
+        var source = service.mergeByClass(List.of(
+                test(1L, "first", source1), test(2L, "second", source2))).get(0).sourceCode();
+
+        assertThat(source)
+                .contains("import static org.mockito.Mockito.*;")
+                .contains("import static org.junit.jupiter.api.Assertions.*;")
+                .contains("import java.util.List;")
+                .contains("import java.util.Map;")
+                .contains("void first()")
+                .contains("void second()");
+    }
+
+    @Test
+    void rejectsConflictingStaticImports() {
+        String source1 = "package com.example; import static a.Assertions.assertThat; "
+                + "class UserServiceTest { void first(){ assertThat(true); } }";
+        String source2 = "package com.example; import static b.Assertions.assertThat; "
+                + "class UserServiceTest { void second(){ assertThat(true); } }";
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> service.mergeByClass(List.of(
+                test(1L, "first", source1), test(2L, "second", source2))))
+                .isInstanceOf(com.greytest.exception.StorageException.class)
+                .hasMessageContaining("static");
     }
 
     @Test
@@ -189,17 +292,62 @@ class UnitTestFileServiceTest {
                 .contains("-DfailIfNoTests=true")
                 .contains("src\\test\\java\\*.java", "target\\test-classes\\*.class")
                 .contains("-Dtest=com.example.UserServiceTest")
-                .contains("target\\site\\jacoco\\jacoco.xml");
+                .contains("target\\site\\jacoco\\jacoco.xml", "build.gradle", "gradlew.bat", "jacocoTestReport");
+        assertThat(entries.get("run-greytest-coverage.cmd"))
+                .contains("--init-script", "--tests \"com.example.UserServiceTest\"");
         assertThat(entries.get("run-greytest-coverage.sh"))
                 .contains("jacoco-maven-plugin:0.8.15:prepare-agent")
                 .contains("-Djacoco.propertyName=greytestJacocoArgLine")
                 .contains("-DargLine=@{greytestJacocoArgLine} ${GREYTEST_JVM_ARGS:-}")
                 .contains("src/test/java", "target/test-classes", "*.java", "*.class")
                 .contains("-Dtest=com.example.UserServiceTest")
-                .contains("-DfailIfNoTests=true")
+                .contains("-DfailIfNoTests=true", "build.gradle", "gradlew", "jacocoTestReport")
                 .contains("target/site/jacoco/jacoco.xml");
+        assertThat(entries.get("run-greytest-coverage.sh"))
+                .contains("--init-script", "--tests \"com.example.UserServiceTest\"");
+        assertThat(entries.get("greytest-jacoco.init.gradle"))
+                .contains("jacoco", "jacocoTestReport", "xml.required = true",
+                        "reports/jacoco/test/jacocoTestReport.xml");
         assertThat(entries.get("README-GREYTEST.txt"))
                 .contains("run-greytest-coverage.cmd", "src/test/java", "GREYTEST_JVM_ARGS", "khong gan trung JaCoCo agent");
+        assertThat(entries.get("run-greytest-coverage.cmd"))
+                .doesNotContain("(where pom.xml is located)");
+    }
+
+    @Test
+    void archiveRemovesLeadingUtf8BomFromJavaSource() throws IOException {
+        var file = new com.greytest.dto.UnitTestFileDto(
+                "src/test/java/com/example/UserServiceTest.java",
+                "UserServiceTest", "com.example", 1, List.of("TC-001"),
+                "\uFEFFpackage com.example; class UserServiceTest {}\n");
+
+        assertThat(zipEntries(service.createCoverageArchive(List.of(file)))
+                .get("src/test/java/com/example/UserServiceTest.java"))
+                .doesNotStartWith("\uFEFF");
+    }
+
+    @Test
+    void archiveRongBiTuChoiDeKhongTaiZipChacChanChayThatBai() {
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> service.createCoverageArchive(List.of()))
+                .isInstanceOf(com.greytest.exception.StorageException.class)
+                .hasMessageContaining("Khong co Unit Test de dong goi");
+    }
+
+    @Test
+    void windowsScriptKhongBiLoiParserKhiChayNgoaiModule() throws Exception {
+        Assumptions.assumeTrue(System.getProperty("os.name").toLowerCase().contains("win"));
+        var file = new com.greytest.dto.UnitTestFileDto(
+                "src/test/java/UserServiceTest.java", "UserServiceTest", "", 1,
+                List.of("TC-001"), "class UserServiceTest {}");
+        Path script = Files.createTempFile("greytest-coverage-", ".cmd");
+        Files.writeString(script, zipEntries(service.createCoverageArchive(List.of(file))).get("run-greytest-coverage.cmd"));
+
+        Process process = new ProcessBuilder("cmd.exe", "/d", "/c", script.toString())
+                .redirectErrorStream(true).start();
+        String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+
+        assertThat(process.waitFor()).isEqualTo(1);
+        assertThat(output).doesNotContain("was unexpected at this time");
     }
 
     @Test

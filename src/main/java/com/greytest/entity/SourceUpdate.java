@@ -1,15 +1,13 @@
 package com.greytest.entity;
 
 import java.time.LocalDateTime;
-import java.util.List;
 
 import org.hibernate.annotations.CreationTimestamp;
 import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.annotations.UpdateTimestamp;
 import org.hibernate.type.SqlTypes;
 
-import com.greytest.entity.enums.ProjectStatus;
-import com.greytest.entity.enums.SourceType;
+import com.greytest.entity.enums.SourceUpdateStatus;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
@@ -22,42 +20,35 @@ import jakarta.persistence.Table;
 import lombok.Getter;
 import lombok.Setter;
 
+/**
+ * Phiên cập nhật source code dạng bản nháp (Draft Update).
+ */
 @Entity
-@Table(name = "project")
+@Table(name = "source_update")
 @Getter
 @Setter
-public class Project {
+public class SourceUpdate {
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    private Long ownerUserId;
+    @Column(nullable = false)
+    private Long projectId;
 
-    private String name;
+    private Long baseRevisionId;
 
-    @Enumerated(EnumType.STRING)
-    private SourceType sourceType;
-
-    private String sourceUrl;
-
-    private String storagePath;
+    @Column(nullable = false)
+    private Long candidateRevisionId;
 
     @Enumerated(EnumType.STRING)
-    private ProjectStatus status;
+    @Column(nullable = false)
+    private SourceUpdateStatus status;
 
-    private Integer totalProductionFiles;
-
-    private Integer parsedProductionFiles;
-
-    private Integer failedParseFiles;
+    private Integer totalChangedMethods;
 
     @JdbcTypeCode(SqlTypes.JSON)
-    private List<String> failedParseFilePaths;
-
-    private Long activeSourceRevisionId;
-
-    private Long activeSourceUpdateId;
+    private String impactSummary;
 
     @CreationTimestamp
     @Column(updatable = false)
