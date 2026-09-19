@@ -206,7 +206,7 @@ public class CoverageService {
             Long projectId,
             ServiceScopeResolver.ServiceScope scope) {
         var approvedRules = rules.findByProjectIdAndStatus(projectId, ReviewStatus.APPROVED).stream()
-                .filter(rule -> scope == null || scope.methodIds().contains(rule.getMethodId()))
+                .filter(rule -> scope == null || (rule.getMethodId() != null && scope.methodIds().contains(rule.getMethodId())))
                 .toList();
         if (approvedRules.isEmpty()) {
             return BigDecimal.valueOf(100).setScale(2, RoundingMode.HALF_UP);
@@ -288,7 +288,7 @@ public class CoverageService {
                 .flatMap(Optional::stream)
                 .filter(rule -> rule.getStatus() == ReviewStatus.APPROVED)
                 .map(rule -> rule.getMethodId())
-                .filter(methodId -> scope == null || scope.methodIds().contains(methodId))
+                .filter(methodId -> scope == null || (methodId != null && scope.methodIds().contains(methodId)))
                 .collect(Collectors.toSet());
         // Vòng upload thứ mấy + số liệu vòng liền trước để hiển thị tiến bộ sau khi đóng gap
         List<CoverageReport> history = scope == null

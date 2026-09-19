@@ -136,14 +136,14 @@ public class ExportService {
                 projectCases.stream().map(testCase -> caseItem(testCase, planCodes)).toList(),
                 projectUnitTests.stream().map(unitTest -> unitTestItem(unitTest, caseCodes)).toList(),
                 matrix.rows(),
-                cov == null ? List.of() : cov.gaps(),
+                cov == null ? List.of() : cov.gaps().stream().filter(CoverageGapDto::refinable).toList(),
                 matrix.uncoveredRules().stream().map(TraceabilityRowDto::ruleCode).toList());
     }
 
     private Set<Long> scopeRuleIds(Long projectId, String servicePath, List<BusinessRule> projectRules) {
         Set<Long> methodIds = scopeResolver.resolve(projectId, servicePath).methodIds();
         return projectRules.stream()
-                .filter(rule -> methodIds.contains(rule.getMethodId()))
+                .filter(rule -> rule.getMethodId() != null && methodIds.contains(rule.getMethodId()))
                 .map(BusinessRule::getId)
                 .collect(Collectors.toSet());
     }

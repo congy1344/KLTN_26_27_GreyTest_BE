@@ -302,7 +302,7 @@ public class TestCaseService {
     /** Bổ sung case theo gap; nút bắt đầu vòng mới là xác nhận HITL nên case được duyệt ngay. */
     public List<TestCaseDto> generateSupplemental(Long projectId,String servicePath,List<CoverageGapDto> gaps,int round) {
         var scope=scopeResolver.resolve(projectId,servicePath);
-        if(gaps.stream().map(CoverageGapDto::methodId).anyMatch(id->!scope.methodIds().contains(id))) {
+        if(gaps.stream().map(CoverageGapDto::methodId).anyMatch(id->id==null||!scope.methodIds().contains(id))) {
             throw new IllegalArgumentException("Coverage gap khong thuoc servicePath da chon.");
         }
         return generateSupplemental(projectId,gaps,round);
@@ -380,10 +380,10 @@ public class TestCaseService {
     private void ensureEditable(Project p){ if(!Set.of(ProjectStatus.PLAN_APPROVED,ProjectStatus.CASE_PENDING_REVIEW,ProjectStatus.CASE_APPROVED,ProjectStatus.TEST_GENERATED,ProjectStatus.COVERAGE_ANALYZED,ProjectStatus.COMPLETED).contains(p.getStatus())) throw new InvalidProjectStatusException("Chi thao tac Test Case sau khi Test Plan da approve."); }
     private List<TestPlan> scopedPlans(Long projectId,ServiceScopeResolver.ServiceScope scope) {
         var ruleIds=rules.findByProjectId(projectId).stream()
-                .filter(rule->scope.methodIds().contains(rule.getMethodId()))
+                .filter(rule->rule.getMethodId()!=null && scope.methodIds().contains(rule.getMethodId()))
                 .map(BusinessRule::getId).collect(java.util.stream.Collectors.toSet());
         return plans.findByProjectId(projectId).stream()
-                .filter(plan->ruleIds.contains(plan.getBusinessRuleId()))
+                .filter(plan->plan.getBusinessRuleId()!=null && ruleIds.contains(plan.getBusinessRuleId()))
                 .toList();
     }
     private Project ensureProject(Long id){ return projects.findById(id).orElseThrow(()->new ProjectNotFoundException(id)); }

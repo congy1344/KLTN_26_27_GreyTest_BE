@@ -36,6 +36,7 @@ services:
       LLM_MAX_TOKENS_TEST_CASE: ${LLM_MAX_TOKENS_TEST_CASE:-8192}
       LLM_MAX_TOKENS_UNIT_TEST: ${LLM_MAX_TOKENS_UNIT_TEST:-12288}
       LLM_MAX_TOKENS_COVERAGE_REFINEMENT: ${LLM_MAX_TOKENS_COVERAGE_REFINEMENT:-6144}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-300}
       GREYTEST_LLM_BATCH_CONCURRENCY: ${GREYTEST_LLM_BATCH_CONCURRENCY:-2}
       LLM_USAGE_ENABLED: ${LLM_USAGE_ENABLED:-false}
       LLM_USAGE_OUTPUT_DIR: ${LLM_USAGE_OUTPUT_DIR:-/app/log/llm-usage}
@@ -50,6 +51,8 @@ services:
     volumes:
       - backend_storage:/app/storage
       - ../log:/app/log
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       - postgres
 

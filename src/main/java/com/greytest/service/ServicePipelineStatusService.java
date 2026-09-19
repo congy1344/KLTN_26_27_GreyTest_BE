@@ -87,7 +87,7 @@ public class ServicePipelineStatusService {
 
     List<BusinessRule> rules(Long projectId, ServiceScope scope) {
         return rules.findByProjectId(projectId).stream()
-                .filter(rule -> scope.methodIds().contains(rule.getMethodId()))
+                .filter(rule -> rule.getMethodId() != null && scope.methodIds().contains(rule.getMethodId()))
                 .toList();
     }
 
@@ -102,7 +102,7 @@ public class ServicePipelineStatusService {
     private List<TestPlan> plans(Long projectId, List<BusinessRule> scopedRules) {
         Set<Long> ruleIds = scopedRules.stream().map(BusinessRule::getId).collect(Collectors.toSet());
         return plans.findByProjectId(projectId).stream()
-                .filter(plan -> ruleIds.contains(plan.getBusinessRuleId()))
+                .filter(plan -> plan.getBusinessRuleId() != null && ruleIds.contains(plan.getBusinessRuleId()))
                 .toList();
     }
 

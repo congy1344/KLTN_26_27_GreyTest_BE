@@ -44,17 +44,24 @@ import com.greytest.dto.diff.ImpactSummaryDto;
 import com.greytest.dto.diff.MethodDiffItem;
 import com.greytest.dto.diff.MethodDiffType;
 import com.greytest.entity.BusinessRule;
+import com.greytest.entity.JavaClass;
+import com.greytest.entity.JavaMethod;
 import com.greytest.entity.TestCase;
 import com.greytest.entity.TestPlan;
 import com.greytest.entity.UnitTest;
+import com.greytest.entity.enums.ClassType;
 import com.greytest.entity.enums.Priority;
+import com.greytest.entity.enums.ProjectStatus;
 import com.greytest.entity.enums.ReviewStatus;
 import com.greytest.entity.enums.RuleSource;
 import com.greytest.entity.enums.SourceUpdateAction;
 import com.greytest.entity.enums.SourceUpdateReviewStatus;
 import com.greytest.entity.enums.SourceUpdateTargetType;
 import com.greytest.entity.enums.TestType;
+import com.greytest.entity.enums.Visibility;
 import com.greytest.repository.BusinessRuleRepository;
+import com.greytest.repository.JavaClassRepository;
+import com.greytest.repository.JavaMethodRepository;
 import com.greytest.repository.TestCaseRepository;
 import com.greytest.repository.TestPlanRepository;
 import com.greytest.repository.UnitTestRepository;
@@ -88,6 +95,8 @@ public class SourceUpdateService {
     private final TestPlanRepository testPlanRepository;
     private final TestCaseRepository testCaseRepository;
     private final UnitTestRepository unitTestRepository;
+    private final JavaClassRepository javaClassRepository;
+    private final JavaMethodRepository javaMethodRepository;
     private final ObjectMapper objectMapper;
 
     public SourceUpdateService(
@@ -103,6 +112,8 @@ public class SourceUpdateService {
             TestPlanRepository testPlanRepository,
             TestCaseRepository testCaseRepository,
             UnitTestRepository unitTestRepository,
+            JavaClassRepository javaClassRepository,
+            JavaMethodRepository javaMethodRepository,
             ObjectMapper objectMapper) {
         this.projectRepository = projectRepository;
         this.sourceRevisionRepository = sourceRevisionRepository;
@@ -116,6 +127,8 @@ public class SourceUpdateService {
         this.testPlanRepository = testPlanRepository;
         this.testCaseRepository = testCaseRepository;
         this.unitTestRepository = unitTestRepository;
+        this.javaClassRepository = javaClassRepository;
+        this.javaMethodRepository = javaMethodRepository;
         this.objectMapper = objectMapper;
     }
 
@@ -198,11 +211,17 @@ public class SourceUpdateService {
         return sourceUpdateMapper.toUpdateDto(update, List.of());
     }
 
-    /**
-     * Thực hiện phân tích AST diff và tầm ảnh hưởng (Impact Analysis) cho bản nháp cập nhật.
-     */
     @Transactional
     public SourceUpdateDto analyzeUpdate(Long projectId, Long updateId, AuthUser user) {
+        return analyzeUpdate(projectId, updateId, null, user);
+    }
+
+    /**
+     * Thực hiện phân tích AST diff và tầm ảnh hưởng (Impact Analysis) cho bản nháp cập nhật.
+     * Nếu có servicePath, chỉ phân tích và đề xuất cho riêng service đó.
+     */
+    @Transactional
+    public SourceUpdateDto analyzeUpdate(Long projectId, Long updateId, String servicePath, AuthUser user) {
         getProjectAndCheckAccess(projectId, user);
         SourceUpdate update = sourceUpdateRepository.findByIdAndProjectId(updateId, projectId)
                 .orElseThrow(() -> new IllegalArgumentException("Không tìm thấy bản cập nhật " + updateId));
@@ -226,8 +245,10 @@ public class SourceUpdateService {
         // 1. So sánh AST các method
         List<MethodDiffItem> diffItems = sourceDiffService.compareSnapshots(basePath, candPath);
 
-        // 2. Phân tích ảnh hưởng lên các artifact trong hệ thống
-        ImpactSummaryDto impact = impactAnalysisService.analyzeImpact(projectId, diffItems);
+        // 2. Phân tích ảnh hưởng lên các artifact trong hệ thống (lọc theo servicePath nếu có)
+        ImpactSummaryDto impact = servicePath != null
+                ? impactAnalysisService.analyzeImpact(projectId, diffItems, servicePath)
+                : impactAnalysisService.analyzeImpact(projectId, diffItems);
 
         try {
             update.setImpactSummary(objectMapper.writeValueAsString(impact));
@@ -240,6 +261,9 @@ public class SourceUpdateService {
         sourceUpdateItemRepository.deleteBySourceUpdateId(updateId);
 
         for (MethodDiffItem changed : impact.changedMethods()) {
+            if (!changed.isServiceMethod()) {
+                continue;
+            }
             SourceUpdateItem item = new SourceUpdateItem();
             item.setSourceUpdateId(updateId);
             item.setTargetType(SourceUpdateTargetType.METHOD);
@@ -259,6 +283,39 @@ public class SourceUpdateService {
             item.setTargetId(ruleId);
             item.setAction(SourceUpdateAction.UPDATE);
             item.setReason("Quy tắc nghiệp vụ thuộc method bị thay đổi");
+            item.setReviewStatus(SourceUpdateReviewStatus.PENDING);
+            sourceUpdateItemRepository.save(item);
+        }
+
+        for (Long planId : impact.affectedTestPlanIds()) {
+            SourceUpdateItem item = new SourceUpdateItem();
+            item.setSourceUpdateId(updateId);
+            item.setTargetType(SourceUpdateTargetType.TEST_PLAN);
+            item.setTargetId(planId);
+            item.setAction(SourceUpdateAction.UPDATE);
+            item.setReason("Test Plan thuộc Business Rule bị thay đổi");
+            item.setReviewStatus(SourceUpdateReviewStatus.PENDING);
+            sourceUpdateItemRepository.save(item);
+        }
+
+        for (Long caseId : impact.affectedTestCaseIds()) {
+            SourceUpdateItem item = new SourceUpdateItem();
+            item.setSourceUpdateId(updateId);
+            item.setTargetType(SourceUpdateTargetType.TEST_CASE);
+            item.setTargetId(caseId);
+            item.setAction(SourceUpdateAction.UPDATE);
+            item.setReason("Test Case thuộc Test Plan bị thay đổi");
+            item.setReviewStatus(SourceUpdateReviewStatus.PENDING);
+            sourceUpdateItemRepository.save(item);
+        }
+
+        for (Long unitTestId : impact.affectedUnitTestIds()) {
+            SourceUpdateItem item = new SourceUpdateItem();
+            item.setSourceUpdateId(updateId);
+            item.setTargetType(SourceUpdateTargetType.UNIT_TEST);
+            item.setTargetId(unitTestId);
+            item.setAction(SourceUpdateAction.UPDATE);
+            item.setReason("Unit Test thuộc Test Case bị thay đổi");
             item.setReviewStatus(SourceUpdateReviewStatus.PENDING);
             sourceUpdateItemRepository.save(item);
         }
@@ -376,7 +433,8 @@ public class SourceUpdateService {
         projectRepository.save(project);
 
         // 2. Duyệt các item đề xuất và áp dụng vào DB
-        int brCount = businessRuleRepository.findByProjectId(projectId).size();
+        int nextBrNumber = nextBusinessRuleNumber(projectId);
+        int nextTpNumber = nextTestPlanNumber(projectId);
         int nextTestCaseNumber = nextTestCaseNumber(projectId);
 
         for (SourceUpdateItem item : items) {
@@ -389,28 +447,36 @@ public class SourceUpdateService {
                     if (item.getReviewStatus() == SourceUpdateReviewStatus.ACCEPTED || item.getReviewStatus() == SourceUpdateReviewStatus.MODIFIED) {
                         businessRuleRepository.deleteById(item.getTargetId());
                     }
-                } else if (item.getAfterData() != null && (item.getAction() == SourceUpdateAction.CREATE || item.getAction() == SourceUpdateAction.UPDATE)) {
-                    try {
-                        GeneratedBusinessRuleDto dto = objectMapper.readValue(item.getAfterData(), GeneratedBusinessRuleDto.class);
-                        if (item.getTargetId() != null) {
-                            businessRuleRepository.findById(item.getTargetId()).ifPresent(rule -> {
+                } else if (item.getAction() == SourceUpdateAction.UPDATE || item.getAction() == SourceUpdateAction.CREATE) {
+                    if (item.getAfterData() != null) {
+                        try {
+                            GeneratedBusinessRuleDto dto = objectMapper.readValue(item.getAfterData(), GeneratedBusinessRuleDto.class);
+                            if (item.getTargetId() != null) {
+                                businessRuleRepository.findById(item.getTargetId()).ifPresent(rule -> {
+                                    rule.setDescription(dto.description());
+                                    rule.setStatus(ReviewStatus.APPROVED);
+                                    rule.setIsModified(false);
+                                    businessRuleRepository.save(rule);
+                                });
+                            } else {
+                                BusinessRule rule = new BusinessRule();
+                                rule.setProjectId(projectId);
+                                rule.setMethodId(dto.methodId());
+                                rule.setRuleCode(String.format("BR-%03d", nextBrNumber++));
                                 rule.setDescription(dto.description());
+                                rule.setSource(RuleSource.AI_GENERATED);
                                 rule.setStatus(ReviewStatus.APPROVED);
+                                rule.setIsModified(false);
                                 businessRuleRepository.save(rule);
-                            });
-                        } else {
-                            BusinessRule rule = new BusinessRule();
-                            rule.setProjectId(projectId);
-                            rule.setMethodId(dto.methodId());
-                            rule.setRuleCode(String.format("BR-%03d", ++brCount));
-                            rule.setDescription(dto.description());
-                            rule.setSource(RuleSource.AI_GENERATED);
-                            rule.setStatus(ReviewStatus.APPROVED);
-                            rule.setIsModified(false);
-                            businessRuleRepository.save(rule);
+                            }
+                        } catch (Exception e) {
+                            throw new IllegalStateException("Không thể áp dụng BusinessRule item " + item.getId(), e);
                         }
-                    } catch (Exception e) {
-                        throw new IllegalStateException("Không thể áp dụng BusinessRule item " + item.getId(), e);
+                    } else if (item.getTargetId() != null && item.getAction() == SourceUpdateAction.UPDATE) {
+                        businessRuleRepository.findById(item.getTargetId()).ifPresent(rule -> {
+                            rule.setIsModified(true);
+                            businessRuleRepository.save(rule);
+                        });
                     }
                 }
             } else if (item.getTargetType() == SourceUpdateTargetType.TEST_PLAN) {
@@ -418,67 +484,87 @@ public class SourceUpdateService {
                     if (item.getReviewStatus() == SourceUpdateReviewStatus.ACCEPTED || item.getReviewStatus() == SourceUpdateReviewStatus.MODIFIED) {
                         testPlanRepository.deleteById(item.getTargetId());
                     }
-                } else if (item.getAfterData() != null && (item.getAction() == SourceUpdateAction.CREATE || item.getAction() == SourceUpdateAction.UPDATE)) {
-                    try {
-                        GeneratedTestPlanDto dto = objectMapper.readValue(item.getAfterData(), GeneratedTestPlanDto.class);
-                        if (item.getTargetId() != null) {
-                            testPlanRepository.findById(item.getTargetId()).ifPresent(plan -> {
+                } else if (item.getAction() == SourceUpdateAction.UPDATE || item.getAction() == SourceUpdateAction.CREATE) {
+                    if (item.getAfterData() != null) {
+                        try {
+                            GeneratedTestPlanDto dto = objectMapper.readValue(item.getAfterData(), GeneratedTestPlanDto.class);
+                            if (item.getTargetId() != null) {
+                                testPlanRepository.findById(item.getTargetId()).ifPresent(plan -> {
+                                    plan.setTitle(dto.title());
+                                    plan.setDescription(dto.description());
+                                    plan.setStatus(ReviewStatus.APPROVED);
+                                    plan.setIsModified(false);
+                                    testPlanRepository.save(plan);
+                                });
+                            } else {
+                                TestPlan plan = new TestPlan();
+                                plan.setProjectId(projectId);
+                                plan.setBusinessRuleId(dto.ruleId());
+                                plan.setPlanCode(String.format("TP-%03d", nextTpNumber++));
                                 plan.setTitle(dto.title());
                                 plan.setDescription(dto.description());
+                                plan.setTestType(TestType.valueOf(dto.testType()));
                                 plan.setStatus(ReviewStatus.APPROVED);
+                                plan.setIsModified(false);
                                 testPlanRepository.save(plan);
-                            });
-                        } else {
-                            TestPlan plan = new TestPlan();
-                            plan.setProjectId(projectId);
-                            plan.setBusinessRuleId(dto.ruleId());
-                            plan.setPlanCode(String.format("TP-%03d", testPlanRepository.findByProjectId(projectId).size() + 1));
-                            plan.setTitle(dto.title());
-                            plan.setDescription(dto.description());
-                            plan.setTestType(TestType.valueOf(dto.testType()));
-                            plan.setStatus(ReviewStatus.APPROVED);
+                            }
+                        } catch (Exception e) {
+                            throw new IllegalStateException("Không thể áp dụng TestPlan item " + item.getId(), e);
+                        }
+                    } else if (item.getTargetId() != null && item.getAction() == SourceUpdateAction.UPDATE) {
+                        testPlanRepository.findById(item.getTargetId()).ifPresent(plan -> {
                             plan.setIsModified(false);
                             testPlanRepository.save(plan);
-                        }
-                    } catch (Exception e) {
-                        throw new IllegalStateException("Không thể áp dụng TestPlan item " + item.getId(), e);
+                        });
                     }
                 }
             } else if (item.getTargetType() == SourceUpdateTargetType.TEST_CASE) {
                 if (item.getAction() == SourceUpdateAction.REMOVE && item.getTargetId() != null) {
                     if (item.getReviewStatus() == SourceUpdateReviewStatus.ACCEPTED || item.getReviewStatus() == SourceUpdateReviewStatus.MODIFIED) {
+                        UnitTest ut = unitTestRepository.findByTestCaseId(item.getTargetId());
+                        if (ut != null) {
+                            unitTestRepository.delete(ut);
+                        }
                         testCaseRepository.deleteById(item.getTargetId());
                     }
-                } else if (item.getAfterData() != null && (item.getAction() == SourceUpdateAction.CREATE || item.getAction() == SourceUpdateAction.UPDATE)) {
-                    try {
-                        GeneratedTestCaseDto dto = objectMapper.readValue(item.getAfterData(), GeneratedTestCaseDto.class);
-                        if (item.getTargetId() != null) {
-                            testCaseRepository.findById(item.getTargetId()).ifPresent(tc -> {
+                } else if (item.getAction() == SourceUpdateAction.UPDATE || item.getAction() == SourceUpdateAction.CREATE) {
+                    if (item.getAfterData() != null) {
+                        try {
+                            GeneratedTestCaseDto dto = objectMapper.readValue(item.getAfterData(), GeneratedTestCaseDto.class);
+                            if (item.getTargetId() != null) {
+                                testCaseRepository.findById(item.getTargetId()).ifPresent(tc -> {
+                                    tc.setDescription(dto.description());
+                                    tc.setPreconditions(dto.preconditions());
+                                    tc.setTestData(dto.testData());
+                                    tc.setExpectedResult(dto.expectedResult());
+                                    tc.setPriority(Priority.valueOf(dto.priority()));
+                                    tc.setStatus(ReviewStatus.APPROVED);
+                                    tc.setIsModified(false);
+                                    testCaseRepository.save(tc);
+                                });
+                            } else {
+                                TestCase tc = new TestCase();
+                                tc.setTestPlanId(dto.planId());
+                                tc.setCaseCode(String.format("TC-%03d", nextTestCaseNumber++));
+                                tc.setTestType(TestType.valueOf(dto.testType()));
                                 tc.setDescription(dto.description());
                                 tc.setPreconditions(dto.preconditions());
                                 tc.setTestData(dto.testData());
                                 tc.setExpectedResult(dto.expectedResult());
                                 tc.setPriority(Priority.valueOf(dto.priority()));
+                                tc.setTraceSource(dto.traceSource());
                                 tc.setStatus(ReviewStatus.APPROVED);
+                                tc.setIsModified(false);
                                 testCaseRepository.save(tc);
-                            });
-                        } else {
-                            TestCase tc = new TestCase();
-                            tc.setTestPlanId(dto.planId());
-                            tc.setCaseCode(String.format("TC-%03d", nextTestCaseNumber++));
-                            tc.setTestType(TestType.valueOf(dto.testType()));
-                            tc.setDescription(dto.description());
-                            tc.setPreconditions(dto.preconditions());
-                            tc.setTestData(dto.testData());
-                            tc.setExpectedResult(dto.expectedResult());
-                            tc.setPriority(Priority.valueOf(dto.priority()));
-                            tc.setTraceSource(dto.traceSource());
-                            tc.setStatus(ReviewStatus.APPROVED);
-                            tc.setIsModified(false);
-                            testCaseRepository.save(tc);
+                            }
+                        } catch (Exception e) {
+                            throw new IllegalStateException("Không thể áp dụng TestCase item " + item.getId(), e);
                         }
-                    } catch (Exception e) {
-                        throw new IllegalStateException("Không thể áp dụng TestCase item " + item.getId(), e);
+                    } else if (item.getTargetId() != null && item.getAction() == SourceUpdateAction.UPDATE) {
+                        testCaseRepository.findById(item.getTargetId()).ifPresent(tc -> {
+                            tc.setIsModified(true);
+                            testCaseRepository.save(tc);
+                        });
                     }
                 }
             } else if (item.getTargetType() == SourceUpdateTargetType.UNIT_TEST) {
@@ -486,47 +572,177 @@ public class SourceUpdateService {
                     if (item.getReviewStatus() == SourceUpdateReviewStatus.ACCEPTED || item.getReviewStatus() == SourceUpdateReviewStatus.MODIFIED) {
                         unitTestRepository.deleteById(item.getTargetId());
                     }
-                } else if (item.getAfterData() != null && (item.getAction() == SourceUpdateAction.CREATE || item.getAction() == SourceUpdateAction.UPDATE)) {
-                    try {
-                        GeneratedUnitTestDto dto = objectMapper.readValue(item.getAfterData(), GeneratedUnitTestDto.class);
-                        ensureTestCaseBelongsToProject(dto.caseId(), projectId);
-                        if (item.getTargetId() != null) {
-                            UnitTest ut = unitTestRepository.findById(item.getTargetId())
-                                    .orElseThrow(() -> new IllegalArgumentException(
-                                            "Không tìm thấy Unit Test " + item.getTargetId()));
-                            if (!Objects.equals(ut.getTestCaseId(), dto.caseId())) {
-                                throw new IllegalArgumentException("Unit Test không thuộc Test Case được cập nhật");
+                } else if (item.getAction() == SourceUpdateAction.UPDATE || item.getAction() == SourceUpdateAction.CREATE) {
+                    if (item.getAfterData() != null) {
+                        try {
+                            GeneratedUnitTestDto dto = objectMapper.readValue(item.getAfterData(), GeneratedUnitTestDto.class);
+                            ensureTestCaseBelongsToProject(dto.caseId(), projectId);
+                            if (item.getTargetId() != null) {
+                                UnitTest ut = unitTestRepository.findById(item.getTargetId())
+                                        .orElseThrow(() -> new IllegalArgumentException(
+                                                "Không tìm thấy Unit Test " + item.getTargetId()));
+                                if (!Objects.equals(ut.getTestCaseId(), dto.caseId())) {
+                                    throw new IllegalArgumentException("Unit Test không thuộc Test Case được cập nhật");
+                                }
+                                String genType = (dto.generationType() != null && !dto.generationType().isBlank())
+                                        ? dto.generationType()
+                                        : "INCREMENTAL";
+                                ut.setSourceCode(normalizeUnitTestSource(dto));
+                                ut.setTestClassName(dto.testClassName());
+                                ut.setTestMethodName(dto.testMethodName());
+                                ut.setPackageName(dto.packageName());
+                                ut.setGenerationType(genType);
+                                ut.setFilePath(unitTestFilePath(dto.packageName(), dto.testClassName()));
+                                unitTestRepository.save(ut);
+                            } else {
+                                UnitTest ut = new UnitTest();
+                                String genType = (dto.generationType() != null && !dto.generationType().isBlank())
+                                        ? dto.generationType()
+                                        : "INCREMENTAL";
+                                ut.setTestCaseId(dto.caseId());
+                                ut.setTestClassName(dto.testClassName());
+                                ut.setTestMethodName(dto.testMethodName());
+                                ut.setPackageName(dto.packageName());
+                                ut.setGenerationType(genType);
+                                ut.setSourceCode(normalizeUnitTestSource(dto));
+                                ut.setFilePath(unitTestFilePath(dto.packageName(), dto.testClassName()));
+                                unitTestRepository.save(ut);
                             }
-                            ut.setSourceCode(normalizeUnitTestSource(dto));
-                            ut.setTestClassName(dto.testClassName());
-                            ut.setTestMethodName(dto.testMethodName());
-                            ut.setPackageName(dto.packageName());
-                            ut.setGenerationType(dto.generationType());
-                            ut.setFilePath(unitTestFilePath(dto.packageName(), dto.testClassName()));
-                            unitTestRepository.save(ut);
-                        } else {
-                            UnitTest ut = new UnitTest();
-                            ut.setTestCaseId(dto.caseId());
-                            ut.setTestClassName(dto.testClassName());
-                            ut.setTestMethodName(dto.testMethodName());
-                            ut.setPackageName(dto.packageName());
-                            ut.setGenerationType(dto.generationType());
-                            ut.setSourceCode(normalizeUnitTestSource(dto));
-                            ut.setFilePath(unitTestFilePath(dto.packageName(), dto.testClassName()));
-                            unitTestRepository.save(ut);
+                        } catch (Exception e) {
+                            throw new IllegalStateException("Không thể áp dụng UnitTest item " + item.getId(), e);
                         }
-                    } catch (Exception e) {
-                        throw new IllegalStateException("Không thể áp dụng UnitTest item " + item.getId(), e);
+                    } else if (item.getTargetId() != null && item.getAction() == SourceUpdateAction.UPDATE) {
+                        unitTestRepository.findById(item.getTargetId()).ifPresent(ut -> {
+                            ut.setGenerationType("INCREMENTAL");
+                            unitTestRepository.save(ut);
+                        });
                     }
                 }
+            } else if (item.getTargetType() == SourceUpdateTargetType.METHOD) {
+                applyMethodUpdate(projectId, item);
             }
         }
+
+        // Đảm bảo các Test Plan bị ảnh hưởng trong đợt cập nhật không bị giữ cờ isModified
+        ImpactSummaryDto impact = parseImpactSummary(update.getImpactSummary());
+        if (impact != null && impact.affectedTestPlanIds() != null) {
+            for (Long planId : impact.affectedTestPlanIds()) {
+                testPlanRepository.findById(planId).ifPresent(p -> {
+                    if (Boolean.TRUE.equals(p.getIsModified())) {
+                        p.setIsModified(false);
+                        testPlanRepository.save(p);
+                    }
+                });
+            }
+        }
+
+        // 3. Ghi nhận log cập nhật thành công
+        List<JavaClass> currentClasses = javaClassRepository.findByProjectId(projectId);
+        List<Long> classIds = currentClasses.stream().map(JavaClass::getId).toList();
+        int totalMethods = classIds.isEmpty() ? 0 : javaMethodRepository.findByClassIdIn(classIds).size();
 
         update.setStatus(SourceUpdateStatus.APPLIED);
         update = sourceUpdateRepository.save(update);
 
-        log.info("Đã áp dụng thành công bản cập nhật {} cho project {}", updateId, projectId);
+        boolean hasUnitTests = items.stream().anyMatch(i -> i.getTargetType() == SourceUpdateTargetType.UNIT_TEST);
+        if (hasUnitTests) {
+            project.setStatus(ProjectStatus.TEST_GENERATED);
+            projectRepository.save(project);
+        }
+
+        log.info("Đã áp dụng thành công bản cập nhật {} cho project {}: {} classes, {} methods",
+                updateId, projectId, currentClasses.size(), totalMethods);
         return sourceUpdateMapper.toUpdateDto(update, items);
+    }
+
+    private void applyMethodUpdate(Long projectId, SourceUpdateItem item) {
+        String targetKey = item.getTargetKey();
+        if (targetKey == null || !targetKey.contains("#")) return;
+
+        String[] parts = targetKey.split("#", 2);
+        String qualifiedClassName = parts[0];
+        String signature = parts[1];
+        String methodName = signature.contains("(") ? signature.substring(0, signature.indexOf("(")) : signature;
+
+        List<JavaClass> classes = javaClassRepository.findByProjectId(projectId);
+        JavaClass targetClass = classes.stream()
+                .filter(c -> Objects.equals(c.getQualifiedName(), qualifiedClassName))
+                .findFirst()
+                .orElse(null);
+
+        // Chỉ cập nhật method cho các class thuộc tầng Service
+        if (targetClass != null && targetClass.getClassType() != null && targetClass.getClassType() != ClassType.SERVICE) {
+            log.warn("Bỏ qua cập nhật method {} vì class {} không phải là Service (type={})",
+                    targetKey, qualifiedClassName, targetClass.getClassType());
+            return;
+        }
+
+        if (item.getAction() == SourceUpdateAction.REMOVE) {
+            if (targetClass != null) {
+                List<JavaMethod> methods = javaMethodRepository.findByClassId(targetClass.getId());
+                for (JavaMethod m : methods) {
+                    if (Objects.equals(m.getMethodName(), methodName)) {
+                        javaMethodRepository.delete(m);
+                    }
+                }
+            }
+        } else if (item.getAction() == SourceUpdateAction.UPDATE) {
+            if (targetClass != null && item.getAfterData() != null) {
+                List<JavaMethod> methods = javaMethodRepository.findByClassId(targetClass.getId());
+                for (JavaMethod m : methods) {
+                    if (Objects.equals(m.getMethodName(), methodName)) {
+                        m.setSourceCode(item.getAfterData());
+                        javaMethodRepository.save(m);
+                    }
+                }
+            }
+        } else if (item.getAction() == SourceUpdateAction.CREATE) {
+            if (targetClass == null) {
+                targetClass = new JavaClass();
+                targetClass.setProjectId(projectId);
+                targetClass.setQualifiedName(qualifiedClassName);
+                int lastDot = qualifiedClassName.lastIndexOf('.');
+                targetClass.setClassName(lastDot > 0 ? qualifiedClassName.substring(lastDot + 1) : qualifiedClassName);
+                targetClass.setPackageName(lastDot > 0 ? qualifiedClassName.substring(0, lastDot) : "");
+                targetClass.setClassType(ClassType.SERVICE);
+                String packagePrefix = qualifiedClassName.substring(0, Math.max(0, qualifiedClassName.lastIndexOf('.')));
+                String inferredFilePath = classes.stream()
+                        .filter(c -> c.getQualifiedName() != null && c.getQualifiedName().startsWith(packagePrefix))
+                        .map(JavaClass::getFilePath)
+                        .filter(fp -> fp != null && !fp.isBlank())
+                        .findFirst()
+                        .map(fp -> {
+                            int srcIdx = fp.indexOf("src/main/java/");
+                            String prefix = srcIdx > 0 ? fp.substring(0, srcIdx) : "";
+                            return prefix + "src/main/java/" + qualifiedClassName.replace('.', '/') + ".java";
+                        })
+                        .orElse("src/main/java/" + qualifiedClassName.replace('.', '/') + ".java");
+                targetClass.setFilePath(inferredFilePath);
+                targetClass = javaClassRepository.save(targetClass);
+            }
+            JavaClass finalClass = targetClass;
+            boolean exists = javaMethodRepository.findByClassId(targetClass.getId()).stream()
+                    .anyMatch(m -> Objects.equals(m.getMethodName(), methodName));
+            if (!exists) {
+                JavaMethod newMethod = new JavaMethod();
+                newMethod.setClassId(finalClass.getId());
+                newMethod.setMethodName(methodName);
+                newMethod.setReturnType("void");
+                newMethod.setVisibility(Visibility.PUBLIC);
+                newMethod.setSourceCode(item.getAfterData() != null ? item.getAfterData() : "");
+                newMethod.setLineStart(1);
+                newMethod.setLineEnd(10);
+                javaMethodRepository.save(newMethod);
+            } else if (item.getAfterData() != null) {
+                javaMethodRepository.findByClassId(targetClass.getId()).stream()
+                        .filter(m -> Objects.equals(m.getMethodName(), methodName))
+                        .findFirst()
+                        .ifPresent(m -> {
+                            m.setSourceCode(item.getAfterData());
+                            javaMethodRepository.save(m);
+                        });
+            }
+        }
     }
 
     /**
@@ -545,6 +761,13 @@ public class SourceUpdateService {
         update.setStatus(SourceUpdateStatus.CANCELLED);
         sourceUpdateRepository.save(update);
 
+        // Hoàn tác các thay đổi tạm thời đối với JavaMethod/JavaClass nếu có
+        for (SourceUpdateItem item : sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId)) {
+            if (item.getTargetType() == SourceUpdateTargetType.METHOD) {
+                revertMethodUpdate(projectId, item);
+            }
+        }
+
         if (update.getCandidateRevisionId() != null) {
             sourceRevisionRepository.findById(update.getCandidateRevisionId()).ifPresent(candidate -> {
                 if (candidate.getStoragePath() != null) {
@@ -559,6 +782,32 @@ public class SourceUpdateService {
         }
 
         log.info("Đã hủy bản cập nhật nháp {} của project {}", updateId, projectId);
+    }
+
+    private void revertMethodUpdate(Long projectId, SourceUpdateItem item) {
+        String targetKey = item.getTargetKey();
+        if (targetKey == null || !targetKey.contains("#")) return;
+        String[] parts = targetKey.split("#", 2);
+        String qualifiedClassName = parts[0];
+        String signature = parts[1];
+        String methodName = signature.contains("(") ? signature.substring(0, signature.indexOf("(")) : signature;
+
+        javaClassRepository.findByProjectId(projectId).stream()
+                .filter(c -> Objects.equals(c.getQualifiedName(), qualifiedClassName))
+                .findFirst()
+                .ifPresent(targetClass -> {
+                    List<JavaMethod> methods = javaMethodRepository.findByClassId(targetClass.getId());
+                    for (JavaMethod m : methods) {
+                        if (Objects.equals(m.getMethodName(), methodName)) {
+                            if (item.getAction() == SourceUpdateAction.CREATE) {
+                                javaMethodRepository.delete(m);
+                            } else if (item.getAction() == SourceUpdateAction.UPDATE && item.getBeforeData() != null) {
+                                m.setSourceCode(item.getBeforeData());
+                                javaMethodRepository.save(m);
+                            }
+                        }
+                    }
+                });
     }
 
     /**
@@ -665,6 +914,32 @@ public class SourceUpdateService {
         return "src/test/java/" + packagePath + testClassName + ".java";
     }
 
+    private int nextBusinessRuleNumber(Long projectId) {
+        int max = 0;
+        for (BusinessRule rule : businessRuleRepository.findByProjectId(projectId)) {
+            String code = rule.getRuleCode();
+            if (code == null || !code.startsWith("BR-")) continue;
+            try {
+                max = Math.max(max, Integer.parseInt(code.substring(3)));
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        return max + 1;
+    }
+
+    private int nextTestPlanNumber(Long projectId) {
+        int max = 0;
+        for (TestPlan plan : testPlanRepository.findByProjectId(projectId)) {
+            String code = plan.getPlanCode();
+            if (code == null || !code.startsWith("TP-")) continue;
+            try {
+                max = Math.max(max, Integer.parseInt(code.substring(3)));
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        return max + 1;
+    }
+
     private int nextTestCaseNumber(Long projectId) {
         int max = 0;
         for (TestPlan plan : testPlanRepository.findByProjectId(projectId)) {
@@ -697,5 +972,17 @@ public class SourceUpdateService {
         TestCase testCase = testCaseRepository.findById(dto.caseId()).orElse(null);
         if (testCase == null) return source;
         return "// GreyTest trace: " + testCase.getCaseCode() + " | " + testCase.getTraceSource() + "\n" + source;
+    }
+
+    private ImpactSummaryDto parseImpactSummary(String json) {
+        if (json == null || json.isBlank()) {
+            return new ImpactSummaryDto(0, 0, 0, 0, List.of(), List.of(), List.of(), List.of(), List.of(), List.of());
+        }
+        try {
+            return objectMapper.readValue(json, ImpactSummaryDto.class);
+        } catch (Exception e) {
+            log.warn("Không thể parse impactSummary JSON: {}", e.getMessage());
+            return new ImpactSummaryDto(0, 0, 0, 0, List.of(), List.of(), List.of(), List.of(), List.of(), List.of());
+        }
     }
 }

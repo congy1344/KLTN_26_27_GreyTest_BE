@@ -27,6 +27,8 @@ import com.greytest.service.analysis.JavaParserHelper.ExtractedMethod;
 import com.greytest.service.analysis.JavaParserHelper.ParsedFile;
 import com.greytest.service.analysis.JavaParserHelper.SourceScanResult;
 
+import com.greytest.service.ServiceScopeResolver;
+
 import lombok.extern.slf4j.Slf4j;
 
 /**
@@ -55,7 +57,8 @@ public class SourceDiffService {
             String normalizedBodyHash,
             List<String> annotations,
             ClassType classType,
-            List<String> invokedMethods) {
+            List<String> invokedMethods,
+            String relativePath) {
     }
 
     /**
@@ -83,6 +86,9 @@ public class SourceDiffService {
             MethodSnapshotInfo base = baseMethods.get(key);
             MethodSnapshotInfo cand = candidateMethods.get(key);
             List<String> callers = callersMap.getOrDefault(key, List.of());
+            MethodSnapshotInfo primary = cand != null ? cand : base;
+            String relPath = primary != null ? primary.relativePath() : null;
+            String servicePath = relPath != null ? ServiceScopeResolver.modulePath(relPath) : null;
 
             if (base == null && cand != null) {
                 // Method mới
@@ -97,7 +103,8 @@ public class SourceDiffService {
                         null,
                         cand.sourceCode(),
                         callers,
-                        cand.classType() == ClassType.SERVICE
+                        cand.classType() == ClassType.SERVICE,
+                        servicePath
                 ));
             } else if (base != null && cand == null) {
                 // Method bị xóa
@@ -112,7 +119,8 @@ public class SourceDiffService {
                         base.sourceCode(),
                         null,
                         callers,
-                        base.classType() == ClassType.SERVICE
+                        base.classType() == ClassType.SERVICE,
+                        servicePath
                 ));
             } else if (base != null && cand != null) {
                 // Có ở cả 2 phiên bản -> so sánh AST hash / annotations / return type
@@ -130,7 +138,8 @@ public class SourceDiffService {
                         base.sourceCode(),
                         cand.sourceCode(),
                         callers,
-                        cand.classType() == ClassType.SERVICE
+                        cand.classType() == ClassType.SERVICE,
+                        servicePath
                 ));
             }
         }
@@ -198,7 +207,8 @@ public class SourceDiffService {
                             bodyHash,
                             annotations,
                             classType,
-                            invokedMethods
+                            invokedMethods,
+                            pf.relativePath()
                     );
                     resultMap.put(methodKey, info);
                 }

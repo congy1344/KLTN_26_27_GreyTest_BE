@@ -83,22 +83,22 @@ public class ServiceScopeResolver {
                 .toList();
     }
 
-    static String modulePath(String filePath) {
+    public static String modulePath(String filePath) {
         if (filePath == null || filePath.isBlank()) {
-            throw new IllegalStateException("Production class khong co filePath de nhan dien module.");
+            return ".";
         }
         String normalized = filePath.replace('\\', '/');
         while (normalized.startsWith("./")) normalized = normalized.substring(2);
         int sourceRootIndex = normalized.indexOf(SOURCE_ROOT);
-        if (sourceRootIndex < 0 || sourceRootIndex > 0 && normalized.charAt(sourceRootIndex - 1) != '/') {
-            throw new IllegalStateException("filePath khong nam trong src/main/java: " + filePath);
+        if (sourceRootIndex < 0 || (sourceRootIndex > 0 && normalized.charAt(sourceRootIndex - 1) != '/')) {
+            return ".";
         }
         String prefix = normalized.substring(0, sourceRootIndex);
         while (prefix.endsWith("/")) prefix = prefix.substring(0, prefix.length() - 1);
         return prefix.isBlank() ? "." : normalizeServicePath(prefix);
     }
 
-    static String normalizeServicePath(String servicePath) {
+    public static String normalizeServicePath(String servicePath) {
         String normalized = servicePath.trim().replace('\\', '/');
         while (normalized.startsWith("./")) normalized = normalized.substring(2);
         while (normalized.endsWith("/") && normalized.length() > 1) {
@@ -116,11 +116,14 @@ public class ServiceScopeResolver {
         Set<Long> classIds = moduleClasses.stream()
                 .map(JavaClass::getId)
                 .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
-        Set<Long> methodIds = classIds.isEmpty() ? Set.of()
+        Set<Long> methodIds = classIds.isEmpty() ? new LinkedHashSet<>()
                 : methods.findByClassIdIn(List.copyOf(classIds)).stream()
                         .map(com.greytest.entity.JavaMethod::getId)
                         .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
-        return new ServiceScope(servicePath, Set.copyOf(classIds), Set.copyOf(methodIds));
+        return new ServiceScope(
+                servicePath,
+                java.util.Collections.unmodifiableSet(classIds),
+                java.util.Collections.unmodifiableSet(methodIds));
     }
 
     public record ServiceScope(String servicePath, Set<Long> classIds, Set<Long> methodIds) {

@@ -1,6 +1,7 @@
 package com.greytest.service.analysis;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -86,8 +87,21 @@ public final class MethodBranchAnalyzer {
                             methodLineStart, "REPEAT", "EXIT");
                 }
             });
-            appendSourceStatementAnchors(method, branches, methodLineStart);
-            return List.copyOf(branches);
+            List<SourceBranchDto> anchors = new ArrayList<>();
+            appendSourceStatementAnchors(method, anchors, methodLineStart);
+
+            List<SourceBranchDto> merged = new ArrayList<>();
+            int aIdx = 0;
+            for (SourceBranchDto branch : branches) {
+                while (aIdx < anchors.size() && anchors.get(aIdx).lineStart() < branch.lineStart()) {
+                    merged.add(anchors.get(aIdx++));
+                }
+                merged.add(branch);
+            }
+            while (aIdx < anchors.size()) {
+                merged.add(anchors.get(aIdx++));
+            }
+            return List.copyOf(merged);
         } catch (RuntimeException exception) {
             throw new IllegalStateException(
                     "Khong parse duoc source method de xac minh control-flow.", exception);

@@ -94,7 +94,7 @@ public class TestPlanService {
     public List<TestPlanDto> list(Long projectId, String servicePath) {
         Set<Long> methodIds = scopeResolver.resolve(projectId, servicePath).methodIds();
         Set<Long> ruleIds = businessRuleRepository.findByProjectId(projectId).stream()
-                .filter(rule -> methodIds.contains(rule.getMethodId()))
+                .filter(rule -> rule.getMethodId() != null && methodIds.contains(rule.getMethodId()))
                 .map(BusinessRule::getId).collect(Collectors.toSet());
         return testPlanRepository.findByProjectId(projectId).stream()
                 .filter(plan -> ruleIds.contains(plan.getBusinessRuleId()))
@@ -122,7 +122,7 @@ public class TestPlanService {
 
         List<BusinessRule> approvedRules = businessRuleRepository
                 .findByProjectIdAndStatus(projectId, ReviewStatus.APPROVED).stream()
-                .filter(rule -> scopedMethodIds == null || scopedMethodIds.contains(rule.getMethodId())).toList();
+                .filter(rule -> scopedMethodIds == null || (rule.getMethodId() != null && scopedMethodIds.contains(rule.getMethodId()))).toList();
         if (approvedRules.isEmpty()) {
             throw new InvalidProjectStatusException("Can co it nhat mot Business Rule APPROVED truoc khi sinh Test Plan.");
         }
@@ -218,7 +218,7 @@ public class TestPlanService {
         Set<Long> methodIds = scopeResolver.resolve(projectId, servicePath).methodIds();
         BusinessRule rule = businessRuleRepository.findById(request.businessRuleId())
                 .orElseThrow(() -> new IllegalArgumentException("Khong tim thay Business Rule"));
-        if (!methodIds.contains(rule.getMethodId())) {
+        if (rule.getMethodId() == null || !methodIds.contains(rule.getMethodId())) {
             throw new IllegalArgumentException("Business Rule khong thuoc servicePath da chon.");
         }
         return create(projectId, request);
@@ -302,7 +302,7 @@ public class TestPlanService {
             plans = projectPlans;
         } else {
             Set<Long> ruleIds = businessRuleRepository.findByProjectId(projectId).stream()
-                    .filter(rule -> scopedMethodIds.contains(rule.getMethodId()))
+                    .filter(rule -> rule.getMethodId() != null && scopedMethodIds.contains(rule.getMethodId()))
                     .map(BusinessRule::getId).collect(Collectors.toSet());
             plans = projectPlans.stream().filter(plan -> ruleIds.contains(plan.getBusinessRuleId())).toList();
         }

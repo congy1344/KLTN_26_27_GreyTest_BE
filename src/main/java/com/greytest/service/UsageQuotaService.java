@@ -25,17 +25,19 @@ public class UsageQuotaService {
     private final int defaultLimit;
     private final Clock clock;
     private final UserActivityLogRepository activityRepository;
+    private final String llmProvider;
 
     @Autowired
     public UsageQuotaService(
             UsageQuotaRepository repository,
             UserActivityLogRepository activityRepository,
-            @Value("${greytest.usage.default-monthly-llm-quota:100}") int defaultLimit) {
-        this(repository, activityRepository, defaultLimit, Clock.systemDefaultZone());
+            @Value("${greytest.usage.default-monthly-llm-quota:100}") int defaultLimit,
+            @Value("${llm.provider:mock}") String llmProvider) {
+        this(repository, activityRepository, defaultLimit, Clock.systemDefaultZone(), llmProvider);
     }
 
     UsageQuotaService(UsageQuotaRepository repository, int defaultLimit, Clock clock) {
-        this(repository, null, defaultLimit, clock);
+        this(repository, null, defaultLimit, clock, "real");
     }
 
     UsageQuotaService(
@@ -43,10 +45,20 @@ public class UsageQuotaService {
             UserActivityLogRepository activityRepository,
             int defaultLimit,
             Clock clock) {
+        this(repository, activityRepository, defaultLimit, clock, "real");
+    }
+
+    UsageQuotaService(
+            UsageQuotaRepository repository,
+            UserActivityLogRepository activityRepository,
+            int defaultLimit,
+            Clock clock,
+            String llmProvider) {
         this.repository = repository;
         this.activityRepository = activityRepository;
         this.defaultLimit = Math.max(defaultLimit, 0);
         this.clock = clock;
+        this.llmProvider = llmProvider != null ? llmProvider.trim().toLowerCase() : "mock";
     }
 
     @Transactional
@@ -59,7 +71,7 @@ public class UsageQuotaService {
     public synchronized UsageQuota consumeLlmCall(
             Long userId, Long projectId, Map<String, Object> metadata) {
         UsageQuota quota = currentForUpdate(userId);
-        if (quota.getQuotaUsed() >= quota.getQuotaLimit()) {
+        if (!"mock".equalsIgnoreCase(llmProvider) && quota.getQuotaUsed() >= quota.getQuotaLimit()) {
             throw new UsageQuotaExceededException(
                     "Bạn đã sử dụng hết quota LLM tháng này. Vui lòng liên hệ quản trị viên.");
         }

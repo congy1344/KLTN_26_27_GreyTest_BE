@@ -158,4 +158,27 @@ class ImpactAnalysisServiceTest {
         assertThat(summary.affectedTestCaseIds()).isEmpty();
         assertThat(summary.affectedUnitTestIds()).isEmpty();
     }
+
+    @Test
+    void ignoresNonServiceMethodsInChangedMethodsAndCounts() {
+        MethodDiffItem repoMethod = new MethodDiffItem(
+                "PatientRepository",
+                "com.example.PatientRepository",
+                "findAllByGender",
+                "findAllByGender(Gender)",
+                "com.example.PatientRepository#findAllByGender(Gender)",
+                MethodDiffType.ADDED,
+                "Added repo method",
+                null,
+                "code",
+                List.of(),
+                false // not a service method
+        );
+
+        ImpactSummaryDto summary = impactService.analyzeImpact(10L, List.of(repoMethod));
+
+        assertThat(summary.totalChangedMethods()).isZero();
+        assertThat(summary.addedMethodsCount()).isZero();
+        assertThat(summary.changedMethods()).isEmpty();
+    }
 }

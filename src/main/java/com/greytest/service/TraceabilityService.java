@@ -49,7 +49,7 @@ public class TraceabilityService {
     private Set<Long> scopeRuleIds(Long projectId, String servicePath) {
         Set<Long> methodIds = scopeResolver.resolve(projectId, servicePath).methodIds();
         return rules.findByProjectId(projectId).stream()
-                .filter(rule -> methodIds.contains(rule.getMethodId()))
+                .filter(rule -> rule.getMethodId() != null && methodIds.contains(rule.getMethodId()))
                 .map(rule -> rule.getId())
                 .collect(Collectors.toSet());
     }

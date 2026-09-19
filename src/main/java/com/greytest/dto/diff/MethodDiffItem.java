@@ -16,5 +16,22 @@ public record MethodDiffItem(
         String beforeSource,
         String afterSource,
         List<String> callerMethods,
-        boolean isServiceMethod) {
+        boolean isServiceMethod,
+        String servicePath) {
+
+    public MethodDiffItem(
+            String className,
+            String qualifiedClassName,
+            String methodName,
+            String signature,
+            String methodKey,
+            MethodDiffType diffType,
+            String reason,
+            String beforeSource,
+            String afterSource,
+            List<String> callerMethods,
+            boolean isServiceMethod) {
+        this(className, qualifiedClassName, methodName, signature, methodKey,
+                diffType, reason, beforeSource, afterSource, callerMethods, isServiceMethod, null);
+    }
 }

@@ -26,6 +26,8 @@ import com.greytest.repository.TestPlanCoveredRuleRepository;
 import com.greytest.repository.TestPlanRepository;
 import com.greytest.repository.UnitTestRepository;
 
+import com.greytest.service.ServiceScopeResolver;
+
 import lombok.extern.slf4j.Slf4j;
 
 /**
@@ -62,8 +64,20 @@ public class ImpactAnalysisService {
     }
 
     public ImpactSummaryDto analyzeImpact(Long projectId, List<MethodDiffItem> diffItems) {
+        return analyzeImpact(projectId, diffItems, null);
+    }
+
+    public ImpactSummaryDto analyzeImpact(Long projectId, List<MethodDiffItem> diffItems, String servicePath) {
+        String normalizedScope = (servicePath != null && !servicePath.isBlank())
+                ? ServiceScopeResolver.normalizeServicePath(servicePath)
+                : null;
+
+        // Chỉ giữ lại các phương thức thuộc tầng Service
+        // Nếu có chọn service cụ thể, chỉ giữ lại các phương thức thuộc service đó
         List<MethodDiffItem> changedMethods = diffItems.stream()
                 .filter(d -> d.diffType() != MethodDiffType.UNCHANGED)
+                .filter(MethodDiffItem::isServiceMethod)
+                .filter(d -> matchesServiceScope(projectId, d, normalizedScope))
                 .toList();
 
         int addedCount = (int) changedMethods.stream().filter(d -> d.diffType() == MethodDiffType.ADDED).count();
@@ -153,5 +167,23 @@ public class ImpactAnalysisService {
                 ? ""
                 : method.getParameters().stream().map(param -> param.type()).collect(Collectors.joining(","));
         return Objects.equals(method.getMethodName() + "(" + parameterTypes + ")", changed.signature());
+    }
+
+    private boolean matchesServiceScope(Long projectId, MethodDiffItem diffItem, String normalizedScope) {
+        if (normalizedScope == null) return true;
+        if (diffItem.servicePath() != null) {
+            String itemScope = ServiceScopeResolver.normalizeServicePath(diffItem.servicePath());
+            return itemScope.equals(normalizedScope);
+        }
+        // Fallback kiểm tra qua JavaClass trong database nếu diffItem chưa có servicePath
+        List<JavaClass> classes = javaClassRepository.findByProjectId(projectId);
+        return classes.stream()
+                .filter(c -> Objects.equals(c.getQualifiedName(), diffItem.qualifiedClassName()))
+                .findFirst()
+                .map(c -> {
+                    String scope = ServiceScopeResolver.modulePath(c.getFilePath());
+                    return ServiceScopeResolver.normalizeServicePath(scope).equals(normalizedScope);
+                })
+                .orElse(true);
     }
 }

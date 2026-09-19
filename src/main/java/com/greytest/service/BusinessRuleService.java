@@ -102,7 +102,8 @@ public class BusinessRuleService {
     public List<BusinessRuleDto> list(Long projectId) {
         ensureProjectExists(projectId);
         return businessRuleRepository.findByProjectId(projectId).stream()
-                .sorted(Comparator.comparing(BusinessRule::getRuleCode, Comparator.nullsLast(String::compareTo)))
+                .sorted(Comparator.comparingInt((BusinessRule rule) -> ruleNumber(rule.getRuleCode()))
+                        .thenComparing(BusinessRule::getRuleCode, Comparator.nullsLast(String::compareTo)))
                 .map(this::toDto)
                 .toList();
     }
@@ -111,8 +112,9 @@ public class BusinessRuleService {
     public List<BusinessRuleDto> list(Long projectId, String servicePath) {
         Set<Long> methodIds = scopeResolver.resolve(projectId, servicePath).methodIds();
         return businessRuleRepository.findByProjectId(projectId).stream()
-                .filter(rule -> methodIds.contains(rule.getMethodId()))
-                .sorted(Comparator.comparing(BusinessRule::getRuleCode, Comparator.nullsLast(String::compareTo)))
+                .filter(rule -> rule.getMethodId() != null && methodIds.contains(rule.getMethodId()))
+                .sorted(Comparator.comparingInt((BusinessRule rule) -> ruleNumber(rule.getRuleCode()))
+                        .thenComparing(BusinessRule::getRuleCode, Comparator.nullsLast(String::compareTo)))
                 .map(this::toDto)
                 .toList();
     }
@@ -231,7 +233,7 @@ public class BusinessRuleService {
         }
 
         List<BusinessRule> existingRules = businessRuleRepository.findByProjectId(projectId).stream()
-                .filter(rule -> scopedMethodIds == null || scopedMethodIds.contains(rule.getMethodId()))
+                .filter(rule -> scopedMethodIds == null || (rule.getMethodId() != null && scopedMethodIds.contains(rule.getMethodId())))
                 .toList();
         ProjectStatus effectiveStatus = scopedStatus == null ? project.getStatus() : scopedStatus;
         boolean backfillAiRules = effectiveStatus == ProjectStatus.BR_PENDING_REVIEW
@@ -324,7 +326,7 @@ public class BusinessRuleService {
         ensureBusinessRuleEditable(scopedStatus == null ? project.getStatus() : scopedStatus);
 
         List<BusinessRule> existingRules = businessRuleRepository.findByProjectId(projectId).stream()
-                .filter(rule -> scopedMethodIds == null || scopedMethodIds.contains(rule.getMethodId()))
+                .filter(rule -> scopedMethodIds == null || (rule.getMethodId() != null && scopedMethodIds.contains(rule.getMethodId())))
                 .toList();
         List<BusinessRule> dirtyRules = existingRules.stream()
                 .filter(rule -> Boolean.TRUE.equals(rule.getIsModified()))
@@ -398,7 +400,7 @@ public class BusinessRuleService {
     private List<BusinessRuleDto> approve(Long projectId, Set<Long> scopedMethodIds) {
         Project project = ensureProjectExists(projectId);
         List<BusinessRule> rules = businessRuleRepository.findByProjectId(projectId).stream()
-                .filter(rule -> scopedMethodIds == null || scopedMethodIds.contains(rule.getMethodId()))
+                .filter(rule -> scopedMethodIds == null || (rule.getMethodId() != null && scopedMethodIds.contains(rule.getMethodId())))
                 .toList();
         if (rules.isEmpty()) {
             throw new InvalidProjectStatusException("Can co it nhat mot Business Rule truoc khi approve.");
@@ -778,13 +780,12 @@ public class BusinessRuleService {
     private int branchOrder(Long methodId, String branchId) {
         JavaMethod method = javaMethodRepository.findById(methodId).orElse(null);
         if (method == null || branchId == null) return Integer.MAX_VALUE;
-        List<String> decisionIds = MethodBranchAnalyzer.analyze(method.getSourceCode(), method.getLineStart()).stream()
-                .filter(branch -> !"STATEMENT".equals(branch.kind()))
+        List<String> branchIds = MethodBranchAnalyzer.analyze(method.getSourceCode(), method.getLineStart()).stream()
                 .map(com.greytest.dto.SourceBranchDto::branchId)
                 .map(this::decisionId)
                 .distinct()
                 .toList();
-        int index = decisionIds.indexOf(decisionId(branchId));
+        int index = branchIds.indexOf(decisionId(branchId));
         return index < 0 ? Integer.MAX_VALUE : index;
     }
 

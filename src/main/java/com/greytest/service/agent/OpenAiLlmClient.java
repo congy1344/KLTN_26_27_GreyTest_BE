@@ -35,6 +35,7 @@ public class OpenAiLlmClient implements LlmClient {
     private final int maxTokens;
     private final Duration timeout;
     private final URI endpoint;
+    private final boolean jsonMode;
     private final LlmUsageRecorder usageRecorder;
 
     @Autowired
@@ -46,6 +47,7 @@ public class OpenAiLlmClient implements LlmClient {
             @Value("${llm.max-tokens:4096}") int maxTokens,
             @Value("${llm.timeout-seconds:60}") long timeoutSeconds,
             @Value("${llm.openai-url:https://api.openai.com/v1/chat/completions}") String endpoint,
+            @Value("${llm.openai-json-mode:true}") boolean jsonMode,
             ObjectProvider<LlmUsageRecorder> usageRecorderProvider) {
         this(
                 objectMapper,
@@ -56,6 +58,7 @@ public class OpenAiLlmClient implements LlmClient {
                 maxTokens,
                 Duration.ofSeconds(timeoutSeconds),
                 URI.create(endpoint),
+                jsonMode,
                 usageRecorderProvider.getIfAvailable(LlmUsageRecorder::noop));
     }
 
@@ -69,7 +72,7 @@ public class OpenAiLlmClient implements LlmClient {
             Duration timeout,
             URI endpoint) {
         this(objectMapper, httpClient, apiKey, model, temperature, maxTokens, timeout, endpoint,
-                LlmUsageRecorder.noop());
+                true, LlmUsageRecorder.noop());
     }
 
     OpenAiLlmClient(
@@ -82,6 +85,21 @@ public class OpenAiLlmClient implements LlmClient {
             Duration timeout,
             URI endpoint,
             LlmUsageRecorder usageRecorder) {
+        this(objectMapper, httpClient, apiKey, model, temperature, maxTokens, timeout, endpoint,
+                true, usageRecorder);
+    }
+
+    OpenAiLlmClient(
+            ObjectMapper objectMapper,
+            HttpClient httpClient,
+            String apiKey,
+            String model,
+            double temperature,
+            int maxTokens,
+            Duration timeout,
+            URI endpoint,
+            boolean jsonMode,
+            LlmUsageRecorder usageRecorder) {
         this.objectMapper = objectMapper;
         this.httpClient = httpClient;
         this.apiKey = apiKey;
@@ -90,6 +108,7 @@ public class OpenAiLlmClient implements LlmClient {
         this.maxTokens = maxTokens;
         this.timeout = timeout;
         this.endpoint = endpoint;
+        this.jsonMode = jsonMode;
         this.usageRecorder = usageRecorder;
     }
 
@@ -132,7 +151,7 @@ public class OpenAiLlmClient implements LlmClient {
                         Duration.ofNanos(System.nanoTime() - startedAt).toMillis());
             }
         } catch (IOException exception) {
-            throw new LlmResponseException("Khong goi duoc OpenAI API.", exception, true);
+            throw new LlmResponseException("Khong goi duoc OpenAI API: " + exception.getMessage(), exception, true);
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
             throw new LlmResponseException("Bi gian doan khi goi OpenAI API.", exception);
@@ -147,6 +166,9 @@ public class OpenAiLlmClient implements LlmClient {
                 .put("content", prompt);
         root.put("temperature", temperature);
         root.put("max_tokens", requestMaxTokens);
+        if (jsonMode) {
+            root.putObject("response_format").put("type", "json_object");
+        }
         try {
             return objectMapper.writeValueAsString(root);
         } catch (JsonProcessingException exception) {

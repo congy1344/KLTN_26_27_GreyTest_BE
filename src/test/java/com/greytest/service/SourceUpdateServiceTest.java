@@ -3,6 +3,7 @@ package com.greytest.service;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -25,12 +26,15 @@ import com.greytest.dto.SourceUpdateDto;
 import com.greytest.dto.SourceUpdateItemDto;
 import com.greytest.dto.SourceUpdateItemPatchRequest;
 import com.greytest.entity.AuthUser;
+import com.greytest.entity.JavaClass;
+import com.greytest.entity.JavaMethod;
 import com.greytest.entity.Project;
 import com.greytest.entity.SourceRevision;
 import com.greytest.entity.SourceUpdate;
 import com.greytest.entity.SourceUpdateItem;
 import com.greytest.entity.TestCase;
 import com.greytest.entity.TestPlan;
+import com.greytest.entity.enums.ClassType;
 import com.greytest.entity.enums.SourceType;
 import com.greytest.entity.enums.SourceUpdateAction;
 import com.greytest.entity.enums.SourceUpdateReviewStatus;
@@ -39,6 +43,8 @@ import com.greytest.entity.enums.SourceUpdateTargetType;
 import com.greytest.entity.enums.UserRole;
 import com.greytest.mapper.SourceUpdateMapper;
 import com.greytest.repository.BusinessRuleRepository;
+import com.greytest.repository.JavaClassRepository;
+import com.greytest.repository.JavaMethodRepository;
 import com.greytest.repository.ProjectRepository;
 import com.greytest.repository.SourceRevisionRepository;
 import com.greytest.repository.SourceUpdateItemRepository;
@@ -81,6 +87,10 @@ class SourceUpdateServiceTest {
     private TestCaseRepository testCaseRepository;
     @Mock
     private UnitTestRepository unitTestRepository;
+    @Mock
+    private JavaClassRepository javaClassRepository;
+    @Mock
+    private JavaMethodRepository javaMethodRepository;
 
     private SourceUpdateService service;
     private final SourceUpdateMapper mapper = new SourceUpdateMapper();
@@ -101,6 +111,8 @@ class SourceUpdateServiceTest {
                 testPlanRepository,
                 testCaseRepository,
                 unitTestRepository,
+                javaClassRepository,
+                javaMethodRepository,
                 objectMapper
         );
     }
@@ -480,6 +492,85 @@ class SourceUpdateServiceTest {
         assertThatThrownBy(() -> service.applyUpdate(10L, 200L, user))
                 .isInstanceOf(IllegalStateException.class);
         assertThat(update.getStatus()).isNotEqualTo(SourceUpdateStatus.APPLIED);
+    }
+
+    @Test
+    void appliesMethodDiffsSuccessfully() {
+        AuthUser user = user(1L);
+        Project p = project(10L, 1L);
+        when(projectRepository.findById(10L)).thenReturn(Optional.of(p));
+
+        SourceUpdate update = new SourceUpdate();
+        update.setId(200L);
+        update.setProjectId(10L);
+        update.setCandidateRevisionId(102L);
+        update.setStatus(SourceUpdateStatus.READY_TO_APPLY);
+        when(sourceUpdateRepository.findByIdAndProjectId(200L, 10L)).thenReturn(Optional.of(update));
+
+        SourceRevision candidate = new SourceRevision();
+        candidate.setId(102L);
+        candidate.setStoragePath("/tmp/candidate");
+        when(sourceRevisionRepository.findById(102L)).thenReturn(Optional.of(candidate));
+
+        JavaClass serviceClass = new JavaClass();
+        serviceClass.setId(50L);
+        serviceClass.setClassName("OrderService");
+        serviceClass.setQualifiedName("com.example.OrderService");
+        serviceClass.setClassType(ClassType.SERVICE);
+        when(javaClassRepository.findByProjectId(10L)).thenReturn(List.of(serviceClass));
+
+        JavaMethod existingMethod = new JavaMethod();
+        existingMethod.setId(301L);
+        existingMethod.setClassId(50L);
+        existingMethod.setMethodName("calculateDiscount");
+        existingMethod.setSourceCode("int calculateDiscount() { return 0; }");
+
+        JavaMethod deletedMethod = new JavaMethod();
+        deletedMethod.setId(302L);
+        deletedMethod.setClassId(50L);
+        deletedMethod.setMethodName("oldMethod");
+
+        when(javaMethodRepository.findByClassId(50L)).thenReturn(List.of(existingMethod, deletedMethod));
+
+        // 1. UPDATE item
+        SourceUpdateItem updateItem = new SourceUpdateItem();
+        updateItem.setId(1L);
+        updateItem.setSourceUpdateId(200L);
+        updateItem.setTargetType(SourceUpdateTargetType.METHOD);
+        updateItem.setTargetKey("com.example.OrderService#calculateDiscount()");
+        updateItem.setAction(SourceUpdateAction.UPDATE);
+        updateItem.setAfterData("int calculateDiscount() { return 10; }");
+        updateItem.setReviewStatus(SourceUpdateReviewStatus.ACCEPTED);
+
+        // 2. REMOVE item
+        SourceUpdateItem removeItem = new SourceUpdateItem();
+        removeItem.setId(2L);
+        removeItem.setSourceUpdateId(200L);
+        removeItem.setTargetType(SourceUpdateTargetType.METHOD);
+        removeItem.setTargetKey("com.example.OrderService#oldMethod()");
+        removeItem.setAction(SourceUpdateAction.REMOVE);
+        removeItem.setReviewStatus(SourceUpdateReviewStatus.ACCEPTED);
+
+        // 3. CREATE item
+        SourceUpdateItem createItem = new SourceUpdateItem();
+        createItem.setId(3L);
+        createItem.setSourceUpdateId(200L);
+        createItem.setTargetType(SourceUpdateTargetType.METHOD);
+        createItem.setTargetKey("com.example.OrderService#newMethod()");
+        createItem.setAction(SourceUpdateAction.CREATE);
+        createItem.setAfterData("void newMethod() {}");
+        createItem.setReviewStatus(SourceUpdateReviewStatus.ACCEPTED);
+
+        when(sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(200L))
+                .thenReturn(List.of(updateItem, removeItem, createItem));
+
+        service.applyUpdate(10L, 200L, user);
+
+        verify(javaMethodRepository).save(argThat(m -> "calculateDiscount".equals(m.getMethodName())
+                && "int calculateDiscount() { return 10; }".equals(m.getSourceCode())));
+        verify(javaMethodRepository).delete(deletedMethod);
+        verify(javaMethodRepository).save(argThat(m -> "newMethod".equals(m.getMethodName())
+                && "void newMethod() {}".equals(m.getSourceCode())));
     }
 
     private AuthUser user(Long id) {

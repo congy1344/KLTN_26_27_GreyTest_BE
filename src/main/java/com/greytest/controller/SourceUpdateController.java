@@ -95,9 +95,10 @@ public class SourceUpdateController {
     public SourceUpdateDto analyzeUpdate(
             @PathVariable Long projectId,
             @PathVariable Long updateId,
+            @RequestParam(required = false) String servicePath,
             @RequestHeader("Authorization") String authorization) {
         var user = authService.currentUser(authorization);
-        return sourceUpdateService.analyzeUpdate(projectId, updateId, user);
+        return sourceUpdateService.analyzeUpdate(projectId, updateId, servicePath, user);
     }
 
     @PostMapping("/{updateId}/generate")

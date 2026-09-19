@@ -744,15 +744,25 @@ public class GenerationContextBuilder {
     private List<BusinessRuleContextDto> businessRules(Long projectId) {
         return businessRuleRepository.findByProjectId(projectId).stream()
                 .map(this::ruleContext)
-                .sorted(Comparator.comparing(BusinessRuleContextDto::ruleCode))
+                .sorted(Comparator.comparingInt((BusinessRuleContextDto rule) -> ruleNumber(rule.ruleCode()))
+                        .thenComparing(BusinessRuleContextDto::ruleCode))
                 .toList();
     }
 
     private List<BusinessRuleContextDto> approvedBusinessRules(Long projectId) {
         return businessRuleRepository.findByProjectIdAndStatus(projectId, ReviewStatus.APPROVED).stream()
                 .map(this::ruleContext)
-                .sorted(Comparator.comparing(BusinessRuleContextDto::ruleCode))
+                .sorted(Comparator.comparingInt((BusinessRuleContextDto rule) -> ruleNumber(rule.ruleCode()))
+                        .thenComparing(BusinessRuleContextDto::ruleCode))
                 .toList();
+    }
+
+    private int ruleNumber(String code) {
+        try {
+            return code != null && code.startsWith("BR-") ? Integer.parseInt(code.substring(3)) : 0;
+        } catch (NumberFormatException ignored) {
+            return 0;
+        }
     }
 
     private BusinessRuleContextDto ruleContext(BusinessRule rule) {

@@ -41,25 +41,37 @@ public class MockLlmClient implements LlmClient {
     }
 
     private String businessRule(String prompt) {
-        List<Long> methodIds = methodIds(prompt);
-        List<String> branchIds = branchIds(prompt);
-        String description = isEnglish(prompt)
+        Map<Long, List<String>> branchesByMethod = branchesByMethod(prompt);
+        boolean english = isEnglish(prompt);
+        String description = english
                 ? "Input must be valid before executing business logic."
                 : "Input phải hợp lệ trước khi thực hiện business logic.";
         StringBuilder rules = new StringBuilder();
-        int ruleCount = branchIds.isEmpty() ? methodIds.size() : branchIds.size();
-        for (int i = 0; i < ruleCount; i++) {
-            if (i > 0) rules.append(",\n");
-            rules.append("""
-                        {
-                          "method_id": %d,
-                          "description": "%s",
-                          "category": "VALIDATION",
-                          "branch_id": %s
-                        }""".formatted(
-                    methodIds.get(Math.min(i, methodIds.size() - 1)),
-                    description + (branchIds.isEmpty() ? "" : " [" + branchIds.get(i) + "]"),
-                    branchIds.isEmpty() ? "null" : "\"" + branchIds.get(i) + "\""));
+        int ruleIndex = 0;
+        for (Map.Entry<Long, List<String>> entry : branchesByMethod.entrySet()) {
+            long methodId = entry.getKey();
+            List<String> branches = entry.getValue();
+            if (branches.isEmpty()) {
+                if (ruleIndex++ > 0) rules.append(",\n");
+                rules.append("""
+                            {
+                              "method_id": %d,
+                              "description": "%s",
+                              "category": "VALIDATION",
+                              "branch_id": null
+                            }""".formatted(methodId, description));
+            } else {
+                for (String branchId : branches) {
+                    if (ruleIndex++ > 0) rules.append(",\n");
+                    rules.append("""
+                                {
+                                  "method_id": %d,
+                                  "description": "%s",
+                                  "category": "VALIDATION",
+                                  "branch_id": "%s"
+                                }""".formatted(methodId, description + " [" + branchId + "]", branchId));
+                }
+            }
         }
         return """
                 {
@@ -113,6 +125,30 @@ public class MockLlmClient implements LlmClient {
             ids.add(Long.parseLong(matcher.group(1)));
         }
         return ids.isEmpty() ? List.of(1L) : ids;
+    }
+
+    private Map<Long, List<String>> branchesByMethod(String prompt) {
+        if (prompt == null) return Map.of(1L, List.of());
+        var matcher = METHOD_ID.matcher(prompt);
+        List<int[]> methodSpans = new ArrayList<>();
+        List<Long> methodIds = new ArrayList<>();
+        while (matcher.find()) {
+            methodIds.add(Long.parseLong(matcher.group(1)));
+            methodSpans.add(new int[]{matcher.start(), matcher.end()});
+        }
+        if (methodIds.isEmpty()) {
+            return Map.of(1L, branchIds(prompt));
+        }
+        Map<Long, List<String>> result = new LinkedHashMap<>();
+        for (int i = 0; i < methodIds.size(); i++) {
+            long methodId = methodIds.get(i);
+            int start = methodSpans.get(i)[0];
+            int end = (i + 1 < methodSpans.size()) ? methodSpans.get(i + 1)[0] : prompt.length();
+            String methodBlock = prompt.substring(start, end);
+            List<String> branches = branchIds(methodBlock);
+            result.put(methodId, branches);
+        }
+        return result;
     }
 
     private List<String> branchIds(String prompt) {
@@ -228,18 +264,24 @@ public class MockLlmClient implements LlmClient {
         List<Long> caseIds = new ArrayList<>();
         while (matcher.find()) caseIds.add(Long.parseLong(matcher.group(1)));
         if (caseIds.isEmpty()) caseIds.add(1L);
+        boolean junit4 = prompt != null && prompt.contains("JUnit 4 only");
         StringBuilder tests = new StringBuilder();
         for (int index = 0; index < caseIds.size(); index++) {
+            long caseId = caseIds.get(index);
             if (index > 0) tests.append(",\n");
+            String testMethod = "testGeneratedScenario_" + caseId;
+            String sourceCode = junit4
+                    ? "package com.example;\\n\\nimport org.junit.Test;\\n\\npublic class GeneratedServiceTest {\\n\\n    @Test\\n    public void " + testMethod + "() {\\n    }\\n}\\n"
+                    : "package com.example;\\n\\nimport org.junit.jupiter.api.Test;\\n\\nclass GeneratedServiceTest {\\n\\n    @Test\\n    void " + testMethod + "() {\\n    }\\n}\\n";
             tests.append("""
                     {
                       "case_id": %d,
                       "test_class_name": "GeneratedServiceTest",
-                      "test_method_name": "testGeneratedScenario_%d",
+                      "test_method_name": "%s",
                       "package_name": "com.example",
                       "generation_type": "NEW_TEST",
-                      "source_code": "package com.example;\\nclass GeneratedServiceTest {}"
-                    }""".formatted(caseIds.get(index), caseIds.get(index)));
+                      "source_code": "%s"
+                    }""".formatted(caseId, testMethod, sourceCode));
         }
         return """
                 {
