@@ -207,7 +207,11 @@ public class AIAgentService {
         prompt += javaVersionInstruction(promptName, projectId, context);
         if (correction != null && !correction.isBlank()) {
             String correctionGuidance = "test-plan".equals(promptName)
-                    ? "Regenerate the full plans array. Keep method_id and rule_id valid, and make the union of covered_rule_ids cover every approved Business Rule in this batch."
+                    ? "Regenerate the full plans array and fix ALL mapping errors listed above. "
+                            + "For each method, cover every missing id, remove unexpected ids, and preserve valid coverage. "
+                            + "Look up each id in approvedBusinessRules and match its methodId and description; "
+                            + "do not guess ids from their order or attach an unrelated rule just to satisfy coverage. "
+                            + "Keep covered_rule_ids nonempty and unique within each plan, and use their smallest id as rule_id."
                     : "Regenerate the full response. Return exactly one separate rule for every decision id, including nested decisions; never merge a missing decision into another rule.";
             prompt += "\n\n# Semantic correction\nPrevious response was invalid: " + correction
                     + "\n" + correctionGuidance;

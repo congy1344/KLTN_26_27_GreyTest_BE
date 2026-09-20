@@ -407,43 +407,53 @@ public class TestPlanService {
 
     private void ensureBatchMatchesMethods(List<GeneratedTestPlanDto> plans, Map<Long, Set<Long>> expectedRulesByMethod) {
         Map<Long, Set<Long>> returnedRulesByMethod = new LinkedHashMap<>();
+        // Gom mọi lỗi mapping để lần retry sửa đủ batch, không chỉ lỗi đầu tiên.
+        List<String> errors = new ArrayList<>();
         for (GeneratedTestPlanDto plan : plans) {
             if (plan == null || plan.methodId() == null || !expectedRulesByMethod.containsKey(plan.methodId())) {
-                throw new LlmResponseException("AI tra ve Test Plan nam ngoai batch method: " + expectedRulesByMethod.keySet());
+                errors.add("AI tra ve Test Plan nam ngoai batch method: method_id="
+                        + (plan == null ? null : plan.methodId()) + "; expected=" + expectedRulesByMethod.keySet());
+                continue;
             }
             Set<Long> expectedRuleIds = expectedRulesByMethod.get(plan.methodId());
             if (plan.coveredRuleIds() == null
                     || plan.coveredRuleIds().stream().anyMatch(java.util.Objects::isNull)) {
-                throw new LlmResponseException(
-                        "AI tra ve covered_rule_ids co gia tri null cho method " + plan.methodId() + ".");
+                errors.add("AI tra ve covered_rule_ids co gia tri null cho method " + plan.methodId() + ".");
+                continue;
             }
-            Set<Long> coveredRuleIds = plan.coveredRuleIds() == null
-                    ? Set.of()
-                    : new TreeSet<>(plan.coveredRuleIds());
-            if (plan.coveredRuleIds() == null
-                    || plan.coveredRuleIds().size() != coveredRuleIds.size()
+            Set<Long> coveredRuleIds = new TreeSet<>(plan.coveredRuleIds());
+            Set<Long> unexpectedRuleIds = new TreeSet<>(coveredRuleIds);
+            unexpectedRuleIds.removeAll(expectedRuleIds);
+            if (plan.coveredRuleIds().size() != coveredRuleIds.size()
                     || coveredRuleIds.isEmpty()
-                    || !expectedRuleIds.containsAll(coveredRuleIds)) {
-                throw new LlmResponseException("AI tra ve covered_rule_ids nam ngoai method "
-                        + plan.methodId() + ": " + expectedRuleIds);
+                    || !unexpectedRuleIds.isEmpty()) {
+                errors.add("AI tra ve covered_rule_ids rong, trung lap hoac nam ngoai method "
+                        + plan.methodId() + ": expected=" + expectedRuleIds
+                        + "; actual=" + plan.coveredRuleIds() + "; unexpected=" + unexpectedRuleIds);
             }
             if (plan.ruleId() == null || !coveredRuleIds.contains(plan.ruleId())) {
-                throw new LlmResponseException("AI tra ve anchor rule_id khong thuoc method: " + plan.ruleId());
+                errors.add("AI tra ve anchor rule_id khong thuoc covered_rule_ids: method_id="
+                        + plan.methodId() + "; rule_id=" + plan.ruleId() + "; covered_rule_ids=" + coveredRuleIds);
             }
             returnedRulesByMethod.computeIfAbsent(plan.methodId(), ignored -> new TreeSet<>()).addAll(coveredRuleIds);
         }
-        Set<Long> expectedMethodIds = new TreeSet<>(expectedRulesByMethod.keySet());
-        Set<Long> returnedMethodIds = new TreeSet<>(returnedRulesByMethod.keySet());
-        if (!returnedMethodIds.equals(expectedMethodIds)) {
-            Set<Long> missingMethodIds = new TreeSet<>(expectedMethodIds);
-            missingMethodIds.removeAll(returnedMethodIds);
-            throw new LlmResponseException("AI chua sinh Test Plan cho method: " + missingMethodIds);
+        Set<Long> missingMethodIds = new TreeSet<>(expectedRulesByMethod.keySet());
+        missingMethodIds.removeAll(returnedRulesByMethod.keySet());
+        if (!missingMethodIds.isEmpty()) {
+            errors.add("AI chua sinh Test Plan cho method: " + missingMethodIds);
         }
         for (Map.Entry<Long, Set<Long>> entry : expectedRulesByMethod.entrySet()) {
-            if (!entry.getValue().equals(returnedRulesByMethod.get(entry.getKey()))) {
-                throw new LlmResponseException("AI chua cover dung Business Rule cho method "
-                        + entry.getKey() + ": " + entry.getValue());
+            Set<Long> actualRuleIds = returnedRulesByMethod.getOrDefault(entry.getKey(), Set.of());
+            Set<Long> missingRuleIds = new TreeSet<>(entry.getValue());
+            missingRuleIds.removeAll(actualRuleIds);
+            if (!missingRuleIds.isEmpty()) {
+                errors.add("AI chua cover dung Business Rule cho method "
+                        + entry.getKey() + ": expected=" + entry.getValue()
+                        + "; actual=" + actualRuleIds + "; missing=" + missingRuleIds);
             }
+        }
+        if (!errors.isEmpty()) {
+            throw new LlmResponseException(String.join("\n", errors));
         }
     }
 

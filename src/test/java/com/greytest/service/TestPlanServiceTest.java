@@ -139,6 +139,63 @@ class TestPlanServiceTest {
     }
 
     @Test
+    void retryReportsAllMappingErrorsAndPersistsOnlyCorrectedBatch() {
+        mockProject(ProjectStatus.BR_APPROVED);
+        Set<Long> ids = Set.of(919L, 920L, 921L, 922L, 923L);
+        when(businessRuleRepository.findByProjectIdAndStatus(1L, ReviewStatus.APPROVED))
+                .thenReturn(List.of(approvedRule(919L, 95236L), approvedRule(920L, 95237L),
+                        approvedRule(921L, 95237L), approvedRule(922L, 95237L), approvedRule(923L, 95238L)));
+        when(aiAgentService.generateTestPlan(1L, ids)).thenReturn(new TestPlanResponseDto(List.of(
+                generatedPlan(95236L, 919L, List.of(919L, 920L), "Tax with wrong rule"),
+                generatedPlan(95237L, 920L, List.of(920L, 921L), "Shipping missing VIP"))));
+        org.mockito.Mockito.doAnswer(invocation -> {
+            String correction = invocation.getArgument(2);
+            assertThat(correction)
+                    .contains("method 95236: expected=[919]; actual=[919, 920]; unexpected=[920]")
+                    .contains("method 95237: expected=[920, 921, 922]; actual=[920, 921]; missing=[922]")
+                    .contains("method: [95238]")
+                    .contains("method 95238: expected=[923]; actual=[]; missing=[923]");
+            return new TestPlanResponseDto(List.of(
+                    generatedPlan(95236L, 919L, List.of(919L), "Tax"),
+                    generatedPlan(95237L, 920L, List.of(920L, 921L, 922L), "Shipping including VIP"),
+                    generatedPlan(95238L, 923L, List.of(923L), "Deadline")));
+        }).when(aiAgentService).generateTestPlan(eq(1L), eq(ids), org.mockito.ArgumentMatchers.anyString());
+        when(testPlanRepository.findByProjectId(1L)).thenReturn(List.of());
+        mockTestPlanSaveAll();
+        mockProjectSave();
+
+        assertThat(service().generate(1L)).hasSize(3);
+        verify(aiAgentService).generateTestPlan(eq(1L), eq(ids), org.mockito.ArgumentMatchers.anyString());
+        @SuppressWarnings({"unchecked", "rawtypes"})
+        ArgumentCaptor<List<TestPlanCoveredRule>> links = ArgumentCaptor.forClass((Class) List.class);
+        verify(testPlanCoveredRuleRepository).saveAll(links.capture());
+        assertThat(links.getValue()).extracting(TestPlanCoveredRule::getBusinessRuleId)
+                .containsExactly(919L, 920L, 921L, 922L, 923L);
+    }
+
+    @Test
+    void retryStillMissingRuleFailsWithoutReplacingExistingPlans() {
+        Project project = mockProject(ProjectStatus.BR_APPROVED);
+        Set<Long> ids = Set.of(920L, 921L, 922L);
+        when(businessRuleRepository.findByProjectIdAndStatus(1L, ReviewStatus.APPROVED))
+                .thenReturn(List.of(approvedRule(920L, 95237L), approvedRule(921L, 95237L),
+                        approvedRule(922L, 95237L)));
+        TestPlanResponseDto incomplete = new TestPlanResponseDto(List.of(
+                generatedPlan(95237L, 920L, List.of(920L, 921L), "Shipping missing VIP")));
+        when(aiAgentService.generateTestPlan(1L, ids)).thenReturn(incomplete);
+        org.mockito.Mockito.doReturn(incomplete).when(aiAgentService)
+                .generateTestPlan(eq(1L), eq(ids), org.mockito.ArgumentMatchers.anyString());
+
+        assertThatThrownBy(() -> service().generate(1L))
+                .isInstanceOf(LlmResponseException.class).hasMessageContaining("missing=[922]");
+        verify(aiAgentService).generateTestPlan(eq(1L), eq(ids), org.mockito.ArgumentMatchers.anyString());
+        verify(testPlanRepository, never()).deleteAll(any());
+        verify(testPlanRepository, never()).saveAll(any());
+        verify(testPlanCoveredRuleRepository, never()).saveAll(any());
+        assertThat(project.getStatus()).isEqualTo(ProjectStatus.BR_APPROVED);
+    }
+
+    @Test
     void generateRetriesWhenCoveredRuleIdsContainNull() {
         Project project = mockProject(ProjectStatus.BR_APPROVED);
         List<BusinessRule> rules = List.of(approvedRule(7L, 11L), approvedRule(8L, 11L));
