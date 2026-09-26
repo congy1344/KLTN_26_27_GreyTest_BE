@@ -22,5 +22,5 @@ public class UnitTestController {
     .contentType(org.springframework.http.MediaType.parseMediaType("application/zip"))
     .body(service.zipFiles(projectId,servicePath));
  }
-   @PostMapping("/api/projects/{projectId}/unit-tests/generate") public org.springframework.http.ResponseEntity<GenerationJobAcceptedDto> generate(@PathVariable Long projectId,@RequestParam(required=false) String servicePath,@RequestHeader("Authorization") String a){var actor=access(projectId,a);return org.springframework.http.ResponseEntity.accepted().body(jobs.submit(projectId,actor.getId(),GenerationProgressStage.UNIT_TEST,()->service.generate(projectId,servicePath)));}
+   @PostMapping("/api/projects/{projectId}/unit-tests/generate") public org.springframework.http.ResponseEntity<GenerationJobAcceptedDto> generate(@PathVariable Long projectId,@RequestParam(required=false) String servicePath,@RequestParam(required=false, defaultValue="false") boolean resume,@RequestHeader("Authorization") String a){var actor=access(projectId,a);return org.springframework.http.ResponseEntity.accepted().body(jobs.submit(projectId,actor.getId(),GenerationProgressStage.UNIT_TEST,()->service.generate(projectId,servicePath,resume)));}
    private com.greytest.entity.AuthUser access(Long id,String a){var user=auth.currentUser(a);projects.requireAccess(id,user);return user;}}

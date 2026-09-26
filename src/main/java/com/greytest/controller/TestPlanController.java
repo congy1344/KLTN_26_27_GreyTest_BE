@@ -60,13 +60,14 @@ public class TestPlanController {
     public ResponseEntity<GenerationJobAcceptedDto> generate(
             @PathVariable Long projectId,
             @RequestParam(required = false) String servicePath,
+            @RequestParam(defaultValue = "false") boolean resume,
             @RequestHeader("Authorization") String authorization) {
         AuthUser actor = requireAccess(projectId, authorization);
         return ResponseEntity.accepted().body(generationJobService.submit(
                 projectId,
                 actor.getId(),
                 GenerationProgressStage.TEST_PLAN,
-                () -> testPlanService.generate(projectId, servicePath)));
+                () -> testPlanService.generate(projectId, servicePath, resume)));
     }
 
     @PostMapping("/api/projects/{projectId}/test-plans")

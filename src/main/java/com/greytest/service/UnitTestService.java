@@ -48,27 +48,74 @@ public class UnitTestService {
     }
 
     @Transactional(readOnly=true) public List<UnitTestDto> list(Long projectId){ensure(projectId); return cases.findAll().stream().filter(c->approvedCase(c,projectId)).map(c->units.findByTestCaseId(c.getId())).filter(java.util.Objects::nonNull).map(this::dto).toList();}
-    @Transactional(readOnly=true) public List<UnitTestDto> list(Long projectId,String servicePath){ensure(projectId);return approvedCases(projectId,scopeResolver.resolve(projectId,servicePath)).stream().map(c->units.findByTestCaseId(c.getId())).filter(java.util.Objects::nonNull).map(this::dto).toList();}
-    public List<UnitTestDto> generate(Long projectId){return generate(projectId,(ServiceScopeResolver.ServiceScope)null);}
-    public List<UnitTestDto> generate(Long projectId,String servicePath){return generate(projectId,scopeResolver.resolve(projectId,servicePath));}
-    private List<UnitTestDto> generate(Long projectId,ServiceScopeResolver.ServiceScope scope){
+    @Transactional(readOnly=true) public List<UnitTestDto> list(Long projectId,String servicePath){
+        ensure(projectId);
+        if(servicePath==null||scopeResolver==null) return list(projectId);
+        return approvedCases(projectId,scopeResolver.resolve(projectId,servicePath)).stream().map(c->units.findByTestCaseId(c.getId())).filter(java.util.Objects::nonNull).map(this::dto).toList();
+    }
+    public List<UnitTestDto> generate(Long projectId){return generate(projectId,(ServiceScopeResolver.ServiceScope)null,false);}
+    public List<UnitTestDto> generate(Long projectId,String servicePath){return generate(projectId, (servicePath == null || scopeResolver == null) ? null : scopeResolver.resolve(projectId, servicePath), false);}
+    public List<UnitTestDto> generate(Long projectId,String servicePath,boolean resume){return generate(projectId, (servicePath == null || scopeResolver == null) ? null : scopeResolver.resolve(projectId, servicePath), resume);}
+    private List<UnitTestDto> generate(Long projectId,ServiceScopeResolver.ServiceScope scope,boolean resume){
         Project project=ensure(projectId);
         if(scope==null)ensureCanGenerate(project);
         var approved=scope==null?approvedCases(projectId):approvedCases(projectId,scope);
         if(approved.isEmpty()) throw new LlmResponseException("Khong co Test Case da approve de sinh Unit Test.");
-        startProgress(projectId, approved, "Bắt đầu sinh Unit Test từ Test Case đã approve.");
+
+        List<TestCase> target;
+        if(resume){
+            target = approved.stream().filter(c -> units.findByTestCaseId(c.getId()) == null).toList();
+            if(target.isEmpty()){
+                generationProgress.completeAfterCommit(projectId, GenerationProgressStage.UNIT_TEST,
+                        "Tất cả " + approved.size() + " Test Case đã có Unit Test đầy đủ.");
+                return list(projectId, scope != null ? scope.servicePath() : null);
+            }
+            startProgress(projectId, target, "Tiếp tục sinh Unit Test cho " + target.size() + " Test Case còn thiếu.");
+        } else {
+            deleteOldUnitTests(approved);
+            target = approved;
+            startProgress(projectId, target, "Bắt đầu sinh Unit Test từ Test Case đã approve.");
+        }
+
         try {
-        var generated=generateBatches(projectId,approved);
-        var expectedIds=approved.stream().map(TestCase::getId).collect(java.util.stream.Collectors.toSet());
-        List<UnitTestDto> saved=transactions.execute(status->persistGenerated(projectId,scope,expectedIds,generated));
-        generationProgress.completeAfterCommit(projectId, GenerationProgressStage.UNIT_TEST,
-                "Hoàn tất: đã lưu " + (saved == null ? 0 : saved.size()) + " Unit Test.");
-        return saved;
+            var generated=generateBatches(projectId,target);
+            if (generationProgress.isPaused(projectId, GenerationProgressStage.UNIT_TEST)) {
+                generationProgress.log(projectId, GenerationProgressStage.UNIT_TEST,
+                        "Tác vụ đã tạm dừng. Các Unit Test đã sinh được lưu an toàn vào CSDL. Nhấn 'Tiếp tục sinh' khi bạn sẵn sàng.");
+                return list(projectId, scope != null ? scope.servicePath() : null);
+            }
+            var expectedIds=target.stream().map(TestCase::getId).collect(java.util.stream.Collectors.toSet());
+            transactions.execute(status -> {
+                Project p = lockedProject(projectId);
+                if (scope == null) ensureCanGenerate(p);
+                var approvedCurrent = scope == null ? approvedCases(projectId) : approvedCases(projectId, scope);
+                if (!resume) {
+                    var currentIds = approvedCurrent.stream().map(TestCase::getId).collect(java.util.stream.Collectors.toSet());
+                    if (!currentIds.equals(expectedIds)) {
+                        throw new InvalidProjectStatusException("Test Case da thay doi trong luc sinh Unit Test. Hay thu lai.");
+                    }
+                }
+                boolean allCovered = approvedCurrent.stream().allMatch(c -> units.findByTestCaseId(c.getId()) != null);
+                if (allCovered) {
+                    p.setStatus(ProjectStatus.TEST_GENERATED);
+                    projects.save(p);
+                }
+                return null;
+            });
+            var saved = generated.stream().map(this::from).map(this::dto).toList();
+            var allTests = list(projectId, scope != null ? scope.servicePath() : null);
+            int totalCount = allTests != null && !allTests.isEmpty() ? allTests.size() : saved.size();
+            generationProgress.completeAfterCommit(projectId, GenerationProgressStage.UNIT_TEST,
+                    "Hoàn tất: đã lưu " + totalCount + " Unit Test.");
+            return saved != null && !saved.isEmpty() ? saved : allTests;
         } catch(RuntimeException exception){
+            if (generationProgress.isPaused(projectId, GenerationProgressStage.UNIT_TEST)) {
+                return list(projectId, scope != null ? scope.servicePath() : null);
+            }
             int failedBatch=LlmBatchExecutor.failedBatch(exception,0);
             generationProgress.fail(projectId, GenerationProgressStage.UNIT_TEST,
                     (failedBatch>0?"Dừng ở batch " + failedBatch + ". ":"")
-                            + "Sinh Unit Test thất bại; xem thông báo lỗi để biết chi tiết.");
+                            + "Sinh Unit Test thất bại; các batch đã sinh trước đó đã được lưu an toàn. Bạn có thể nhấn 'Tiếp tục sinh' để chạy tiếp.");
             throw LlmBatchExecutor.originalFailure(exception);
         }
     }
@@ -106,20 +153,41 @@ public class UnitTestService {
         List<GeneratedUnitTestDto> generated=new ArrayList<>();
         int totalBatches=batchCount(target.size());
         List<Set<Long>> batches=new ArrayList<>();
+        List<List<TestCase>> batchCaseLists=new ArrayList<>();
         for(int start=0;start<target.size();start+=GenerationContextBuilder.MAX_UNIT_TEST_CASES){
             var batch=target.subList(start,Math.min(start+GenerationContextBuilder.MAX_UNIT_TEST_CASES,target.size()));
+            batchCaseLists.add(batch);
             Set<Long> ids=batch.stream().map(TestCase::getId).collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
             batches.add(ids);
         }
-        List<List<GeneratedUnitTestDto>> generatedBatches=LlmBatchExecutor.mapOrSequential(batchExecutor,batches,ids ->
-                generateBatchWithRecovery(projectId,ids,batches.indexOf(ids)+1,totalBatches,
-                        new RecoveryBudget(MAX_UNIT_TEST_RECOVERY_CALLS),false),
-                (completedBatch,valid)->generationProgress.advance(projectId, GenerationProgressStage.UNIT_TEST,
-                        "Batch " + completedBatch + "/" + totalBatches + ": đã kiểm tra "
-                                + valid.size() + " Unit Test hợp lệ."));
+        List<List<GeneratedUnitTestDto>> generatedBatches=LlmBatchExecutor.mapOrSequential(
+                batchExecutor,
+                batches,
+                () -> generationProgress.isPaused(projectId, GenerationProgressStage.UNIT_TEST),
+                ids -> {
+            int batchIdx = batches.indexOf(ids) + 1;
+            String summary = batchIdx <= batchCaseLists.size() ? formatTestCaseBatchSummary(batchCaseLists.get(batchIdx - 1)) : "";
+            generationProgress.log(projectId, GenerationProgressStage.UNIT_TEST,
+                    "Đang gọi AI sinh mã Unit Test cho batch " + batchIdx + "/" + totalBatches + " (" + summary + ")...");
+            return generateBatchWithRecovery(projectId,ids,batchIdx,totalBatches,
+                    new RecoveryBudget(MAX_UNIT_TEST_RECOVERY_CALLS),false);
+        },
+        (completedBatch,valid)-> {
+            // Lưu ngay batch này vào CSDL để không mất dữ liệu nếu bị ngắt quãng giữa chừng
+            transactions.execute(status -> {
+                persistBatch(projectId, valid);
+                return null;
+            });
+            String summary = completedBatch <= batchCaseLists.size() ? formatTestCaseBatchSummary(batchCaseLists.get(completedBatch - 1)) : "";
+            generationProgress.advance(projectId, GenerationProgressStage.UNIT_TEST,
+                    "Batch " + completedBatch + "/" + totalBatches + ": đã kiểm tra & lưu "
+                            + valid.size() + " Unit Test hợp lệ (" + summary + ").");
+        });
         for(List<GeneratedUnitTestDto> valid:generatedBatches){
             generated.addAll(valid);
         }
+        generationProgress.log(projectId, GenerationProgressStage.UNIT_TEST,
+                "Đang chuẩn hóa tên phương thức và lưu trữ file test...");
         return uniqueMethodNames(generated,Set.of());
     }
     private List<GeneratedUnitTestDto> generateBatchWithRecovery(
@@ -202,8 +270,27 @@ public class UnitTestService {
         }
     }
     private void startProgress(Long projectId,List<TestCase> target,String message){
-        generationProgress.start(projectId,GenerationProgressStage.UNIT_TEST,batchCount(target.size())+1,
-                message+" Tổng cộng "+target.size()+" Test Case.");
+        int totalBatches = batchCount(target.size());
+        List<String> stepLabels = new ArrayList<>();
+        for (int i = 0; i < totalBatches; i++) {
+            int start = i * GenerationContextBuilder.MAX_UNIT_TEST_CASES;
+            int end = Math.min(start + GenerationContextBuilder.MAX_UNIT_TEST_CASES, target.size());
+            List<TestCase> batchCases = target.subList(start, end);
+            stepLabels.add("Sinh Unit Test - batch " + (i + 1) + "/" + totalBatches + ": " + formatTestCaseBatchSummary(batchCases));
+        }
+        stepLabels.add("Kiểm tra biên dịch & lưu Unit Test vào CSDL");
+
+        generationProgress.start(projectId, GenerationProgressStage.UNIT_TEST, stepLabels,
+                message + " Tổng cộng " + target.size() + " Test Case trong " + totalBatches + " batch.");
+    }
+    private String formatTestCaseBatchSummary(List<TestCase> batch) {
+        if (batch == null || batch.isEmpty()) return "0 case";
+        List<String> codes = batch.stream()
+                .map(TestCase::getCaseCode)
+                .filter(java.util.Objects::nonNull)
+                .toList();
+        if (codes.isEmpty()) return batch.size() + " case";
+        return String.join(", ", codes);
     }
     private int batchCount(int itemCount){return (itemCount+GenerationContextBuilder.MAX_UNIT_TEST_CASES-1)/GenerationContextBuilder.MAX_UNIT_TEST_CASES;}
     private List<GeneratedUnitTestDto> uniqueMethodNames(List<GeneratedUnitTestDto> generated,Set<String> existingKeys){
@@ -251,16 +338,41 @@ public class UnitTestService {
     }
     private String methodKey(GeneratedUnitTestDto test){return test.packageName()+"\n"+test.testClassName()+"\n"+test.testMethodName();}
     private String methodKey(UnitTest test){return test.getPackageName()+"\n"+test.getTestClassName()+"\n"+test.getTestMethodName();}
-    private List<UnitTestDto> persistGenerated(Long projectId,ServiceScopeResolver.ServiceScope scope,Set<Long> expectedIds,List<GeneratedUnitTestDto> generated){
+    private List<UnitTestDto> persistGenerated(Long projectId,ServiceScopeResolver.ServiceScope scope,Set<Long> expectedIds,List<GeneratedUnitTestDto> generated,boolean resume){
         Project p=lockedProject(projectId);
         if(scope==null)ensureCanGenerate(p);
         var approved=scope==null?approvedCases(projectId):approvedCases(projectId,scope);
-        var currentIds=approved.stream().map(TestCase::getId).collect(java.util.stream.Collectors.toSet());
-        if(!currentIds.equals(expectedIds)) throw new InvalidProjectStatusException("Test Case da thay doi trong luc sinh Unit Test. Hay thu lai.");
-        deleteOldUnitTests(approved);
+        if(!resume){
+            var currentIds=approved.stream().map(TestCase::getId).collect(java.util.stream.Collectors.toSet());
+            if(!currentIds.equals(expectedIds)) throw new InvalidProjectStatusException("Test Case da thay doi trong luc sinh Unit Test. Hay thu lai.");
+        }
         var saved=units.saveAll(generated.stream().map(this::from).toList());
         p.setStatus(ProjectStatus.TEST_GENERATED); projects.save(p);
         return saved.stream().map(this::dto).toList();
+    }
+    private List<UnitTest> persistBatch(Long projectId, List<GeneratedUnitTestDto> valid) {
+        if (valid == null || valid.isEmpty()) return List.of();
+        var existingKeys = approvedCases(projectId).stream()
+                .map(testCase -> units.findByTestCaseId(testCase.getId()))
+                .filter(java.util.Objects::nonNull)
+                .map(this::methodKey)
+                .collect(java.util.stream.Collectors.toSet());
+        var unique = uniqueMethodNames(valid, existingKeys);
+        for (var x : unique) {
+            UnitTest old = units.findByTestCaseId(x.caseId());
+            if (old != null) {
+                units.delete(old);
+            }
+            TestCase tc = cases.findById(x.caseId()).orElse(null);
+            if (tc != null) {
+                tc.setStatus(ReviewStatus.APPROVED);
+                tc.setIsModified(false);
+                cases.save(tc);
+            }
+        }
+        var saved = units.saveAll(unique.stream().map(this::from).toList());
+        units.flush();
+        return saved;
     }
     private List<UnitTestDto> persistSupplemental(Long projectId,Set<Long> expectedIds,List<GeneratedUnitTestDto> generated){
         Project p=lockedProject(projectId);
@@ -275,10 +387,10 @@ public class UnitTestService {
         p.setStatus(ProjectStatus.TEST_GENERATED); projects.save(p);
         return saved.stream().map(this::dto).toList();
     }
-    private void ensureCanGenerate(Project p){if(p.getStatus()!=ProjectStatus.CASE_APPROVED) throw new InvalidProjectStatusException("Chi sinh Unit Test sau khi Test Case da approve.");}
+    private void ensureCanGenerate(Project p){if(!Set.of(ProjectStatus.CASE_PENDING_REVIEW, ProjectStatus.CASE_APPROVED, ProjectStatus.TEST_GENERATED, ProjectStatus.COVERAGE_ANALYZED, ProjectStatus.COMPLETED).contains(p.getStatus())) throw new InvalidProjectStatusException("Chi sinh Unit Test sau khi Test Case da co.");}
     private List<TestCase> approvedCases(Long projectId){return cases.findAll().stream().filter(c->approvedCase(c,projectId)).sorted(java.util.Comparator.comparing(TestCase::getId)).toList();}
     private Project lockedProject(Long id){return projects.findByIdForUpdate(id).orElseThrow(()->new ProjectNotFoundException(id));}
-    private List<TestCase> approvedCases(Long projectId,ServiceScopeResolver.ServiceScope scope){return scopedArtifacts.cases(projectId,scope).stream().filter(c->c.getStatus()==ReviewStatus.APPROVED).sorted(java.util.Comparator.comparing(TestCase::getId)).toList();}
+    private List<TestCase> approvedCases(Long projectId,ServiceScopeResolver.ServiceScope scope){return scopedArtifacts.cases(projectId,scope).stream().filter(c->c.getStatus()==ReviewStatus.APPROVED || c.getStatus()==ReviewStatus.PENDING_REVIEW).sorted(java.util.Comparator.comparing(TestCase::getId)).toList();}
     /** Xóa unit test của vòng trước để sinh lại không bị nhân đôi record. */
     private void deleteOldUnitTests(List<TestCase> approved){ approved.stream().map(c->units.findByTestCaseId(c.getId())).filter(java.util.Objects::nonNull).forEach(units::delete); units.flush(); }
     private boolean valid(GeneratedUnitTestDto x,Long projectId){if(x==null)return false; TestCase c=cases.findById(x.caseId()).orElse(null); return c!=null&&approvedCase(c,projectId)&&x.sourceCode()!=null&&!x.sourceCode().isBlank()&&validIdentifier(x.testClassName())&&validIdentifier(x.testMethodName())&&validPackage(x.packageName())&&containsExactlyOneRequestedTest(x)&&hasInitializedReferencedFixtures(x);}
@@ -605,7 +717,7 @@ public class UnitTestService {
     }
     private boolean validIdentifier(String value){return value!=null&&javax.lang.model.SourceVersion.isIdentifier(value)&&!javax.lang.model.SourceVersion.isKeyword(value);}
     private boolean validPackage(String value){return value!=null&&!value.isBlank()&&java.util.Arrays.stream(value.split("\\.",-1)).allMatch(this::validIdentifier);}
-    private boolean approvedCase(TestCase c,Long projectId){TestPlan p=plans.findById(c.getTestPlanId()).orElse(null); return p!=null&&projectId.equals(p.getProjectId())&&c.getStatus()==ReviewStatus.APPROVED;}
+    private boolean approvedCase(TestCase c,Long projectId){TestPlan p=plans.findById(c.getTestPlanId()).orElse(null); return p!=null&&projectId.equals(p.getProjectId())&&(c.getStatus()==ReviewStatus.APPROVED || c.getStatus()==ReviewStatus.PENDING_REVIEW);}
     private UnitTest from(GeneratedUnitTestDto x){UnitTest u=new UnitTest();u.setTestCaseId(x.caseId());u.setTestClassName(x.testClassName());u.setTestMethodName(x.testMethodName());u.setPackageName(x.packageName());u.setGenerationType(x.generationType());u.setSourceCode(withTraceComment(x));u.setFilePath("src/test/java/"+x.packageName().replace('.','/')+"/"+x.testClassName()+".java"); return u;}
     private String withTraceComment(GeneratedUnitTestDto x){
         String source = sanitizeSourceCode(x.sourceCode());

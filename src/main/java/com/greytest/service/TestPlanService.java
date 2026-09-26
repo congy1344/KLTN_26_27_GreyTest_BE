@@ -2,14 +2,18 @@ package com.greytest.service;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.transaction.annotation.Transactional;
 
 import com.greytest.dto.CreateTestPlanRequest;
@@ -49,7 +53,37 @@ public class TestPlanService {
     private final ProjectRepository projectRepository;
     private final AIAgentService aiAgentService;
     private final GenerationProgressService generationProgressService;
+    private final TransactionTemplate transactions;
     private ServiceScopeResolver scopeResolver;
+    private LlmBatchExecutor batchExecutor;
+
+    public TestPlanService(
+            TestPlanRepository testPlanRepository,
+            TestPlanCoveredRuleRepository testPlanCoveredRuleRepository,
+            BusinessRuleRepository businessRuleRepository,
+            ProjectRepository projectRepository,
+            AIAgentService aiAgentService,
+            GenerationProgressService generationProgressService,
+            PlatformTransactionManager transactionManager) {
+        this.testPlanRepository = testPlanRepository;
+        this.testPlanCoveredRuleRepository = testPlanCoveredRuleRepository;
+        this.businessRuleRepository = businessRuleRepository;
+        this.projectRepository = projectRepository;
+        this.aiAgentService = aiAgentService;
+        this.transactions = transactionManager != null
+                ? new TransactionTemplate(transactionManager)
+                : new TransactionTemplate(new org.springframework.transaction.support.AbstractPlatformTransactionManager() {
+                    @Override
+                    protected Object doGetTransaction() { return new Object(); }
+                    @Override
+                    protected void doBegin(Object transaction, org.springframework.transaction.TransactionDefinition definition) {}
+                    @Override
+                    protected void doCommit(org.springframework.transaction.support.DefaultTransactionStatus status) {}
+                    @Override
+                    protected void doRollback(org.springframework.transaction.support.DefaultTransactionStatus status) {}
+                });
+        this.generationProgressService = generationProgressService;
+    }
 
     public TestPlanService(
             TestPlanRepository testPlanRepository,
@@ -58,12 +92,8 @@ public class TestPlanService {
             ProjectRepository projectRepository,
             AIAgentService aiAgentService,
             GenerationProgressService generationProgressService) {
-        this.testPlanRepository = testPlanRepository;
-        this.testPlanCoveredRuleRepository = testPlanCoveredRuleRepository;
-        this.businessRuleRepository = businessRuleRepository;
-        this.projectRepository = projectRepository;
-        this.aiAgentService = aiAgentService;
-        this.generationProgressService = generationProgressService;
+        this(testPlanRepository, testPlanCoveredRuleRepository, businessRuleRepository,
+                projectRepository, aiAgentService, generationProgressService, null);
     }
 
     @org.springframework.beans.factory.annotation.Autowired
@@ -74,10 +104,27 @@ public class TestPlanService {
             ProjectRepository projectRepository,
             AIAgentService aiAgentService,
             GenerationProgressService generationProgressService,
+            PlatformTransactionManager transactionManager,
+            ServiceScopeResolver scopeResolver,
+            LlmBatchExecutor batchExecutor) {
+        this(testPlanRepository, testPlanCoveredRuleRepository, businessRuleRepository,
+                projectRepository, aiAgentService, generationProgressService, transactionManager);
+        this.scopeResolver = scopeResolver;
+        this.batchExecutor = batchExecutor;
+    }
+
+    public TestPlanService(
+            TestPlanRepository testPlanRepository,
+            TestPlanCoveredRuleRepository testPlanCoveredRuleRepository,
+            BusinessRuleRepository businessRuleRepository,
+            ProjectRepository projectRepository,
+            AIAgentService aiAgentService,
+            GenerationProgressService generationProgressService,
+            PlatformTransactionManager transactionManager,
             ServiceScopeResolver scopeResolver) {
         this(testPlanRepository, testPlanCoveredRuleRepository, businessRuleRepository,
-                projectRepository, aiAgentService, generationProgressService);
-        this.scopeResolver = scopeResolver;
+                projectRepository, aiAgentService, generationProgressService, transactionManager,
+                scopeResolver, null);
     }
 
     @Transactional(readOnly = true)
@@ -109,76 +156,218 @@ public class TestPlanService {
 
     @Transactional
     public List<TestPlanDto> generate(Long projectId) {
-        return generate(projectId, (Set<Long>) null);
+        return generate(projectId, (String) null, false);
     }
 
     public List<TestPlanDto> generate(Long projectId, String servicePath) {
-        return generate(projectId, scopeResolver.resolve(projectId, servicePath).methodIds());
+        return generate(projectId, servicePath, false);
     }
 
-    private List<TestPlanDto> generate(Long projectId, Set<Long> scopedMethodIds) {
+    public List<TestPlanDto> generate(Long projectId, String servicePath, boolean resume) {
+        Set<Long> methodIds = servicePath == null || servicePath.isBlank()
+                ? null
+                : scopeResolver.resolve(projectId, servicePath).methodIds();
+        return generate(projectId, methodIds, resume);
+    }
+
+    /**
+     * Sinh Test Plan theo batch, mỗi batch được lưu ngay vào CSDL sau khi AI trả kết quả.
+     * Nếu bị lỗi giữa chừng, các batch đã hoàn thành vẫn được giữ lại —
+     * người dùng bấm "Tiếp tục sinh" (resume=true) để chạy tiếp phần còn thiếu.
+     */
+    private List<TestPlanDto> generate(Long projectId, Set<Long> scopedMethodIds, boolean resume) {
         Project project = ensureProjectExists(projectId);
         if (scopedMethodIds == null) ensureCanGenerate(project);
 
-        List<BusinessRule> approvedRules = businessRuleRepository
-                .findByProjectIdAndStatus(projectId, ReviewStatus.APPROVED).stream()
+        List<BusinessRule> queriedRules = businessRuleRepository.findByProjectId(projectId);
+        if (queriedRules.isEmpty()) {
+            queriedRules = businessRuleRepository.findByProjectIdAndStatus(projectId, ReviewStatus.APPROVED);
+        }
+        List<BusinessRule> allApprovedRules = queriedRules.stream()
+                .filter(rule -> rule.getStatus() == ReviewStatus.APPROVED || rule.getStatus() == ReviewStatus.PENDING_REVIEW)
                 .filter(rule -> scopedMethodIds == null || (rule.getMethodId() != null && scopedMethodIds.contains(rule.getMethodId()))).toList();
-        if (approvedRules.isEmpty()) {
+        if (allApprovedRules.isEmpty()) {
             throw new InvalidProjectStatusException("Can co it nhat mot Business Rule APPROVED truoc khi sinh Test Plan.");
         }
 
-        List<List<BusinessRule>> batches = methodBatches(approvedRules);
-        generationProgressService.start(projectId, GenerationProgressStage.TEST_PLAN, batches.size() + 1,
-                "Đã nhóm " + approvedRules.size() + " Business Rule thành " + batches.size() + " batch.");
-        List<GeneratedTestPlanDto> generatedPlans = new ArrayList<>();
-        int batchNumber = 0;
-        try {
-        for (List<BusinessRule> batch : batches) {
-            Set<Long> batchRuleIds = ruleIds(batch);
-            TestPlanResponseDto response = generateValidatedTestPlans(projectId, batchRuleIds, rulesByMethod(batch));
-            generatedPlans.addAll(response.plans());
-            batchNumber++;
-            generationProgressService.advance(projectId, GenerationProgressStage.TEST_PLAN,
-                    "Batch " + batchNumber + "/" + batches.size() + ": nhận "
-                            + response.plans().size() + " Test Plan từ AI.");
+        List<TestPlan> existingPlans = testPlanRepository.findByProjectId(projectId);
+        Set<Long> alreadyCoveredRuleIds = existingPlans.stream()
+                .flatMap(plan -> {
+                    List<Long> ids = testPlanCoveredRuleRepository.findByTestPlanId(plan.getId()).stream()
+                            .map(TestPlanCoveredRule::getBusinessRuleId).toList();
+                    if (ids.isEmpty() && plan.getBusinessRuleId() != null) {
+                        return java.util.stream.Stream.of(plan.getBusinessRuleId());
+                    }
+                    return ids.stream();
+                })
+                .collect(Collectors.toSet());
+
+        List<BusinessRule> targetRules = resume
+                ? allApprovedRules.stream().filter(rule -> !alreadyCoveredRuleIds.contains(rule.getId())).toList()
+                : allApprovedRules;
+
+        if (targetRules.isEmpty()) {
+            generationProgressService.log(projectId, GenerationProgressStage.TEST_PLAN,
+                    "Tat ca Business Rule da duoc bao phu boi Test Plan.");
+            return existingPlans.stream().map(this::toDto).toList();
         }
 
-        Set<Long> approvedRuleIds = approvedRules.stream().map(BusinessRule::getId).collect(Collectors.toSet());
-        List<TestPlan> oldPlans = testPlanRepository.findByProjectId(projectId).stream()
-                .filter(plan -> approvedRuleIds.contains(plan.getBusinessRuleId()))
-                .toList();
-        Set<Long> oldPlanIds = oldPlans.stream().map(TestPlan::getId).collect(Collectors.toSet());
-        List<TestPlan> remainingPlans = testPlanRepository.findByProjectId(projectId).stream()
-                .filter(plan -> !oldPlanIds.contains(plan.getId())).toList();
-        List<GeneratedPlanDraft> validPlanDrafts = buildGeneratedPlanDrafts(
-                projectId, generatedPlans, approvedRules, nextPlanNumber(remainingPlans));
-        if (validPlanDrafts.isEmpty()) {
-            throw new LlmResponseException("AI khong tra ve Test Plan hop le cho Business Rule da approve.");
+        // Nếu sinh lại từ đầu: xóa plan cũ TRƯỚC khi bắt đầu gọi AI,
+        // để mỗi batch mới lưu vào DB ngay mà không bị trùng.
+        List<TestPlan> oldPlans = new ArrayList<>();
+        if (!resume) {
+            Set<Long> approvedRuleIds = allApprovedRules.stream().map(BusinessRule::getId).collect(Collectors.toSet());
+            oldPlans = scopedMethodIds == null
+                    ? existingPlans
+                    : existingPlans.stream()
+                            .filter(plan -> approvedRuleIds.contains(plan.getBusinessRuleId()))
+                            .toList();
+            if (!oldPlans.isEmpty()) {
+                final List<TestPlan> toDelete = oldPlans;
+                transactions.executeWithoutResult(status -> {
+                    testPlanRepository.deleteAll(toDelete);
+                    testPlanRepository.flush();
+                });
+            }
         }
-        if (!oldPlans.isEmpty()) {
-            testPlanRepository.deleteAll(oldPlans);
-            testPlanRepository.flush();
+        final Set<Long> deletedPlanIds = oldPlans.stream().map(TestPlan::getId).filter(java.util.Objects::nonNull).collect(Collectors.toSet());
+
+        List<List<BusinessRule>> allBatches = methodBatches(allApprovedRules);
+        int totalBatches = allBatches.size();
+        List<String> stepLabels = new ArrayList<>();
+        for (int i = 0; i < totalBatches; i++) {
+            stepLabels.add("Sinh Test Plan - batch " + (i + 1) + "/" + totalBatches + ": " + formatRuleBatchSummary(allBatches.get(i)));
         }
-        List<TestPlan> savedPlans = testPlanRepository.saveAll(validPlanDrafts.stream()
-                        .map(GeneratedPlanDraft::plan)
-                        .toList());
-        testPlanCoveredRuleRepository.saveAll(coveredRuleLinks(savedPlans, validPlanDrafts));
-        List<TestPlanDto> created = savedPlans.stream()
-                .map(this::toDto)
+        stepLabels.add("Kiểm tra và lưu Test Plan vào CSDL");
+
+        int firstPendingBatchIndex = -1;
+        for (int i = 0; i < totalBatches; i++) {
+            if (allBatches.get(i).stream().anyMatch(rule -> !alreadyCoveredRuleIds.contains(rule.getId()))) {
+                firstPendingBatchIndex = i;
+                break;
+            }
+        }
+        if (firstPendingBatchIndex < 0) {
+            firstPendingBatchIndex = totalBatches;
+        }
+
+        if (resume && firstPendingBatchIndex > 0) {
+            generationProgressService.resume(projectId, GenerationProgressStage.TEST_PLAN, stepLabels, firstPendingBatchIndex,
+                    "Tiếp tục sinh Test Plan từ batch " + (firstPendingBatchIndex + 1) + "/" + totalBatches + " (" + targetRules.size() + " Business Rule còn thiếu).");
+        } else {
+            generationProgressService.start(projectId, GenerationProgressStage.TEST_PLAN, stepLabels,
+                    "Đã nhóm " + allApprovedRules.size() + " Business Rule thành " + totalBatches + " batch.");
+        }
+
+        // Đếm plan number tăng dần qua các batch; dùng AtomicInteger để thread-safe
+        List<TestPlan> remainingPlans = existingPlans.stream()
+                .filter(p -> p.getId() == null || !deletedPlanIds.contains(p.getId()))
                 .toList();
-        project.setStatus(ProjectStatus.PLAN_PENDING_REVIEW);
-        projectRepository.save(project);
+        int baseNumber = resume || scopedMethodIds != null
+                ? nextPlanNumber(remainingPlans)
+                : 1;
+        AtomicInteger planCounter = new AtomicInteger(baseNumber);
+
+        List<List<BusinessRule>> batchesToRun = allBatches.stream()
+                .filter(batch -> batch.stream().anyMatch(rule -> !alreadyCoveredRuleIds.contains(rule.getId())))
+                .toList();
+
+        List<TestPlan> allSavedPlans = new java.util.concurrent.CopyOnWriteArrayList<>();
+        try {
+        // Mỗi batch được lưu ngay vào CSDL qua callback onCompleted
+        List<List<GeneratedTestPlanDto>> allBatchResults = LlmBatchExecutor.mapOrSequential(
+                batchExecutor,
+                batchesToRun,
+                () -> generationProgressService.isPaused(projectId, GenerationProgressStage.TEST_PLAN),
+                batch -> {
+                    int batchIdx = allBatches.indexOf(batch) + 1;
+                    String summary = formatRuleBatchSummary(batch);
+                    generationProgressService.log(projectId, GenerationProgressStage.TEST_PLAN,
+                            "Đang gọi AI sinh Test Plan cho batch " + batchIdx + "/" + totalBatches
+                                     + " (" + summary + ")...");
+                    Set<Long> batchRuleIds = ruleIds(batch);
+                    TestPlanResponseDto response = generateValidatedTestPlans(projectId, batchRuleIds, rulesByMethod(batch));
+                    return response.plans();
+                },
+                (completedRunBatch, batchPlans) -> {
+                    List<BusinessRule> currentBatch = batchesToRun.get(completedRunBatch - 1);
+                    int actualBatchIdx = allBatches.indexOf(currentBatch) + 1;
+                    // Lưu ngay batch này vào CSDL để không mất dữ liệu nếu bị ngắt quãng giữa chừng
+                    List<TestPlan> saved = transactions.execute(status -> persistBatch(projectId, targetRules, batchPlans, planCounter, deletedPlanIds));
+                    if (saved != null) allSavedPlans.addAll(saved);
+                    String summary = formatRuleBatchSummary(currentBatch);
+                    generationProgressService.advance(projectId, GenerationProgressStage.TEST_PLAN,
+                            "Batch " + actualBatchIdx + "/" + totalBatches + ": đã kiểm tra & lưu "
+                                    + batchPlans.size() + " Test Plan (" + summary + ").");
+                });
+
+        if (generationProgressService.isPaused(projectId, GenerationProgressStage.TEST_PLAN)) {
+            generationProgressService.log(projectId, GenerationProgressStage.TEST_PLAN,
+                    "Tác vụ đã tạm dừng. Các Test Plan đã sinh được lưu an toàn vào CSDL. Nhấn 'Tiếp tục sinh' khi bạn sẵn sàng.");
+            List<TestPlanDto> fromRepo = testPlanRepository.findByProjectId(projectId).stream().map(this::toDto).toList();
+            return fromRepo.isEmpty() ? allSavedPlans.stream().map(this::toDto).toList() : fromRepo;
+        }
+
+        // Cập nhật trạng thái project sau khi tất cả batch hoàn thành
+        transactions.executeWithoutResult(status -> {
+            Project p = projectRepository.findById(projectId).orElseThrow(() -> new ProjectNotFoundException(projectId));
+            p.setStatus(ProjectStatus.PLAN_PENDING_REVIEW);
+            projectRepository.save(p);
+        });
+
+        int totalSaved = allBatchResults.stream().mapToInt(List::size).sum();
         generationProgressService.completeAfterCommit(projectId, GenerationProgressStage.TEST_PLAN,
-                "Hoàn tất: đã lưu " + created.size() + " Test Plan và liên kết Business Rule.");
-        return created;
+                "Hoàn tất: đã lưu " + totalSaved + " Test Plan"
+                        + (resume ? " mới bổ sung." : " và liên kết với " + allApprovedRules.size() + " Business Rule."));
+        List<TestPlanDto> fromRepo = testPlanRepository.findByProjectId(projectId).stream().map(this::toDto).toList();
+        return fromRepo.isEmpty() ? allSavedPlans.stream().map(this::toDto).toList() : fromRepo;
+
         } catch (RuntimeException exception) {
-            String failureLocation = batchNumber < batches.size()
-                    ? "Dừng ở batch " + (batchNumber + 1) + "."
+            if (generationProgressService.isPaused(projectId, GenerationProgressStage.TEST_PLAN)) {
+                List<TestPlanDto> fromRepo = testPlanRepository.findByProjectId(projectId).stream().map(this::toDto).toList();
+                return fromRepo.isEmpty() ? allSavedPlans.stream().map(this::toDto).toList() : fromRepo;
+            }
+            int failedBatch = LlmBatchExecutor.failedBatch(exception, 0);
+            String failureLocation = failedBatch > 0
+                    ? "Dừng ở batch " + failedBatch + "."
                     : "Dừng ở bước kiểm tra và lưu Test Plan.";
             generationProgressService.fail(projectId, GenerationProgressStage.TEST_PLAN,
-                    failureLocation + " Sinh Test Plan thất bại; xem thông báo lỗi để biết chi tiết.");
-            throw exception;
+                    failureLocation + " Sinh Test Plan thất bại; các batch đã sinh trước đó đã được lưu an toàn."
+                            + " Bạn có thể nhấn 'Tiếp tục sinh' để chạy tiếp.");
+            throw LlmBatchExecutor.originalFailure(exception);
         }
+    }
+
+    /**
+     * Lưu kết quả một batch Test Plan vào CSDL ngay lập tức.
+     * Được gọi trong callback onCompleted của LlmBatchExecutor.
+     */
+    private List<TestPlan> persistBatch(Long projectId, List<BusinessRule> targetRules,
+                              List<GeneratedTestPlanDto> batchPlans, AtomicInteger planCounter,
+                              Set<Long> deletedPlanIds) {
+        List<GeneratedPlanDraft> validDrafts = buildGeneratedPlanDrafts(
+                projectId, batchPlans, targetRules, planCounter, deletedPlanIds);
+        if (validDrafts.isEmpty()) return List.of();
+        List<TestPlan> savedPlans = testPlanRepository.saveAll(
+                validDrafts.stream().map(GeneratedPlanDraft::plan).toList());
+        testPlanCoveredRuleRepository.saveAll(coveredRuleLinks(savedPlans, validDrafts));
+        targetRules.forEach(rule -> {
+            if (rule.getStatus() == ReviewStatus.PENDING_REVIEW) {
+                rule.setStatus(ReviewStatus.APPROVED);
+                businessRuleRepository.save(rule);
+            }
+        });
+        return savedPlans;
+    }
+
+    private String formatRuleBatchSummary(List<BusinessRule> batch) {
+        if (batch == null || batch.isEmpty()) return "0 rule";
+        List<String> codes = batch.stream()
+                .map(BusinessRule::getRuleCode)
+                .filter(java.util.Objects::nonNull)
+                .toList();
+        if (codes.isEmpty()) return batch.size() + " rule";
+        return String.join(", ", codes);
     }
 
     /**
@@ -322,17 +511,28 @@ public class TestPlanService {
             Long projectId,
             List<GeneratedTestPlanDto> generatedPlans,
             List<BusinessRule> approvedRules,
-            int firstPlanNumber) {
+            AtomicInteger planCounter,
+            Set<Long> deletedPlanIds) {
         Set<Long> approvedRuleIds = approvedRules.stream()
                 .map(BusinessRule::getId)
                 .collect(Collectors.toSet());
-        int[] planNumber = {firstPlanNumber};
-        return generatedPlans.stream()
-                .filter(plan -> isUsableGeneratedPlan(plan, approvedRuleIds))
-                .map(plan -> new GeneratedPlanDraft(
-                        generatedPlan(projectId, plan, planNumber[0]++),
-                        new TreeSet<>(plan.coveredRuleIds())))
-                .toList();
+        Set<String> existingCodes = testPlanRepository.findByProjectId(projectId).stream()
+                .map(TestPlan::getPlanCode)
+                .filter(java.util.Objects::nonNull)
+                .collect(Collectors.toCollection(HashSet::new));
+        List<GeneratedPlanDraft> drafts = new ArrayList<>();
+        for (GeneratedTestPlanDto plan : generatedPlans) {
+            if (!isUsableGeneratedPlan(plan, approvedRuleIds)) continue;
+            int num = planCounter.getAndIncrement();
+            while (existingCodes.contains(nextPlanCode(num))) {
+                num = planCounter.getAndIncrement();
+            }
+            existingCodes.add(nextPlanCode(num));
+            drafts.add(new GeneratedPlanDraft(
+                    generatedPlan(projectId, plan, num),
+                    new TreeSet<>(plan.coveredRuleIds())));
+        }
+        return drafts;
     }
 
     private List<TestPlanCoveredRule> coveredRuleLinks(List<TestPlan> plans, List<GeneratedPlanDraft> drafts) {
@@ -495,8 +695,8 @@ public class TestPlanService {
     private BusinessRule ensureApprovedRule(Long projectId, Long ruleId) {
         BusinessRule rule = businessRuleRepository.findById(ruleId)
                 .orElseThrow(() -> new IllegalArgumentException("Khong tim thay Business Rule " + ruleId));
-        if (!projectId.equals(rule.getProjectId()) || rule.getStatus() != ReviewStatus.APPROVED) {
-            throw new IllegalArgumentException("Business Rule phai thuoc project hien tai va o trang thai APPROVED.");
+        if (!projectId.equals(rule.getProjectId()) || (rule.getStatus() != ReviewStatus.APPROVED && rule.getStatus() != ReviewStatus.PENDING_REVIEW)) {
+            throw new IllegalArgumentException("Business Rule phai thuoc project hien tai.");
         }
         return rule;
     }
@@ -509,7 +709,7 @@ public class TestPlanService {
     // Cho phép regenerate/sửa Test Plan ở mọi pha từ BR_APPROVED trở đi; dữ liệu pha sau
     // (Case/Unit Test) được DB cascade dọn, status rollback về PLAN_PENDING_REVIEW
     private static final Set<ProjectStatus> PLAN_EDITABLE_STATUSES = Set.of(
-            ProjectStatus.BR_APPROVED, ProjectStatus.PLAN_PENDING_REVIEW, ProjectStatus.PLAN_APPROVED,
+            ProjectStatus.BR_PENDING_REVIEW, ProjectStatus.BR_APPROVED, ProjectStatus.PLAN_PENDING_REVIEW, ProjectStatus.PLAN_APPROVED,
             ProjectStatus.CASE_PENDING_REVIEW, ProjectStatus.CASE_APPROVED, ProjectStatus.TEST_GENERATED,
             ProjectStatus.COVERAGE_ANALYZED, ProjectStatus.COMPLETED);
 
@@ -553,8 +753,8 @@ public class TestPlanService {
                 plan.getProjectId(),
                 plan.getBusinessRuleId(),
                 plan.getPlanCode(),
-                plan.getTitle(),
-                plan.getDescription(),
+                com.greytest.util.TextSanitizer.cleanAiText(plan.getTitle()),
+                com.greytest.util.TextSanitizer.cleanAiText(plan.getDescription()),
                 plan.getTestType(),
                 plan.getStatus(),
                 plan.getIsModified(),

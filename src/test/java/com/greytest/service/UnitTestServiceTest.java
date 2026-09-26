@@ -157,9 +157,9 @@ class UnitTestServiceTest {
 
         assertThat(result).hasSize(11);
         ArgumentCaptor<Set<Long>> batches = ArgumentCaptor.forClass(Set.class);
-        verify(ai, org.mockito.Mockito.times(3)).generateUnitTests(
+        verify(ai, org.mockito.Mockito.times(2)).generateUnitTests(
                 org.mockito.ArgumentMatchers.eq(1L), batches.capture());
-        assertThat(batches.getAllValues()).extracting(Set::size).containsExactly(5, 5, 1);
+        assertThat(batches.getAllValues()).extracting(Set::size).containsExactly(8, 3);
         verify(generationProgress).completeAfterCommit(
                 org.mockito.ArgumentMatchers.eq(1L),
                 org.mockito.ArgumentMatchers.eq(com.greytest.dto.GenerationProgressStage.UNIT_TEST),
@@ -486,6 +486,44 @@ class UnitTestServiceTest {
         assertThatThrownBy(() -> service.generateSupplemental(1L, List.of(31L)))
                 .isInstanceOf(LlmResponseException.class);
         verify(units, never()).saveAll(org.mockito.ArgumentMatchers.anyList());
+    }
+
+    @Test
+    void generationResumeOnlyGeneratesMissingUnitTests() {
+        Project project = new Project();
+        project.setId(1L);
+        project.setStatus(ProjectStatus.CASE_APPROVED);
+        TestPlan plan = new TestPlan();
+        plan.setId(20L);
+        plan.setProjectId(1L);
+
+        TestCase case1 = approvedCase(1L, 20L);
+        TestCase case2 = approvedCase(2L, 20L);
+
+        UnitTest existingUnit1 = new UnitTest();
+        existingUnit1.setId(101L);
+        existingUnit1.setTestCaseId(1L);
+
+        when(projects.findById(1L)).thenReturn(Optional.of(project));
+        when(projects.findByIdForUpdate(1L)).thenReturn(Optional.of(project));
+        when(cases.findAll()).thenReturn(List.of(case1, case2));
+        when(cases.findById(2L)).thenReturn(Optional.of(case2));
+        when(plans.findById(20L)).thenReturn(Optional.of(plan));
+        when(units.findByTestCaseId(1L)).thenReturn(existingUnit1);
+        when(units.findByTestCaseId(2L)).thenReturn(null);
+
+        when(ai.generateUnitTests(1L, Set.of(2L))).thenReturn(new UnitTestResponseDto(List.of(
+                new GeneratedUnitTestDto(2L, "ServiceTest", "case2",
+                        "demo", "NEW_TEST", validSource("ServiceTest", "case2")))));
+        when(units.saveAll(org.mockito.ArgumentMatchers.anyList())).thenAnswer(invocation -> invocation.getArgument(0));
+
+        var result = service.generate(1L, (String) null, true);
+
+        assertThat(result).hasSize(1);
+        assertThat(result.get(0).testCaseId()).isEqualTo(2L);
+        verify(ai).generateUnitTests(1L, Set.of(2L));
+        verify(ai, never()).generateUnitTests(1L, Set.of(1L));
+        verify(units, never()).delete(existingUnit1);
     }
 
     private static TestCase approvedCase(Long id, Long planId) {

@@ -40,7 +40,7 @@ public class GenerationProgressService {
         this.clock = clock;
     }
 
-    public synchronized void start(Long projectId, GenerationProgressStage stage, int totalSteps, String message) {
+    public synchronized void start(Long projectId, GenerationProgressStage stage, List<String> stepLabels, String message) {
         cleanupExpired();
         ProgressKey requestedKey = new ProgressKey(projectId, stage);
         boolean projectHasRunningGeneration = states.entrySet().stream()
@@ -52,8 +52,40 @@ public class GenerationProgressService {
                     "Một tác vụ sinh AI đang chạy cho project này. Vui lòng chờ hoàn tất.");
         }
         states.compute(requestedKey, (key, current) -> {
-            return new ProgressState(stage, Math.max(totalSteps, 1), message, clock.instant());
+            return new ProgressState(stage, stepLabels, message, clock.instant());
         });
+    }
+
+    public synchronized void resume(
+            Long projectId,
+            GenerationProgressStage stage,
+            List<String> stepLabels,
+            int completedSteps,
+            String message) {
+        cleanupExpired();
+        ProgressKey requestedKey = new ProgressKey(projectId, stage);
+        boolean projectHasRunningGeneration = states.entrySet().stream()
+                .anyMatch(entry -> entry.getKey().projectId().equals(projectId)
+                        && entry.getValue().isActive()
+                        && (!entry.getKey().equals(requestedKey) || entry.getValue().isRunning()));
+        if (projectHasRunningGeneration) {
+            throw new GenerationInProgressException(
+                    "Một tác vụ sinh AI đang chạy cho project này. Vui lòng chờ hoàn tất.");
+        }
+        states.compute(requestedKey, (key, current) -> {
+            ProgressState state = new ProgressState(stage, stepLabels, message, clock.instant());
+            state.completedSteps = Math.min(completedSteps, state.totalSteps);
+            if (current != null && !current.logs.isEmpty()) {
+                // Giữ lại các log cũ của những batch trước đó để hiển thị liền mạch
+                List<GenerationProgressLogDto> oldLogs = new ArrayList<>(current.logs);
+                state.logs.addAll(0, oldLogs);
+            }
+            return state;
+        });
+    }
+
+    public synchronized void start(Long projectId, GenerationProgressStage stage, int totalSteps, String message) {
+        start(projectId, stage, ProgressState.buildStepLabels(stage, totalSteps), message);
     }
 
     /** Ghi nhận ngay tác vụ đã vào hàng đợi để frontend không phải giữ request HTTP. */
@@ -66,7 +98,7 @@ public class GenerationProgressService {
                     "Một tác vụ sinh AI đang chạy cho project này. Vui lòng chờ hoàn tất.");
         }
         states.put(new ProgressKey(projectId, stage),
-                new ProgressState(stage, 1, message, clock.instant(), GenerationProgressStatus.QUEUED));
+                new ProgressState(stage, List.of("Đang chờ worker xử lý"), message, clock.instant(), GenerationProgressStatus.QUEUED));
     }
 
     public void advance(Long projectId, GenerationProgressStage stage, String message) {
@@ -116,6 +148,16 @@ public class GenerationProgressService {
         if (state != null) state.failIfActive(message, clock.instant());
     }
 
+    public synchronized void pause(Long projectId, GenerationProgressStage stage, String message) {
+        ProgressState state = states.get(new ProgressKey(projectId, stage));
+        if (state != null) state.pause(message, clock.instant());
+    }
+
+    public boolean isPaused(Long projectId, GenerationProgressStage stage) {
+        ProgressState state = states.get(new ProgressKey(projectId, stage));
+        return state != null && state.isPaused();
+    }
+
     public void log(Long projectId, GenerationProgressStage stage, String message) {
         ProgressState state = states.get(new ProgressKey(projectId, stage));
         if (state != null) state.note(message, clock.instant());
@@ -146,21 +188,23 @@ public class GenerationProgressService {
         private String failureMessage;
         private Instant updatedAt;
 
-        private ProgressState(GenerationProgressStage stage, int totalSteps, String message, Instant now) {
-            this(stage, totalSteps, message, now, GenerationProgressStatus.RUNNING);
+        private ProgressState(GenerationProgressStage stage, List<String> stepLabels, String message, Instant now) {
+            this(stage, stepLabels, message, now, GenerationProgressStatus.RUNNING);
         }
 
         private ProgressState(
                 GenerationProgressStage stage,
-                int totalSteps,
+                List<String> customStepLabels,
                 String message,
                 Instant now,
                 GenerationProgressStatus initialStatus) {
             this.stage = stage;
-            this.totalSteps = totalSteps;
             this.stepLabels = initialStatus == GenerationProgressStatus.QUEUED
                     ? List.of("Đang chờ worker xử lý")
-                    : buildStepLabels(stage, totalSteps);
+                    : (customStepLabels != null && !customStepLabels.isEmpty()
+                            ? List.copyOf(customStepLabels)
+                            : buildStepLabels(stage, 1));
+            this.totalSteps = this.stepLabels.size();
             this.status = initialStatus;
             this.updatedAt = now;
             addLog(message, now);
@@ -197,6 +241,17 @@ public class GenerationProgressService {
             if (isActive()) fail(message, now);
         }
 
+        private synchronized void pause(String message, Instant now) {
+            if (!isActive()) return;
+            status = GenerationProgressStatus.PAUSED;
+            updatedAt = now;
+            addLog(message, now);
+        }
+
+        private synchronized boolean isPaused() {
+            return status == GenerationProgressStatus.PAUSED;
+        }
+
         private synchronized void note(String message, Instant now) {
             if (!isActive()) return;
             updatedAt = now;
@@ -212,7 +267,9 @@ public class GenerationProgressService {
         }
 
         private synchronized boolean isTerminalBefore(Instant threshold) {
-            return (status == GenerationProgressStatus.COMPLETED || status == GenerationProgressStatus.FAILED)
+            return (status == GenerationProgressStatus.COMPLETED
+                    || status == GenerationProgressStatus.FAILED
+                    || status == GenerationProgressStatus.PAUSED)
                     && updatedAt.isBefore(threshold);
         }
 

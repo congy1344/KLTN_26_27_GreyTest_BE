@@ -137,6 +137,18 @@ public class ProjectService {
         delete(id);
     }
 
+    @Transactional
+    public ProjectDto complete(Long id, AuthUser user) {
+        Project project = findOrThrow(id);
+        requireProjectAccess(project, user);
+        if (project.getStatus() == ProjectStatus.COVERAGE_ANALYZED) {
+            project.setStatus(ProjectStatus.COMPLETED);
+            project = projectRepository.save(project);
+            log.info("Project {} đã hoàn thành toàn bộ pipeline, cập nhật trạng thái COMPLETED", id);
+        }
+        return projectMapper.toDto(project);
+    }
+
     private Project save(String name, SourceType sourceType, String sourceUrl, Path dir, AuthUser owner) {
         Project project = new Project();
         project.setName(name);

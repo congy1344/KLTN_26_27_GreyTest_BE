@@ -58,6 +58,10 @@ public final class GeneratedUnitTestSemanticValidator {
             MethodContextDto productionMethod = methodsByCaseId.get(test.caseId());
             validateFrameworkCompatibility(test, framework, problems);
             validateRemovedMockitoApis(test, problems);
+            validateMockitoRunnerOrExtension(test, framework, problems);
+            validateJUnit5AssertionOrder(test, framework, problems);
+            validateMockitoVerifyNoInteractions(test, problems);
+            validateImportsFromContext(context, test, problems);
             validateMockedEnums(context, test, problems);
             validateInjectMocksStubbing(test, problems);
             validatePrivateMethodCalls(context, test, problems);
@@ -170,6 +174,44 @@ public final class GeneratedUnitTestSemanticValidator {
         }
     }
 
+    private static void validateMockitoRunnerOrExtension(
+            GeneratedUnitTestDto generatedTest,
+            TestFramework framework,
+            List<String> problems) {
+        if (generatedTest == null || generatedTest.sourceCode() == null) return;
+        String source = generatedTest.sourceCode();
+        boolean hasMockAnnotation = source.contains("@Mock") || source.contains("@InjectMocks")
+                || source.contains("@Spy");
+        if (!hasMockAnnotation) return;
+
+        Optional<CompilationUnit> parsed = parseCompilationUnit(source);
+        if (parsed.isEmpty()) return;
+        CompilationUnit cu = parsed.get();
+
+        boolean hasMockFields = cu.findAll(FieldDeclaration.class).stream()
+                .anyMatch(f -> f.getAnnotationByName("Mock").isPresent()
+                        || f.getAnnotationByName("InjectMocks").isPresent()
+                        || f.getAnnotationByName("Spy").isPresent());
+        if (!hasMockFields) return;
+
+        boolean hasOpenMocks = source.contains("openMocks(") || source.contains("initMocks(");
+        if (hasOpenMocks) return;
+
+        boolean hasExtendWithMockito = source.matches("(?s).*@ExtendWith\\s*\\(\\s*(?:[A-Za-z_$][\\w$]*\\.)*MockitoExtension\\.class\\s*\\).*");
+        boolean hasRunWithMockito = source.matches("(?s).*@RunWith\\s*\\(\\s*(?:[A-Za-z_$][\\w$]*\\.)*MockitoJUnitRunner(?:\\.[A-Za-z_$][\\w$]*)*\\.class\\s*\\).*");
+
+        if (framework == TestFramework.JUNIT4) {
+            if (!hasRunWithMockito) {
+                problems.add("When using @Mock or @InjectMocks in JUnit 4, the test class MUST be annotated with @RunWith(MockitoJUnitRunner.class) and import org.junit.runner.RunWith and org.mockito.junit.MockitoJUnitRunner.");
+            }
+        } else {
+            // Mặc định hoặc JUNIT5
+            if (!hasExtendWithMockito && !hasRunWithMockito) {
+                problems.add("When using @Mock or @InjectMocks in JUnit 5, the test class MUST be annotated with @ExtendWith(MockitoExtension.class) and import org.junit.jupiter.api.extension.ExtendWith and org.mockito.junit.jupiter.MockitoExtension.");
+            }
+        }
+    }
+
     private static void validateMockedEnums(
             UnitTestContextDto context,
             GeneratedUnitTestDto generatedTest,
@@ -226,6 +268,116 @@ public final class GeneratedUnitTestSemanticValidator {
                 .anyMatch(GeneratedUnitTestSemanticValidator::hasTrailingJunit5Message);
         if (usesJunit5MessageOrder) {
             problems.add("JUnit 4 assertion messages must be the first argument, not the last argument.");
+        }
+    }
+
+    private static void validateJUnit5AssertionOrder(
+            GeneratedUnitTestDto generatedTest,
+            TestFramework framework,
+            List<String> problems) {
+        if (generatedTest == null || generatedTest.sourceCode() == null) return;
+        String source = generatedTest.sourceCode();
+        boolean isJunit5 = framework == TestFramework.JUNIT5
+                || source.contains("org.junit.jupiter")
+                || (!source.contains("org.junit.Assert") && !source.contains("org.junit.Test"));
+        if (!isJunit5) return;
+
+        Optional<CompilationUnit> parsed = parseCompilationUnit(source);
+        if (parsed.isEmpty()) return;
+
+        boolean hasLeadingMessage = parsed.get().findAll(MethodCallExpr.class).stream()
+                .filter(call -> call.getNameAsString().startsWith("assert"))
+                .anyMatch(GeneratedUnitTestSemanticValidator::hasLeadingJunit4Message);
+        if (hasLeadingMessage) {
+            problems.add("In JUnit 5 (org.junit.jupiter.api.Assertions), the failure message is the LAST parameter (or omit it). "
+                    + "Do not put String message first (e.g. use assertTrue(condition, \"message\"), not assertTrue(\"message\", condition)).");
+        }
+    }
+
+    private static boolean hasLeadingJunit4Message(MethodCallExpr call) {
+        if (!java.util.Set.of(
+                "assertEquals", "assertNotEquals", "assertSame", "assertNotSame", "assertArrayEquals",
+                "assertTrue", "assertFalse", "assertNull", "assertNotNull").contains(call.getNameAsString())) {
+            return false;
+        }
+        int size = call.getArguments().size();
+        if (size == 0 || !call.getArgument(0).isStringLiteralExpr()) return false;
+        if (size >= 3) return true;
+        return size == 2 && switch (call.getNameAsString()) {
+            case "assertTrue", "assertFalse" -> true;
+            case "assertNull", "assertNotNull" -> !call.getArgument(1).isStringLiteralExpr();
+            default -> false;
+        };
+    }
+
+    private static void validateMockitoVerifyNoInteractions(
+            GeneratedUnitTestDto generatedTest,
+            List<String> problems) {
+        if (generatedTest == null || generatedTest.sourceCode() == null) return;
+        Optional<CompilationUnit> parsed = parseCompilationUnit(generatedTest.sourceCode());
+        if (parsed.isEmpty()) return;
+
+        for (MethodCallExpr call : parsed.get().findAll(MethodCallExpr.class)) {
+            String name = call.getNameAsString();
+            if ("verifyNoInteractions".equals(name) || "verifyZeroInteractions".equals(name)) {
+                for (Expression arg : call.getArguments()) {
+                    if (arg.isMethodCallExpr()) {
+                        String methodName = arg.asMethodCallExpr().getNameAsString();
+                        if (methodName.startsWith("any") || "eq".equals(methodName) || "isNull".equals(methodName) || "notNull".equals(methodName) || "isNotNull".equals(methodName)) {
+                            problems.add("verifyNoInteractions() only accepts mock instances (e.g. verifyNoInteractions(repository)); "
+                                    + "do not pass argument matchers like " + methodName + "() into verifyNoInteractions(). "
+                                    + "To verify a method was never invoked, use verify(mock, never()).method(" + methodName + "()).");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private static void validateImportsFromContext(
+            UnitTestContextDto context,
+            GeneratedUnitTestDto generatedTest,
+            List<String> problems) {
+        if (context == null || context.classes() == null || generatedTest == null || generatedTest.sourceCode() == null) return;
+        Optional<CompilationUnit> parsed = parseCompilationUnit(generatedTest.sourceCode());
+        if (parsed.isEmpty()) return;
+
+        Map<String, String> knownQualifiedNames = new HashMap<>();
+        for (ClassContextDto clazz : context.classes()) {
+            if (clazz.className() != null && clazz.qualifiedName() != null) {
+                knownQualifiedNames.put(clazz.className(), clazz.qualifiedName());
+            }
+            if (clazz.sourceCode() != null) {
+                for (String line : clazz.sourceCode().split("\n")) {
+                    String trimmed = line.trim();
+                    if (trimmed.startsWith("import ") && trimmed.endsWith(";")) {
+                        String imported = trimmed.substring(7, trimmed.length() - 1).trim();
+                        if (!imported.startsWith("static ") && !imported.endsWith(".*")) {
+                            int dot = imported.lastIndexOf('.');
+                            if (dot > 0) {
+                                String simple = imported.substring(dot + 1);
+                                knownQualifiedNames.put(simple, imported);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        for (var importDecl : parsed.get().getImports()) {
+            if (importDecl.isStatic() || importDecl.isAsterisk()) continue;
+            String importedFqn = importDecl.getNameAsString();
+            int dot = importedFqn.lastIndexOf('.');
+            if (dot > 0) {
+                String simpleName = importedFqn.substring(dot + 1);
+                String expectedFqn = knownQualifiedNames.get(simpleName);
+                if (expectedFqn != null && !expectedFqn.equals(importedFqn)) {
+                    problems.add("Invalid import '" + importDecl.toString().trim() + "'. "
+                            + "Class " + simpleName + " is declared as " + expectedFqn + " in this project. "
+                            + "Use the exact import: import " + expectedFqn + ";");
+                }
+            }
         }
     }
 

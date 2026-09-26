@@ -159,8 +159,8 @@ public class JavaParserHelper {
 
             Visibility visibility = mapVisibility(md);
 
-            // Lấy source code body — nếu method có body, trả full method text
-            String sourceCode = md.toString();
+            // Lấy source code body — loại bỏ comments/ghi chú để AI không bị nhiễu
+            String sourceCode = cleanMethodSource(md);
 
             int lineStart = md.getRange().map(r -> r.begin.line).orElse(0);
             int lineEnd = md.getRange().map(r -> r.end.line).orElse(0);
@@ -178,6 +178,22 @@ public class JavaParserHelper {
             ));
         }
         return methods;
+    }
+
+    /**
+     * Lấy source code method đã loại bỏ toàn bộ comments (Javadoc, line comment, block comment)
+     * giúp AI tập trung hoàn toàn vào các câu lệnh thực thi, tránh bị hallucinate từ ghi chú.
+     */
+    public static String cleanMethodSource(MethodDeclaration md) {
+        if (md == null) return "";
+        try {
+            MethodDeclaration clone = md.clone();
+            clone.getAllContainedComments().forEach(com.github.javaparser.ast.Node::remove);
+            clone.getComment().ifPresent(com.github.javaparser.ast.Node::remove);
+            return clone.toString();
+        } catch (Exception ignored) {
+            return md.toString();
+        }
     }
 
     /**

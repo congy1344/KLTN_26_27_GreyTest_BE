@@ -82,6 +82,13 @@ public class ProjectController {
     }
 
 
+    @PostMapping("/{id}/complete")
+    public ProjectDto complete(
+            @PathVariable Long id,
+            @RequestHeader("Authorization") String authorization) {
+        return projectService.complete(id, authService.currentUser(authorization));
+    }
+
     @DeleteMapping("/{id}")
     public ResponseEntity<Void> delete(
             @PathVariable Long id,

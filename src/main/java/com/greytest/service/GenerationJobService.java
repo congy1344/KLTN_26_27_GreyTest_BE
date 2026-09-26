@@ -81,6 +81,11 @@ public class GenerationJobService {
                 "Tác vụ AI đang chạy nền. Bạn có thể tiếp tục sử dụng trang và theo dõi bằng nút Log.");
     }
 
+    public void pause(Long projectId, GenerationProgressStage stage) {
+        progressService.pause(projectId, stage, "Đã tạm dừng tác vụ. Các batch đã sinh được lưu an toàn. Bạn có thể nhấn 'Tiếp tục sinh' để tiếp tục.");
+        activeProjects.remove(projectId, stage);
+    }
+
     private void recordGenerationRequest(Long projectId, Long actorUserId, GenerationProgressStage stage) {
         if (actorUserId == null || activityService == null) return;
         activityService.record(actorUserId, actionFor(stage), projectId, java.util.Map.of("stage", stage.name()));

@@ -41,8 +41,8 @@ greytest:
   llm-cache:
     max-entries: ${GREYTEST_LLM_CACHE_MAX_ENTRIES:500}
   llm-batch:
-    # Claude chạy tối đa 2 batch đồng thời để giảm thời gian nhưng tránh dồn rate limit.
-    concurrency: ${GREYTEST_LLM_BATCH_CONCURRENCY:2}
+    # Chạy 3 batch đồng thời kết hợp batch size lớn hơn để tăng tốc độ sinh
+    concurrency: ${GREYTEST_LLM_BATCH_CONCURRENCY:3}
   ai-context-log-path: ${GREYTEST_AI_CONTEXT_LOG_PATH:../log}
   ai-context-log-enabled: ${GREYTEST_AI_CONTEXT_LOG_ENABLED:false}
   ai-context-log-console-enabled: ${GREYTEST_AI_CONTEXT_LOG_CONSOLE_ENABLED:false}

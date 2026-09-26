@@ -10,6 +10,7 @@ Rules:
 - Do not invent method_id. Do not use class id.
 - Do not invent behavior, validation, exceptions, or outcomes.
 - Derive rules from direct evidence in the method source, signature, annotations, and the relation entries that point to the selected Service.
+- CRITICAL: Never derive, infer, summarize, or extract Business Rules from code comments, Javadoc, TODO notes, or commented-out code. Business Rules MUST be derived ONLY and STRICTLY from actual executable Java code statements, expressions, control flow (if/else, switch, loops), method invocations, thrown exceptions, validations, and state changes. If a comment, note, or annotation description exists in the context, ignore it completely.
 - Do not infer behavior from unrelated controllers, repositories, tests, or other services. A relation entry may be used only to explain a call that is already visible in the selected method source.
 - Each rule must describe business intent, not repeat code.
 - Line trace contract: use the method's `branches[].lineStart` and `branches[].lineEnd` as the source evidence. For a decision rule, set `branch_id` to the decision id; GreyTest resolves the exact executable statement lines from static analysis. Do not write, guess, or copy `Lx-Ly` ranges into `description`.

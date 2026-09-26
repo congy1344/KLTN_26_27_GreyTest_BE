@@ -36,6 +36,10 @@ import com.greytest.entity.enums.SourceUpdateTargetType;
 import com.greytest.dto.diff.MethodDiffType;
 import com.greytest.entity.MethodParam;
 import com.greytest.entity.enums.ClassType;
+import com.greytest.entity.enums.Priority;
+import com.greytest.entity.enums.ReviewStatus;
+import com.greytest.entity.enums.RuleSource;
+import com.greytest.entity.enums.TestType;
 import com.greytest.entity.enums.Visibility;
 import com.greytest.exception.ProjectNotFoundException;
 import com.greytest.mapper.SourceUpdateMapper;
@@ -177,6 +181,7 @@ public class IncrementalGenerationService {
         BusinessRuleResponseDto response = aiAgentService.generateBusinessRules(projectId, targetMethodIds);
 
         if (response != null && response.rules() != null) {
+            int nextBrNumber = nextBusinessRuleNumber(projectId);
             for (var br : response.rules()) {
                 SourceUpdateItem item = new SourceUpdateItem();
                 item.setSourceUpdateId(updateId);
@@ -186,9 +191,25 @@ public class IncrementalGenerationService {
                                 .filter(r -> Objects.equals(r.getMethodId(), br.methodId()))
                                 .findFirst().orElse(null)
                         : null;
-                item.setTargetId(existing == null ? null : existing.getId());
-                item.setAction(existing == null ? SourceUpdateAction.CREATE : SourceUpdateAction.UPDATE);
-                item.setReason("Business Rule mới sinh tăng dần từ AI");
+                if (existing != null) {
+                    item.setTargetId(existing.getId());
+                    item.setAction(SourceUpdateAction.UPDATE);
+                    item.setReason("Cập nhật Business Rule theo method bị thay đổi");
+                } else if (businessRuleRepository != null) {
+                    // Tạo BusinessRule tạm thời với status APPROVED để các stage TP/TC/UT tiếp theo có context đọc được
+                    BusinessRule newRule = new BusinessRule();
+                    newRule.setProjectId(projectId);
+                    newRule.setMethodId(br.methodId());
+                    newRule.setRuleCode(String.format("BR-%03d", nextBrNumber++));
+                    newRule.setDescription(br.description());
+                    newRule.setSource(RuleSource.AI_GENERATED);
+                    newRule.setStatus(ReviewStatus.APPROVED);
+                    newRule.setIsModified(false);
+                    newRule = businessRuleRepository.save(newRule);
+                    item.setTargetId(newRule.getId());
+                    item.setAction(SourceUpdateAction.CREATE);
+                    item.setReason("Thêm mới Business Rule cho method mới");
+                }
                 item.setAfterData(toJson(br));
                 item.setReviewStatus(SourceUpdateReviewStatus.ACCEPTED);
                 sourceUpdateItemRepository.save(item);
@@ -197,7 +218,21 @@ public class IncrementalGenerationService {
     }
 
     private void generateIncrementalTestPlans(Long projectId, Long updateId, ImpactSummaryDto impact) {
+        Set<Long> removedRuleIds = sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId).stream()
+                .filter(i -> i.getTargetType() == SourceUpdateTargetType.BUSINESS_RULE && i.getAction() == SourceUpdateAction.REMOVE)
+                .map(SourceUpdateItem::getTargetId)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toSet());
+
         Set<Long> ruleIds = new HashSet<>(impact.affectedBusinessRuleIds());
+        ruleIds.removeAll(removedRuleIds);
+
+        // Gom thêm các Business Rule mới được tạo (CREATE) từ stage trước
+        sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId).stream()
+                .filter(i -> i.getTargetType() == SourceUpdateTargetType.BUSINESS_RULE && i.getAction() == SourceUpdateAction.CREATE)
+                .map(SourceUpdateItem::getTargetId)
+                .filter(Objects::nonNull)
+                .forEach(ruleIds::add);
 
         if (ruleIds.isEmpty()) {
             log.info("Không có Business Rule nào cần sinh Test Plan tăng dần cho project {}", projectId);
@@ -208,6 +243,7 @@ public class IncrementalGenerationService {
         TestPlanResponseDto response = aiAgentService.generateTestPlan(projectId, ruleIds);
 
         if (response != null && response.plans() != null) {
+            int nextTpNumber = nextTestPlanNumber(projectId);
             for (var tp : response.plans()) {
                 SourceUpdateItem item = new SourceUpdateItem();
                 item.setSourceUpdateId(updateId);
@@ -217,9 +253,25 @@ public class IncrementalGenerationService {
                                 .filter(p -> Objects.equals(p.getBusinessRuleId(), tp.ruleId()))
                                 .findFirst().orElse(null)
                         : null;
-                item.setTargetId(existing == null ? null : existing.getId());
-                item.setAction(existing == null ? SourceUpdateAction.CREATE : SourceUpdateAction.UPDATE);
-                item.setReason("Test Plan mới sinh tăng dần từ AI");
+                if (existing != null) {
+                    item.setTargetId(existing.getId());
+                    item.setAction(SourceUpdateAction.UPDATE);
+                    item.setReason("Cập nhật Test Plan theo Business Rule bị ảnh hưởng");
+                } else if (testPlanRepository != null) {
+                    TestPlan newPlan = new TestPlan();
+                    newPlan.setProjectId(projectId);
+                    newPlan.setBusinessRuleId(tp.ruleId());
+                    newPlan.setPlanCode(String.format("TP-%03d", nextTpNumber++));
+                    newPlan.setTitle(tp.title());
+                    newPlan.setDescription(tp.description());
+                    newPlan.setTestType(TestType.valueOf(tp.testType()));
+                    newPlan.setStatus(ReviewStatus.APPROVED);
+                    newPlan.setIsModified(false);
+                    newPlan = testPlanRepository.save(newPlan);
+                    item.setTargetId(newPlan.getId());
+                    item.setAction(SourceUpdateAction.CREATE);
+                    item.setReason("Thêm mới Test Plan cho Business Rule mới");
+                }
                 item.setAfterData(toJson(tp));
                 item.setReviewStatus(SourceUpdateReviewStatus.ACCEPTED);
                 sourceUpdateItemRepository.save(item);
@@ -228,7 +280,21 @@ public class IncrementalGenerationService {
     }
 
     private void generateIncrementalTestCases(Long projectId, Long updateId, ImpactSummaryDto impact) {
+        Set<Long> removedPlanIds = sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId).stream()
+                .filter(i -> i.getTargetType() == SourceUpdateTargetType.TEST_PLAN && i.getAction() == SourceUpdateAction.REMOVE)
+                .map(SourceUpdateItem::getTargetId)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toSet());
+
         Set<Long> planIds = new HashSet<>(impact.affectedTestPlanIds());
+        planIds.removeAll(removedPlanIds);
+
+        // Gom thêm các Test Plan mới được tạo (CREATE) từ stage trước
+        sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId).stream()
+                .filter(i -> i.getTargetType() == SourceUpdateTargetType.TEST_PLAN && i.getAction() == SourceUpdateAction.CREATE)
+                .map(SourceUpdateItem::getTargetId)
+                .filter(Objects::nonNull)
+                .forEach(planIds::add);
 
         if (planIds.isEmpty()) {
             log.info("Không có Test Plan nào cần sinh Test Case tăng dần cho project {}", projectId);
@@ -242,7 +308,7 @@ public class IncrementalGenerationService {
             // Xóa các đề xuất TEST_CASE cũ của bản cập nhật này nếu đã sinh trước đó
             List<SourceUpdateItem> existingItems = sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId);
             for (SourceUpdateItem item : existingItems) {
-                if (item.getTargetType() == SourceUpdateTargetType.TEST_CASE) {
+                if (item.getTargetType() == SourceUpdateTargetType.TEST_CASE && item.getAction() != SourceUpdateAction.REMOVE) {
                     sourceUpdateItemRepository.delete(item);
                 }
             }
@@ -252,6 +318,7 @@ public class IncrementalGenerationService {
                     .filter(Objects::nonNull)
                     .collect(Collectors.groupingBy(GeneratedTestCaseDto::planId));
 
+            int nextTestCaseNumber = nextTestCaseNumber(projectId);
             for (Long planId : planIds) {
                 List<GeneratedTestCaseDto> newCases = newCasesByPlan.getOrDefault(planId, List.of());
                 List<TestCase> oldCases = testCaseRepository != null
@@ -274,13 +341,31 @@ public class IncrementalGenerationService {
 
                 // Nếu số case mới nhiều hơn cũ: thêm mới
                 for (int i = matchCount; i < newCases.size(); i++) {
+                    GeneratedTestCaseDto dto = newCases.get(i);
+                    Long createdCaseId = null;
+                    if (testCaseRepository != null) {
+                        TestCase newTc = new TestCase();
+                        newTc.setTestPlanId(planId);
+                        newTc.setCaseCode(String.format("TC-%03d", nextTestCaseNumber++));
+                        newTc.setTestType(TestType.valueOf(dto.testType()));
+                        newTc.setDescription(dto.description());
+                        newTc.setPreconditions(dto.preconditions());
+                        newTc.setTestData(dto.testData());
+                        newTc.setExpectedResult(dto.expectedResult());
+                        newTc.setPriority(Priority.valueOf(dto.priority()));
+                        newTc.setTraceSource(dto.traceSource());
+                        newTc.setStatus(ReviewStatus.APPROVED);
+                        newTc.setIsModified(false);
+                        newTc = testCaseRepository.save(newTc);
+                        createdCaseId = newTc.getId();
+                    }
                     SourceUpdateItem item = new SourceUpdateItem();
                     item.setSourceUpdateId(updateId);
                     item.setTargetType(SourceUpdateTargetType.TEST_CASE);
-                    item.setTargetId(null);
+                    item.setTargetId(createdCaseId);
                     item.setAction(SourceUpdateAction.CREATE);
                     item.setReason("Thêm mới Test Case theo Test Plan bị ảnh hưởng");
-                    item.setAfterData(toJson(newCases.get(i)));
+                    item.setAfterData(toJson(dto));
                     item.setReviewStatus(SourceUpdateReviewStatus.ACCEPTED);
                     sourceUpdateItemRepository.save(item);
                 }
@@ -301,7 +386,21 @@ public class IncrementalGenerationService {
     }
 
     private void generateIncrementalUnitTests(Long projectId, Long updateId, ImpactSummaryDto impact) {
+        Set<Long> removedCaseIds = sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId).stream()
+                .filter(i -> i.getTargetType() == SourceUpdateTargetType.TEST_CASE && i.getAction() == SourceUpdateAction.REMOVE)
+                .map(SourceUpdateItem::getTargetId)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toSet());
+
         Set<Long> caseIds = new HashSet<>(impact.affectedTestCaseIds());
+        caseIds.removeAll(removedCaseIds);
+
+        // Gom thêm các Test Case mới được tạo (CREATE) từ stage trước
+        sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId).stream()
+                .filter(i -> i.getTargetType() == SourceUpdateTargetType.TEST_CASE && i.getAction() == SourceUpdateAction.CREATE)
+                .map(SourceUpdateItem::getTargetId)
+                .filter(Objects::nonNull)
+                .forEach(caseIds::add);
 
         if (caseIds.isEmpty()) {
             log.info("Không có Test Case nào cần sinh Unit Test tăng dần cho project {}", projectId);
@@ -317,7 +416,7 @@ public class IncrementalGenerationService {
                 SourceUpdateItem item = new SourceUpdateItem();
                 item.setSourceUpdateId(updateId);
                 item.setTargetType(SourceUpdateTargetType.UNIT_TEST);
-                UnitTest existing = unitTestRepository.findByTestCaseId(ut.caseId());
+                UnitTest existing = unitTestRepository != null ? unitTestRepository.findByTestCaseId(ut.caseId()) : null;
                 item.setTargetId(existing == null ? null : existing.getId());
                 item.setAction(existing == null ? SourceUpdateAction.CREATE : SourceUpdateAction.UPDATE);
                 item.setReason("Unit Test mới sinh tăng dần từ AI");
@@ -326,6 +425,39 @@ public class IncrementalGenerationService {
                 sourceUpdateItemRepository.save(item);
             }
         }
+    }
+
+    private int nextBusinessRuleNumber(Long projectId) {
+        if (businessRuleRepository == null) return 1;
+        return businessRuleRepository.findByProjectId(projectId).stream()
+                .map(BusinessRule::getRuleCode)
+                .filter(Objects::nonNull)
+                .map(code -> code.replaceAll("[^0-9]", ""))
+                .filter(digits -> !digits.isBlank())
+                .mapToInt(Integer::parseInt)
+                .max().orElse(0) + 1;
+    }
+
+    private int nextTestPlanNumber(Long projectId) {
+        if (testPlanRepository == null) return 1;
+        return testPlanRepository.findByProjectId(projectId).stream()
+                .map(TestPlan::getPlanCode)
+                .filter(Objects::nonNull)
+                .map(code -> code.replaceAll("[^0-9]", ""))
+                .filter(digits -> !digits.isBlank())
+                .mapToInt(Integer::parseInt)
+                .max().orElse(0) + 1;
+    }
+
+    private int nextTestCaseNumber(Long projectId) {
+        if (testCaseRepository == null) return 1;
+        return testCaseRepository.findByProjectId(projectId).stream()
+                .map(TestCase::getCaseCode)
+                .filter(Objects::nonNull)
+                .map(code -> code.replaceAll("[^0-9]", ""))
+                .filter(digits -> !digits.isBlank())
+                .mapToInt(Integer::parseInt)
+                .max().orElse(0) + 1;
     }
 
     private Set<Long> resolveTargetMethodIds(Long projectId, ImpactSummaryDto impact) {

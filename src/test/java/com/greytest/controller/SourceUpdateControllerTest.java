@@ -131,7 +131,7 @@ class SourceUpdateControllerTest {
                                 200L, 10L, 1L, 2L,
                                 SourceUpdateStatus.ANALYZED, 1, "{}", List.of(),
                                 LocalDateTime.now(), LocalDateTime.now());
-                when(sourceUpdateService.analyzeUpdate(10L, 200L, user)).thenReturn(dto);
+                when(sourceUpdateService.analyzeUpdate(eq(10L), eq(200L), any(), eq(user))).thenReturn(dto);
 
                 mockMvc.perform(post("/api/projects/10/source-updates/200/analyze")
                                 .header("Authorization", "token"))

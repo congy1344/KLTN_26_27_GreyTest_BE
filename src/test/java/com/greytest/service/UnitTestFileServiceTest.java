@@ -135,6 +135,17 @@ class UnitTestFileServiceTest {
     }
 
     @Test
+    void mergeGopEnumConstantsKhiHaiTestDungCungNestedEnumKhacEntries() {
+        String source1 = "package com.example; class UserServiceTest { enum TestEventType { APPOINTMENT_CREATED } void first(){} }";
+        String source2 = "package com.example; class UserServiceTest { enum TestEventType { PAYMENT_UPDATED } void second(){} }";
+
+        var merged = service.mergeByClass(List.of(
+                test(1L, "first", source1), test(2L, "second", source2))).get(0).sourceCode();
+
+        assertThat(merged).contains("enum TestEventType", "APPOINTMENT_CREATED", "PAYMENT_UPDATED");
+    }
+
+    @Test
     void mergeGiuImportDauTienKhiHaiTestDungCungTenImportKhacPackage() {
         String source1 = "package com.example; import a.Status; class UserServiceTest { Status firstStatus; void first(){} }";
         String source2 = "package com.example; import b.Status; class UserServiceTest { Status secondStatus; void second(){ Status.valueOf(\"OK\"); } }";
@@ -279,29 +290,38 @@ class UnitTestFileServiceTest {
 
         assertThat(entries).containsKeys(
                 "src/test/java/com/example/UserServiceTest.java",
+                "src/test/resources/mockito-extensions/org.mockito.plugins.MockMaker",
                 "run-greytest-coverage.cmd",
                 "run-greytest-coverage.sh",
                 "README-GREYTEST.txt");
+        assertThat(entries.get("src/test/resources/mockito-extensions/org.mockito.plugins.MockMaker"))
+                .isEqualTo("mock-maker-subclass\n");
         assertThat(entries.get("run-greytest-coverage.cmd"))
                 .contains("jacoco-maven-plugin:0.8.15:prepare-agent")
                 .contains("jacoco-maven-plugin:0.8.15:report")
                 .contains("cd /d \"%~dp0\"", "call %MAVEN_COMMAND%", "%*")
                 .contains("-Djacoco.propertyName=greytestJacocoArgLine")
                 .contains("-DargLine=@{greytestJacocoArgLine} %GREYTEST_JVM_ARGS%")
+                .contains("set \"GREYTEST_JVM_ARGS=-Djdk.attach.allowAttachSelf=true -XX:+EnableDynamicAgentLoading\"")
+                .contains("Phat hien module con cua du an Maven multi-module")
                 .contains("clean test-compile")
                 .contains("-DfailIfNoTests=true")
                 .contains("src\\test\\java\\*.java", "target\\test-classes\\*.class")
                 .contains("-Dtest=com.example.UserServiceTest")
                 .contains("target\\site\\jacoco\\jacoco.xml", "build.gradle", "gradlew.bat", "jacocoTestReport");
         assertThat(entries.get("run-greytest-coverage.cmd"))
-                .contains("--init-script", "--tests \"com.example.UserServiceTest\"");
+                .contains("--init-script", "--tests \"com.example.UserServiceTest\"")
+                .contains("clean test --tests \"com.example.UserServiceTest\" jacocoTestReport")
+                .contains("GREYTEST_JUNCTION_RUN", "New-Item -ItemType Junction");
         assertThat(entries.get("run-greytest-coverage.sh"))
                 .contains("jacoco-maven-plugin:0.8.15:prepare-agent")
                 .contains("-Djacoco.propertyName=greytestJacocoArgLine")
                 .contains("-DargLine=@{greytestJacocoArgLine} ${GREYTEST_JVM_ARGS:-}")
+                .contains("export GREYTEST_JVM_ARGS=\"${GREYTEST_JVM_ARGS:--Djdk.attach.allowAttachSelf=true -XX:+EnableDynamicAgentLoading}\"")
                 .contains("src/test/java", "target/test-classes", "*.java", "*.class")
                 .contains("-Dtest=com.example.UserServiceTest")
                 .contains("-DfailIfNoTests=true", "build.gradle", "gradlew", "jacocoTestReport")
+                .contains("clean test --tests \"com.example.UserServiceTest\" jacocoTestReport")
                 .contains("target/site/jacoco/jacoco.xml");
         assertThat(entries.get("run-greytest-coverage.sh"))
                 .contains("--init-script", "--tests \"com.example.UserServiceTest\"");
@@ -309,7 +329,7 @@ class UnitTestFileServiceTest {
                 .contains("jacoco", "jacocoTestReport", "xml.required = true",
                         "reports/jacoco/test/jacocoTestReport.xml");
         assertThat(entries.get("README-GREYTEST.txt"))
-                .contains("run-greytest-coverage.cmd", "src/test/java", "GREYTEST_JVM_ARGS", "khong gan trung JaCoCo agent");
+                .contains("run-greytest-coverage.cmd", "src/test/java", "GREYTEST_JVM_ARGS", "mock-maker-subclass");
         assertThat(entries.get("run-greytest-coverage.cmd"))
                 .doesNotContain("(where pom.xml is located)");
     }
@@ -370,6 +390,72 @@ class UnitTestFileServiceTest {
         Map<String, String> entries = zipEntries(service.createCoverageArchive(List.of(file)));
 
         assertThat(entries.get("src/test/java/LegacyTest.java")).isEqualTo(source);
+    }
+
+    @Test
+    void multiModuleSafeTestPathAndArchive() throws IOException {
+        String source = "package com.example; public class SubServiceTest {}";
+        var file = new com.greytest.dto.UnitTestFileDto(
+                "sub-module/src/test/java/com/example/SubServiceTest.java",
+                "SubServiceTest", "com.example", 1, List.of("TC-001"), source);
+
+        Map<String, String> entries = zipEntries(service.createCoverageArchive(List.of(file)));
+        assertThat(entries).containsKey("src/test/java/com/example/SubServiceTest.java");
+    }
+
+    @Test
+    void ensureMockitoRunnerAutoAddsExtensionForJUnit5() {
+        String testWithoutRunner = """
+                package com.example;
+                import org.junit.jupiter.api.Test;
+                import org.mockito.Mock;
+                public class ServiceTest {
+                    @Mock
+                    private Repo repo;
+                    @Test
+                    void testMethod() {}
+                }
+                """;
+        String fixed = service.ensureMockitoRunner(testWithoutRunner);
+        assertThat(fixed).contains("@ExtendWith(MockitoExtension.class)");
+        assertThat(fixed).contains("import org.junit.jupiter.api.extension.ExtendWith;");
+        assertThat(fixed).contains("import org.mockito.junit.jupiter.MockitoExtension;");
+    }
+
+    @Test
+    void mergePreservesClassAnnotationsFromSubsequentTests() {
+        String source1 = """
+                package com.example;
+                import org.junit.jupiter.api.Test;
+                public class UserServiceTest {
+                    @Test
+                    void test1() {}
+                }
+                """;
+        String source2 = """
+                package com.example;
+                import org.junit.jupiter.api.Test;
+                import org.junit.jupiter.api.extension.ExtendWith;
+                import org.mockito.Mock;
+                import org.mockito.junit.jupiter.MockitoExtension;
+                @ExtendWith(MockitoExtension.class)
+                public class UserServiceTest {
+                    @Mock
+                    private Repo repo;
+                    @Test
+                    void test2() {}
+                }
+                """;
+
+        var merged = service.mergeByClass(List.of(
+                test(1L, "test1", source1),
+                test(2L, "test2", source2)));
+
+        assertThat(merged).hasSize(1);
+        String code = merged.get(0).sourceCode();
+        assertThat(code).contains("@ExtendWith(MockitoExtension.class)");
+        assertThat(code).contains("import org.junit.jupiter.api.extension.ExtendWith;");
+        assertThat(code).contains("import org.mockito.junit.jupiter.MockitoExtension;");
     }
 
     private Map<String, String> zipEntries(byte[] archive) throws IOException {

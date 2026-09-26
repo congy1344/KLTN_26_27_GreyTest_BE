@@ -176,6 +176,30 @@ class GenerationJobServiceTest {
                 .doesNotContain("chua phan hoi on dinh");
     }
 
+    @Test
+    void pausesRunningJobAndReleasesProjectLock() {
+        ManualExecutor executor = new ManualExecutor();
+        GenerationProgressService progress = new GenerationProgressService();
+        GenerationJobService jobs = new GenerationJobService(executor, progress);
+
+        jobs.submit(1L, GenerationProgressStage.TEST_PLAN, () -> {
+            progress.start(1L, GenerationProgressStage.TEST_PLAN, 2, "Đang sinh batch 1.");
+        });
+
+        // Đang queued, project bị lock
+        assertThatThrownBy(() -> jobs.executeMutation(1L, () -> "mutation"))
+                .isInstanceOf(GenerationInProgressException.class);
+
+        // Pause job
+        jobs.pause(1L, GenerationProgressStage.TEST_PLAN);
+
+        assertThat(progress.get(1L, GenerationProgressStage.TEST_PLAN).status())
+                .isEqualTo(GenerationProgressStatus.PAUSED);
+
+        // Lock đã được giải phóng, mutation chạy được
+        assertThat(jobs.executeMutation(1L, () -> "mutation")).isEqualTo("mutation");
+    }
+
     private static final class ManualExecutor implements Executor {
         private final Queue<Runnable> tasks = new ArrayDeque<>();
 

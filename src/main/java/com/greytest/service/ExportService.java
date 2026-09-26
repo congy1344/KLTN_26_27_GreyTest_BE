@@ -82,8 +82,8 @@ public class ExportService {
         } else if (project.getStatus() != ProjectStatus.COVERAGE_ANALYZED && project.getStatus() != ProjectStatus.COMPLETED) {
             throw new InvalidProjectStatusException("Chỉ xuất báo cáo sau khi đã phân tích coverage.");
         }
-        // Xuất báo cáo là bước cuối của pipeline
-        if (servicePath == null) {
+        // Xuất báo cáo là bước cuối của pipeline — cập nhật cả khi export theo service
+        if (project.getStatus() != ProjectStatus.COMPLETED) {
             project.setStatus(ProjectStatus.COMPLETED);
             projects.save(project);
         }
@@ -246,20 +246,22 @@ public class ExportService {
 
     private ExportReportDto.BusinessRuleItem ruleItem(BusinessRule rule) {
         return new ExportReportDto.BusinessRuleItem(
-                rule.getRuleCode(), rule.getDescription(), name(rule.getStatus()));
+                rule.getRuleCode(), com.greytest.util.TextSanitizer.cleanAiText(rule.getDescription()), name(rule.getStatus()));
     }
 
     private ExportReportDto.TestPlanItem planItem(TestPlan plan) {
         return new ExportReportDto.TestPlanItem(
-                plan.getPlanCode(), plan.getTitle(), plan.getDescription(),
+                plan.getPlanCode(), com.greytest.util.TextSanitizer.cleanAiText(plan.getTitle()),
+                com.greytest.util.TextSanitizer.cleanAiText(plan.getDescription()),
                 name(plan.getTestType()), name(plan.getStatus()));
     }
 
     private ExportReportDto.TestCaseItem caseItem(TestCase testCase, Map<Long, String> planCodes) {
         return new ExportReportDto.TestCaseItem(
                 testCase.getCaseCode(), planCodes.get(testCase.getTestPlanId()), name(testCase.getTestType()),
-                testCase.getDescription(),
-                testCase.getPreconditions(), testCase.getTestData(), testCase.getExpectedResult(),
+                com.greytest.util.TextSanitizer.cleanAiText(testCase.getDescription()),
+                com.greytest.util.TextSanitizer.cleanAiText(testCase.getPreconditions()), testCase.getTestData(),
+                com.greytest.util.TextSanitizer.cleanAiText(testCase.getExpectedResult()),
                 name(testCase.getPriority()), testCase.getTraceSource(), name(testCase.getStatus()));
     }
 
@@ -275,6 +277,7 @@ public class ExportService {
 
     private String cell(Object value) {
         if (value == null || value.toString().isBlank()) return "—";
-        return value.toString().replace("|", "\\|").replace("\r", " ").replace("\n", " ");
+        String cleaned = com.greytest.util.TextSanitizer.cleanAiText(value.toString());
+        return cleaned.replace("|", "\\|").replace("\r", " ").replace("\n", " ");
     }
 }

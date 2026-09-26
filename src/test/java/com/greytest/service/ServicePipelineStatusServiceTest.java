@@ -15,6 +15,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import com.greytest.entity.BusinessRule;
 import com.greytest.entity.CoverageReport;
+import com.greytest.entity.Project;
 import com.greytest.entity.TestCase;
 import com.greytest.entity.TestPlan;
 import com.greytest.entity.UnitTest;
@@ -22,6 +23,7 @@ import com.greytest.entity.enums.ProjectStatus;
 import com.greytest.entity.enums.ReviewStatus;
 import com.greytest.repository.BusinessRuleRepository;
 import com.greytest.repository.CoverageReportRepository;
+import com.greytest.repository.ProjectRepository;
 import com.greytest.repository.TestCaseRepository;
 import com.greytest.repository.TestPlanRepository;
 import com.greytest.repository.UnitTestRepository;
@@ -34,6 +36,7 @@ class ServicePipelineStatusServiceTest {
     @Mock private TestCaseRepository cases;
     @Mock private UnitTestRepository unitTests;
     @Mock private CoverageReportRepository reports;
+    @Mock private ProjectRepository projects;
     @Mock private ServiceScopeResolver scopes;
     @InjectMocks private ServicePipelineStatusService statuses;
 
@@ -56,6 +59,9 @@ class ServicePipelineStatusServiceTest {
 
         var accountScope = new ServiceScopeResolver.ServiceScope("account-service", Set.of(101L), Set.of(11L));
         var authScope = new ServiceScopeResolver.ServiceScope("auth-service", Set.of(202L), Set.of(22L));
+        // Project global status chưa COMPLETED → scoped status trả COVERAGE_ANALYZED
+        Project project = new Project(); project.setStatus(ProjectStatus.COVERAGE_ANALYZED);
+        when(projects.findById(7L)).thenReturn(Optional.of(project));
 
         assertThat(statuses.status(7L, accountScope)).isEqualTo(ProjectStatus.BR_PENDING_REVIEW);
         assertThat(statuses.status(7L, authScope)).isEqualTo(ProjectStatus.COVERAGE_ANALYZED);
@@ -80,8 +86,36 @@ class ServicePipelineStatusServiceTest {
         when(scopes.listScopes(7L)).thenReturn(List.of(scope));
         when(reports.findTopByProjectIdAndServicePathOrderByIdDesc(7L, "."))
                 .thenReturn(Optional.of(new CoverageReport()));
+        // Project global status chưa COMPLETED
+        Project project = new Project(); project.setStatus(ProjectStatus.COVERAGE_ANALYZED);
+        when(projects.findById(7L)).thenReturn(Optional.of(project));
 
         assertThat(statuses.status(7L, scope)).isEqualTo(ProjectStatus.COVERAGE_ANALYZED);
+    }
+
+    @Test
+    void returnsCompletedWhenProjectIsCompleted() {
+        BusinessRule rule = rule(2L, 22L, ReviewStatus.APPROVED);
+        TestPlan plan = plan(3L, rule.getId());
+        TestCase testCase = testCase(4L);
+        UnitTest unitTest = new UnitTest();
+        unitTest.setId(5L);
+        unitTest.setTestCaseId(testCase.getId());
+        var scope = new ServiceScopeResolver.ServiceScope(
+                "auth-service", Set.of(202L), Set.of(22L));
+
+        when(rules.findByProjectId(7L)).thenReturn(List.of(rule));
+        when(plans.findByProjectId(7L)).thenReturn(List.of(plan));
+        when(cases.findByTestPlanIdIn(List.of(plan.getId()))).thenReturn(List.of(testCase));
+        when(unitTests.findByTestCaseIdIn(List.of(testCase.getId()))).thenReturn(List.of(unitTest));
+        when(reports.findTopByProjectIdAndServicePathOrderByIdDesc(7L, "auth-service"))
+                .thenReturn(Optional.of(new CoverageReport()));
+
+        // Project global status = COMPLETED → scoped status cũng trả COMPLETED
+        Project project = new Project(); project.setStatus(ProjectStatus.COMPLETED);
+        when(projects.findById(7L)).thenReturn(Optional.of(project));
+
+        assertThat(statuses.status(7L, scope)).isEqualTo(ProjectStatus.COMPLETED);
     }
 
     private BusinessRule rule(Long id, Long methodId, ReviewStatus status) {

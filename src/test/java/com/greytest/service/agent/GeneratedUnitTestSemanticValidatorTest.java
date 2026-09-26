@@ -467,6 +467,69 @@ class GeneratedUnitTestSemanticValidatorTest {
                         .contains("Method 'privateHelper' is private in Service"));
     }
 
+    @Test
+    void rejectsMockWithoutRunnerOrExtension() {
+        String testWithoutRunner = """
+                package com.example;
+                import org.junit.jupiter.api.Test;
+                import org.mockito.Mock;
+                import org.mockito.InjectMocks;
+                public class ServiceTest {
+                    @Mock
+                    private Repo repo;
+                    @InjectMocks
+                    private Service service;
+                    @Test
+                    void testMethod() {}
+                }
+                """;
+        var ctx = context("test", "public void test() {}");
+        var error = GeneratedUnitTestSemanticValidator.validate(ctx, response(testWithoutRunner), TestFramework.JUNIT5);
+        assertThat(error).hasValueSatisfying(msg -> assertThat(msg)
+                .contains("@ExtendWith(MockitoExtension.class)"));
+
+        var errorJunit4 = GeneratedUnitTestSemanticValidator.validate(ctx, response(testWithoutRunner), TestFramework.JUNIT4);
+        assertThat(errorJunit4).hasValueSatisfying(msg -> assertThat(msg)
+                .contains("@RunWith(MockitoJUnitRunner.class)"));
+    }
+
+    @Test
+    void acceptsMockWithExtendWithOrOpenMocks() {
+        String testWithExtendWith = """
+                package com.example;
+                import org.junit.jupiter.api.Test;
+                import org.junit.jupiter.api.extension.ExtendWith;
+                import org.mockito.Mock;
+                import org.mockito.junit.jupiter.MockitoExtension;
+                @ExtendWith(MockitoExtension.class)
+                public class ServiceTest {
+                    @Mock
+                    private Repo repo;
+                    @Test
+                    void testMethod() {}
+                }
+                """;
+        var ctx = context("test", "public void test() {}");
+        assertThat(GeneratedUnitTestSemanticValidator.validate(ctx, response(testWithExtendWith), TestFramework.JUNIT5)).isEmpty();
+
+        String testWithOpenMocks = """
+                package com.example;
+                import org.junit.jupiter.api.Test;
+                import org.junit.jupiter.api.BeforeEach;
+                import org.mockito.Mock;
+                import org.mockito.MockitoAnnotations;
+                public class ServiceTest {
+                    @Mock
+                    private Repo repo;
+                    @BeforeEach
+                    void setup() { MockitoAnnotations.openMocks(this); }
+                    @Test
+                    void testMethod() {}
+                }
+                """;
+        assertThat(GeneratedUnitTestSemanticValidator.validate(ctx, response(testWithOpenMocks), TestFramework.JUNIT5)).isEmpty();
+    }
+
     private UnitTestContextDto context(String methodName, String methodSource) {
         MethodContextDto method = new MethodContextDto(
                 10L, "demo.Service", methodName, "Object", List.of(), List.of(),

@@ -236,11 +236,15 @@ public class BusinessRuleService {
                 .filter(rule -> scopedMethodIds == null || (rule.getMethodId() != null && scopedMethodIds.contains(rule.getMethodId())))
                 .toList();
         ProjectStatus effectiveStatus = scopedStatus == null ? project.getStatus() : scopedStatus;
+        // backfillAiRules: khi đã có rule AI cũ chưa modified, cho phép cập nhật nội dung
+        // (dùng trong saveGeneratedRulesInTransaction), KHÔNG dùng để mở rộng uncoveredMethodIds
         boolean backfillAiRules = effectiveStatus == ProjectStatus.BR_PENDING_REVIEW
                 && existingRules.stream().anyMatch(rule -> rule.getSource() == RuleSource.AI_GENERATED
                         && !Boolean.TRUE.equals(rule.getIsModified()));
+        // Chỉ sinh cho method chưa cover đủ decision — method đã có đủ BR sẽ được bỏ qua,
+        // đảm bảo khi resume sẽ tiếp tục từ batch dang dở thay vì chạy lại từ đầu
         Set<Long> uncoveredMethodIds = serviceMethods.stream()
-                .filter(method -> backfillAiRules || needsGeneration(method, existingRules))
+                .filter(method -> needsGeneration(method, existingRules))
                 .map(JavaMethod::getId)
                 .collect(Collectors.toCollection(HashSet::new));
         if (uncoveredMethodIds.isEmpty()) {
@@ -253,17 +257,66 @@ public class BusinessRuleService {
             return List.of();
         }
 
-        List<Set<Long>> methodBatches = serviceMethodBatches(projectId, uncoveredMethodIds);
-        generationProgressService.start(projectId, GenerationProgressStage.BUSINESS_RULE,
-                methodBatches.size() + 1,
-                "Đã xác định " + uncoveredMethodIds.size() + " Service method trong "
-                        + methodBatches.size() + " batch.");
+        Map<Long, String> methodNameMap = serviceMethods.stream()
+                .collect(Collectors.toMap(JavaMethod::getId, JavaMethod::getMethodName, (a, b) -> a));
+        List<Set<Long>> allBatches = serviceMethodBatches(projectId, validMethodIds);
+        int totalBatches = allBatches.size();
+        List<String> stepLabels = new ArrayList<>();
+        for (int i = 0; i < totalBatches; i++) {
+            String summary = formatMethodBatchSummary(allBatches.get(i), methodNameMap);
+            stepLabels.add("Sinh Business Rule - batch " + (i + 1) + "/" + totalBatches + ": " + summary);
+        }
+        stepLabels.add("Kiểm tra và lưu Business Rule vào CSDL");
+
+        int firstPendingBatchIndex = -1;
+        for (int i = 0; i < totalBatches; i++) {
+            if (allBatches.get(i).stream().anyMatch(uncoveredMethodIds::contains)) {
+                firstPendingBatchIndex = i;
+                break;
+            }
+        }
+        if (firstPendingBatchIndex < 0) {
+            firstPendingBatchIndex = totalBatches;
+        }
+
+        if (firstPendingBatchIndex > 0) {
+            generationProgressService.resume(
+                    projectId,
+                    GenerationProgressStage.BUSINESS_RULE,
+                    stepLabels,
+                    firstPendingBatchIndex,
+                    "Tiếp tục sinh từ batch " + (firstPendingBatchIndex + 1) + "/" + totalBatches
+                            + " (" + uncoveredMethodIds.size() + " Service method còn lại).");
+        } else {
+            generationProgressService.start(
+                    projectId,
+                    GenerationProgressStage.BUSINESS_RULE,
+                    stepLabels,
+                    "Đã xác định " + serviceMethods.size() + " Service method trong "
+                            + totalBatches + " batch.");
+        }
+
         List<BusinessRuleDto> created = new ArrayList<>();
         Set<String> existingRuleKeys = ruleKeys(existingRules);
         int firstRuleNumber = nextRuleNumber(businessRuleRepository.findByProjectId(projectId));
-        int batchNumber = 0;
+        int lastAttemptedBatchNumber = firstPendingBatchIndex + 1;
         try {
-        for (Set<Long> activeMethodIds : methodBatches) {
+        for (int i = 0; i < totalBatches; i++) {
+            Set<Long> activeMethodIds = allBatches.get(i);
+            boolean needsRun = activeMethodIds.stream().anyMatch(uncoveredMethodIds::contains);
+            if (!needsRun) {
+                // Batch này đã được sinh và lưu trước đó, bỏ qua để tiếp tục batch dang dở
+                continue;
+            }
+            if (generationProgressService.isPaused(projectId, GenerationProgressStage.BUSINESS_RULE)) {
+                break;
+            }
+            int batchNumber = i + 1;
+            lastAttemptedBatchNumber = batchNumber;
+            String currentSummary = formatMethodBatchSummary(activeMethodIds, methodNameMap);
+            generationProgressService.log(projectId, GenerationProgressStage.BUSINESS_RULE,
+                    "Đang gọi AI phân tích batch " + batchNumber + "/" + totalBatches
+                            + " (" + currentSummary + ")...");
             BusinessRuleResponseDto response = generateValidatedBusinessRules(projectId, activeMethodIds);
             List<GeneratedBusinessRuleDto> orderedRules = new ArrayList<>();
             for (Long methodId : activeMethodIds) {
@@ -283,28 +336,47 @@ public class BusinessRuleService {
                     firstRuleNumber + created.size(),
                     backfillAiRules);
             created.addAll(batch);
-            batchNumber++;
             generationProgressService.advance(projectId, GenerationProgressStage.BUSINESS_RULE,
-                    "Batch " + batchNumber + "/" + methodBatches.size() + ": đã sinh "
-                            + batch.size() + " Business Rule cho " + activeMethodIds.size() + " method.");
+                    "Batch " + batchNumber + "/" + totalBatches + ": đã sinh "
+                            + batch.size() + " Business Rule cho " + currentSummary + ".");
         }
+
+        if (generationProgressService.isPaused(projectId, GenerationProgressStage.BUSINESS_RULE)) {
+            generationProgressService.log(projectId, GenerationProgressStage.BUSINESS_RULE,
+                    "Tác vụ đã tạm dừng. Các Business Rule đã sinh được lưu an toàn vào CSDL. Nhấn 'Tiếp tục sinh' khi bạn sẵn sàng.");
+            return created;
+        }
+
+        generationProgressService.log(projectId, GenerationProgressStage.BUSINESS_RULE,
+                "Đang kiểm tra tính nhất quán và hoàn tất cập nhật trạng thái...");
         project.setStatus(ProjectStatus.BR_PENDING_REVIEW);
         projectRepository.save(project);
         generationProgressService.completeAfterCommit(projectId, GenerationProgressStage.BUSINESS_RULE,
-                "Hoàn tất: đã lưu " + created.size() + " Business Rule.");
+                "Hoàn tất: đã lưu " + created.size() + " Business Rule cho " + uncoveredMethodIds.size() + " service method.");
         return created;
         } catch (RuntimeException exception) {
-            String failureLocation = batchNumber < methodBatches.size()
-                    ? "Dừng ở batch " + (batchNumber + 1) + "."
+            if (generationProgressService.isPaused(projectId, GenerationProgressStage.BUSINESS_RULE)) {
+                return created;
+            }
+            String failureLocation = lastAttemptedBatchNumber <= totalBatches
+                    ? "Dừng ở batch " + lastAttemptedBatchNumber + "/" + totalBatches + "."
                     : "Dừng ở bước kiểm tra và lưu Business Rule.";
             String persistedSummary = created.isEmpty()
-                    ? "Chưa lưu được Business Rule nào."
-                    : "Đã lưu " + created.size() + " Business Rule từ các batch trước.";
+                    ? "Chưa lưu thêm Business Rule nào trong phiên này."
+                    : "Đã lưu " + created.size() + " Business Rule trong phiên này.";
             generationProgressService.fail(projectId, GenerationProgressStage.BUSINESS_RULE,
                     failureLocation + " " + persistedSummary
                             + " Sinh Business Rule thất bại; xem thông báo lỗi để biết chi tiết.");
             throw exception;
         }
+    }
+
+    private String formatMethodBatchSummary(Set<Long> methodIds, Map<Long, String> methodNameMap) {
+        if (methodIds == null || methodIds.isEmpty()) return "0 method";
+        List<String> names = methodIds.stream()
+                .map(id -> methodNameMap.getOrDefault(id, "Method#" + id))
+                .toList();
+        return String.join(", ", names);
     }
 
     @Transactional
@@ -502,10 +574,11 @@ public class BusinessRuleService {
             if (!isUsableGeneratedRule(generatedRule, validMethodIds, blockedMethodIds)) continue;
             String key = generatedRuleKey(generatedRule);
             BusinessRule existing = existingByKey.get(key);
+            String cleanDescription = com.greytest.util.TextSanitizer.cleanAiText(generatedRule.description().trim());
             if (replaceAiGenerated && existing != null
                     && existing.getSource() == RuleSource.AI_GENERATED
                     && !Boolean.TRUE.equals(existing.getIsModified())) {
-                existing.setDescription(generatedRule.description().trim());
+                existing.setDescription(cleanDescription);
                 existing.setStatus(ReviewStatus.PENDING_REVIEW);
                 existing.setIsModified(false);
                 existing.setReviewNote(withSourceBranch(
@@ -521,7 +594,7 @@ public class BusinessRuleService {
             rule.setProjectId(projectId);
             rule.setMethodId(generatedRule.methodId());
             rule.setRuleCode(nextRuleCode(ruleNumber++));
-            rule.setDescription(generatedRule.description().trim());
+            rule.setDescription(cleanDescription);
             rule.setSource(source);
             rule.setStatus(ReviewStatus.PENDING_REVIEW);
             rule.setIsModified(false);
@@ -1029,7 +1102,7 @@ public class BusinessRuleService {
                 rule.getProjectId(),
                 rule.getMethodId(),
                 rule.getRuleCode(),
-                rule.getDescription(),
+                com.greytest.util.TextSanitizer.cleanAiText(rule.getDescription()),
                 visibleReviewNote(rule.getReviewNote()),
                 suggestedDescription(rule.getReviewNote()),
                 rule.getSource(),

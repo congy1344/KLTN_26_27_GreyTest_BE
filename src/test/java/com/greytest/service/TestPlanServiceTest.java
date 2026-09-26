@@ -50,6 +50,7 @@ class TestPlanServiceTest {
     @Mock private ProjectRepository projectRepository;
     @Mock private AIAgentService aiAgentService;
     @Mock private GenerationProgressService generationProgressService;
+    @Mock private ServiceScopeResolver scopeResolver;
     @BeforeEach
     void configureSemanticRetryMock() {
         org.mockito.Mockito.lenient().when(aiAgentService.generateTestPlan(
@@ -91,27 +92,31 @@ class TestPlanServiceTest {
         Project project = mockProject(ProjectStatus.BR_APPROVED);
         List<BusinessRule> rules = List.of(
                 approvedRule(1L, 101L), approvedRule(2L, 102L), approvedRule(3L, 103L),
-                approvedRule(4L, 104L), approvedRule(5L, 105L), approvedRule(6L, 106L));
+                approvedRule(4L, 104L), approvedRule(5L, 105L), approvedRule(6L, 106L),
+                approvedRule(7L, 107L), approvedRule(8L, 108L), approvedRule(9L, 109L));
         when(businessRuleRepository.findByProjectIdAndStatus(1L, ReviewStatus.APPROVED)).thenReturn(rules);
-        when(aiAgentService.generateTestPlan(1L, Set.of(1L, 2L, 3L, 4L, 5L))).thenReturn(new TestPlanResponseDto(List.of(
+        when(aiAgentService.generateTestPlan(1L, Set.of(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L))).thenReturn(new TestPlanResponseDto(List.of(
                 generatedPlan(101L, 1L, List.of(1L), "Plan 1"),
                 generatedPlan(102L, 2L, List.of(2L), "Plan 2"),
                 generatedPlan(103L, 3L, List.of(3L), "Plan 3"),
                 generatedPlan(104L, 4L, List.of(4L), "Plan 4"),
-                generatedPlan(105L, 5L, List.of(5L), "Plan 5"))));
-        when(aiAgentService.generateTestPlan(1L, Set.of(6L))).thenReturn(new TestPlanResponseDto(List.of(
-                generatedPlan(106L, 6L, List.of(6L), "Plan 6"))));
+                generatedPlan(105L, 5L, List.of(5L), "Plan 5"),
+                generatedPlan(106L, 6L, List.of(6L), "Plan 6"),
+                generatedPlan(107L, 7L, List.of(7L), "Plan 7"),
+                generatedPlan(108L, 8L, List.of(8L), "Plan 8"))));
+        when(aiAgentService.generateTestPlan(1L, Set.of(9L))).thenReturn(new TestPlanResponseDto(List.of(
+                generatedPlan(109L, 9L, List.of(9L), "Plan 9"))));
         when(testPlanRepository.findByProjectId(1L)).thenReturn(List.of());
         mockTestPlanSaveAll();
         mockProjectSave();
 
         List<TestPlanDto> plans = service().generate(1L);
 
-        assertThat(plans).hasSize(6);
+        assertThat(plans).hasSize(9);
         assertThat(plans).extracting(TestPlanDto::planCode)
-                .containsExactly("TP-001", "TP-002", "TP-003", "TP-004", "TP-005", "TP-006");
-        verify(aiAgentService).generateTestPlan(1L, Set.of(1L, 2L, 3L, 4L, 5L));
-        verify(aiAgentService).generateTestPlan(1L, Set.of(6L));
+                .containsExactly("TP-001", "TP-002", "TP-003", "TP-004", "TP-005", "TP-006", "TP-007", "TP-008", "TP-009");
+        verify(aiAgentService).generateTestPlan(1L, Set.of(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L));
+        verify(aiAgentService).generateTestPlan(1L, Set.of(9L));
         assertThat(project.getStatus()).isEqualTo(ProjectStatus.PLAN_PENDING_REVIEW);
     }
 
@@ -268,11 +273,12 @@ class TestPlanServiceTest {
                 approvedRule(1L, 101L), approvedRule(2L, 102L), approvedRule(3L, 103L),
                 approvedRule(4L, 104L), approvedRule(5L, 105L), approvedRule(6L, 106L));
         when(businessRuleRepository.findByProjectIdAndStatus(1L, ReviewStatus.APPROVED)).thenReturn(rules);
-        when(aiAgentService.generateTestPlan(1L, Set.of(1L, 2L, 3L, 4L, 5L))).thenReturn(new TestPlanResponseDto(List.of(
+        when(aiAgentService.generateTestPlan(1L, Set.of(1L, 2L, 3L, 4L, 5L, 6L))).thenReturn(new TestPlanResponseDto(List.of(
                 generatedPlan(101L, 1L, List.of(1L, 2L), "Plan 1"),
                 generatedPlan(103L, 3L, List.of(3L), "Plan 3"),
                 generatedPlan(104L, 4L, List.of(4L), "Plan 4"),
-                generatedPlan(105L, 5L, List.of(5L), "Plan 5"))));
+                generatedPlan(105L, 5L, List.of(5L), "Plan 5"),
+                generatedPlan(106L, 6L, List.of(6L), "Plan 6"))));
 
         assertThatThrownBy(() -> service().generate(1L))
                 .isInstanceOf(LlmResponseException.class)
@@ -363,11 +369,11 @@ class TestPlanServiceTest {
         // Guard mở cho vòng regenerate: ở COMPLETED vẫn gọi được generate — lỗi ném ra
         // phải là "thiếu BR approved" (bước sau guard), không phải lỗi chặn status
         mockProject(ProjectStatus.COMPLETED);
-        when(businessRuleRepository.findByProjectIdAndStatus(1L, ReviewStatus.APPROVED)).thenReturn(List.of());
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of());
 
         assertThatThrownBy(() -> service().generate(1L))
                 .isInstanceOf(InvalidProjectStatusException.class)
-                .hasMessageContaining("it nhat mot Business Rule APPROVED");
+                .hasMessageContaining("it nhat mot Business Rule");
     }
 
     private TestPlanService service() {
@@ -377,7 +383,9 @@ class TestPlanServiceTest {
                 businessRuleRepository,
                 projectRepository,
                 aiAgentService,
-                generationProgressService);
+                generationProgressService,
+                null,
+                scopeResolver);
     }
 
     private Project mockProject(ProjectStatus status) {
@@ -432,6 +440,38 @@ class TestPlanServiceTest {
                 title,
                 "Du lieu hop le thi thanh cong.",
                 "HAPPY_PATH");
+    }
+
+    @Test
+    void generateForScopedServiceContinuesCodeSequenceFromExistingPlans() {
+        Project project = mockProject(ProjectStatus.BR_APPROVED);
+        BusinessRule ruleServiceA = approvedRule(1L, 101L);
+        BusinessRule ruleServiceB = approvedRule(2L, 202L);
+
+        TestPlan existingPlan1 = plan(91L, 1L, "Service A Plan 1");
+        existingPlan1.setPlanCode("TP-001");
+        TestPlan existingPlan2 = plan(92L, 1L, "Service A Plan 2");
+        existingPlan2.setPlanCode("TP-002");
+
+        when(scopeResolver.resolve(1L, "service-b")).thenReturn(
+                new ServiceScopeResolver.ServiceScope("service-b", Set.of(), Set.of(202L)));
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(ruleServiceA, ruleServiceB));
+        when(testPlanRepository.findByProjectId(1L)).thenReturn(List.of(existingPlan1, existingPlan2));
+        when(aiAgentService.generateTestPlan(eq(1L), eq(Set.of(2L)))).thenReturn(new TestPlanResponseDto(List.of(
+                generatedPlan(202L, 2L, List.of(2L), "Service B Plan 1"))));
+        mockTestPlanSaveAll();
+        mockProjectSave();
+
+        // Sinh chỉ cho service B (scoped method 202L)
+        service().generate(1L, "service-b", false);
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<TestPlan>> captor = ArgumentCaptor.forClass(List.class);
+        verify(testPlanRepository).saveAll(captor.capture());
+        assertThat(captor.getValue()).singleElement().satisfies(savedPlan -> {
+            assertThat(savedPlan.getPlanCode()).isEqualTo("TP-003");
+            assertThat(savedPlan.getTitle()).isEqualTo("Service B Plan 1");
+        });
     }
 
     private TestPlan plan(Long id, Long ruleId, String title) {

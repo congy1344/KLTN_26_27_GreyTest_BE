@@ -144,6 +144,9 @@ class ExportServiceTest {
         String markdown = service.export(5L, "markdown", "billing-service");
 
         assertThat(markdown).contains("TP-001").doesNotContain("TP-002");
+        // Xuất report theo service cũng phải cập nhật project sang COMPLETED
+        assertThat(project.getStatus()).isEqualTo(ProjectStatus.COMPLETED);
+        verify(projects).save(project);
     }
 
     @Test

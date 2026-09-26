@@ -3,6 +3,7 @@ package com.greytest.controller;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -24,6 +25,7 @@ import com.greytest.dto.GenerationProgressStepStatus;
 import com.greytest.entity.AuthUser;
 import com.greytest.entity.enums.UserRole;
 import com.greytest.service.AuthService;
+import com.greytest.service.GenerationJobService;
 import com.greytest.service.GenerationProgressService;
 import com.greytest.service.ProjectService;
 
@@ -34,6 +36,7 @@ class GenerationProgressControllerTest {
     @MockBean private GenerationProgressService progressService;
     @MockBean private AuthService authService;
     @MockBean private ProjectService projectService;
+    @MockBean private GenerationJobService jobService;
 
     @Test
     void returnsAuthorizedProjectProgressWithLogs() throws Exception {
@@ -69,6 +72,31 @@ class GenerationProgressControllerTest {
                 .andExpect(jsonPath("$.logs[0].message").value("Đã xử lý batch 1/1."));
 
         verify(projectService).requireAccess(1L, user);
+    }
+
+    @Test
+    void pausesGenerationProgressSuccessfully() throws Exception {
+        AuthUser user = new AuthUser();
+        user.setId(10L);
+        user.setRole(UserRole.USER);
+        user.setEnabled(true);
+        when(authService.currentUser("Bearer token")).thenReturn(user);
+        when(progressService.get(1L, GenerationProgressStage.TEST_PLAN)).thenReturn(
+                new GenerationProgressDto(
+                        GenerationProgressStage.TEST_PLAN,
+                        GenerationProgressStatus.PAUSED,
+                        50,
+                        1,
+                        2,
+                        List.of(),
+                        List.of()));
+
+        mockMvc.perform(post("/api/projects/1/generation-progress/TEST_PLAN/pause")
+                        .header("Authorization", "Bearer token"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("PAUSED"));
+
+        verify(jobService).pause(1L, GenerationProgressStage.TEST_PLAN);
     }
 
     @Test

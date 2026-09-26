@@ -68,15 +68,15 @@ public class GenerationContextBuilder {
     private static final int MAX_METHOD_SOURCE_CHARS = 4_000;
     // Gom toi da ba method cung Service de giam so request nhung van giu prompt gon.
     public static final int MAX_GENERATION_METHODS = 3;
-    public static final int MAX_TEST_PLAN_METHODS = 5;
-    // ponytail: batch co dinh giu moi request nho; doi sang countTokens neu mot plan don le vuot context.
-    public static final int MAX_TEST_CASE_PLANS = 5;
-    // ponytail: Unit Test co source code dai hon metadata, giu batch nho de tranh timeout.
-    public static final int MAX_UNIT_TEST_CASES = 5;
+    public static final int MAX_TEST_PLAN_METHODS = 8;
+    // ponytail: batch co dinh giu moi request gon gang, 8 item/batch toi uu toc do va quota
+    public static final int MAX_TEST_CASE_PLANS = 8;
+    // ponytail: Unit Test gom 8 case/batch de giam so lan goi mang
+    public static final int MAX_UNIT_TEST_CASES = 8;
     public static final int MAX_UNIT_TEST_RETRY_CASES = 2;
     private static final int MAX_UNIT_TEST_REFERENCES = 10;
-    // ponytail: chi dua declaration lien quan truc tiep vao prompt; tang gioi han khi do phu type bi thieu.
-    private static final int MAX_UNIT_TEST_SUPPORTING_CLASSES = 12;
+    // ponytail: chi dua declaration lien quan truc tiep vao prompt; tang gioi han len 25 de khong thieu DTO/Entity/Repo/Client.
+    private static final int MAX_UNIT_TEST_SUPPORTING_CLASSES = 25;
     private static final int MAX_GENERATION_RELATIONS = 40;
     private static final int MAX_GENERATION_DEPENDENCIES = 40;
     // ponytail: chỉ kèm vài callee Service để giữ prompt có giới hạn; tăng khi benchmark chứng minh cần.
@@ -632,9 +632,29 @@ public class GenerationContextBuilder {
 
     private boolean isUnitTestSupportingClass(JavaClassDto javaClass, List<ClassContextDto> targetClasses) {
         return targetClasses.stream().anyMatch(target ->
-                javaClass.packageName() != null
-                        && javaClass.packageName().equals(target.packageName())
-                        || isDirectlyImported(javaClass, target));
+                (javaClass.packageName() != null && javaClass.packageName().equals(target.packageName()))
+                        || isDirectlyImported(javaClass, target)
+                        || isReferencedBySimpleName(javaClass, target));
+    }
+
+    private boolean isReferencedBySimpleName(JavaClassDto javaClass, ClassContextDto targetClass) {
+        if (targetClass.sourceCode() == null || javaClass.className() == null || javaClass.className().isBlank()) {
+            return false;
+        }
+        return javaClass.qualifiedName() != null
+                && targetClass.packageName() != null
+                && commonBasePackage(targetClass.packageName(), javaClass.packageName())
+                && targetClass.sourceCode().contains(javaClass.className());
+    }
+
+    private boolean commonBasePackage(String pkg1, String pkg2) {
+        if (pkg1 == null || pkg2 == null) return false;
+        String[] parts1 = pkg1.split("\\.");
+        String[] parts2 = pkg2.split("\\.");
+        if (parts1.length >= 2 && parts2.length >= 2) {
+            return parts1[0].equals(parts2[0]) && parts1[1].equals(parts2[1]);
+        }
+        return false;
     }
 
     private boolean isDirectlyImported(JavaClassDto javaClass, List<ClassContextDto> targetClasses) {
@@ -750,7 +770,8 @@ public class GenerationContextBuilder {
     }
 
     private List<BusinessRuleContextDto> approvedBusinessRules(Long projectId) {
-        return businessRuleRepository.findByProjectIdAndStatus(projectId, ReviewStatus.APPROVED).stream()
+        return businessRuleRepository.findByProjectId(projectId).stream()
+                .filter(rule -> rule.getStatus() == ReviewStatus.APPROVED || rule.getStatus() == ReviewStatus.PENDING_REVIEW)
                 .map(this::ruleContext)
                 .sorted(Comparator.comparingInt((BusinessRuleContextDto rule) -> ruleNumber(rule.ruleCode()))
                         .thenComparing(BusinessRuleContextDto::ruleCode))
@@ -819,7 +840,7 @@ public class GenerationContextBuilder {
 
     private List<TestPlanContextItemDto> approvedTestPlans(Long projectId) {
         List<TestPlan> plans = testPlanRepository.findByProjectId(projectId).stream()
-                .filter(plan -> plan.getStatus() == ReviewStatus.APPROVED)
+                .filter(plan -> plan.getStatus() == ReviewStatus.APPROVED || plan.getStatus() == ReviewStatus.PENDING_REVIEW)
                 .sorted(Comparator.comparing(TestPlan::getPlanCode))
                 .toList();
         Map<Long, List<Long>> coveredRuleIds = coveredRuleIdsByPlan(plans);
@@ -851,7 +872,7 @@ public class GenerationContextBuilder {
     private List<TestCaseContextItemDto> approvedTestCases(Long projectId) {
         return approvedTestPlans(projectId).stream()
                 .flatMap(plan -> testCaseRepository.findByTestPlanId(plan.id()).stream())
-                .filter(testCase -> testCase.getStatus() == ReviewStatus.APPROVED)
+                .filter(testCase -> testCase.getStatus() == ReviewStatus.APPROVED || testCase.getStatus() == ReviewStatus.PENDING_REVIEW)
                 .map(this::testCaseContext)
                 .sorted(Comparator.comparing(TestCaseContextItemDto::caseCode))
                 .toList();
@@ -860,7 +881,7 @@ public class GenerationContextBuilder {
     private List<TestCaseContextItemDto> approvedTestCases(List<TestPlanContextItemDto> plans) {
         return plans.stream()
                 .flatMap(plan -> testCaseRepository.findByTestPlanId(plan.id()).stream())
-                .filter(testCase -> testCase.getStatus() == ReviewStatus.APPROVED)
+                .filter(testCase -> testCase.getStatus() == ReviewStatus.APPROVED || testCase.getStatus() == ReviewStatus.PENDING_REVIEW)
                 .map(this::testCaseContext)
                 .sorted(Comparator.comparing(TestCaseContextItemDto::caseCode))
                 .toList();

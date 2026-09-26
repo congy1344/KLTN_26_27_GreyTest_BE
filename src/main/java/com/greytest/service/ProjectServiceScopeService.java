@@ -35,10 +35,18 @@ public class ProjectServiceScopeService {
         return scopes.listScopes(projectId).stream()
                 .map(scope -> new ProjectServiceDto(
                         scope.servicePath(),
-                        ".".equals(scope.servicePath())
-                                ? project.getName()
-                                : Path.of(scope.servicePath()).getFileName().toString(),
+                        scopeName(scope, project.getName()),
                         statuses.status(projectId, scope)))
                 .toList();
+    }
+
+    private String scopeName(ServiceScopeResolver.ServiceScope scope, String projectName) {
+        if (".".equals(scope.servicePath())) {
+            return projectName;
+        }
+        if (scope.servicePath().contains("/")) {
+            return Path.of(scope.servicePath()).getFileName().toString();
+        }
+        return scope.servicePath();
     }
 }

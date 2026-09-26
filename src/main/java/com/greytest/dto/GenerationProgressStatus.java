@@ -6,5 +6,6 @@ public enum GenerationProgressStatus {
     QUEUED,
     RUNNING,
     COMPLETED,
-    FAILED
+    FAILED,
+    PAUSED
 }

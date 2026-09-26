@@ -8,12 +8,14 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import com.greytest.entity.BusinessRule;
+import com.greytest.entity.Project;
 import com.greytest.entity.TestCase;
 import com.greytest.entity.TestPlan;
 import com.greytest.entity.enums.ProjectStatus;
 import com.greytest.entity.enums.ReviewStatus;
 import com.greytest.repository.BusinessRuleRepository;
 import com.greytest.repository.CoverageReportRepository;
+import com.greytest.repository.ProjectRepository;
 import com.greytest.repository.TestCaseRepository;
 import com.greytest.repository.TestPlanRepository;
 import com.greytest.repository.UnitTestRepository;
@@ -30,6 +32,7 @@ public class ServicePipelineStatusService {
     private final TestCaseRepository cases;
     private final UnitTestRepository unitTests;
     private final CoverageReportRepository reports;
+    private final ProjectRepository projects;
     private final ServiceScopeResolver scopes;
 
     public ServicePipelineStatusService(
@@ -38,12 +41,14 @@ public class ServicePipelineStatusService {
             TestCaseRepository cases,
             UnitTestRepository unitTests,
             CoverageReportRepository reports,
+            ProjectRepository projects,
             ServiceScopeResolver scopes) {
         this.rules = rules;
         this.plans = plans;
         this.cases = cases;
         this.unitTests = unitTests;
         this.reports = reports;
+        this.projects = projects;
         this.scopes = scopes;
     }
 
@@ -70,6 +75,11 @@ public class ServicePipelineStatusService {
         List<Long> caseIds = scopedCases.stream().map(TestCase::getId).toList();
         if (unitTests.findByTestCaseIdIn(caseIds).isEmpty()) return ProjectStatus.CASE_APPROVED;
         if (hasCoverage(projectId, scope)) {
+            // Nếu project đã hoàn thành pipeline (đã xuất report), trả COMPLETED cho scoped status
+            Project project = projects.findById(projectId).orElse(null);
+            if (project != null && project.getStatus() == ProjectStatus.COMPLETED) {
+                return ProjectStatus.COMPLETED;
+            }
             return ProjectStatus.COVERAGE_ANALYZED;
         }
         return ProjectStatus.TEST_GENERATED;

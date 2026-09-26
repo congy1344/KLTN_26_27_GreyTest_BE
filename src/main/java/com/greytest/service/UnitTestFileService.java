@@ -45,6 +45,8 @@ public class UnitTestFileService {
     private static final String UNIX_SCRIPT_NAME = "run-greytest-coverage.sh";
     private static final String GRADLE_INIT_SCRIPT_NAME = "greytest-jacoco.init.gradle";
     private static final String README_NAME = "README-GREYTEST.txt";
+    private static final String MOCKITO_MOCK_MAKER_FILE = "src/test/resources/mockito-extensions/org.mockito.plugins.MockMaker";
+    private static final String MOCKITO_SUBCLASS_MOCK_MAKER_CONTENT = "mock-maker-subclass\n";
 
     public record MergedFile(String filePath, String testClassName, String packageName,
             List<Long> caseIds, String sourceCode) {
@@ -80,12 +82,14 @@ public class UnitTestFileService {
                 .collect(Collectors.joining(" "));
         try (var zip = new ZipOutputStream(output, StandardCharsets.UTF_8)) {
             for (UnitTestFileDto testFile : testFiles) {
-                writeArchiveEntry(zip, safeTestPath(testFile.filePath()), testFile.sourceCode());
+                String safeSource = ensureMockitoRunner(testFile.sourceCode());
+                writeArchiveEntry(zip, safeTestPath(testFile.filePath()), safeSource);
             }
             writeArchiveEntry(zip, WINDOWS_SCRIPT_NAME, windowsCoverageScript(testSelector, gradleTestFilters));
             writeArchiveEntry(zip, UNIX_SCRIPT_NAME, unixCoverageScript(testSelector, gradleTestFilters));
             writeArchiveEntry(zip, GRADLE_INIT_SCRIPT_NAME, gradleJacocoInitScript());
             writeArchiveEntry(zip, README_NAME, coverageReadme());
+            writeArchiveEntry(zip, MOCKITO_MOCK_MAKER_FILE, MOCKITO_SUBCLASS_MOCK_MAKER_CONTENT);
         } catch (IOException exception) {
             throw new StorageException("Khong tao duoc ZIP unit test", exception);
         }
@@ -134,20 +138,59 @@ public class UnitTestFileService {
         if (filePath == null || filePath.isBlank()) {
             throw new StorageException("Duong dan Unit Test khong hop le", null);
         }
-        Path testRoot = Path.of("src", "test", "java");
-        Path normalized = Path.of(filePath).normalize();
-        if (normalized.isAbsolute() || !normalized.startsWith(testRoot)) {
+        String normalized = filePath.replace('\\', '/');
+        while (normalized.startsWith("./")) normalized = normalized.substring(2);
+        if (normalized.startsWith("/") || normalized.contains("..") || normalized.contains(":")) {
             throw new StorageException("Duong dan Unit Test khong hop le", null);
         }
-        return normalized.toString().replace('\\', '/');
+        int testRootIndex = normalized.indexOf("src/test/java/");
+        if (testRootIndex < 0) {
+            throw new StorageException("Duong dan Unit Test khong hop le: phai chua src/test/java/", null);
+        }
+        return normalized.substring(testRootIndex);
     }
 
     private String windowsCoverageScript(String testSelector, String gradleTestFilters) {
         return """
                 @echo off
-                setlocal
+                setlocal enabledelayedexpansion
                 chcp 65001 >nul
                 cd /d "%%~dp0"
+
+                set "GT_SRC_DIR=%%~dp0"
+                if "!GT_SRC_DIR:~-1!"=="\\" set "GT_SRC_DIR=!GT_SRC_DIR:~0,-1!"
+
+                if not defined GREYTEST_JVM_ARGS set "GREYTEST_JVM_ARGS=-Djdk.attach.allowAttachSelf=true -XX:+EnableDynamicAgentLoading"
+
+                if not "!GREYTEST_JUNCTION_RUN!"=="1" (
+                  powershell -NoProfile -ExecutionPolicy Bypass -Command "if ('!GT_SRC_DIR!' -match '[^\\x00-\\x7F]') { exit 1 } else { exit 0 }" >nul 2>&1
+                  if errorlevel 1 (
+                    echo [GreyTest] Canh bao: Duong dan thu muc chua ky tu co dau/Unicode: "!GT_SRC_DIR!"
+                    echo [GreyTest] Dang tu dong tao Junction ASCII tam thoi de build tool [gradlew/mvnw] hoat dong on dinh...
+                    if exist "!GT_SRC_DIR!\\..\\pom.xml" (
+                      echo [GreyTest] Phat hien module con cua du an Maven multi-module. Dang cai dat parent POM vao local repository...
+                      pushd "!GT_SRC_DIR!\\.."
+                      set "PRE_MAVEN=mvn"
+                      if exist "mvnw.cmd" set "PRE_MAVEN=mvnw.cmd"
+                      call !PRE_MAVEN! -N install -DskipTests >nul 2>&1
+                      popd
+                    )
+                    set "GT_JUNC_BASE=%%SystemDrive%%\\tmp"
+                    if not exist "!GT_JUNC_BASE!" mkdir "!GT_JUNC_BASE!" >nul 2>&1
+                    set "GT_JUNC_DIR=!GT_JUNC_BASE!\\gt-run-%%RANDOM%%"
+                    powershell -NoProfile -ExecutionPolicy Bypass -Command "New-Item -ItemType Junction -Path '!GT_JUNC_DIR!' -Target '!GT_SRC_DIR!' | Out-Null" >nul 2>&1
+                    if exist "!GT_JUNC_DIR!\\run-greytest-coverage.cmd" (
+                      echo [GreyTest] Chuyen huong thuc thi qua Junction: "!GT_JUNC_DIR!"
+                      set "GREYTEST_JUNCTION_RUN=1"
+                      pushd "!GT_JUNC_DIR!"
+                      call "!GT_JUNC_DIR!\\run-greytest-coverage.cmd" %%*
+                      set "GT_EXIT=!ERRORLEVEL!"
+                      popd
+                      rmdir "!GT_JUNC_DIR!" >nul 2>&1
+                      exit /b !GT_EXIT!
+                    )
+                  )
+                )
 
                 set "BUILD_KIND="
                 if exist "pom.xml" set "BUILD_KIND=maven"
@@ -188,6 +231,7 @@ public class UnitTestFileService {
                   %%*
                 if errorlevel 1 (
                   echo [GreyTest] ERROR: Project or generated tests could not be compiled.
+                  echo [GreyTest] Tip: Neu gap loi 'Non-resolvable parent POM', hay chay 'mvn -N install' tai thu muc chua parent pom.xml truoc.
                   exit /b 1
                 )
 
@@ -207,6 +251,7 @@ public class UnitTestFileService {
                   org.jacoco:jacoco-maven-plugin:%4$s:report %%*
                 if errorlevel 1 (
                   echo [GreyTest] ERROR: Build or tests failed. Review the Maven output above.
+                  echo [GreyTest] Tip: Neu gap loi Mockito attach Byte Buddy, kiem tra GREYTEST_JVM_ARGS hoac dung JDK 17+.
                   exit /b 1
                 )
 
@@ -231,9 +276,10 @@ public class UnitTestFileService {
                 )
 
                 echo [GreyTest] Running Gradle tests and generating JaCoCo XML...
-                call %%GRADLE_COMMAND%% --init-script "greytest-jacoco.init.gradle" clean test jacocoTestReport %1$s %%*
+                call %%GRADLE_COMMAND%% --init-script "greytest-jacoco.init.gradle" clean test %1$s jacocoTestReport %%*
                 if errorlevel 1 (
                   echo [GreyTest] ERROR: Gradle project or generated tests could not be compiled or executed.
+                  echo [GreyTest] Luu y: Neu thu muc du an chua tieng Viet co dau (vi du: mau, sua), hay dung junction ASCII hoac doi ten thu muc khong dau.
                   exit /b 1
                 )
 
@@ -262,6 +308,8 @@ public class UnitTestFileService {
                 set -u
                 cd "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)" || exit 1
 
+                export GREYTEST_JVM_ARGS="${GREYTEST_JVM_ARGS:--Djdk.attach.allowAttachSelf=true -XX:+EnableDynamicAgentLoading}"
+
                 build_kind=""
                 if [ -f "pom.xml" ]; then
                   build_kind="maven"
@@ -288,9 +336,9 @@ public class UnitTestFileService {
 
                 if [ "$build_kind" = "gradle" ]; then
                   if [ -f "./gradlew" ]; then
-                    sh ./gradlew --init-script "greytest-jacoco.init.gradle" clean test jacocoTestReport %1$s "$@" || exit 1
+                    sh ./gradlew --init-script "greytest-jacoco.init.gradle" clean test %1$s jacocoTestReport "$@" || exit 1
                   elif command -v gradle >/dev/null 2>&1; then
-                    gradle --init-script "greytest-jacoco.init.gradle" clean test jacocoTestReport %1$s "$@" || exit 1
+                    gradle --init-script "greytest-jacoco.init.gradle" clean test %1$s jacocoTestReport "$@" || exit 1
                   else
                     echo "[GreyTest] ERROR: Gradle was not found in PATH and gradlew is missing."
                     exit 1
@@ -314,6 +362,11 @@ public class UnitTestFileService {
                     return 1
                   fi
                 }
+
+                if [ -f "../pom.xml" ] && [ "$build_kind" = "maven" ]; then
+                  echo "[GreyTest] Phat hien module con. Dang cai dat parent POM vao Maven local repository..."
+                  (cd .. && run_maven -N install -DskipTests >/dev/null 2>&1)
+                fi
 
                 echo "[GreyTest] Running tests and generating JaCoCo XML..."
                 run_maven clean test-compile \
@@ -376,6 +429,16 @@ public class UnitTestFileService {
                    Linux/macOS: chay sh ./run-greytest-coverage.sh
                 4. Tai file target/site/jacoco/jacoco.xml (Maven) hoac build/reports/jacoco/test/jacocoTestReport.xml (Gradle) len GreyTest.
 
+                CAU HINH MOCKITO VA JVM (CHO RUNTIME TEST)
+                - File 'src/test/resources/mockito-extensions/org.mockito.plugins.MockMaker' (mock-maker-subclass) duoc dong goi san trong ZIP de tranh loi 'Could not initialize inline Byte Buddy mock maker' tren cac phien ban Java 17/21+.
+                - Script tu dong them cac tham so JVM can thiet (-Djdk.attach.allowAttachSelf=true -XX:+EnableDynamicAgentLoading). Neu can truyen them JVM args rieng, set bien GREYTEST_JVM_ARGS truoc khi chay script.
+
+                DU AN MULTI-MODULE (PARENT POM)
+                - Neu chay module con gap loi 'Non-resolvable parent POM' (vi du parent nam o thu muc cha ../pom.xml), hay chay lenh:
+                  cd <thu muc goc chua parent pom.xml>
+                  mvn -N install -DskipTests
+                  sau do chay lai run-greytest-coverage.cmd trong module con.
+
                 Script tu nhan dien Maven hoac Gradle va khong sua source code cua project.
                 Voi Maven, script su dung JaCoCo %s va khong them cau hinh JaCoCo vao pom.xml.
                 Voi Gradle, script tu tam ap dung plugin JaCoCo, bat XML report va chi chay cac test class duoc sinh.
@@ -383,12 +446,6 @@ public class UnitTestFileService {
                 Project can co san dependency cua test duoc sinh (JUnit 5/Mockito/Spring Test neu co dung).
                 Neu project can Maven profile, truyen tham so khi chay script, vi du:
                 run-greytest-coverage.cmd -Ptest
-
-                TUY CHON JVM RIENG
-                Script chu dong tach JaCoCo agent khoi argLine cua project de tranh gan trung agent.
-                Neu test can JVM argument rieng, dat bien GREYTEST_JVM_ARGS truoc khi chay, vi du Windows:
-                set "GREYTEST_JVM_ARGS=--add-opens=java.base/java.lang=ALL-UNNAMED"
-                run-greytest-coverage.cmd
                 """.formatted(JACOCO_VERSION);
     }
 
@@ -396,7 +453,7 @@ public class UnitTestFileService {
         UnitTest first = tests.get(0);
         List<Long> caseIds = tests.stream().map(UnitTest::getTestCaseId).toList();
         String source = tests.size() == 1 ? first.getSourceCode() : mergeSources(tests);
-        return new MergedFile(first.getFilePath(), first.getTestClassName(), first.getPackageName(), caseIds, source);
+        return new MergedFile(first.getFilePath(), first.getTestClassName(), first.getPackageName(), caseIds, ensureMockitoRunner(source));
     }
 
     private String mergeSources(List<UnitTest> tests) {
@@ -431,8 +488,13 @@ public class UnitTestFileService {
             String testClassName, Set<String> methodSignatures, Set<String> fieldNames,
             Set<String> constructorSignatures) {
         TypeDeclaration<?> nextType = typeByName(next, testClassName);
+        for (var annotation : nextType.getAnnotations()) {
+            if (baseType.getAnnotations().stream().noneMatch(existing -> existing.getNameAsString().equals(annotation.getNameAsString()))) {
+                baseType.addAnnotation(annotation.clone());
+            }
+        }
         Map<String, String> conflictingImports = new LinkedHashMap<>();
-        next.getImports().forEach(imp -> addImport(base, imp, conflictingImports));
+        next.getImports().forEach(imp -> addImport(base, baseType, next, nextType, imp, conflictingImports));
         qualifyConflictingTypes(nextType, conflictingImports);
         for (BodyDeclaration<?> member : nextType.getMembers()) {
             if (member instanceof MethodDeclaration method
@@ -463,6 +525,17 @@ public class UnitTestFileService {
                         .orElse(null);
                 if (existingNestedType == null) {
                     baseType.addMember(nestedType.clone());
+                } else if (existingNestedType instanceof com.github.javaparser.ast.body.EnumDeclaration existingEnum
+                        && nestedType instanceof com.github.javaparser.ast.body.EnumDeclaration newEnum) {
+                    // Gộp các enum constant chưa có vào enum hiện tại
+                    java.util.Set<String> existingEntries = existingEnum.getEntries().stream()
+                            .map(com.github.javaparser.ast.nodeTypes.NodeWithSimpleName::getNameAsString)
+                            .collect(java.util.stream.Collectors.toSet());
+                    for (var entry : newEnum.getEntries()) {
+                        if (existingEntries.add(entry.getNameAsString())) {
+                            existingEnum.addEntry(entry.clone());
+                        }
+                    }
                 } else if (!existingNestedType.toString().equals(nestedType.toString())) {
                     throw new StorageException("Xung dot nested class: " + nestedType.getNameAsString(), null);
                 }
@@ -472,7 +545,8 @@ public class UnitTestFileService {
         }
     }
 
-    private void addImport(CompilationUnit base, com.github.javaparser.ast.ImportDeclaration candidate,
+    private void addImport(CompilationUnit base, TypeDeclaration<?> baseType, CompilationUnit next,
+            TypeDeclaration<?> nextType, com.github.javaparser.ast.ImportDeclaration candidate,
             Map<String, String> conflictingImports) {
         if (base.getImports().contains(candidate)) {
             return;
@@ -484,7 +558,10 @@ public class UnitTestFileService {
         }
         if (candidate.isAsterisk() && !candidate.isStatic() && base.getImports().stream()
                 .filter(existing -> !existing.isAsterisk() && !existing.isStatic())
-                .anyMatch(existing -> !importPackage(existing).equals(candidate.getNameAsString()))) {
+                .anyMatch(existing -> !importPackage(existing).equals(candidate.getNameAsString())
+                        && typeUsesSimpleName(nextType, importSimpleName(existing))
+                        && next.getImports().stream().noneMatch(imp -> !imp.isAsterisk()
+                                && importSimpleName(imp).equals(importSimpleName(existing))))) {
             throw new StorageException("Xung dot wildcard voi explicit import: " + candidate.getNameAsString(), null);
         }
         String candidateName = importSimpleName(candidate);
@@ -498,7 +575,8 @@ public class UnitTestFileService {
         boolean wildcardConflict = !candidate.isAsterisk() && !candidate.isStatic()
                 && base.getImports().stream()
                         .filter(existing -> existing.isAsterisk() && !existing.isStatic())
-                        .anyMatch(existing -> !existing.getNameAsString().equals(importPackage(candidate)));
+                        .anyMatch(existing -> !existing.getNameAsString().equals(importPackage(candidate))
+                                && typeUsesSimpleName(baseType, candidateName));
         if (wildcardConflict) {
             conflictingImports.put(candidateName, candidate.getNameAsString());
             return;
@@ -517,6 +595,16 @@ public class UnitTestFileService {
             return;
         }
         base.addImport(candidate.clone());
+    }
+
+    private boolean typeUsesSimpleName(TypeDeclaration<?> type, String simpleName) {
+        if (type == null || simpleName == null || simpleName.isBlank()) {
+            return false;
+        }
+        return type.findAll(com.github.javaparser.ast.type.ClassOrInterfaceType.class).stream()
+                .anyMatch(t -> t.getNameAsString().equals(simpleName))
+                || type.findAll(com.github.javaparser.ast.expr.NameExpr.class).stream()
+                .anyMatch(n -> n.getNameAsString().equals(simpleName));
     }
 
     private void qualifyConflictingTypes(TypeDeclaration<?> type, Map<String, String> conflictingImports) {
@@ -629,6 +717,103 @@ public class UnitTestFileService {
             return parse(source);
         } catch (RuntimeException exception) {
             throw new StorageException("Source Unit Test khong phai Java hop le", exception);
+        }
+    }
+
+    public String ensureMockitoRunner(String sourceCode) {
+        if (sourceCode == null || sourceCode.isBlank()) return sourceCode;
+
+        boolean needsRunner = (sourceCode.contains("@Mock") || sourceCode.contains("@InjectMocks") || sourceCode.contains("@Spy"))
+                && !sourceCode.contains("openMocks(") && !sourceCode.contains("initMocks(")
+                && !sourceCode.contains("MockitoExtension.class") && !sourceCode.contains("MockitoJUnitRunner.class");
+
+        boolean needsAssertionFix = !sourceCode.contains("org.junit.Assert")
+                && (sourceCode.contains("assertTrue(\"") || sourceCode.contains("assertFalse(\"")
+                        || sourceCode.contains("assertNotNull(\"") || sourceCode.contains("assertNull(\""));
+
+        boolean needsVerifyFix = (sourceCode.contains("verifyNoInteractions") || sourceCode.contains("verifyZeroInteractions"))
+                && (sourceCode.contains("any()") || sourceCode.contains("any(") || sourceCode.contains("eq("));
+
+        if (!needsRunner && !needsAssertionFix && !needsVerifyFix) {
+            return sourceCode;
+        }
+
+        try {
+            CompilationUnit cu = parse(sourceCode);
+            boolean isJunit4 = cu.getImports().stream()
+                    .anyMatch(i -> i.getNameAsString().startsWith("org.junit.") && !i.getNameAsString().startsWith("org.junit.jupiter."));
+
+            // 1. Đảm bảo Mockito Runner / Extension nếu dùng @Mock, @InjectMocks, @Spy
+            if (needsRunner) {
+                boolean hasMockFields = cu.findAll(FieldDeclaration.class).stream()
+                        .anyMatch(f -> f.getAnnotationByName("Mock").isPresent()
+                                || f.getAnnotationByName("InjectMocks").isPresent()
+                                || f.getAnnotationByName("Spy").isPresent());
+                if (hasMockFields) {
+                    for (TypeDeclaration<?> type : cu.getTypes()) {
+                        if (isJunit4) {
+                            if (type.getAnnotationByName("RunWith").isEmpty()) {
+                                cu.addImport("org.junit.runner.RunWith");
+                                cu.addImport("org.mockito.junit.MockitoJUnitRunner");
+                                type.addAnnotation(com.github.javaparser.StaticJavaParser.parseAnnotation("@RunWith(MockitoJUnitRunner.class)"));
+                            }
+                        } else {
+                            if (type.getAnnotationByName("ExtendWith").isEmpty()) {
+                                cu.addImport("org.junit.jupiter.api.extension.ExtendWith");
+                                cu.addImport("org.mockito.junit.jupiter.MockitoExtension");
+                                type.addAnnotation(com.github.javaparser.StaticJavaParser.parseAnnotation("@ExtendWith(MockitoExtension.class)"));
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 2. Tự động sửa thứ tự tham số assertion JUnit 5 nếu String message bị đặt đầu
+            if (needsAssertionFix && !isJunit4) {
+                for (com.github.javaparser.ast.expr.MethodCallExpr call : cu.findAll(com.github.javaparser.ast.expr.MethodCallExpr.class)) {
+                    String name = call.getNameAsString();
+                    int argCount = call.getArguments().size();
+                    if (("assertTrue".equals(name) || "assertFalse".equals(name)) && argCount == 2) {
+                        if (call.getArgument(0).isStringLiteralExpr()) {
+                            var msg = call.getArgument(0).clone();
+                            var cond = call.getArgument(1).clone();
+                            call.setArgument(0, cond);
+                            call.setArgument(1, msg);
+                        }
+                    } else if (("assertNotNull".equals(name) || "assertNull".equals(name)) && argCount == 2) {
+                        if (call.getArgument(0).isStringLiteralExpr() && !call.getArgument(1).isStringLiteralExpr()) {
+                            var msg = call.getArgument(0).clone();
+                            var actual = call.getArgument(1).clone();
+                            call.setArgument(0, actual);
+                            call.setArgument(1, msg);
+                        }
+                    }
+                }
+            }
+
+            // 3. Loại bỏ lời gọi verifyNoInteractions chứa matcher không hợp lệ
+            if (needsVerifyFix) {
+                for (com.github.javaparser.ast.expr.MethodCallExpr call : cu.findAll(com.github.javaparser.ast.expr.MethodCallExpr.class)) {
+                    String name = call.getNameAsString();
+                    if ("verifyNoInteractions".equals(name) || "verifyZeroInteractions".equals(name)) {
+                        boolean hasIllegalMatcher = call.getArguments().stream().anyMatch(arg -> {
+                            if (arg.isMethodCallExpr()) {
+                                String mName = arg.asMethodCallExpr().getNameAsString();
+                                return mName.startsWith("any") || "eq".equals(mName) || "isNull".equals(mName) || "notNull".equals(mName);
+                            }
+                            return false;
+                        });
+                        if (hasIllegalMatcher) {
+                            call.findAncestor(com.github.javaparser.ast.stmt.Statement.class).ifPresent(com.github.javaparser.ast.Node::remove);
+                        }
+                    }
+                }
+            }
+
+            return cu.toString();
+        } catch (Exception e) {
+            log.warn("Khong the tu dong chuan hoa Unit Test: {}", e.getMessage());
+            return sourceCode;
         }
     }
 }

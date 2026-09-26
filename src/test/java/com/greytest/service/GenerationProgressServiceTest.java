@@ -84,6 +84,23 @@ class GenerationProgressServiceTest {
     }
 
     @Test
+    void supportsCustomStepLabelsForDetailedBatchDescriptions() {
+        java.util.List<String> labels = java.util.List.of(
+                "Sinh Business Rule - batch 1/2: getDoctor, saveDoctor",
+                "Sinh Business Rule - batch 2/2: deleteDoctor",
+                "Kiểm tra và lưu Business Rule vào CSDL");
+        service.start(10L, GenerationProgressStage.BUSINESS_RULE, labels, "Bắt đầu sinh 3 methods.");
+        service.advance(10L, GenerationProgressStage.BUSINESS_RULE, "Đã xong batch 1.");
+
+        GenerationProgressDto dto = service.get(10L, GenerationProgressStage.BUSINESS_RULE);
+        assertThat(dto.steps()).extracting(step -> step.label())
+                .containsExactlyElementsOf(labels);
+        assertThat(dto.steps().get(0).status()).isEqualTo(GenerationProgressStepStatus.COMPLETED);
+        assertThat(dto.steps().get(1).status()).isEqualTo(GenerationProgressStepStatus.RUNNING);
+        assertThat(dto.steps().get(2).status()).isEqualTo(GenerationProgressStepStatus.WAITING);
+    }
+
+    @Test
     void completesAtOneHundredPercentAndReportsFailureWithoutLosingHistory() {
         service.start(9L, GenerationProgressStage.UNIT_TEST, 2, "Bắt đầu sinh Unit Test.");
         service.advance(9L, GenerationProgressStage.UNIT_TEST, "Đã xử lý batch 1/1.");
@@ -207,6 +224,23 @@ class GenerationProgressServiceTest {
         } finally {
             TransactionSynchronizationManager.clearSynchronization();
         }
+    }
+
+    @Test
+    void pausesRunningProgressAndAllowsCheckingIsPaused() {
+        service.start(9L, GenerationProgressStage.TEST_CASE, 3, "Bắt đầu sinh Test Case.");
+        service.advance(9L, GenerationProgressStage.TEST_CASE, "Đã xử lý batch 1/2.");
+
+        assertThat(service.isPaused(9L, GenerationProgressStage.TEST_CASE)).isFalse();
+
+        service.pause(9L, GenerationProgressStage.TEST_CASE, "Đã tạm dừng tác vụ.");
+
+        assertThat(service.isPaused(9L, GenerationProgressStage.TEST_CASE)).isTrue();
+        GenerationProgressDto paused = service.get(9L, GenerationProgressStage.TEST_CASE);
+        assertThat(paused.status()).isEqualTo(GenerationProgressStatus.PAUSED);
+        assertThat(paused.completedSteps()).isEqualTo(1);
+        assertThat(paused.logs()).extracting(log -> log.message())
+                .contains("Đã tạm dừng tác vụ.");
     }
 
     private static final class MutableClock extends Clock {

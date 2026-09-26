@@ -39,17 +39,28 @@ public class LlmBatchExecutor {
     }
 
     public <I, O> List<O> map(List<I> inputs, Function<I, O> worker) {
-        return map(inputs, worker, (batchNumber, output) -> { });
+        return map(inputs, null, worker, (batchNumber, output) -> { });
     }
 
     public <I, O> List<O> map(
             List<I> inputs,
             Function<I, O> worker,
             BiConsumer<Integer, O> onCompleted) {
+        return map(inputs, null, worker, onCompleted);
+    }
+
+    public <I, O> List<O> map(
+            List<I> inputs,
+            java.util.function.BooleanSupplier shouldStop,
+            Function<I, O> worker,
+            BiConsumer<Integer, O> onCompleted) {
         if (inputs.isEmpty()) return List.of();
         if (concurrency == 1 || inputs.size() == 1) {
             List<O> outputs = new ArrayList<>(inputs.size());
             for (int index = 0; index < inputs.size(); index++) {
+                if (shouldStop != null && shouldStop.getAsBoolean()) {
+                    break;
+                }
                 O output = executeBatch(index + 1, inputs.get(index), worker, onCompleted);
                 outputs.add(output);
             }
@@ -64,6 +75,9 @@ public class LlmBatchExecutor {
             Supplier<O> contextualTask = GenerationJobContext.wrap(() -> {
                 LocaleContextHolder.setLocale(locale);
                 try {
+                    if (shouldStop != null && shouldStop.getAsBoolean()) {
+                        return null;
+                    }
                     return executeBatch(batchNumber, input, worker, onCompleted);
                 } finally {
                     LocaleContextHolder.resetLocaleContext();
@@ -75,7 +89,10 @@ public class LlmBatchExecutor {
         List<O> outputs = new ArrayList<>(inputs.size());
         try {
             CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new)).join();
-            for (CompletableFuture<O> future : futures) outputs.add(future.join());
+            for (CompletableFuture<O> future : futures) {
+                O res = future.join();
+                if (res != null) outputs.add(res);
+            }
             return outputs;
         } catch (CompletionException exception) {
             Throwable cause = exception.getCause();
@@ -89,7 +106,7 @@ public class LlmBatchExecutor {
             LlmBatchExecutor executor,
             List<I> inputs,
             Function<I, O> worker) {
-        return mapOrSequential(executor, inputs, worker, (batchNumber, output) -> { });
+        return mapOrSequential(executor, inputs, null, worker, (batchNumber, output) -> { });
     }
 
     public static <I, O> List<O> mapOrSequential(
@@ -97,9 +114,21 @@ public class LlmBatchExecutor {
             List<I> inputs,
             Function<I, O> worker,
             BiConsumer<Integer, O> onCompleted) {
-        if (executor != null) return executor.map(inputs, worker, onCompleted);
+        return mapOrSequential(executor, inputs, null, worker, onCompleted);
+    }
+
+    public static <I, O> List<O> mapOrSequential(
+            LlmBatchExecutor executor,
+            List<I> inputs,
+            java.util.function.BooleanSupplier shouldStop,
+            Function<I, O> worker,
+            BiConsumer<Integer, O> onCompleted) {
+        if (executor != null) return executor.map(inputs, shouldStop, worker, onCompleted);
         List<O> outputs = new ArrayList<>(inputs.size());
         for (int index = 0; index < inputs.size(); index++) {
+            if (shouldStop != null && shouldStop.getAsBoolean()) {
+                break;
+            }
             O output = executeBatch(index + 1, inputs.get(index), worker, onCompleted);
             outputs.add(output);
         }

@@ -377,8 +377,14 @@ public class AIAgentService {
 
     String languageInstruction() {
         if (Locale.ENGLISH.getLanguage().equals(LocaleContextHolder.getLocale().getLanguage())) {
-            return "# Output language\nReturn every natural-language field in English only. Do not mix Vietnamese prose into descriptions. Keep JSON keys, enum values, identifiers, code and file paths unchanged.";
+            return "# Output language\nReturn every natural-language field in English only. Do not mix Vietnamese prose into descriptions. Never use Chinese characters (such as 抛出, 异常, 返回). Keep JSON keys, enum values, identifiers, code and file paths unchanged.";
         }
-        return "# Ngon ngu output\nTra loi tat ca cac truong ngon ngu tu nhien bang tieng Viet only. Khong tron cau tieng Anh vao description. Giu nguyen cac thuat ngu IT pho bien bang tieng Anh (vi du: API, endpoint, controller, service, repository, method, class, source code, Test Plan, Test Case, Unit Test, mock, assertion, branch, coverage); khong dich guong ep. Khong dich JSON key, enum value, identifier, code va file path.";
+        return "# Ngon ngu output\n"
+                + "Tra loi tat ca cac truong ngon ngu tu nhien bang tieng Viet only. "
+                + "TUYET DOI KHONG su dung bat ky chu Han / chu tieng Trung nao (vi du: KHONG dung 抛出, 异常, 返回, 如果, ...). "
+                + "Dung tu ngu tieng Viet chuan (vi du: 'nem ra', 'nem ngoai le', 'tra ve', 'neu', 'la null') hoac giu nguyen tu khoa Java bang tieng Anh (throw, return, exception). "
+                + "Khong tron cau tieng Anh vao description. "
+                + "Giu nguyen cac thuat ngu IT pho bien bang tieng Anh (vi du: API, endpoint, controller, service, repository, method, class, source code, Test Plan, Test Case, Unit Test, mock, assertion, branch, coverage); khong dich guong ep. "
+                + "Khong dich JSON key, enum value, identifier, code va file path.";
     }
 }

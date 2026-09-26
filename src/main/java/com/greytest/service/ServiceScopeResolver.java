@@ -55,6 +55,7 @@ public class ServiceScopeResolver {
         return scopes.stream()
                 .filter(scope -> scope.servicePath().equals(normalized))
                 .findFirst()
+                .or(() -> scopes.stream().filter(s -> s.servicePath().equalsIgnoreCase(normalized)).findFirst())
                 .orElseThrow(() -> new IllegalArgumentException(
                         "servicePath khong thuoc project: " + normalized + ". Gia tri hop le: "
                                 + scopes.stream().map(ServiceScope::servicePath).toList()));
@@ -76,11 +77,20 @@ public class ServiceScopeResolver {
                 .filter(javaClass -> javaClass.getClassType() == ClassType.SERVICE)
                 .map(javaClass -> modulePath(javaClass.getFilePath()))
                 .collect(java.util.stream.Collectors.toSet());
-        return classesByPath.entrySet().stream()
+        List<ServiceScope> moduleScopes = classesByPath.entrySet().stream()
                 .filter(entry -> servicePaths.contains(entry.getKey()))
                 .sorted(java.util.Map.Entry.comparingByKey())
                 .map(entry -> scope(entry.getKey(), entry.getValue()))
                 .toList();
+
+        if (moduleScopes.isEmpty() && !classesByPath.isEmpty()) {
+            return classesByPath.entrySet().stream()
+                    .sorted(java.util.Map.Entry.comparingByKey())
+                    .map(entry -> scope(entry.getKey(), entry.getValue()))
+                    .toList();
+        }
+
+        return moduleScopes;
     }
 
     public static String modulePath(String filePath) {

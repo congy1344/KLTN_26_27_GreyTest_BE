@@ -2,8 +2,13 @@ package com.greytest.service;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -276,46 +281,86 @@ public class SourceUpdateService {
             sourceUpdateItemRepository.save(item);
         }
 
+        // Xác định tập các methodKey bị xóa để cascade REMOVE xuống BR, TP, TC, UT
+        Set<String> deletedMethodKeys = impact.changedMethods().stream()
+                .filter(m -> m.diffType() == MethodDiffType.DELETED)
+                .map(MethodDiffItem::methodKey)
+                .collect(Collectors.toSet());
+
+        Set<Long> deletedRuleIds = new HashSet<>();
         for (Long ruleId : impact.affectedBusinessRuleIds()) {
+            BusinessRule rule = businessRuleRepository.findById(ruleId).orElse(null);
+            boolean isDeleted = false;
+            if (rule != null && rule.getMethodId() != null) {
+                JavaMethod m = javaMethodRepository.findById(rule.getMethodId()).orElse(null);
+                if (m != null) {
+                    JavaClass jc = m.getClassId() == null ? null : javaClassRepository.findById(m.getClassId()).orElse(null);
+                    if (jc != null) {
+                        String parameterTypes = m.getParameters() == null ? ""
+                                : m.getParameters().stream().map(param -> param.type()).collect(Collectors.joining(","));
+                        String key = jc.getQualifiedName() + "#" + m.getMethodName() + "(" + parameterTypes + ")";
+                        if (deletedMethodKeys.contains(key)) {
+                            isDeleted = true;
+                        }
+                    }
+                }
+            }
+            if (isDeleted) {
+                deletedRuleIds.add(ruleId);
+            }
             SourceUpdateItem item = new SourceUpdateItem();
             item.setSourceUpdateId(updateId);
             item.setTargetType(SourceUpdateTargetType.BUSINESS_RULE);
             item.setTargetId(ruleId);
-            item.setAction(SourceUpdateAction.UPDATE);
-            item.setReason("Quy tắc nghiệp vụ thuộc method bị thay đổi");
+            item.setAction(isDeleted ? SourceUpdateAction.REMOVE : SourceUpdateAction.UPDATE);
+            item.setReason(isDeleted ? "Quy tắc nghiệp vụ thuộc method đã bị xóa khỏi source code" : "Quy tắc nghiệp vụ thuộc method bị thay đổi");
             item.setReviewStatus(SourceUpdateReviewStatus.PENDING);
             sourceUpdateItemRepository.save(item);
         }
 
+        Set<Long> deletedPlanIds = new HashSet<>();
         for (Long planId : impact.affectedTestPlanIds()) {
+            TestPlan tp = testPlanRepository.findById(planId).orElse(null);
+            boolean isDeleted = tp != null && tp.getBusinessRuleId() != null && deletedRuleIds.contains(tp.getBusinessRuleId());
+            if (isDeleted) {
+                deletedPlanIds.add(planId);
+            }
             SourceUpdateItem item = new SourceUpdateItem();
             item.setSourceUpdateId(updateId);
             item.setTargetType(SourceUpdateTargetType.TEST_PLAN);
             item.setTargetId(planId);
-            item.setAction(SourceUpdateAction.UPDATE);
-            item.setReason("Test Plan thuộc Business Rule bị thay đổi");
+            item.setAction(isDeleted ? SourceUpdateAction.REMOVE : SourceUpdateAction.UPDATE);
+            item.setReason(isDeleted ? "Test Plan thuộc Business Rule đã bị xóa" : "Test Plan thuộc Business Rule bị thay đổi");
             item.setReviewStatus(SourceUpdateReviewStatus.PENDING);
             sourceUpdateItemRepository.save(item);
         }
 
+        Set<Long> deletedCaseIds = new HashSet<>();
         for (Long caseId : impact.affectedTestCaseIds()) {
+            TestCase tc = testCaseRepository.findById(caseId).orElse(null);
+            boolean isDeleted = tc != null && tc.getTestPlanId() != null && deletedPlanIds.contains(tc.getTestPlanId());
+            if (isDeleted) {
+                deletedCaseIds.add(caseId);
+            }
             SourceUpdateItem item = new SourceUpdateItem();
             item.setSourceUpdateId(updateId);
             item.setTargetType(SourceUpdateTargetType.TEST_CASE);
             item.setTargetId(caseId);
-            item.setAction(SourceUpdateAction.UPDATE);
-            item.setReason("Test Case thuộc Test Plan bị thay đổi");
+            item.setAction(isDeleted ? SourceUpdateAction.REMOVE : SourceUpdateAction.UPDATE);
+            item.setReason(isDeleted ? "Test Case thuộc Test Plan đã bị xóa" : "Test Case thuộc Test Plan bị thay đổi");
             item.setReviewStatus(SourceUpdateReviewStatus.PENDING);
             sourceUpdateItemRepository.save(item);
         }
 
         for (Long unitTestId : impact.affectedUnitTestIds()) {
+            UnitTest ut = unitTestRepository.findById(unitTestId).orElse(null);
+            boolean isDeleted = ut != null && ut.getTestCaseId() != null && deletedCaseIds.contains(ut.getTestCaseId());
             SourceUpdateItem item = new SourceUpdateItem();
             item.setSourceUpdateId(updateId);
             item.setTargetType(SourceUpdateTargetType.UNIT_TEST);
             item.setTargetId(unitTestId);
-            item.setAction(SourceUpdateAction.UPDATE);
-            item.setReason("Unit Test thuộc Test Case bị thay đổi");
+            item.setAction(isDeleted ? SourceUpdateAction.REMOVE : SourceUpdateAction.UPDATE);
+            item.setReason(isDeleted ? "Unit Test thuộc Test Case đã bị xóa" : "Unit Test thuộc Test Case bị thay đổi");
             item.setReviewStatus(SourceUpdateReviewStatus.PENDING);
             sourceUpdateItemRepository.save(item);
         }
@@ -432,194 +477,259 @@ public class SourceUpdateService {
         project.setActiveSourceUpdateId(null);
         projectRepository.save(project);
 
-        // 2. Duyệt các item đề xuất và áp dụng vào DB
         int nextBrNumber = nextBusinessRuleNumber(projectId);
         int nextTpNumber = nextTestPlanNumber(projectId);
         int nextTestCaseNumber = nextTestCaseNumber(projectId);
 
+        // Phase 1: Xóa các mục REMOVE theo thứ tự từ dưới lên (UNIT_TEST -> TEST_CASE -> TEST_PLAN -> BUSINESS_RULE -> METHOD)
+        // để tránh vi phạm foreign key constraints của PostgreSQL.
         for (SourceUpdateItem item : items) {
-            if (item.getReviewStatus() == SourceUpdateReviewStatus.REJECTED) {
+            if (item.getAction() != SourceUpdateAction.REMOVE
+                    || (item.getReviewStatus() != SourceUpdateReviewStatus.ACCEPTED && item.getReviewStatus() != SourceUpdateReviewStatus.MODIFIED)) {
                 continue;
             }
+            if (item.getTargetType() == SourceUpdateTargetType.UNIT_TEST && item.getTargetId() != null) {
+                unitTestRepository.deleteById(item.getTargetId());
+            }
+        }
 
+        for (SourceUpdateItem item : items) {
+            if (item.getAction() != SourceUpdateAction.REMOVE
+                    || (item.getReviewStatus() != SourceUpdateReviewStatus.ACCEPTED && item.getReviewStatus() != SourceUpdateReviewStatus.MODIFIED)) {
+                continue;
+            }
+            if (item.getTargetType() == SourceUpdateTargetType.TEST_CASE && item.getTargetId() != null) {
+                UnitTest ut = unitTestRepository.findByTestCaseId(item.getTargetId());
+                if (ut != null) {
+                    unitTestRepository.delete(ut);
+                }
+                testCaseRepository.deleteById(item.getTargetId());
+            }
+        }
+
+        for (SourceUpdateItem item : items) {
+            if (item.getAction() != SourceUpdateAction.REMOVE
+                    || (item.getReviewStatus() != SourceUpdateReviewStatus.ACCEPTED && item.getReviewStatus() != SourceUpdateReviewStatus.MODIFIED)) {
+                continue;
+            }
+            if (item.getTargetType() == SourceUpdateTargetType.TEST_PLAN && item.getTargetId() != null) {
+                testPlanRepository.deleteById(item.getTargetId());
+            }
+        }
+
+        for (SourceUpdateItem item : items) {
+            if (item.getAction() != SourceUpdateAction.REMOVE
+                    || (item.getReviewStatus() != SourceUpdateReviewStatus.ACCEPTED && item.getReviewStatus() != SourceUpdateReviewStatus.MODIFIED)) {
+                continue;
+            }
+            if (item.getTargetType() == SourceUpdateTargetType.BUSINESS_RULE && item.getTargetId() != null) {
+                businessRuleRepository.deleteById(item.getTargetId());
+            }
+        }
+
+        for (SourceUpdateItem item : items) {
+            if (item.getAction() == SourceUpdateAction.REMOVE && item.getTargetType() == SourceUpdateTargetType.METHOD) {
+                applyMethodUpdate(projectId, item);
+            }
+        }
+
+        // Phase 2: Áp dụng CREATE và UPDATE theo thứ tự từ trên xuống (METHOD -> BR -> TP -> TC -> UT)
+        // và ánh xạ ID thật giữa các thực thể cha - con mới được tạo.
+        Map<Long, Long> ruleIdMap = new HashMap<>();
+        Map<Long, Long> planIdMap = new HashMap<>();
+        Map<Long, Long> caseIdMap = new HashMap<>();
+
+        for (SourceUpdateItem item : items) {
+            if (item.getAction() != SourceUpdateAction.REMOVE && item.getTargetType() == SourceUpdateTargetType.METHOD) {
+                applyMethodUpdate(projectId, item);
+            }
+        }
+
+        for (SourceUpdateItem item : items) {
+            if (item.getReviewStatus() == SourceUpdateReviewStatus.REJECTED || item.getAction() == SourceUpdateAction.REMOVE) {
+                continue;
+            }
             if (item.getTargetType() == SourceUpdateTargetType.BUSINESS_RULE) {
-                if (item.getAction() == SourceUpdateAction.REMOVE && item.getTargetId() != null) {
-                    if (item.getReviewStatus() == SourceUpdateReviewStatus.ACCEPTED || item.getReviewStatus() == SourceUpdateReviewStatus.MODIFIED) {
-                        businessRuleRepository.deleteById(item.getTargetId());
-                    }
-                } else if (item.getAction() == SourceUpdateAction.UPDATE || item.getAction() == SourceUpdateAction.CREATE) {
-                    if (item.getAfterData() != null) {
-                        try {
-                            GeneratedBusinessRuleDto dto = objectMapper.readValue(item.getAfterData(), GeneratedBusinessRuleDto.class);
-                            if (item.getTargetId() != null) {
-                                businessRuleRepository.findById(item.getTargetId()).ifPresent(rule -> {
-                                    rule.setDescription(dto.description());
-                                    rule.setStatus(ReviewStatus.APPROVED);
-                                    rule.setIsModified(false);
-                                    businessRuleRepository.save(rule);
-                                });
-                            } else {
-                                BusinessRule rule = new BusinessRule();
-                                rule.setProjectId(projectId);
-                                rule.setMethodId(dto.methodId());
-                                rule.setRuleCode(String.format("BR-%03d", nextBrNumber++));
+                if (item.getAfterData() != null) {
+                    try {
+                        GeneratedBusinessRuleDto dto = objectMapper.readValue(item.getAfterData(), GeneratedBusinessRuleDto.class);
+                        if (item.getTargetId() != null && item.getAction() == SourceUpdateAction.UPDATE) {
+                            businessRuleRepository.findById(item.getTargetId()).ifPresent(rule -> {
                                 rule.setDescription(dto.description());
-                                rule.setSource(RuleSource.AI_GENERATED);
                                 rule.setStatus(ReviewStatus.APPROVED);
                                 rule.setIsModified(false);
                                 businessRuleRepository.save(rule);
-                            }
-                        } catch (Exception e) {
-                            throw new IllegalStateException("Không thể áp dụng BusinessRule item " + item.getId(), e);
-                        }
-                    } else if (item.getTargetId() != null && item.getAction() == SourceUpdateAction.UPDATE) {
-                        businessRuleRepository.findById(item.getTargetId()).ifPresent(rule -> {
-                            rule.setIsModified(true);
-                            businessRuleRepository.save(rule);
-                        });
-                    }
-                }
-            } else if (item.getTargetType() == SourceUpdateTargetType.TEST_PLAN) {
-                if (item.getAction() == SourceUpdateAction.REMOVE && item.getTargetId() != null) {
-                    if (item.getReviewStatus() == SourceUpdateReviewStatus.ACCEPTED || item.getReviewStatus() == SourceUpdateReviewStatus.MODIFIED) {
-                        testPlanRepository.deleteById(item.getTargetId());
-                    }
-                } else if (item.getAction() == SourceUpdateAction.UPDATE || item.getAction() == SourceUpdateAction.CREATE) {
-                    if (item.getAfterData() != null) {
-                        try {
-                            GeneratedTestPlanDto dto = objectMapper.readValue(item.getAfterData(), GeneratedTestPlanDto.class);
+                                ruleIdMap.put(item.getTargetId(), rule.getId());
+                            });
+                        } else {
+                            BusinessRule rule = new BusinessRule();
+                            rule.setProjectId(projectId);
+                            rule.setMethodId(dto.methodId());
+                            rule.setRuleCode(String.format("BR-%03d", nextBrNumber++));
+                            rule.setDescription(dto.description());
+                            rule.setSource(RuleSource.AI_GENERATED);
+                            rule.setStatus(ReviewStatus.APPROVED);
+                            rule.setIsModified(false);
+                            rule = businessRuleRepository.save(rule);
                             if (item.getTargetId() != null) {
-                                testPlanRepository.findById(item.getTargetId()).ifPresent(plan -> {
-                                    plan.setTitle(dto.title());
-                                    plan.setDescription(dto.description());
-                                    plan.setStatus(ReviewStatus.APPROVED);
-                                    plan.setIsModified(false);
-                                    testPlanRepository.save(plan);
-                                });
-                            } else {
-                                TestPlan plan = new TestPlan();
-                                plan.setProjectId(projectId);
-                                plan.setBusinessRuleId(dto.ruleId());
-                                plan.setPlanCode(String.format("TP-%03d", nextTpNumber++));
+                                ruleIdMap.put(item.getTargetId(), rule.getId());
+                            }
+                        }
+                    } catch (Exception e) {
+                        throw new IllegalStateException("Không thể áp dụng BusinessRule item " + item.getId(), e);
+                    }
+                } else if (item.getTargetId() != null && item.getAction() == SourceUpdateAction.UPDATE) {
+                    businessRuleRepository.findById(item.getTargetId()).ifPresent(rule -> {
+                        rule.setIsModified(false);
+                        businessRuleRepository.save(rule);
+                    });
+                }
+            }
+        }
+
+        for (SourceUpdateItem item : items) {
+            if (item.getReviewStatus() == SourceUpdateReviewStatus.REJECTED || item.getAction() == SourceUpdateAction.REMOVE) {
+                continue;
+            }
+            if (item.getTargetType() == SourceUpdateTargetType.TEST_PLAN) {
+                if (item.getAfterData() != null) {
+                    try {
+                        GeneratedTestPlanDto dto = objectMapper.readValue(item.getAfterData(), GeneratedTestPlanDto.class);
+                        Long targetRuleId = ruleIdMap.getOrDefault(dto.ruleId(), dto.ruleId());
+                        if (item.getTargetId() != null && item.getAction() == SourceUpdateAction.UPDATE) {
+                            testPlanRepository.findById(item.getTargetId()).ifPresent(plan -> {
                                 plan.setTitle(dto.title());
                                 plan.setDescription(dto.description());
-                                plan.setTestType(TestType.valueOf(dto.testType()));
+                                plan.setBusinessRuleId(targetRuleId);
                                 plan.setStatus(ReviewStatus.APPROVED);
                                 plan.setIsModified(false);
                                 testPlanRepository.save(plan);
-                            }
-                        } catch (Exception e) {
-                            throw new IllegalStateException("Không thể áp dụng TestPlan item " + item.getId(), e);
-                        }
-                    } else if (item.getTargetId() != null && item.getAction() == SourceUpdateAction.UPDATE) {
-                        testPlanRepository.findById(item.getTargetId()).ifPresent(plan -> {
+                                planIdMap.put(item.getTargetId(), plan.getId());
+                            });
+                        } else {
+                            TestPlan plan = new TestPlan();
+                            plan.setProjectId(projectId);
+                            plan.setBusinessRuleId(targetRuleId);
+                            plan.setPlanCode(String.format("TP-%03d", nextTpNumber++));
+                            plan.setTitle(dto.title());
+                            plan.setDescription(dto.description());
+                            plan.setTestType(TestType.valueOf(dto.testType()));
+                            plan.setStatus(ReviewStatus.APPROVED);
                             plan.setIsModified(false);
-                            testPlanRepository.save(plan);
-                        });
-                    }
-                }
-            } else if (item.getTargetType() == SourceUpdateTargetType.TEST_CASE) {
-                if (item.getAction() == SourceUpdateAction.REMOVE && item.getTargetId() != null) {
-                    if (item.getReviewStatus() == SourceUpdateReviewStatus.ACCEPTED || item.getReviewStatus() == SourceUpdateReviewStatus.MODIFIED) {
-                        UnitTest ut = unitTestRepository.findByTestCaseId(item.getTargetId());
-                        if (ut != null) {
-                            unitTestRepository.delete(ut);
-                        }
-                        testCaseRepository.deleteById(item.getTargetId());
-                    }
-                } else if (item.getAction() == SourceUpdateAction.UPDATE || item.getAction() == SourceUpdateAction.CREATE) {
-                    if (item.getAfterData() != null) {
-                        try {
-                            GeneratedTestCaseDto dto = objectMapper.readValue(item.getAfterData(), GeneratedTestCaseDto.class);
+                            plan = testPlanRepository.save(plan);
                             if (item.getTargetId() != null) {
-                                testCaseRepository.findById(item.getTargetId()).ifPresent(tc -> {
-                                    tc.setDescription(dto.description());
-                                    tc.setPreconditions(dto.preconditions());
-                                    tc.setTestData(dto.testData());
-                                    tc.setExpectedResult(dto.expectedResult());
-                                    tc.setPriority(Priority.valueOf(dto.priority()));
-                                    tc.setStatus(ReviewStatus.APPROVED);
-                                    tc.setIsModified(false);
-                                    testCaseRepository.save(tc);
-                                });
-                            } else {
-                                TestCase tc = new TestCase();
-                                tc.setTestPlanId(dto.planId());
-                                tc.setCaseCode(String.format("TC-%03d", nextTestCaseNumber++));
-                                tc.setTestType(TestType.valueOf(dto.testType()));
+                                planIdMap.put(item.getTargetId(), plan.getId());
+                            }
+                        }
+                    } catch (Exception e) {
+                        throw new IllegalStateException("Không thể áp dụng TestPlan item " + item.getId(), e);
+                    }
+                } else if (item.getTargetId() != null && item.getAction() == SourceUpdateAction.UPDATE) {
+                    testPlanRepository.findById(item.getTargetId()).ifPresent(plan -> {
+                        plan.setIsModified(false);
+                        testPlanRepository.save(plan);
+                    });
+                }
+            }
+        }
+
+        for (SourceUpdateItem item : items) {
+            if (item.getReviewStatus() == SourceUpdateReviewStatus.REJECTED || item.getAction() == SourceUpdateAction.REMOVE) {
+                continue;
+            }
+            if (item.getTargetType() == SourceUpdateTargetType.TEST_CASE) {
+                if (item.getAfterData() != null) {
+                    try {
+                        GeneratedTestCaseDto dto = objectMapper.readValue(item.getAfterData(), GeneratedTestCaseDto.class);
+                        Long targetPlanId = planIdMap.getOrDefault(dto.planId(), dto.planId());
+                        if (item.getTargetId() != null && item.getAction() == SourceUpdateAction.UPDATE) {
+                            testCaseRepository.findById(item.getTargetId()).ifPresent(tc -> {
                                 tc.setDescription(dto.description());
                                 tc.setPreconditions(dto.preconditions());
                                 tc.setTestData(dto.testData());
                                 tc.setExpectedResult(dto.expectedResult());
                                 tc.setPriority(Priority.valueOf(dto.priority()));
-                                tc.setTraceSource(dto.traceSource());
+                                tc.setTestPlanId(targetPlanId);
                                 tc.setStatus(ReviewStatus.APPROVED);
                                 tc.setIsModified(false);
                                 testCaseRepository.save(tc);
-                            }
-                        } catch (Exception e) {
-                            throw new IllegalStateException("Không thể áp dụng TestCase item " + item.getId(), e);
-                        }
-                    } else if (item.getTargetId() != null && item.getAction() == SourceUpdateAction.UPDATE) {
-                        testCaseRepository.findById(item.getTargetId()).ifPresent(tc -> {
-                            tc.setIsModified(true);
-                            testCaseRepository.save(tc);
-                        });
-                    }
-                }
-            } else if (item.getTargetType() == SourceUpdateTargetType.UNIT_TEST) {
-                if (item.getAction() == SourceUpdateAction.REMOVE && item.getTargetId() != null) {
-                    if (item.getReviewStatus() == SourceUpdateReviewStatus.ACCEPTED || item.getReviewStatus() == SourceUpdateReviewStatus.MODIFIED) {
-                        unitTestRepository.deleteById(item.getTargetId());
-                    }
-                } else if (item.getAction() == SourceUpdateAction.UPDATE || item.getAction() == SourceUpdateAction.CREATE) {
-                    if (item.getAfterData() != null) {
-                        try {
-                            GeneratedUnitTestDto dto = objectMapper.readValue(item.getAfterData(), GeneratedUnitTestDto.class);
-                            ensureTestCaseBelongsToProject(dto.caseId(), projectId);
+                                caseIdMap.put(item.getTargetId(), tc.getId());
+                            });
+                        } else {
+                            TestCase tc = new TestCase();
+                            tc.setTestPlanId(targetPlanId);
+                            tc.setCaseCode(String.format("TC-%03d", nextTestCaseNumber++));
+                            tc.setTestType(TestType.valueOf(dto.testType()));
+                            tc.setDescription(dto.description());
+                            tc.setPreconditions(dto.preconditions());
+                            tc.setTestData(dto.testData());
+                            tc.setExpectedResult(dto.expectedResult());
+                            tc.setPriority(Priority.valueOf(dto.priority()));
+                            tc.setTraceSource(dto.traceSource());
+                            tc.setStatus(ReviewStatus.APPROVED);
+                            tc.setIsModified(false);
+                            tc = testCaseRepository.save(tc);
                             if (item.getTargetId() != null) {
-                                UnitTest ut = unitTestRepository.findById(item.getTargetId())
-                                        .orElseThrow(() -> new IllegalArgumentException(
-                                                "Không tìm thấy Unit Test " + item.getTargetId()));
-                                if (!Objects.equals(ut.getTestCaseId(), dto.caseId())) {
-                                    throw new IllegalArgumentException("Unit Test không thuộc Test Case được cập nhật");
-                                }
-                                String genType = (dto.generationType() != null && !dto.generationType().isBlank())
-                                        ? dto.generationType()
-                                        : "INCREMENTAL";
-                                ut.setSourceCode(normalizeUnitTestSource(dto));
-                                ut.setTestClassName(dto.testClassName());
-                                ut.setTestMethodName(dto.testMethodName());
-                                ut.setPackageName(dto.packageName());
-                                ut.setGenerationType(genType);
-                                ut.setFilePath(unitTestFilePath(dto.packageName(), dto.testClassName()));
-                                unitTestRepository.save(ut);
-                            } else {
-                                UnitTest ut = new UnitTest();
-                                String genType = (dto.generationType() != null && !dto.generationType().isBlank())
-                                        ? dto.generationType()
-                                        : "INCREMENTAL";
-                                ut.setTestCaseId(dto.caseId());
-                                ut.setTestClassName(dto.testClassName());
-                                ut.setTestMethodName(dto.testMethodName());
-                                ut.setPackageName(dto.packageName());
-                                ut.setGenerationType(genType);
-                                ut.setSourceCode(normalizeUnitTestSource(dto));
-                                ut.setFilePath(unitTestFilePath(dto.packageName(), dto.testClassName()));
-                                unitTestRepository.save(ut);
+                                caseIdMap.put(item.getTargetId(), tc.getId());
                             }
-                        } catch (Exception e) {
-                            throw new IllegalStateException("Không thể áp dụng UnitTest item " + item.getId(), e);
                         }
-                    } else if (item.getTargetId() != null && item.getAction() == SourceUpdateAction.UPDATE) {
-                        unitTestRepository.findById(item.getTargetId()).ifPresent(ut -> {
-                            ut.setGenerationType("INCREMENTAL");
-                            unitTestRepository.save(ut);
-                        });
+                    } catch (Exception e) {
+                        throw new IllegalStateException("Không thể áp dụng TestCase item " + item.getId(), e);
                     }
+                } else if (item.getTargetId() != null && item.getAction() == SourceUpdateAction.UPDATE) {
+                    testCaseRepository.findById(item.getTargetId()).ifPresent(tc -> {
+                        tc.setIsModified(false);
+                        testCaseRepository.save(tc);
+                    });
                 }
-            } else if (item.getTargetType() == SourceUpdateTargetType.METHOD) {
-                applyMethodUpdate(projectId, item);
+            }
+        }
+
+        for (SourceUpdateItem item : items) {
+            if (item.getReviewStatus() == SourceUpdateReviewStatus.REJECTED || item.getAction() == SourceUpdateAction.REMOVE) {
+                continue;
+            }
+            if (item.getTargetType() == SourceUpdateTargetType.UNIT_TEST) {
+                if (item.getAfterData() != null) {
+                    try {
+                        GeneratedUnitTestDto dto = objectMapper.readValue(item.getAfterData(), GeneratedUnitTestDto.class);
+                        Long targetCaseId = caseIdMap.getOrDefault(dto.caseId(), dto.caseId());
+                        ensureTestCaseBelongsToProject(targetCaseId, projectId);
+                        String genType = (dto.generationType() != null && !dto.generationType().isBlank())
+                                ? dto.generationType()
+                                : "INCREMENTAL";
+                        if (item.getTargetId() != null && item.getAction() == SourceUpdateAction.UPDATE) {
+                            UnitTest ut = unitTestRepository.findById(item.getTargetId())
+                                    .orElseThrow(() -> new IllegalArgumentException(
+                                            "Không tìm thấy Unit Test " + item.getTargetId()));
+                            ut.setTestCaseId(targetCaseId);
+                            ut.setSourceCode(normalizeUnitTestSource(dto));
+                            ut.setTestClassName(dto.testClassName());
+                            ut.setTestMethodName(dto.testMethodName());
+                            ut.setPackageName(dto.packageName());
+                            ut.setGenerationType(genType);
+                            ut.setFilePath(unitTestFilePath(dto.packageName(), dto.testClassName()));
+                            unitTestRepository.save(ut);
+                        } else {
+                            UnitTest ut = new UnitTest();
+                            ut.setTestCaseId(targetCaseId);
+                            ut.setTestClassName(dto.testClassName());
+                            ut.setTestMethodName(dto.testMethodName());
+                            ut.setPackageName(dto.packageName());
+                            ut.setGenerationType(genType);
+                            ut.setSourceCode(normalizeUnitTestSource(dto));
+                            ut.setFilePath(unitTestFilePath(dto.packageName(), dto.testClassName()));
+                            unitTestRepository.save(ut);
+                        }
+                    } catch (Exception e) {
+                        throw new IllegalStateException("Không thể áp dụng UnitTest item " + item.getId(), e);
+                    }
+                } else if (item.getTargetId() != null && item.getAction() == SourceUpdateAction.UPDATE) {
+                    unitTestRepository.findById(item.getTargetId()).ifPresent(ut -> {
+                        ut.setGenerationType("INCREMENTAL");
+                        unitTestRepository.save(ut);
+                    });
+                }
             }
         }
 
@@ -761,8 +871,37 @@ public class SourceUpdateService {
         update.setStatus(SourceUpdateStatus.CANCELLED);
         sourceUpdateRepository.save(update);
 
-        // Hoàn tác các thay đổi tạm thời đối với JavaMethod/JavaClass nếu có
-        for (SourceUpdateItem item : sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId)) {
+        // Hoàn tác các thay đổi tạm thời đối với UT, TC, TP, BR, JavaMethod/JavaClass nếu có
+        List<SourceUpdateItem> items = sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId);
+        for (SourceUpdateItem item : items) {
+            if (item.getAction() == SourceUpdateAction.CREATE && item.getTargetId() != null) {
+                if (item.getTargetType() == SourceUpdateTargetType.UNIT_TEST) {
+                    unitTestRepository.deleteById(item.getTargetId());
+                }
+            }
+        }
+        for (SourceUpdateItem item : items) {
+            if (item.getAction() == SourceUpdateAction.CREATE && item.getTargetId() != null) {
+                if (item.getTargetType() == SourceUpdateTargetType.TEST_CASE) {
+                    testCaseRepository.deleteById(item.getTargetId());
+                }
+            }
+        }
+        for (SourceUpdateItem item : items) {
+            if (item.getAction() == SourceUpdateAction.CREATE && item.getTargetId() != null) {
+                if (item.getTargetType() == SourceUpdateTargetType.TEST_PLAN) {
+                    testPlanRepository.deleteById(item.getTargetId());
+                }
+            }
+        }
+        for (SourceUpdateItem item : items) {
+            if (item.getAction() == SourceUpdateAction.CREATE && item.getTargetId() != null) {
+                if (item.getTargetType() == SourceUpdateTargetType.BUSINESS_RULE) {
+                    businessRuleRepository.deleteById(item.getTargetId());
+                }
+            }
+        }
+        for (SourceUpdateItem item : items) {
             if (item.getTargetType() == SourceUpdateTargetType.METHOD) {
                 revertMethodUpdate(projectId, item);
             }

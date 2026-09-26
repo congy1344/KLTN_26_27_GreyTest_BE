@@ -79,11 +79,50 @@ class ServiceScopeResolverTest {
         assertThat(resolver.resolve(7L, "./auth-service/").servicePath()).isEqualTo("auth-service");
     }
 
+    @Test
+    void keepsSingleScopeForMonolithicProjectWithMultipleServiceClasses() {
+        JavaClass doctorClass = javaClass(1L, "src/main/java/com/example/DoctorService.java");
+        doctorClass.setClassName("DoctorService");
+        JavaClass patientClass = javaClass(2L, "src/main/java/com/example/PatientService.java");
+        patientClass.setClassName("PatientService");
+        JavaMethod doctorMethod = javaMethod(11L, 1L);
+        JavaMethod patientMethod = javaMethod(22L, 2L);
+
+        when(projects.existsById(7L)).thenReturn(true);
+        when(classes.findByProjectId(7L)).thenReturn(List.of(doctorClass, patientClass));
+        when(methods.findByClassIdIn(org.mockito.ArgumentMatchers.anyList()))
+                .thenReturn(List.of(doctorMethod, patientMethod));
+
+        var scopes = resolver.listScopes(7L);
+
+        assertThat(scopes).extracting(ServiceScopeResolver.ServiceScope::servicePath)
+                .containsExactly(".");
+        assertThat(scopes.get(0).methodIds()).containsExactlyInAnyOrder(11L, 22L);
+    }
+
+    @Test
+    void keepsSingleScopeWhenOnlyOneServiceClassExistsInSingleModule() {
+        JavaClass userClass = javaClass(1L, "src/main/java/com/example/UserService.java");
+        userClass.setClassName("UserService");
+        JavaMethod userMethod = javaMethod(11L, 1L);
+
+        when(projects.existsById(7L)).thenReturn(true);
+        when(classes.findByProjectId(7L)).thenReturn(List.of(userClass));
+        when(methods.findByClassIdIn(List.of(1L))).thenReturn(List.of(userMethod));
+
+        var scopes = resolver.listScopes(7L);
+
+        assertThat(scopes).extracting(ServiceScopeResolver.ServiceScope::servicePath)
+                .containsExactly(".");
+        assertThat(scopes.get(0).methodIds()).containsExactly(11L);
+    }
+
     private JavaClass javaClass(Long id, String filePath) {
         JavaClass javaClass = new JavaClass();
         javaClass.setId(id);
         javaClass.setProjectId(7L);
         javaClass.setFilePath(filePath);
+        javaClass.setClassName(filePath.substring(filePath.lastIndexOf('/') + 1).replace(".java", ""));
         javaClass.setClassType(ClassType.SERVICE);
         return javaClass;
     }

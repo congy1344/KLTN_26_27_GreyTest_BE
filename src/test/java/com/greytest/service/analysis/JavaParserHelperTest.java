@@ -212,4 +212,34 @@ class JavaParserHelperTest {
                         com.greytest.entity.enums.HttpMethod.POST,
                         com.greytest.entity.enums.HttpMethod.HEAD);
     }
+
+    @Test
+    void stripsCommentsFromMethodSource(@TempDir Path sourceDir) throws IOException {
+        Files.writeString(sourceDir.resolve("CommentedService.java"), """
+                package demo;
+
+                class CommentedService {
+                    /** Javadoc note */
+                    public void process(int value) {
+                        // Single line note: check threshold
+                        /* Block comment note */
+                        if (value > 100) {
+                            throw new IllegalArgumentException();
+                        }
+                    }
+                }
+                """);
+
+        ParsedFile parsedFile = parser.parseDirectory(sourceDir).get(0);
+        ClassOrInterfaceDeclaration declaration = parser.findClasses(parsedFile.compilationUnit()).get(0);
+        List<ExtractedMethod> methods = parser.extractMethods(declaration);
+
+        assertThat(methods).hasSize(1);
+        String source = methods.get(0).sourceCode();
+        assertThat(source).doesNotContain("Javadoc note")
+                .doesNotContain("Single line note")
+                .doesNotContain("Block comment note")
+                .contains("if (value > 100)")
+                .contains("throw new IllegalArgumentException();");
+    }
 }

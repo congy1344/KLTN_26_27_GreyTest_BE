@@ -101,9 +101,9 @@ class TestCaseServiceTest {
 
         assertThat(result).hasSize(11);
         ArgumentCaptor<Set<Long>> batches = ArgumentCaptor.forClass(Set.class);
-        verify(ai, org.mockito.Mockito.times(3)).generateTestCases(
+        verify(ai, org.mockito.Mockito.times(2)).generateTestCases(
                 org.mockito.ArgumentMatchers.eq(1L), batches.capture());
-        assertThat(batches.getAllValues()).extracting(Set::size).containsExactly(5, 5, 1);
+        assertThat(batches.getAllValues()).extracting(Set::size).containsExactly(8, 3);
         assertThat(batches.getAllValues().stream().flatMap(Set::stream))
                 .containsExactlyInAnyOrderElementsOf(LongStream.rangeClosed(1, 11).boxed().toList());
     }
@@ -217,13 +217,14 @@ class TestCaseServiceTest {
     @Test
     void generateDoesNotPersistWhenALateBatchFails() {
         project(ProjectStatus.PLAN_APPROVED);
-        List<TestPlan> approvedPlans = LongStream.rangeClosed(1, 6)
+        int firstBatchSize = com.greytest.service.agent.GenerationContextBuilder.MAX_TEST_CASE_PLANS;
+        List<TestPlan> approvedPlans = LongStream.rangeClosed(1, firstBatchSize + 1)
                 .mapToObj(id -> {
                     TestPlan plan = new TestPlan();
                     plan.setId(id);
                     plan.setProjectId(1L);
                     plan.setStatus(ReviewStatus.APPROVED);
-                    if (id <= 5) {
+                    if (id <= firstBatchSize) {
                         when(plans.existsById(id)).thenReturn(true);
                         when(plans.findById(id)).thenReturn(Optional.of(plan));
                     }
