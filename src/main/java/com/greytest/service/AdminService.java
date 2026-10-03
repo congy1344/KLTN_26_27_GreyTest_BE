@@ -1,6 +1,10 @@
 package com.greytest.service;
 
+import java.time.Instant;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -27,6 +31,7 @@ import com.greytest.entity.UsageQuota;
 import com.greytest.entity.UserActivityLog;
 import com.greytest.entity.enums.ActivityAction;
 import com.greytest.entity.enums.UserRole;
+import com.greytest.entity.enums.UserTier;
 import com.greytest.exception.AuthException;
 import com.greytest.repository.AuthUserRepository;
 import com.greytest.repository.ProjectRepository;
@@ -38,7 +43,8 @@ import com.greytest.repository.UserActivityLogRepository;
 @Service
 public class AdminService {
 
-    private static final Set<String> USER_SORTS = Set.of("email", "createdAt", "role", "enabled");
+    private static final Set<String> DATABASE_USER_SORTS = Set.of("email", "createdAt", "role", "enabled", "tier");
+    private static final Set<String> COMPUTED_USER_SORTS = Set.of("totalGenerationRequests", "lastActivityAt", "quota", "quotaUsed");
     private static final List<ActivityAction> GENERATION_ACTIONS = List.of(
             ActivityAction.GENERATE_BUSINESS_RULE,
             ActivityAction.GENERATE_TEST_PLAN,
@@ -74,8 +80,39 @@ public class AdminService {
     @Transactional
     public PageDto<UserSummaryDto> listUsers(
             String search, UserRole role, Boolean enabled, int page, int size, String sort, String direction) {
-        String sortField = USER_SORTS.contains(sort) ? sort : "createdAt";
-        Sort.Direction sortDirection = "asc".equalsIgnoreCase(direction) ? Sort.Direction.ASC : Sort.Direction.DESC;
+        boolean isDesc = "desc".equalsIgnoreCase(direction);
+
+        if (COMPUTED_USER_SORTS.contains(sort)) {
+            List<AuthUser> allFiltered = users.findAll(userFilter(search, role, enabled));
+            List<UserSummaryDto> content = new ArrayList<>(allFiltered.stream().map(this::summary).toList());
+
+            Comparator<UserSummaryDto> comparator;
+            if ("totalGenerationRequests".equalsIgnoreCase(sort)) {
+                comparator = Comparator.comparingLong(UserSummaryDto::totalGenerationRequests);
+                if (isDesc) comparator = comparator.reversed();
+            } else if ("lastActivityAt".equalsIgnoreCase(sort)) {
+                Comparator<Instant> instantComparator = isDesc
+                        ? Comparator.nullsLast(Comparator.reverseOrder())
+                        : Comparator.nullsLast(Comparator.naturalOrder());
+                comparator = Comparator.comparing(UserSummaryDto::lastActivityAt, instantComparator);
+            } else { // "quota" hoặc "quotaUsed"
+                comparator = Comparator.comparingInt(u -> u.quota() != null ? u.quota().used() : 0);
+                if (isDesc) comparator = comparator.reversed();
+            }
+            content.sort(comparator);
+
+            int totalElements = content.size();
+            int safePage = Math.max(page, 0);
+            int safeSize = Math.min(Math.max(size, 1), 100);
+            int totalPages = totalElements == 0 ? 1 : (int) Math.ceil((double) totalElements / safeSize);
+            int fromIndex = Math.min(safePage * safeSize, totalElements);
+            int toIndex = Math.min(fromIndex + safeSize, totalElements);
+            List<UserSummaryDto> pageContent = content.subList(fromIndex, toIndex);
+            return new PageDto<>(pageContent, safePage, safeSize, totalElements, totalPages);
+        }
+
+        String sortField = DATABASE_USER_SORTS.contains(sort) ? sort : "createdAt";
+        Sort.Direction sortDirection = isDesc ? Sort.Direction.DESC : Sort.Direction.ASC;
         PageRequest pageable = PageRequest.of(Math.max(page, 0), Math.min(Math.max(size, 1), 100),
                 Sort.by(sortDirection, sortField));
         Page<AuthUser> result = users.findAll(userFilter(search, role, enabled), pageable);
@@ -97,15 +134,26 @@ public class AdminService {
     }
 
     @Transactional
-    public UserSummaryDto updateStatus(AuthUser admin, Long userId, boolean enabled) {
+    public UserSummaryDto updateStatus(AuthUser admin, Long userId, boolean enabled, String reason) {
+        // Khóa chung trước khi đọc target để request đồng thời không dùng trạng thái admin cũ.
+        List<AuthUser> enabledAdmins = users.findEnabledAdminsForUpdate();
+        AuthUser user = requireUser(userId);
         if (admin.getId().equals(userId) && !enabled) {
             throw new IllegalArgumentException("Admin không thể tự khóa tài khoản đang đăng nhập");
         }
-        AuthUser user = requireUser(userId);
+        if (!enabled && (reason == null || reason.isBlank())) {
+            throw new IllegalArgumentException("Cần nhập lý do khi khóa tài khoản");
+        }
+        // Luôn giữ ít nhất một admin hoạt động để quản trị hệ thống.
+        if (!enabled && isLastEnabledAdmin(user, enabledAdmins)) {
+            throw new IllegalArgumentException("Không thể khóa admin đang hoạt động cuối cùng");
+        }
+        boolean previousEnabled = Boolean.TRUE.equals(user.getEnabled());
         user.setEnabled(enabled);
         users.save(user);
         activityService.record(admin.getId(), ActivityAction.ADMIN_STATUS_CHANGE, null,
-                Map.of("targetUserId", userId, "enabled", enabled));
+                Map.of("targetUserId", userId, "previousEnabled", previousEnabled,
+                        "newEnabled", enabled, "reason", reason == null ? "" : reason.trim()));
         return summary(user);
     }
 
@@ -114,20 +162,46 @@ public class AdminService {
         if (admin.getId().equals(userId) && role != UserRole.ADMIN) {
             throw new IllegalArgumentException("Admin không thể tự hạ quyền tài khoản đang đăng nhập");
         }
+        List<AuthUser> enabledAdmins = users.findEnabledAdminsForUpdate();
         AuthUser user = requireUser(userId);
+        if (role != UserRole.ADMIN && isLastEnabledAdmin(user, enabledAdmins)) {
+            throw new IllegalArgumentException("Không thể hạ quyền admin đang hoạt động cuối cùng");
+        }
+        UserRole previousRole = user.getRole();
         user.setRole(role);
         users.save(user);
         activityService.record(admin.getId(), ActivityAction.ADMIN_ROLE_CHANGE, null,
-                Map.of("targetUserId", userId, "role", role.name()));
+                Map.of("targetUserId", userId, "previousRole", previousRole.name(), "newRole", role.name()));
         return summary(user);
     }
 
     @Transactional
-    public QuotaDto updateQuota(AuthUser admin, Long userId, int limit) {
+    public UserSummaryDto updateTier(AuthUser admin, Long userId, UserTier tier) {
+        AuthUser user = requireUser(userId);
+        UserTier previousTier = user.getTier() != null ? user.getTier() : UserTier.FREE;
+        user.setTier(tier);
+        users.save(user);
+
+        if (tier == UserTier.PRO) {
+            quotaService.upgradeToPro(userId);
+        } else {
+            quotaService.downgradeToFree(userId);
+        }
+
+        activityService.record(admin.getId(), ActivityAction.ADMIN_TIER_CHANGE, null,
+                Map.of("targetUserId", userId, "previousTier", previousTier.name(), "newTier", tier.name()));
+        return summary(user);
+    }
+
+    @Transactional
+    public QuotaDto updateQuota(AuthUser admin, Long userId, Integer limit) {
         requireUser(userId);
         UsageQuota quota = quotaService.updateLimit(userId, limit);
-        activityService.record(admin.getId(), ActivityAction.ADMIN_QUOTA_CHANGE, null,
-                Map.of("targetUserId", userId, "quotaLimit", limit));
+        // Giữ key null trong audit để frontend phân biệt unlimited với dữ liệu cũ thiếu key.
+        Map<String, Object> metadata = new HashMap<>();
+        metadata.put("targetUserId", userId);
+        metadata.put("quotaLimit", limit);
+        activityService.record(admin.getId(), ActivityAction.ADMIN_QUOTA_CHANGE, null, metadata);
         return toQuota(quota);
     }
 
@@ -212,14 +286,20 @@ public class AdminService {
     private UserSummaryDto summary(AuthUser user) {
         return new UserSummaryDto(
                 user.getId(), user.getEmail(), user.getFullName(), user.getRole(),
+                user.getTier() != null ? user.getTier() : UserTier.FREE,
                 Boolean.TRUE.equals(user.getEnabled()), toInstant(user.getCreatedAt()),
-                activities.countByUserId(user.getId()), toQuota(quotaService.current(user.getId())));
+                activities.countByUserIdAndActionTypeIn(user.getId(), GENERATION_ACTIONS),
+                activities.findFirstByUserIdOrderByCreatedAtDesc(user.getId())
+                        .map(activity -> toInstant(activity.getCreatedAt())).orElse(null),
+                toQuota(quotaService.current(user.getId())));
     }
 
     private QuotaDto toQuota(UsageQuota quota) {
-        int remaining = Math.max(quota.getQuotaLimit() - quota.getQuotaUsed(), 0);
-        return new QuotaDto(quota.getQuotaLimit(), quota.getQuotaUsed(), remaining,
-                quota.getPeriodStart(), quota.getQuotaUsed() >= quota.getQuotaLimit());
+        Integer limit = quota.getQuotaLimit();
+        Integer remaining = limit == null ? null : Math.max(limit - quota.getQuotaUsed(), 0);
+        return new QuotaDto(limit, quota.getQuotaUsed(), remaining,
+                quota.getPeriodStart(), quota.getPeriodStart().plusMonths(1),
+                limit != null && quota.getQuotaUsed() >= limit);
     }
 
     private ActivityDto toActivity(UserActivityLog activity, String email) {
@@ -235,5 +315,10 @@ public class AdminService {
     private AuthUser requireUser(Long userId) {
         return users.findById(userId).orElseThrow(() -> new AuthException(
                 "USER_NOT_FOUND", "Không tìm thấy người dùng", org.springframework.http.HttpStatus.NOT_FOUND));
+    }
+
+    private boolean isLastEnabledAdmin(AuthUser user, List<AuthUser> enabledAdmins) {
+        return user.getRole() == UserRole.ADMIN && Boolean.TRUE.equals(user.getEnabled())
+                && enabledAdmins.size() <= 1;
     }
 }

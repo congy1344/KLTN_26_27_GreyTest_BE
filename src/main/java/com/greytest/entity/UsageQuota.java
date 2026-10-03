@@ -27,7 +27,7 @@ public class UsageQuota {
     @Column(nullable = false, unique = true)
     private Long userId;
 
-    @Column(nullable = false)
+    @Column
     private Integer quotaLimit;
 
     @Column(nullable = false)

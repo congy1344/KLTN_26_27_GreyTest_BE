@@ -9,22 +9,26 @@ import java.util.Map;
 import com.greytest.entity.enums.ActivityAction;
 import com.greytest.entity.enums.ProjectStatus;
 import com.greytest.entity.enums.UserRole;
+import com.greytest.entity.enums.UserTier;
 
 public final class AdminDtos {
     private AdminDtos() {}
 
     public record PageDto<T>(List<T> content, int page, int size, long totalElements, int totalPages) {}
 
-    public record QuotaDto(int limit, int used, int remaining, LocalDate periodStart, boolean exceeded) {}
+    public record QuotaDto(
+            Integer limit, int used, Integer remaining, LocalDate periodStart, LocalDate resetDate, boolean exceeded) {}
 
     public record UserSummaryDto(
             Long id,
             String email,
             String fullName,
             UserRole role,
+            UserTier tier,
             boolean enabled,
             Instant createdAt,
-            long totalActivities,
+            long totalGenerationRequests,
+            Instant lastActivityAt,
             QuotaDto quota) {}
 
     public record ProjectSummaryDto(Long id, String name, ProjectStatus status, Instant createdAt) {}

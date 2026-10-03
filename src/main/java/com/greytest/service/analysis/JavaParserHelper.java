@@ -1,5 +1,7 @@
 package com.greytest.service.analysis;
 
+import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -7,6 +9,7 @@ import java.util.Set;
 
 import org.springframework.stereotype.Component;
 
+import com.github.javaparser.Range;
 import com.github.javaparser.ast.CompilationUnit;
 import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration;
 import com.github.javaparser.ast.body.EnumDeclaration;
@@ -16,6 +19,7 @@ import com.github.javaparser.ast.body.MethodDeclaration;
 import com.github.javaparser.ast.body.Parameter;
 import com.github.javaparser.ast.body.RecordDeclaration;
 import com.github.javaparser.ast.body.TypeDeclaration;
+import com.github.javaparser.ast.comments.Comment;
 import com.github.javaparser.ast.expr.AnnotationExpr;
 import com.github.javaparser.ast.expr.AssignExpr;
 import com.github.javaparser.ast.expr.Expression;
@@ -26,6 +30,7 @@ import com.greytest.entity.enums.ClassType;
 import com.greytest.entity.enums.HttpMethod;
 import com.greytest.entity.enums.AnnotationCategory;
 import com.greytest.entity.enums.Visibility;
+import com.greytest.exception.SourceAnalysisException;
 
 /**
  * Helper wrap JavaParser để phân tích source code Java.
@@ -187,13 +192,59 @@ public class JavaParserHelper {
     public static String cleanMethodSource(MethodDeclaration md) {
         if (md == null) return "";
         try {
-            MethodDeclaration clone = md.clone();
-            clone.getAllContainedComments().forEach(com.github.javaparser.ast.Node::remove);
-            clone.getComment().ifPresent(com.github.javaparser.ast.Node::remove);
-            return clone.toString();
-        } catch (Exception ignored) {
-            return md.toString();
+            return sourceWithoutCommentsPreservingLines(md);
+        } catch (Exception exception) {
+            throw new SourceAnalysisException(
+                    "Khong the doc source gốc cua method de anh xa dong nguon chinh xac.", exception);
         }
+    }
+
+    /**
+     * Giữ nguyên layout file gốc để Range của AST còn ánh xạ chính xác về dòng nguồn.
+     */
+    private static String sourceWithoutCommentsPreservingLines(MethodDeclaration method) throws IOException {
+        Range methodRange = method.getRange().orElseThrow();
+        Path sourcePath = method.findCompilationUnit()
+                .flatMap(CompilationUnit::getStorage)
+                .map(storage -> storage.getPath())
+                .orElseThrow();
+        String source = Files.readString(sourcePath);
+        int methodStart = sourceOffset(source, methodRange.begin.line, methodRange.begin.column);
+        int methodEnd = sourceOffset(source, methodRange.end.line, methodRange.end.column);
+        if (methodStart < 0 || methodEnd < methodStart) {
+            throw new IOException("Không xác định được phạm vi method trong source gốc");
+        }
+
+        char[] methodSource = source.substring(methodStart, methodEnd + 1).toCharArray();
+        method.getAllContainedComments().forEach(comment -> blankComment(
+                methodSource, source, methodStart, comment));
+        method.getComment().ifPresent(comment -> blankComment(methodSource, source, methodStart, comment));
+        return new String(methodSource);
+    }
+
+    private static void blankComment(char[] methodSource, String source, int methodStart, Comment comment) {
+        comment.getRange().ifPresent(range -> {
+            int commentStart = sourceOffset(source, range.begin.line, range.begin.column);
+            int commentEnd = sourceOffset(source, range.end.line, range.end.column);
+            int from = Math.max(0, commentStart - methodStart);
+            int to = Math.min(methodSource.length, commentEnd - methodStart + 1);
+            for (int index = from; index < to; index++) {
+                if (methodSource[index] != '\n' && methodSource[index] != '\r') {
+                    methodSource[index] = ' ';
+                }
+            }
+        });
+    }
+
+    private static int sourceOffset(String source, int line, int column) {
+        int lineStart = 0;
+        for (int currentLine = 1; currentLine < line; currentLine++) {
+            int lineEnd = source.indexOf('\n', lineStart);
+            if (lineEnd < 0) return -1;
+            lineStart = lineEnd + 1;
+        }
+        int offset = lineStart + column - 1;
+        return offset >= 0 && offset < source.length() ? offset : -1;
     }
 
     /**

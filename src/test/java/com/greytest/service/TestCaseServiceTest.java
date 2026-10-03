@@ -109,6 +109,67 @@ class TestCaseServiceTest {
     }
 
     @Test
+    void resumeKeepsOriginalBatchNumbersInProgress() {
+        project(ProjectStatus.PLAN_APPROVED);
+        int batchSize = com.greytest.service.agent.GenerationContextBuilder.MAX_TEST_CASE_PLANS;
+        List<TestPlan> approvedPlans = LongStream.rangeClosed(1, batchSize + 1)
+                .mapToObj(id -> approvedPlan(id, false))
+                .toList();
+        when(plans.findByProjectId(1L)).thenReturn(approvedPlans);
+        for (long id = 1; id <= batchSize; id++) {
+            when(cases.findByTestPlanId(id)).thenReturn(List.of(new TestCase()));
+        }
+        when(cases.findByTestPlanId((long) batchSize + 1)).thenReturn(List.of());
+        when(ai.generateTestCases(1L, Set.of((long) batchSize + 1)))
+                .thenThrow(new LlmResponseException("stop after progress setup"));
+
+        assertThatThrownBy(() -> service.generate(1L, (String) null, true))
+                .isInstanceOf(LlmResponseException.class);
+
+        ArgumentCaptor<List<String>> labels = ArgumentCaptor.forClass(List.class);
+        verify(generationProgress).resume(
+                org.mockito.ArgumentMatchers.eq(1L),
+                org.mockito.ArgumentMatchers.eq(com.greytest.dto.GenerationProgressStage.TEST_CASE),
+                labels.capture(),
+                org.mockito.ArgumentMatchers.eq(1),
+                org.mockito.ArgumentMatchers.contains("batch 2/2"));
+        assertThat(labels.getValue()).contains(
+                "Sinh Test Case - batch 1/2: 8 plan",
+                "Sinh Test Case - batch 2/2: 1 plan");
+    }
+
+    @Test
+    void resumeUpdatesOnlyMissingPlansWithinOriginalBatch() {
+        project(ProjectStatus.PLAN_APPROVED);
+        int batchSize = com.greytest.service.agent.GenerationContextBuilder.MAX_TEST_CASE_PLANS;
+        List<TestPlan> approvedPlans = LongStream.rangeClosed(1, batchSize + 2)
+                .mapToObj(id -> approvedPlan(id, false))
+                .toList();
+        TestPlan existingPlan = approvedPlans.get(batchSize);
+        TestPlan missingPlan = approvedPlans.get(batchSize + 1);
+        when(plans.findByProjectId(1L)).thenReturn(approvedPlans);
+        for (long id = 1; id <= batchSize + 1; id++) {
+            when(cases.findByTestPlanId(id)).thenReturn(List.of(new TestCase()));
+        }
+        when(cases.findByTestPlanId((long) batchSize + 2)).thenReturn(List.of());
+        when(plans.existsById(missingPlan.getId())).thenReturn(true);
+        when(plans.findById(missingPlan.getId())).thenReturn(Optional.of(missingPlan));
+        when(ai.generateTestCases(1L, Set.of(missingPlan.getId())))
+                .thenReturn(new TestCaseResponseDto(List.of(generatedCase(missingPlan.getId(), "missing plan"))));
+        when(cases.saveAll(org.mockito.ArgumentMatchers.anyList()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        service.generate(1L, (String) null, true);
+
+        verify(plans).save(missingPlan);
+        verify(plans, org.mockito.Mockito.never()).save(existingPlan);
+        verify(generationProgress).advance(
+                org.mockito.ArgumentMatchers.eq(1L),
+                org.mockito.ArgumentMatchers.eq(com.greytest.dto.GenerationProgressStage.TEST_CASE),
+                org.mockito.ArgumentMatchers.contains("Batch 2/2"));
+    }
+
+    @Test
     void generateReportsSaveStepWhenFailureHappensAfterLastBatch() {
         project(ProjectStatus.PLAN_APPROVED);
         TestPlan plan = approvedPlan(20L, false);

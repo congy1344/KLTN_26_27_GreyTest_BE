@@ -64,6 +64,21 @@ class AuthServiceTest {
                 .hasMessageContaining("cong dang nhap Admin");
     }
 
+    @Test
+    void loginRejectsDisabledUserWithExplicitAccountDisabledError() {
+        AuthUserRepository repository = mock(AuthUserRepository.class);
+        AuthUser disabledUser = user(UserRole.USER);
+        disabledUser.setEnabled(false);
+        when(repository.findByEmailIgnoreCase("user@greytest.dev"))
+                .thenReturn(Optional.of(disabledUser));
+
+        assertThatThrownBy(() -> new AuthService(repository, TOKEN_SECRET)
+                .login(new LoginRequest("user@greytest.dev", "correct-password")))
+                .isInstanceOf(AuthException.class)
+                .matches(e -> "ACCOUNT_DISABLED".equals(((AuthException) e).getCode()))
+                .hasMessageContaining("vô hiệu hóa");
+    }
+
     private AuthUser user(UserRole role) {
         AuthUser user = new AuthUser();
         user.setId(1L);

@@ -396,6 +396,58 @@ class BusinessRuleServiceTest {
     }
 
     @Test
+    void generateAllowsIndependentRulesForTheSameStatementAnchor() {
+        mockProject();
+        JavaMethod method = method(11L, "findUser");
+        method.setSourceCode("""
+                public User findUser(Long id) {
+                    return repository.findById(id)
+                            .map(this::enrich)
+                            .orElseThrow(() -> new UserNotFoundException("User not found"));
+                }
+                """);
+        mockServiceMethods(method);
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of());
+        when(aiAgentService.generateBusinessRules(1L, Set.of(11L))).thenReturn(
+                new BusinessRuleResponseDto(List.of(
+                        new GeneratedBusinessRuleDto(11L,
+                                "Khi tìm thấy user, service enrich dữ liệu user.", "INTEGRATION", "STMT-1"),
+                        new GeneratedBusinessRuleDto(11L,
+                                "Khi không tìm thấy user, service ném UserNotFoundException với thông báo User not found.",
+                                "VALIDATION", "STMT-1"))));
+        mockBusinessRuleSave();
+
+        assertThat(service().generate(1L)).extracting(BusinessRuleDto::sourceBranchId)
+                .containsExactly("STMT-1", "STMT-1");
+    }
+
+    @Test
+    void generateRejectsSourceAnchorOutsidePersistedMethodRange() {
+        mockProject();
+        JavaMethod method = method(11L, "findUser");
+        method.setLineStart(20);
+        method.setLineEnd(22);
+        method.setSourceCode("""
+                public String findUser(Long id) {
+                    return repository
+                            .findById(id)
+                            .orElseThrow();
+                }
+                """);
+        mockServiceMethods(method);
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of());
+        when(aiAgentService.generateBusinessRules(1L, Set.of(11L))).thenReturn(
+                new BusinessRuleResponseDto(List.of(
+                        new GeneratedBusinessRuleDto(11L, "Khi tìm user, service trả về user theo id.",
+                                "BUSINESS_LOGIC", "STMT-1"))));
+        mockBusinessRuleSave();
+
+        assertThatThrownBy(() -> service().generate(1L))
+                .isInstanceOf(InvalidProjectStatusException.class)
+                .hasMessageContaining("range source");
+    }
+
+    @Test
     void generateRejectsDuplicateDescriptionsAcrossDecisionsInSameMethod() {
         mockProject();
         JavaMethod branchedMethod = method(11L, "validateAppointment");
@@ -914,6 +966,35 @@ class BusinessRuleServiceTest {
         assertThat(trueRule.getStatus()).isEqualTo(ReviewStatus.APPROVED);
         assertThat(falseRule.getStatus()).isEqualTo(ReviewStatus.APPROVED);
     }
+
+    @Test
+    void approveAllowsIndependentRulesForTheSameStatementAnchor() {
+        Project project = new Project();
+        project.setId(1L);
+        project.setStatus(ProjectStatus.BR_PENDING_REVIEW);
+        when(projectRepository.findById(1L)).thenReturn(Optional.of(project));
+        JavaMethod method = method(11L, "findUser");
+        method.setSourceCode("""
+                public User findUser(Long id) {
+                    return repository.findById(id)
+                            .map(this::enrich)
+                            .orElseThrow(() -> new UserNotFoundException("User not found"));
+                }
+                """);
+        mockServiceMethods(method);
+        BusinessRule enrichRule = rule(7L, 11L, "Khi tìm thấy user, service enrich dữ liệu user.");
+        enrichRule.setReviewNote("SOURCE_BRANCH:STMT-1\nDa review.");
+        BusinessRule missingRule = rule(8L, 11L,
+                "Khi không tìm thấy user, service ném UserNotFoundException.");
+        missingRule.setReviewNote("SOURCE_BRANCH:STMT-1\nDa review.");
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(enrichRule, missingRule));
+        mockProjectSave();
+        mockBusinessRuleSave();
+
+        assertThat(service().approve(1L)).extracting(BusinessRuleDto::sourceBranchId)
+                .containsExactly("STMT-1", "STMT-1");
+    }
+
     @Test
     void approveRejectsUnreadableMethodSourceInsteadOfAssumingNoBranches() {
         Project project = new Project();

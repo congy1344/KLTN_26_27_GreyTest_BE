@@ -108,15 +108,30 @@ public class TestCaseService {
             }
         }
 
-        List<List<TestPlan>> batches = planBatches(targetPlans);
+        List<List<TestPlan>> allBatches = planBatches(approvedPlans);
+        Set<Long> targetPlanIds = targetPlans.stream().map(TestPlan::getId).collect(java.util.stream.Collectors.toSet());
+        List<Integer> batchIndexes = java.util.stream.IntStream.range(0, allBatches.size())
+                .filter(index -> allBatches.get(index).stream().anyMatch(plan -> targetPlanIds.contains(plan.getId())))
+                .boxed()
+                .toList();
+        List<List<TestPlan>> batches = batchIndexes.stream()
+                .map(index -> allBatches.get(index).stream().filter(plan -> targetPlanIds.contains(plan.getId())).toList())
+                .toList();
         List<String> stepLabels = new ArrayList<>();
-        for (int i = 0; i < batches.size(); i++) {
-            stepLabels.add("Sinh Test Case - batch " + (i + 1) + "/" + batches.size() + ": " + formatPlanBatchSummary(batches.get(i)));
+        for (int i = 0; i < allBatches.size(); i++) {
+            stepLabels.add("Sinh Test Case - batch " + (i + 1) + "/" + allBatches.size() + ": " + formatPlanBatchSummary(allBatches.get(i)));
         }
         stepLabels.add("Kiểm tra và lưu Test Case vào CSDL");
 
-        generationProgress.start(projectId, GenerationProgressStage.TEST_CASE, stepLabels,
-                "Đã nhóm " + targetPlans.size() + (resume ? " Test Plan mới/chưa có case" : " Test Plan") + " thành " + batches.size() + " batch.");
+        int completedBatchCount = batchIndexes.get(0);
+        String progressMessage = resume
+                ? "Tiếp tục sinh Test Case từ batch " + (completedBatchCount + 1) + "/" + allBatches.size() + "."
+                : "Đã nhóm " + targetPlans.size() + " Test Plan thành " + allBatches.size() + " batch.";
+        if (resume && completedBatchCount > 0) {
+            generationProgress.resume(projectId, GenerationProgressStage.TEST_CASE, stepLabels, completedBatchCount, progressMessage);
+        } else {
+            generationProgress.start(projectId, GenerationProgressStage.TEST_CASE, stepLabels, progressMessage);
+        }
 
         int baseNumber = nextCaseNumber();
         java.util.concurrent.atomic.AtomicInteger caseCounter = new java.util.concurrent.atomic.AtomicInteger(baseNumber);
@@ -129,13 +144,14 @@ public class TestCaseService {
                     () -> generationProgress.isPaused(projectId, GenerationProgressStage.TEST_CASE),
                     batch -> {
                         String summary = formatPlanBatchSummary(batch);
-                        int batchIdx = batches.indexOf(batch) + 1;
+                        int batchIdx = batchIndexes.get(batches.indexOf(batch)) + 1;
                         generationProgress.log(projectId, GenerationProgressStage.TEST_CASE,
-                                "Đang gọi AI sinh Test Case cho batch " + batchIdx + "/" + batches.size()
+                                "Đang gọi AI sinh Test Case cho batch " + batchIdx + "/" + allBatches.size()
                                         + " (" + summary + ")...");
                         return generateValidatedBatch(projectId, batch);
                     },
                     (batchNumber, validBatch) -> {
+                        int batchIndex = batchNumber <= batchIndexes.size() ? batchIndexes.get(batchNumber - 1) : -1;
                         List<TestPlan> currentBatchPlans = batchNumber <= batches.size() ? batches.get(batchNumber - 1) : List.of();
                         List<TestCase> saved = transactions.execute(status -> {
                             List<GeneratedTestCaseDto> uniqueBatch = deduplicate(validBatch, currentBatchPlans);
@@ -154,11 +170,11 @@ public class TestCaseService {
                         if (saved != null) {
                             allSavedCases.addAll(saved.stream().map(this::dto).toList());
                         }
-                        String summary = batchNumber <= batches.size() ? formatPlanBatchSummary(batches.get(batchNumber - 1)) : "";
+                        String summary = batchIndex >= 0 ? formatPlanBatchSummary(allBatches.get(batchIndex)) : "";
                         generationProgress.advance(
                                 projectId,
                                 GenerationProgressStage.TEST_CASE,
-                                "Batch " + batchNumber + "/" + batches.size() + ": đã lưu "
+                                "Batch " + (batchIndex + 1) + "/" + allBatches.size() + ": đã lưu "
                                         + validBatch.size() + " Test Case (" + summary + ").");
                     });
 
@@ -182,8 +198,11 @@ public class TestCaseService {
                 return list(projectId);
             }
             int failedBatch = LlmBatchExecutor.failedBatch(exception, 0);
-            String failureLocation = failedBatch > 0
-                    ? "Dừng ở batch " + failedBatch + "."
+            int originalBatch = failedBatch > 0 && failedBatch <= batchIndexes.size()
+                    ? batchIndexes.get(failedBatch - 1) + 1
+                    : failedBatch;
+            String failureLocation = originalBatch > 0
+                    ? "Dừng ở batch " + originalBatch + "."
                     : "Dừng ở bước kiểm tra và lưu Test Case.";
             generationProgress.fail(projectId, GenerationProgressStage.TEST_CASE,
                     failureLocation + " Sinh Test Case thất bại; các batch đã sinh trước đó đã được lưu an toàn."

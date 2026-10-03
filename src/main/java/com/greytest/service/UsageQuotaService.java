@@ -23,6 +23,7 @@ public class UsageQuotaService {
 
     private final UsageQuotaRepository repository;
     private final int defaultLimit;
+    private final int proLimit;
     private final Clock clock;
     private final UserActivityLogRepository activityRepository;
     private final String llmProvider;
@@ -32,12 +33,28 @@ public class UsageQuotaService {
             UsageQuotaRepository repository,
             UserActivityLogRepository activityRepository,
             @Value("${greytest.usage.default-monthly-llm-quota:100}") int defaultLimit,
+            @Value("${greytest.usage.pro-monthly-llm-quota:1000}") int proLimit,
             @Value("${llm.provider:mock}") String llmProvider) {
-        this(repository, activityRepository, defaultLimit, Clock.systemDefaultZone(), llmProvider);
+        this(repository, activityRepository, defaultLimit, proLimit, Clock.systemDefaultZone(), llmProvider);
+    }
+
+    public UsageQuotaService(
+            UsageQuotaRepository repository,
+            UserActivityLogRepository activityRepository,
+            int defaultLimit,
+            int proLimit,
+            Clock clock,
+            String llmProvider) {
+        this.repository = repository;
+        this.activityRepository = activityRepository;
+        this.defaultLimit = Math.max(defaultLimit, 0);
+        this.proLimit = Math.max(proLimit, 0);
+        this.clock = clock;
+        this.llmProvider = llmProvider != null ? llmProvider.trim().toLowerCase() : "mock";
     }
 
     UsageQuotaService(UsageQuotaRepository repository, int defaultLimit, Clock clock) {
-        this(repository, null, defaultLimit, clock, "real");
+        this(repository, null, defaultLimit, 1000, clock, "real");
     }
 
     UsageQuotaService(
@@ -45,7 +62,7 @@ public class UsageQuotaService {
             UserActivityLogRepository activityRepository,
             int defaultLimit,
             Clock clock) {
-        this(repository, activityRepository, defaultLimit, clock, "real");
+        this(repository, activityRepository, defaultLimit, 1000, clock, "real");
     }
 
     UsageQuotaService(
@@ -54,11 +71,25 @@ public class UsageQuotaService {
             int defaultLimit,
             Clock clock,
             String llmProvider) {
-        this.repository = repository;
-        this.activityRepository = activityRepository;
-        this.defaultLimit = Math.max(defaultLimit, 0);
-        this.clock = clock;
-        this.llmProvider = llmProvider != null ? llmProvider.trim().toLowerCase() : "mock";
+        this(repository, activityRepository, defaultLimit, 1000, clock, llmProvider);
+    }
+
+    @Transactional
+    public synchronized UsageQuota upgradeToPro(Long userId) {
+        return updateLimit(userId, proLimit);
+    }
+
+    @Transactional
+    public synchronized UsageQuota downgradeToFree(Long userId) {
+        return updateLimit(userId, defaultLimit);
+    }
+
+    public int getProLimit() {
+        return proLimit;
+    }
+
+    public int getDefaultLimit() {
+        return defaultLimit;
     }
 
     @Transactional
@@ -71,7 +102,10 @@ public class UsageQuotaService {
     public synchronized UsageQuota consumeLlmCall(
             Long userId, Long projectId, Map<String, Object> metadata) {
         UsageQuota quota = currentForUpdate(userId);
-        if (!"mock".equalsIgnoreCase(llmProvider) && quota.getQuotaUsed() >= quota.getQuotaLimit()) {
+        // Giới hạn null biểu thị unlimited nhưng vẫn ghi nhận số lần gọi LLM.
+        if (!"mock".equalsIgnoreCase(llmProvider)
+                && quota.getQuotaLimit() != null
+                && quota.getQuotaUsed() >= quota.getQuotaLimit()) {
             throw new UsageQuotaExceededException(
                     "Bạn đã sử dụng hết quota LLM tháng này. Vui lòng liên hệ quản trị viên.");
         }
@@ -89,9 +123,10 @@ public class UsageQuotaService {
     }
 
     @Transactional
-    public synchronized UsageQuota updateLimit(Long userId, int limit) {
+    public synchronized UsageQuota updateLimit(Long userId, Integer limit) {
         UsageQuota quota = currentForUpdate(userId);
-        quota.setQuotaLimit(Math.max(limit, 0));
+        if (limit != null && limit < 0) throw new IllegalArgumentException("Quota không được âm");
+        quota.setQuotaLimit(limit);
         return repository.save(quota);
     }
 

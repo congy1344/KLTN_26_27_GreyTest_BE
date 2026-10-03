@@ -10,20 +10,27 @@ import com.github.javaparser.JavaParser;
 import com.github.javaparser.ParserConfiguration;
 import com.github.javaparser.ast.CompilationUnit;
 import com.github.javaparser.ast.Node;
+import com.github.javaparser.ast.comments.Comment;
 import java.util.HashSet;
 import java.util.Set;
-import java.util.stream.Collectors;
 import com.github.javaparser.ast.body.FieldDeclaration;
+import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration;
+import com.github.javaparser.ast.body.ConstructorDeclaration;
 import com.github.javaparser.ast.body.MethodDeclaration;
 import com.greytest.dto.agent.GenerationContextDtos.ClassContextDto;
 import com.github.javaparser.ast.body.VariableDeclarator;
 import com.github.javaparser.ast.expr.Expression;
+import com.github.javaparser.ast.expr.AnnotationExpr;
+import com.github.javaparser.ast.expr.FieldAccessExpr;
 import com.github.javaparser.ast.expr.InstanceOfExpr;
+import com.github.javaparser.ast.expr.LambdaExpr;
 import com.github.javaparser.ast.expr.MethodCallExpr;
 import com.github.javaparser.ast.expr.NormalAnnotationExpr;
 import com.github.javaparser.ast.expr.NullLiteralExpr;
 import com.github.javaparser.ast.expr.ObjectCreationExpr;
 import com.github.javaparser.ast.stmt.IfStmt;
+import com.github.javaparser.ast.stmt.ExpressionStmt;
+import com.github.javaparser.ast.stmt.BlockStmt;
 import com.github.javaparser.ast.stmt.SwitchEntry;
 import com.github.javaparser.ast.stmt.SwitchStmt;
 import com.greytest.dto.agent.GenerationContextDtos.BusinessRuleContextDto;
@@ -54,17 +61,25 @@ public final class GeneratedUnitTestSemanticValidator {
         Map<Long, MethodContextDto> methodsByCaseId = methodsByCaseId(context);
         List<String> problems = new ArrayList<>();
         for (GeneratedUnitTestDto test : response.unitTests()) {
-            if (test == null || test.sourceCode() == null) continue;
+            if (test == null) continue;
+            if (test.sourceCode() == null) {
+                problems.add("Test case " + test.caseId() + " must contain valid Java test source.");
+                continue;
+            }
             MethodContextDto productionMethod = methodsByCaseId.get(test.caseId());
             validateFrameworkCompatibility(test, framework, problems);
+            validateZeroSkippingPolicy(test, problems);
+            validateNoLenientStubbing(test, problems);
             validateRemovedMockitoApis(test, problems);
             validateMockitoRunnerOrExtension(test, framework, problems);
             validateJUnit5AssertionOrder(test, framework, problems);
             validateMockitoVerifyNoInteractions(test, problems);
-            validateImportsFromContext(context, test, problems);
+            validateImportsFromContext(context, productionMethod, test, problems);
             validateMockedEnums(context, test, problems);
             validateInjectMocksStubbing(test, problems);
+            validateSutDependencyMocks(context, productionMethod, test, problems);
             validatePrivateMethodCalls(context, test, problems);
+            validateAnonymousSutSubclassOverrides(productionMethod, test, problems);
             validateContentCast(test, problems);
             validateMultipartAssumption(productionMethod, test, problems);
             validateNullSwitchExpectation(productionMethod, test, problems);
@@ -76,7 +91,10 @@ public final class GeneratedUnitTestSemanticValidator {
             GeneratedUnitTestDto generatedTest, List<String> problems) {
         if (generatedTest == null || generatedTest.sourceCode() == null) return;
         Optional<CompilationUnit> parsed = parseCompilationUnit(generatedTest.sourceCode());
-        if (parsed.isEmpty()) return;
+        if (parsed.isEmpty()) {
+            problems.add("Test case " + generatedTest.caseId() + " must contain valid Java test source.");
+            return;
+        }
         CompilationUnit cu = parsed.get();
 
         Set<String> injectMockFieldNames = new HashSet<>();
@@ -122,20 +140,7 @@ public final class GeneratedUnitTestSemanticValidator {
         if (parsed.isEmpty()) return;
         CompilationUnit cu = parsed.get();
 
-        Map<String, Set<String>> privateMethodsByClass = new HashMap<>();
-        for (ClassContextDto clazz : context.classes()) {
-            if (clazz.methods() == null) continue;
-            Set<String> privateMethods = clazz.methods().stream()
-                    .filter(m -> "PRIVATE".equalsIgnoreCase(m.visibility()))
-                    .map(MethodContextDto::methodName)
-                    .collect(Collectors.toSet());
-            if (!privateMethods.isEmpty()) {
-                privateMethodsByClass.put(clazz.className(), privateMethods);
-                if (clazz.qualifiedName() != null) {
-                    privateMethodsByClass.put(clazz.qualifiedName(), privateMethods);
-                }
-            }
-        }
+        Map<String, Set<String>> privateMethodsByClass = privateMethodsByClass(context);
         if (privateMethodsByClass.isEmpty()) return;
 
         Map<String, String> sutFieldToType = new HashMap<>();
@@ -167,11 +172,205 @@ public final class GeneratedUnitTestSemanticValidator {
         }
     }
 
+    private static void validateAnonymousSutSubclassOverrides(
+            MethodContextDto productionMethod,
+            GeneratedUnitTestDto generatedTest,
+            List<String> problems) {
+        if (productionMethod == null || productionMethod.classQualifiedName() == null
+                || generatedTest == null || generatedTest.sourceCode() == null) return;
+        Optional<CompilationUnit> parsed = parseCompilationUnit(generatedTest.sourceCode());
+        if (parsed.isEmpty()) return;
+        String qualifiedSutType = productionMethod.classQualifiedName();
+        String sutType = qualifiedSutType.substring(qualifiedSutType.lastIndexOf('.') + 1);
+
+        for (ObjectCreationExpr creation : parsed.get().findAll(ObjectCreationExpr.class)) {
+            if (!isSutCreation(creation, parsed.get(), qualifiedSutType) || creation.getAnonymousClassBody().isEmpty()) continue;
+            creation.getAnonymousClassBody().get().stream()
+                    .filter(MethodDeclaration.class::isInstance)
+                    .map(MethodDeclaration.class::cast)
+                    .filter(method -> method.getAnnotationByName("Override").isPresent())
+                    .forEach(method -> problems.add("Do not use an anonymous subclass of " + sutType
+                            + " to override '" + method.getNameAsString()
+                            + "'. It bypasses the real System Under Test and cannot override private methods. "
+                            + "Mock injected dependencies and call the public method instead."));
+        }
+    }
+
+    private static boolean isSutCreation(
+            ObjectCreationExpr creation,
+            CompilationUnit testSource,
+            String qualifiedSutType) {
+        String creationType = creation.getType().getNameWithScope();
+        if (creationType.equals(qualifiedSutType)) return true;
+        if (creationType.contains(".")) return false;
+
+        String sutType = qualifiedSutType.substring(qualifiedSutType.lastIndexOf('.') + 1);
+        if (!creationType.equals(sutType)) return false;
+        String sutPackage = qualifiedSutType.substring(0, qualifiedSutType.lastIndexOf('.'));
+        return testSource.getPackageDeclaration()
+                .map(declaration -> declaration.getNameAsString().equals(sutPackage))
+                .orElse(false)
+                || testSource.getImports().stream().anyMatch(imported -> !imported.isStatic()
+                        && (imported.getNameAsString().equals(qualifiedSutType)
+                        || imported.isAsterisk() && imported.getNameAsString().equals(sutPackage)));
+    }
+
+    private static Map<String, Set<String>> privateMethodsByClass(UnitTestContextDto context) {
+        Map<String, Set<String>> privateMethodsByClass = new HashMap<>();
+        if (context == null || context.classes() == null) return privateMethodsByClass;
+        for (ClassContextDto clazz : context.classes()) {
+            if (clazz.methods() == null) continue;
+            Set<String> privateMethods = new HashSet<>();
+            clazz.methods().stream()
+                    .filter(method -> "PRIVATE".equalsIgnoreCase(method.visibility()))
+                    .map(MethodContextDto::methodName)
+                    .forEach(privateMethods::add);
+            if (privateMethods.isEmpty()) continue;
+            privateMethodsByClass.put(clazz.className(), privateMethods);
+            if (clazz.qualifiedName() != null) {
+                privateMethodsByClass.put(clazz.qualifiedName(), privateMethods);
+            }
+        }
+        return privateMethodsByClass;
+    }
+
     private static void validateRemovedMockitoApis(
             GeneratedUnitTestDto generatedTest, List<String> problems) {
         if (generatedTest.sourceCode().matches("(?s).*\\bverifyZeroInteractions\\s*\\(.*")) {
             problems.add("Mockito removed verifyZeroInteractions; use verifyNoInteractions instead.");
         }
+    }
+
+    private static void validateZeroSkippingPolicy(
+            GeneratedUnitTestDto generatedTest, List<String> problems) {
+        Optional<CompilationUnit> parsed = parseCompilationUnit(generatedTest.sourceCode());
+        if (parsed.isEmpty()) return;
+        // Mỗi test case đã duyệt phải có một test JUnit thực thi được để lượt retry của AI sửa đúng phản hồi.
+        boolean hasSkippedComment = parsed.get().getAllContainedComments().stream()
+                .map(Comment::getContent)
+                .anyMatch(comment -> comment.trim().matches("(?is)^skipped\\b.*")
+                        || comment.matches("(?is).*@(?:[\\w.]*)(?:Test|TestFactory|TestTemplate|Disabled|Ignore)\\b.*"));
+        boolean hasDisabledAnnotation = parsed.get().findAll(AnnotationExpr.class).stream()
+                .map(annotation -> annotation.getNameAsString())
+                .anyMatch(name -> name.equals("Disabled") || name.endsWith(".Disabled")
+                        || name.equals("Ignore") || name.endsWith(".Ignore"));
+        boolean hasRunnableTest = findTestMethod(parsed.get(), generatedTest.testMethodName())
+                .map(method -> method.getAnnotations().stream().anyMatch(
+                        annotation -> isTestMethodAnnotation(annotation.getName().getIdentifier())))
+                .orElse(false);
+        if (hasSkippedComment || hasDisabledAnnotation) {
+            problems.add("Test case " + generatedTest.caseId()
+                    + " must not skip, disable, or comment out its generated test.");
+        }
+        if (!hasRunnableTest) {
+            problems.add("Test case " + generatedTest.caseId() + " must declare @Test on generated method '"
+                    + generatedTest.testMethodName() + "'.");
+        }
+    }
+
+    private static boolean isTestMethodAnnotation(String annotationName) {
+        return "Test".equals(annotationName);
+    }
+
+    private static void validateNoLenientStubbing(
+            GeneratedUnitTestDto generatedTest, List<String> problems) {
+        Optional<CompilationUnit> parsed = parseCompilationUnit(generatedTest.sourceCode());
+        if (parsed.isEmpty()) return;
+        boolean importsMockitoLenient = parsed.get().getImports().stream()
+                .anyMatch(imported -> imported.isStatic()
+                        && (imported.getNameAsString().equals("org.mockito.Mockito.lenient")
+                        || imported.isAsterisk() && imported.getNameAsString().equals("org.mockito.Mockito")));
+        boolean importsMockitoWithSettings = parsed.get().getImports().stream()
+                .anyMatch(imported -> imported.isStatic()
+                        && (imported.getNameAsString().equals("org.mockito.Mockito.withSettings")
+                        || imported.isAsterisk() && imported.getNameAsString().equals("org.mockito.Mockito")));
+        boolean importsMockitoSession = parsed.get().getImports().stream()
+                .anyMatch(imported -> imported.isStatic()
+                        && (imported.getNameAsString().equals("org.mockito.Mockito.mockitoSession")
+                        || imported.isAsterisk() && imported.getNameAsString().equals("org.mockito.Mockito")));
+        boolean importsMockitoStrictness = parsed.get().getImports().stream()
+                .anyMatch(imported -> (!imported.isStatic()
+                        && imported.getNameAsString().equals("org.mockito.quality.Strictness"))
+                        || (imported.isStatic() && (imported.getNameAsString()
+                        .startsWith("org.mockito.quality.Strictness.")
+                        || (imported.isAsterisk() && imported.getNameAsString()
+                        .equals("org.mockito.quality.Strictness")))));
+        boolean usesLenientStubbing = parsed.get().findAll(MethodCallExpr.class).stream()
+                .filter(call -> "lenient".equals(call.getNameAsString()))
+                .anyMatch(call -> isMockitoLenientCall(
+                        call, importsMockitoLenient, importsMockitoWithSettings));
+        boolean disablesStrictStubbing = parsed.get().findAll(AnnotationExpr.class).stream()
+                .anyMatch(annotation -> disablesStrictStubbing(annotation, importsMockitoStrictness));
+        boolean usesNonStrictness = parsed.get().findAll(FieldAccessExpr.class).stream()
+                .anyMatch(expression -> isMockitoNonStrictness(expression, importsMockitoStrictness))
+                || parsed.get().findAll(MethodCallExpr.class).stream()
+                .anyMatch(call -> isMockitoStrictnessCall(
+                        call, importsMockitoWithSettings, importsMockitoSession)
+                        && isMockitoNonStrictness(call.getArgument(0), importsMockitoStrictness));
+        if (usesLenientStubbing || disablesStrictStubbing || usesNonStrictness) {
+            problems.add("Do not use lenient or non-STRICT_STUBS Mockito settings; keep strict stubbing enabled.");
+        }
+    }
+
+    private static boolean isMockitoScope(Expression scope) {
+        String name = scope.toString();
+        return "Mockito".equals(name) || "org.mockito.Mockito".equals(name)
+                || "BDDMockito".equals(name) || "org.mockito.BDDMockito".equals(name);
+    }
+
+    private static boolean isMockitoLenientCall(
+            MethodCallExpr call, boolean importsMockitoLenient, boolean importsMockitoWithSettings) {
+        return call.getScope().map(scope -> isMockitoScope(scope)
+                || (scope.isMethodCallExpr() && isMockitoWithSettingsCall(
+                scope.asMethodCallExpr(), importsMockitoWithSettings))).orElse(importsMockitoLenient);
+    }
+
+    private static boolean isMockitoWithSettingsCall(MethodCallExpr call, boolean importsMockitoWithSettings) {
+        if (!"withSettings".equals(call.getNameAsString())) return false;
+        return call.getScope().map(GeneratedUnitTestSemanticValidator::isMockitoScope)
+                .orElse(importsMockitoWithSettings);
+    }
+
+    private static boolean isMockitoStrictnessCall(
+            MethodCallExpr call, boolean importsMockitoWithSettings, boolean importsMockitoSession) {
+        if (!"strictness".equals(call.getNameAsString()) || call.getArguments().size() != 1
+                || call.getScope().isEmpty() || !call.getScope().get().isMethodCallExpr()) return false;
+        MethodCallExpr configuredMock = call.getScope().get().asMethodCallExpr();
+        return isMockitoWithSettingsCall(configuredMock, importsMockitoWithSettings)
+                || isMockitoSessionCall(configuredMock, importsMockitoSession);
+    }
+
+    private static boolean isMockitoSessionCall(MethodCallExpr call, boolean importsMockitoSession) {
+        if (!"mockitoSession".equals(call.getNameAsString())) return false;
+        return call.getScope().map(GeneratedUnitTestSemanticValidator::isMockitoScope)
+                .orElse(importsMockitoSession);
+    }
+
+    private static boolean disablesStrictStubbing(AnnotationExpr annotation, boolean importsMockitoStrictness) {
+        if (!(annotation instanceof NormalAnnotationExpr normal)) return false;
+        String name = annotation.getName().getIdentifier();
+        if ("Mock".equals(name)) {
+            return normal.getPairs().stream().anyMatch(pair ->
+                    ("lenient".equals(pair.getNameAsString())
+                            && pair.getValue().isBooleanLiteralExpr()
+                            && pair.getValue().asBooleanLiteralExpr().getValue())
+                            || ("strictness".equals(pair.getNameAsString())
+                            && isMockitoNonStrictness(pair.getValue(), importsMockitoStrictness)));
+        }
+        return "MockitoSettings".equals(name) && normal.getPairs().stream()
+                .anyMatch(pair -> "strictness".equals(pair.getNameAsString())
+                        && isMockitoNonStrictness(pair.getValue(), importsMockitoStrictness));
+    }
+
+    private static boolean isMockitoNonStrictness(Expression value, boolean importsMockitoStrictness) {
+        if (value.isFieldAccessExpr()) {
+            FieldAccessExpr strictness = value.asFieldAccessExpr();
+            return !"STRICT_STUBS".equals(strictness.getNameAsString())
+                    && ("org.mockito.quality.Strictness".equals(strictness.getScope().toString())
+                    || "Strictness".equals(strictness.getScope().toString()) && importsMockitoStrictness);
+        }
+        return value.isNameExpr() && importsMockitoStrictness
+                && !"STRICT_STUBS".equals(value.asNameExpr().getNameAsString());
     }
 
     private static void validateMockitoRunnerOrExtension(
@@ -199,6 +398,11 @@ public final class GeneratedUnitTestSemanticValidator {
 
         boolean hasExtendWithMockito = source.matches("(?s).*@ExtendWith\\s*\\(\\s*(?:[A-Za-z_$][\\w$]*\\.)*MockitoExtension\\.class\\s*\\).*");
         boolean hasRunWithMockito = source.matches("(?s).*@RunWith\\s*\\(\\s*(?:[A-Za-z_$][\\w$]*\\.)*MockitoJUnitRunner(?:\\.[A-Za-z_$][\\w$]*)*\\.class\\s*\\).*");
+        boolean hasSilentMockitoRunner = source.matches("(?s).*@RunWith\\s*\\(\\s*(?:[A-Za-z_$][\\w$]*\\.)*MockitoJUnitRunner\\.Silent\\.class\\s*\\).*");
+
+        if (hasSilentMockitoRunner) {
+            problems.add("MockitoJUnitRunner.Silent disables strict stubbing; use MockitoJUnitRunner.class instead.");
+        }
 
         if (framework == TestFramework.JUNIT4) {
             if (!hasRunWithMockito) {
@@ -317,9 +521,23 @@ public final class GeneratedUnitTestSemanticValidator {
         Optional<CompilationUnit> parsed = parseCompilationUnit(generatedTest.sourceCode());
         if (parsed.isEmpty()) return;
 
-        for (MethodCallExpr call : parsed.get().findAll(MethodCallExpr.class)) {
-            String name = call.getNameAsString();
-            if ("verifyNoInteractions".equals(name) || "verifyZeroInteractions".equals(name)) {
+        for (MethodDeclaration testMethod : parsed.get().findAll(MethodDeclaration.class)) {
+            Map<String, List<ExpressionStmt>> interactionsByMock = new HashMap<>();
+            Map<String, List<ExpressionStmt>> clearedByMock = new HashMap<>();
+            Map<String, List<ExpressionStmt>> noInteractionsByMock = new HashMap<>();
+            for (MethodCallExpr call : testMethod.findAll(MethodCallExpr.class)) {
+                String name = call.getNameAsString();
+                Optional<ExpressionStmt> statement = topLevelStatement(call, testMethod);
+                if ("verify".equals(name) && isPositiveVerification(call)) {
+                    mockReference(call.getArgument(0)).ifPresent(mock -> statement.ifPresent(value -> interactionsByMock
+                            .computeIfAbsent(mock, ignored -> new ArrayList<>()).add(value)));
+                } else if ("clearInvocations".equals(name) || "reset".equals(name)) {
+                    for (Expression arg : call.getArguments()) {
+                        mockReference(arg).ifPresent(mock -> statement.ifPresent(value -> clearedByMock
+                                .computeIfAbsent(mock, ignored -> new ArrayList<>()).add(value)));
+                    }
+                }
+                if (!"verifyNoInteractions".equals(name) && !"verifyZeroInteractions".equals(name)) continue;
                 for (Expression arg : call.getArguments()) {
                     if (arg.isMethodCallExpr()) {
                         String methodName = arg.asMethodCallExpr().getNameAsString();
@@ -330,13 +548,80 @@ public final class GeneratedUnitTestSemanticValidator {
                             break;
                         }
                     }
+                    mockReference(arg).ifPresent(mock -> statement.ifPresent(value -> noInteractionsByMock
+                            .computeIfAbsent(mock, ignored -> new ArrayList<>()).add(value)));
                 }
             }
+            noInteractionsByMock.forEach((mock, noInteractionCalls) -> noInteractionCalls.forEach(noInteractionCall -> {
+                boolean hasPriorInteraction = interactionsByMock.getOrDefault(mock, List.of()).stream().anyMatch(interaction ->
+                        appearsBefore(interaction, noInteractionCall)
+                                && clearedByMock.getOrDefault(mock, List.of()).stream()
+                                .noneMatch(clearCall -> appearsBefore(interaction, clearCall)
+                                        && appearsBefore(clearCall, noInteractionCall)));
+                if (hasPriorInteraction) {
+                    problems.add("verifyNoInteractions(" + mock + ") contradicts an earlier stub or verify on the same mock. "
+                            + "Use verifyNoMoreInteractions(" + mock + ") after explicit verification, or remove the contradictory assertion.");
+                }
+            }));
         }
+    }
+
+    private static Optional<String> mockReference(Expression expression) {
+        if (expression.isNameExpr()) return Optional.of(expression.asNameExpr().getNameAsString());
+        if (expression.isFieldAccessExpr()) {
+            var fieldAccess = expression.asFieldAccessExpr();
+            return Optional.of(fieldAccess.getScope().isThisExpr()
+                    ? fieldAccess.getNameAsString()
+                    : fieldAccess.toString());
+        }
+        return Optional.empty();
+    }
+
+    private static boolean isPositiveVerification(MethodCallExpr verifyCall) {
+        if (verifyCall.getArguments().isEmpty()) return false;
+        if (verifyCall.getArguments().size() == 1) return true;
+        Expression mode = verifyCall.getArgument(1);
+        if (!mode.isMethodCallExpr()) return false;
+        MethodCallExpr modeCall = mode.asMethodCallExpr();
+        if ("atLeastOnce".equals(modeCall.getNameAsString())) return true;
+        if (("times".equals(modeCall.getNameAsString()) || "atLeast".equals(modeCall.getNameAsString()))
+                && modeCall.getArguments().size() == 1 && modeCall.getArgument(0).isIntegerLiteralExpr()) {
+            try {
+                return Integer.parseInt(modeCall.getArgument(0).asIntegerLiteralExpr().getValue()) > 0;
+            } catch (NumberFormatException ignored) {
+                return false;
+            }
+        }
+        return false;
+    }
+
+    private static Optional<ExpressionStmt> topLevelStatement(
+            MethodCallExpr call,
+            MethodDeclaration testMethod) {
+        Node current = call;
+        while (current.getParentNode().isPresent()) {
+            current = current.getParentNode().get();
+            if (current instanceof LambdaExpr) return Optional.empty();
+            if (current instanceof ExpressionStmt statement && statement.getParentNode()
+                    .filter(BlockStmt.class::isInstance)
+                    .flatMap(Node::getParentNode)
+                    .filter(testMethod::equals)
+                    .isPresent()) return Optional.of(statement);
+            if (current instanceof MethodDeclaration) return Optional.empty();
+        }
+        return Optional.empty();
+    }
+
+    private static boolean appearsBefore(Node first, Node second) {
+        return first.getRange().flatMap(firstRange -> second.getRange().map(secondRange ->
+                firstRange.begin.line < secondRange.begin.line
+                        || firstRange.begin.line == secondRange.begin.line
+                        && firstRange.begin.column < secondRange.begin.column)).orElse(false);
     }
 
     private static void validateImportsFromContext(
             UnitTestContextDto context,
+            MethodContextDto productionMethod,
             GeneratedUnitTestDto generatedTest,
             List<String> problems) {
         if (context == null || context.classes() == null || generatedTest == null || generatedTest.sourceCode() == null) return;
@@ -379,6 +664,140 @@ public final class GeneratedUnitTestSemanticValidator {
                 }
             }
         }
+
+        microserviceRoot(productionMethod).ifPresent(serviceRoot -> {
+            String organizationRoot = serviceRoot.substring(0, serviceRoot.lastIndexOf('.'));
+            for (var importDecl : parsed.get().getImports()) {
+                if (importDecl.isStatic() || importDecl.isAsterisk()) continue;
+                String importedFqn = importDecl.getNameAsString();
+                if (importedFqn.startsWith(organizationRoot + ".")
+                        && !importedFqn.startsWith(serviceRoot + ".")
+                        && !isUsedByTargetService(context, productionMethod, importedFqn)) {
+                    problems.add("Import '" + importedFqn + "' belongs to another microservice. "
+                            + "Only import DTOs and models under " + serviceRoot
+                            + ", except clients declared under " + serviceRoot + ".client.");
+                }
+            }
+        });
+    }
+
+    private static void validateSutDependencyMocks(
+            UnitTestContextDto context,
+            MethodContextDto productionMethod,
+            GeneratedUnitTestDto generatedTest,
+            List<String> problems) {
+        if (context == null || productionMethod == null || productionMethod.classQualifiedName() == null
+                || generatedTest == null || generatedTest.sourceCode() == null) return;
+        ClassContextDto sut = context.classes().stream()
+                .filter(javaClass -> productionMethod.classQualifiedName().equals(javaClass.qualifiedName()))
+                .findFirst().orElse(null);
+        if (sut == null) return;
+        Optional<CompilationUnit> parsedTest = parseCompilationUnit(generatedTest.sourceCode());
+        if (parsedTest.isEmpty()) return;
+
+        for (ObjectCreationExpr creation : parsedTest.get().findAll(ObjectCreationExpr.class)) {
+            if (isSutCreation(creation, parsedTest.get(), productionMethod.classQualifiedName())
+                    && creation.getArguments().stream().anyMatch(Expression::isNullLiteralExpr)) {
+                problems.add("Do not pass null to the System Under Test constructor. Declare a @Mock dependency or use a non-null configuration value.");
+            }
+        }
+        boolean hasSutInjectMocks = parsedTest.get().findAll(FieldDeclaration.class).stream()
+                .filter(field -> field.getAnnotationByName("InjectMocks").isPresent())
+                .anyMatch(field -> simpleType(field.getElementType().asString()).equals(sut.className()));
+        if (!hasSutInjectMocks) return;
+
+        List<String> requiredDependencies = injectedDependencyTypes(sut);
+        if (requiredDependencies.isEmpty()) return;
+
+        Map<String, Integer> mockCounts = new HashMap<>();
+        for (FieldDeclaration field : parsedTest.get().findAll(FieldDeclaration.class)) {
+            if (!field.getAnnotationByName("Mock").isPresent()) continue;
+            String type = simpleType(field.getElementType().asString());
+            mockCounts.merge(type, field.getVariables().size(), Integer::sum);
+        }
+        Map<String, Integer> requiredCounts = new HashMap<>();
+        requiredDependencies.forEach(type -> requiredCounts.merge(type, 1, Integer::sum));
+        List<String> missing = requiredCounts.entrySet().stream()
+                .filter(entry -> mockCounts.getOrDefault(entry.getKey(), 0) < entry.getValue())
+                .map(Map.Entry::getKey)
+                .sorted()
+                .toList();
+        if (!missing.isEmpty()) {
+            problems.add("The Service constructor or injected fields require @Mock dependencies: "
+                    + String.join(", ", missing)
+                    + ". Declare every dependency as a class-level @Mock so @InjectMocks does not receive null.");
+        }
+
+    }
+
+    private static List<String> injectedDependencyTypes(ClassContextDto sut) {
+        Optional<ClassOrInterfaceDeclaration> declaration = serviceDeclaration(sut);
+        if (declaration.isEmpty()) return List.of();
+        java.util.LinkedHashSet<String> dependencies = new java.util.LinkedHashSet<>();
+        List<ConstructorDeclaration> constructors = declaration.get().getConstructors();
+        constructors.stream()
+                .max(java.util.Comparator.comparingInt(constructor -> constructor.getParameters().size()))
+                .ifPresent(constructor -> constructor.getParameters().stream()
+                        .filter(parameter -> parameter.getAnnotationByName("Value").isEmpty())
+                        .forEach(parameter -> addMockableDependency(
+                                dependencies, simpleType(parameter.getType().asString()))));
+
+        boolean usesRequiredArgsConstructor = declaration.get().getAnnotationByName("RequiredArgsConstructor").isPresent();
+        for (FieldDeclaration field : declaration.get().getFields()) {
+            boolean requiredByLombok = usesRequiredArgsConstructor
+                    && (field.isFinal() || field.getAnnotationByName("NonNull").isPresent());
+            if (field.isStatic() || field.getAnnotationByName("Value").isPresent()
+                    || !(field.getAnnotationByName("Autowired").isPresent() || requiredByLombok)) continue;
+            for (VariableDeclarator variable : field.getVariables()) {
+                if (requiredByLombok && variable.getInitializer().isPresent()) continue;
+                addMockableDependency(dependencies, simpleType(field.getElementType().asString()));
+            }
+        }
+        return List.copyOf(dependencies);
+    }
+
+    private static void addMockableDependency(java.util.Set<String> dependencies, String type) {
+        if (!isConfigurationType(type)) dependencies.add(type);
+    }
+
+    private static boolean isConfigurationType(String type) {
+        return java.util.Set.of("String", "Boolean", "Byte", "Character", "Double", "Float", "Integer", "Long",
+                "Short", "boolean", "byte", "char", "double", "float", "int", "long", "short").contains(type);
+    }
+
+    private static boolean isUsedByTargetService(
+            UnitTestContextDto context,
+            MethodContextDto productionMethod,
+            String importedFqn) {
+        return context.classes().stream()
+                .filter(javaClass -> productionMethod.classQualifiedName().equals(javaClass.qualifiedName()))
+                .map(ClassContextDto::sourceCode)
+                .filter(java.util.Objects::nonNull)
+                .anyMatch(source -> source.contains("import " + importedFqn + ";") || source.contains(importedFqn));
+    }
+
+    private static Optional<ClassOrInterfaceDeclaration> serviceDeclaration(ClassContextDto sut) {
+        if (sut.sourceCode() == null || sut.className() == null) return Optional.empty();
+        return parseCompilationUnit(sut.sourceCode()).flatMap(source -> source.findAll(ClassOrInterfaceDeclaration.class).stream()
+                .filter(declaration -> declaration.getFullyQualifiedName()
+                        .map(name -> name.equals(sut.qualifiedName()))
+                        .orElse(declaration.getNameAsString().equals(sut.className())
+                                && declaration.getParentNode().filter(CompilationUnit.class::isInstance).isPresent()))
+                .findFirst());
+    }
+
+    private static Optional<String> microserviceRoot(MethodContextDto productionMethod) {
+        if (productionMethod == null || productionMethod.classQualifiedName() == null) return Optional.empty();
+        String[] parts = productionMethod.classQualifiedName().split("\\.");
+        if (parts.length < 4 || !"service".equals(parts[3])) return Optional.empty();
+        return Optional.of(parts[0] + "." + parts[1] + "." + parts[2]);
+    }
+
+    private static String simpleType(String type) {
+        int genericStart = type.indexOf('<');
+        String rawType = genericStart < 0 ? type : type.substring(0, genericStart);
+        int lastDot = rawType.lastIndexOf('.');
+        return lastDot < 0 ? rawType : rawType.substring(lastDot + 1);
     }
 
     private static boolean hasTrailingJunit5Message(MethodCallExpr call) {

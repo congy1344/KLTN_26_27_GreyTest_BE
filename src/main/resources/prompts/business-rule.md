@@ -25,7 +25,10 @@ Rules:
 - Never generate a rule for the callee Service, copy its internal decisions as caller rules, or use the callee method id. The output must still target only the selected caller method.
 - Do not claim a transaction, rollback, retry, fallback, or failure outcome unless the caller source and calleeServiceSourceCode together prove it.
 - Do not turn a dependencyCalls item into a standalone rule unless the call is an independently testable observable side effect of the selected method.
-- Use categories: VALIDATION, BUSINESS_LOGIC, SIDE_EFFECT.
+- Use one category consistently for the same observed behavior: VALIDATION for an input/condition check or thrown validation exception; BUSINESS_LOGIC for a calculation, mapping, or state decision; SIDE_EFFECT for persistence, deletion, or a directly observable local mutation; INTEGRATION for a call to another service, client, or remote endpoint.
+- For Vietnamese output, every description must follow exactly: "Khi <tình huống>, service <hành vi>." Use equivalent grammar for another output language.
+- Describe only behavior proven by executable code. State the exact exception class and message string when code throws it. When a normally expected existence, null, duplicate, or similar check is absent, say "không kiểm tra" in a Vietnamese description instead of inventing that check.
+- Prefer one independently testable behavior per rule. Split independent enrichment, exception, persistence, and integration behaviors into separate rules; they may share the same `STMT-*` anchor only when the source has one statement.
 - Context -> classes[0] -> methods contains up to three methods from the same Service class.
 - The method includes deterministic source anchors extracted from its source: control-flow outcomes plus executable top-level statements outside decisions.
 - Only entries whose `kind` is not `STATEMENT` are control-flow outcomes for the decision checklist. `STATEMENT` entries are source anchors, not decisions.
@@ -53,11 +56,11 @@ Rules:
 - If the checklist contains `IF-1`, the response is invalid unless exactly one rule has `"branch_id":"IF-1"`; apply the same check to every other decision id.
 - Silently verify that no observable behavior is missing and remove redundant rules.
 - Do not create duplicate or overlapping rules in the same response.
-- Before returning, compare rules within each method by normalized meaning. Remove exact duplicates, near-duplicates, and rules whose behavior is already fully covered by another rule; merge their validation, state change, persistence, enrichment, and side-effect details into the single most complete rule.
+- Before returning, compare rules within each method by normalized meaning. Remove exact duplicates and near-duplicates. Merge facets only when they are inseparable parts of the same control-flow decision; never merge independent enrichment, exception, persistence, or integration behavior into one rule.
 - Completeness order: inspect validation and exceptions first, then normalization/defaults, decision/state transitions, persistence, enrichment, and external side effects. For CRUD methods, explicitly check each observable input, lookup, conflict check, default, save/delete, and response transformation supported by the source.
 - Domain boundary: do not add healthcare policies, time windows, patient double-booking, state-transition restrictions, soft delete, or any other requirement unless the selected source method directly implements or proves it. Missing requirements must remain ungenerated rather than becoming fabricated Business Rules.
 - Completeness checklist: scan the whole method source, not only branches. Include directly observable validation and exceptions (for example orElseThrow/throw and exact type/message), normalization and defaults (trim, lowercase, fallback values), arithmetic bounds (Math.min/Math.max), threshold comparisons, state changes, persistence, and calls that produce observable side effects.
-- When a decision has several observable facets, combine the condition, threshold/formula, state transition, persistence, and side effects in the one rule for that decision. Do not omit a side effect merely because another service performs it.
+- When a control-flow decision has several facets with no separate source anchor, combine the condition, threshold/formula, state transition, persistence, and side effects in that decision's one rule. Do not omit a side effect merely because another service performs it.
 - For methods with no control-flow decisions, still return rules for independently testable behavior proven directly by the source and attach the matching `STMT-*` anchor.
 - Language contract: the appended # Output language section is authoritative. Every natural-language description in one response must use that one language only. Technical identifiers, exception names, enum values, method names, code, and file paths stay unchanged. Do not copy English prose from the source into a Vietnamese response or Vietnamese prose into an English response.
 
@@ -67,7 +70,7 @@ Output schema:
 - Each item has:
   - "method_id": number copied exactly from Context -> classes[] -> methods[] -> id.
   - "description": one short business rule sentence.
-  - "category": one of VALIDATION, BUSINESS_LOGIC, SIDE_EFFECT.
+  - "category": one of VALIDATION, BUSINESS_LOGIC, SIDE_EFFECT, INTEGRATION.
   - "branch_id": control-flow decision id such as `IF-1`, `SWITCH-1`, or `FOR-1`, or a `STMT-*` source anchor for directly observable behavior outside every decision; null only when no source anchor exists.
 
 Context:

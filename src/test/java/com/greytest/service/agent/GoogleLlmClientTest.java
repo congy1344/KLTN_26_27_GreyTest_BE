@@ -100,6 +100,9 @@ class GoogleLlmClientTest {
         assertThat(itemSchema.path("required"))
                 .extracting(field -> field.asText())
                 .contains("branch_id");
+        assertThat(itemSchema.path("properties").path("category").path("enum"))
+                .extracting(category -> category.asText())
+                .containsExactly("VALIDATION", "BUSINESS_LOGIC", "SIDE_EFFECT", "INTEGRATION");
     }
 
     @Test

@@ -90,13 +90,14 @@ public class AuthService {
         AuthUser user = userRepository.findById(userId)
                 .orElseThrow(() -> unauthorized("Nguoi dung khong ton tai"));
         if (!Boolean.TRUE.equals(user.getEnabled())) {
-            throw unauthorized("Tai khoan da bi vo hieu hoa");
+            throw new AuthException("ACCOUNT_DISABLED", "Tài khoản của bạn đã bị vô hiệu hóa", HttpStatus.FORBIDDEN);
         }
         return user;
     }
 
     public AuthUserDto toDto(AuthUser user) {
-        return new AuthUserDto(user.getId(), user.getEmail(), user.getFullName(), user.getRole());
+        return new AuthUserDto(user.getId(), user.getEmail(), user.getFullName(), user.getRole(),
+                user.getTier() != null ? user.getTier() : com.greytest.entity.enums.UserTier.FREE);
     }
 
     private String issueToken(AuthUser user) {
@@ -149,9 +150,11 @@ public class AuthService {
     private AuthUser authenticate(LoginRequest request) {
         AuthUser user = userRepository.findByEmailIgnoreCase(normalizeEmail(request.email()))
                 .orElseThrow(() -> unauthorized("Email hoac mat khau khong dung"));
-        if (!Boolean.TRUE.equals(user.getEnabled())
-                || !passwordEncoder.matches(request.password(), user.getPasswordHash())) {
+        if (!passwordEncoder.matches(request.password(), user.getPasswordHash())) {
             throw unauthorized("Email hoac mat khau khong dung");
+        }
+        if (!Boolean.TRUE.equals(user.getEnabled())) {
+            throw new AuthException("ACCOUNT_DISABLED", "Tài khoản của bạn đã bị vô hiệu hóa", HttpStatus.FORBIDDEN);
         }
         return user;
     }

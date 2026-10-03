@@ -74,6 +74,48 @@ class UsageQuotaServiceTest {
         assertThat(stored.get().getQuotaUsed()).isEqualTo(1);
     }
 
+    @Test
+    void unlimitedQuotaAllowsCallsForRealProvider() {
+        UsageQuota unlimited = new UsageQuota();
+        unlimited.setUserId(7L);
+        unlimited.setQuotaLimit(null);
+        unlimited.setQuotaUsed(100);
+        unlimited.setPeriodStart(LocalDate.of(2026, 8, 1));
+        AtomicReference<UsageQuota> stored = new AtomicReference<>(unlimited);
+        UsageQuotaService service = new UsageQuotaService(repository(stored), null, 2, AUGUST, "real");
+
+        UsageQuota result = service.consumeLlmCall(7L);
+
+        assertThat(result.getQuotaUsed()).isEqualTo(101);
+        assertThat(result.getQuotaLimit()).isNull();
+    }
+
+    @Test
+    void updatesQuotaToUnlimited() {
+        UsageQuota finite = new UsageQuota();
+        finite.setUserId(7L);
+        finite.setQuotaLimit(2);
+        finite.setQuotaUsed(1);
+        finite.setPeriodStart(LocalDate.of(2026, 8, 1));
+        AtomicReference<UsageQuota> stored = new AtomicReference<>(finite);
+        UsageQuotaService service = new UsageQuotaService(repository(stored), 2, AUGUST);
+
+        UsageQuota result = service.updateLimit(7L, null);
+
+        assertThat(result.getQuotaLimit()).isNull();
+        assertThat(result.getQuotaUsed()).isEqualTo(1);
+    }
+
+    @Test
+    void rejectsNegativeQuotaLimit() {
+        AtomicReference<UsageQuota> stored = new AtomicReference<>();
+        UsageQuotaService service = new UsageQuotaService(repository(stored), 2, AUGUST);
+
+        assertThatThrownBy(() -> service.updateLimit(7L, -1))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("âm");
+    }
+
     private UsageQuotaRepository repository(AtomicReference<UsageQuota> stored) {
         UsageQuotaRepository repository = mock(UsageQuotaRepository.class);
         when(repository.findByUserIdForUpdate(any())).thenAnswer(invocation -> Optional.ofNullable(stored.get()));

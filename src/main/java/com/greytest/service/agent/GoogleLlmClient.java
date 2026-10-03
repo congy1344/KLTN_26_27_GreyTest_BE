@@ -304,7 +304,7 @@ public class GoogleLlmClient implements LlmClient {
         properties.set("method_id", type("integer"));
         properties.set("branch_id", nullableStringSchema());
         properties.set("description", type("string"));
-        properties.set("category", enumSchema("VALIDATION", "BUSINESS_LOGIC", "SIDE_EFFECT"));
+        properties.set("category", enumSchema("VALIDATION", "BUSINESS_LOGIC", "SIDE_EFFECT", "INTEGRATION"));
         required(schema, "method_id", "branch_id", "description", "category");
         return schema;
     }

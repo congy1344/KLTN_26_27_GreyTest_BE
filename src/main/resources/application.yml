@@ -38,6 +38,7 @@ greytest:
     token-secret: ${GREYTEST_AUTH_TOKEN_SECRET:}
   usage:
     default-monthly-llm-quota: ${GREYTEST_DEFAULT_MONTHLY_LLM_QUOTA:100}
+    pro-monthly-llm-quota: ${GREYTEST_PRO_MONTHLY_LLM_QUOTA:1000}
   llm-cache:
     max-entries: ${GREYTEST_LLM_CACHE_MAX_ENTRIES:500}
   llm-batch:

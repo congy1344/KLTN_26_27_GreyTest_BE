@@ -135,6 +135,16 @@ class AgentGatewayTest {
     }
 
     @Test
+    void businessRulePromptRequiresVietnameseTemplateAndCategoryDefinitions() {
+        String prompt = promptManager.render("business-rule", Map.of("context_json", Map.of("project", "demo")));
+
+        assertThat(prompt).contains(
+                "Khi <tình huống>, service <hành vi>.",
+                "INTEGRATION",
+                "không kiểm tra");
+    }
+
+    @Test
     void mockClientCollapsesAllOutcomesIntoDecisionLevelBusinessRules() {
         String prompt = """
                 # Prompt: business-rule
@@ -426,6 +436,24 @@ class AgentGatewayTest {
         assertThatThrownBy(() -> parser.parse(invalidJson, BusinessRuleResponseDto.class))
                 .isInstanceOf(LlmResponseException.class)
                 .hasMessageContaining("LLM response khong dung schema");
+    }
+
+    @Test
+    void parserAcceptsIntegrationBusinessRuleCategory() {
+        String responseJson = """
+                {
+                  "rules": [{
+                    "method_id": 1,
+                    "description": "Khi lưu đơn hàng, service gọi notificationClient.send.",
+                    "category": "INTEGRATION",
+                    "branch_id": "STMT-1"
+                  }]
+                }
+                """;
+
+        BusinessRuleResponseDto response = parser.parse(responseJson, BusinessRuleResponseDto.class);
+
+        assertThat(response.rules()).extracting("category").containsExactly("INTEGRATION");
     }
 
     @Test

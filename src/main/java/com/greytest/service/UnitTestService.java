@@ -61,8 +61,11 @@ public class UnitTestService {
         if(scope==null)ensureCanGenerate(project);
         var approved=scope==null?approvedCases(projectId):approvedCases(projectId,scope);
         if(approved.isEmpty()) throw new LlmResponseException("Khong co Test Case da approve de sinh Unit Test.");
+        List<List<TestCase>> allBatches = caseBatches(approved);
 
         List<TestCase> target;
+        List<List<TestCase>> batchesToRun;
+        List<Integer> batchIndexes;
         if(resume){
             target = approved.stream().filter(c -> units.findByTestCaseId(c.getId()) == null).toList();
             if(target.isEmpty()){
@@ -70,15 +73,32 @@ public class UnitTestService {
                         "Tất cả " + approved.size() + " Test Case đã có Unit Test đầy đủ.");
                 return list(projectId, scope != null ? scope.servicePath() : null);
             }
-            startProgress(projectId, target, "Tiếp tục sinh Unit Test cho " + target.size() + " Test Case còn thiếu.");
+            Set<Long> targetIds = target.stream().map(TestCase::getId).collect(java.util.stream.Collectors.toSet());
+            batchIndexes = java.util.stream.IntStream.range(0, allBatches.size())
+                    .filter(index -> allBatches.get(index).stream().anyMatch(testCase -> targetIds.contains(testCase.getId())))
+                    .boxed()
+                    .toList();
+            batchesToRun = batchIndexes.stream()
+                    .map(index -> allBatches.get(index).stream().filter(testCase -> targetIds.contains(testCase.getId())).toList())
+                    .toList();
+            int completedBatchCount = batchIndexes.get(0);
+            List<String> stepLabels = progressLabels(allBatches);
+            String message = "Tiếp tục sinh Unit Test từ batch " + (completedBatchCount + 1) + "/" + allBatches.size() + ".";
+            if (completedBatchCount > 0) {
+                generationProgress.resume(projectId, GenerationProgressStage.UNIT_TEST, stepLabels, completedBatchCount, message);
+            } else {
+                generationProgress.start(projectId, GenerationProgressStage.UNIT_TEST, stepLabels, message);
+            }
         } else {
             deleteOldUnitTests(approved);
             target = approved;
+            batchesToRun = allBatches;
+            batchIndexes = java.util.stream.IntStream.range(0, allBatches.size()).boxed().toList();
             startProgress(projectId, target, "Bắt đầu sinh Unit Test từ Test Case đã approve.");
         }
 
         try {
-            var generated=generateBatches(projectId,target);
+            var generated=generateBatches(projectId,batchesToRun,batchIndexes,allBatches.size());
             if (generationProgress.isPaused(projectId, GenerationProgressStage.UNIT_TEST)) {
                 generationProgress.log(projectId, GenerationProgressStage.UNIT_TEST,
                         "Tác vụ đã tạm dừng. Các Unit Test đã sinh được lưu an toàn vào CSDL. Nhấn 'Tiếp tục sinh' khi bạn sẵn sàng.");
@@ -113,8 +133,11 @@ public class UnitTestService {
                 return list(projectId, scope != null ? scope.servicePath() : null);
             }
             int failedBatch=LlmBatchExecutor.failedBatch(exception,0);
+            int originalBatch = failedBatch > 0 && failedBatch <= batchIndexes.size()
+                    ? batchIndexes.get(failedBatch - 1) + 1
+                    : failedBatch;
             generationProgress.fail(projectId, GenerationProgressStage.UNIT_TEST,
-                    (failedBatch>0?"Dừng ở batch " + failedBatch + ". ":"")
+                    (originalBatch>0?"Dừng ở batch " + originalBatch + ". ":"")
                             + "Sinh Unit Test thất bại; các batch đã sinh trước đó đã được lưu an toàn. Bạn có thể nhấn 'Tiếp tục sinh' để chạy tiếp.");
             throw LlmBatchExecutor.originalFailure(exception);
         }
@@ -150,13 +173,15 @@ public class UnitTestService {
         }
     }
     private List<GeneratedUnitTestDto> generateBatches(Long projectId,List<TestCase> target){
+        List<List<TestCase>> batches = caseBatches(target);
+        List<Integer> batchIndexes = java.util.stream.IntStream.range(0, batches.size()).boxed().toList();
+        return generateBatches(projectId, batches, batchIndexes, batches.size());
+    }
+    private List<GeneratedUnitTestDto> generateBatches(
+            Long projectId,List<List<TestCase>> batchCaseLists,List<Integer> batchIndexes,int totalBatches){
         List<GeneratedUnitTestDto> generated=new ArrayList<>();
-        int totalBatches=batchCount(target.size());
         List<Set<Long>> batches=new ArrayList<>();
-        List<List<TestCase>> batchCaseLists=new ArrayList<>();
-        for(int start=0;start<target.size();start+=GenerationContextBuilder.MAX_UNIT_TEST_CASES){
-            var batch=target.subList(start,Math.min(start+GenerationContextBuilder.MAX_UNIT_TEST_CASES,target.size()));
-            batchCaseLists.add(batch);
+        for(List<TestCase> batch : batchCaseLists){
             Set<Long> ids=batch.stream().map(TestCase::getId).collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
             batches.add(ids);
         }
@@ -165,11 +190,12 @@ public class UnitTestService {
                 batches,
                 () -> generationProgress.isPaused(projectId, GenerationProgressStage.UNIT_TEST),
                 ids -> {
-            int batchIdx = batches.indexOf(ids) + 1;
-            String summary = batchIdx <= batchCaseLists.size() ? formatTestCaseBatchSummary(batchCaseLists.get(batchIdx - 1)) : "";
+            int currentIndex = batches.indexOf(ids);
+            int batchIdx = batchIndexes.get(currentIndex);
+            String summary = currentIndex < batchCaseLists.size() ? formatTestCaseBatchSummary(batchCaseLists.get(currentIndex)) : "";
             generationProgress.log(projectId, GenerationProgressStage.UNIT_TEST,
-                    "Đang gọi AI sinh mã Unit Test cho batch " + batchIdx + "/" + totalBatches + " (" + summary + ")...");
-            return generateBatchWithRecovery(projectId,ids,batchIdx,totalBatches,
+                    "Đang gọi AI sinh mã Unit Test cho batch " + (batchIdx + 1) + "/" + totalBatches + " (" + summary + ")...");
+            return generateBatchWithRecovery(projectId,ids,batchIdx + 1,totalBatches,
                     new RecoveryBudget(MAX_UNIT_TEST_RECOVERY_CALLS),false);
         },
         (completedBatch,valid)-> {
@@ -178,9 +204,10 @@ public class UnitTestService {
                 persistBatch(projectId, valid);
                 return null;
             });
+            int batchIdx = completedBatch <= batchIndexes.size() ? batchIndexes.get(completedBatch - 1) : -1;
             String summary = completedBatch <= batchCaseLists.size() ? formatTestCaseBatchSummary(batchCaseLists.get(completedBatch - 1)) : "";
             generationProgress.advance(projectId, GenerationProgressStage.UNIT_TEST,
-                    "Batch " + completedBatch + "/" + totalBatches + ": đã kiểm tra & lưu "
+                    "Batch " + (batchIdx + 1) + "/" + totalBatches + ": đã kiểm tra & lưu "
                             + valid.size() + " Unit Test hợp lệ (" + summary + ").");
         });
         for(List<GeneratedUnitTestDto> valid:generatedBatches){
@@ -270,18 +297,25 @@ public class UnitTestService {
         }
     }
     private void startProgress(Long projectId,List<TestCase> target,String message){
-        int totalBatches = batchCount(target.size());
+        List<List<TestCase>> batches = caseBatches(target);
+        List<String> stepLabels = progressLabels(batches);
+        generationProgress.start(projectId, GenerationProgressStage.UNIT_TEST, stepLabels,
+                message + " Tổng cộng " + target.size() + " Test Case trong " + batches.size() + " batch.");
+    }
+    private List<List<TestCase>> caseBatches(List<TestCase> testCases) {
+        List<List<TestCase>> batches = new ArrayList<>();
+        for (int start = 0; start < testCases.size(); start += GenerationContextBuilder.MAX_UNIT_TEST_CASES) {
+            batches.add(testCases.subList(start, Math.min(start + GenerationContextBuilder.MAX_UNIT_TEST_CASES, testCases.size())));
+        }
+        return batches;
+    }
+    private List<String> progressLabels(List<List<TestCase>> batches) {
         List<String> stepLabels = new ArrayList<>();
-        for (int i = 0; i < totalBatches; i++) {
-            int start = i * GenerationContextBuilder.MAX_UNIT_TEST_CASES;
-            int end = Math.min(start + GenerationContextBuilder.MAX_UNIT_TEST_CASES, target.size());
-            List<TestCase> batchCases = target.subList(start, end);
-            stepLabels.add("Sinh Unit Test - batch " + (i + 1) + "/" + totalBatches + ": " + formatTestCaseBatchSummary(batchCases));
+        for (int i = 0; i < batches.size(); i++) {
+            stepLabels.add("Sinh Unit Test - batch " + (i + 1) + "/" + batches.size() + ": " + formatTestCaseBatchSummary(batches.get(i)));
         }
         stepLabels.add("Kiểm tra biên dịch & lưu Unit Test vào CSDL");
-
-        generationProgress.start(projectId, GenerationProgressStage.UNIT_TEST, stepLabels,
-                message + " Tổng cộng " + target.size() + " Test Case trong " + totalBatches + " batch.");
+        return stepLabels;
     }
     private String formatTestCaseBatchSummary(List<TestCase> batch) {
         if (batch == null || batch.isEmpty()) return "0 case";

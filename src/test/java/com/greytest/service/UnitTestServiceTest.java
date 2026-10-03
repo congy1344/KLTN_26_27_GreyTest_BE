@@ -526,6 +526,45 @@ class UnitTestServiceTest {
         verify(units, never()).delete(existingUnit1);
     }
 
+    @Test
+    void resumeKeepsOriginalBatchNumbersInProgress() {
+        Project project = new Project();
+        project.setId(1L);
+        project.setStatus(ProjectStatus.CASE_APPROVED);
+        int batchSize = com.greytest.service.agent.GenerationContextBuilder.MAX_UNIT_TEST_CASES;
+        List<TestCase> approved = LongStream.rangeClosed(1, batchSize + 1)
+                .mapToObj(id -> approvedCase(id, 20L))
+                .toList();
+        TestPlan plan = new TestPlan();
+        plan.setId(20L);
+        plan.setProjectId(1L);
+        when(projects.findById(1L)).thenReturn(Optional.of(project));
+        when(cases.findAll()).thenReturn(approved);
+        when(plans.findById(20L)).thenReturn(Optional.of(plan));
+        for (long id = 1; id <= batchSize; id++) {
+            UnitTest existing = new UnitTest();
+            existing.setTestCaseId(id);
+            when(units.findByTestCaseId(id)).thenReturn(existing);
+        }
+        when(units.findByTestCaseId((long) batchSize + 1)).thenReturn(null);
+        when(ai.generateUnitTests(1L, Set.of((long) batchSize + 1)))
+                .thenThrow(new LlmResponseException("stop after progress setup"));
+
+        assertThatThrownBy(() -> service.generate(1L, (String) null, true))
+                .isInstanceOf(LlmResponseException.class);
+
+        ArgumentCaptor<List<String>> labels = ArgumentCaptor.forClass(List.class);
+        verify(generationProgress).resume(
+                org.mockito.ArgumentMatchers.eq(1L),
+                org.mockito.ArgumentMatchers.eq(com.greytest.dto.GenerationProgressStage.UNIT_TEST),
+                labels.capture(),
+                org.mockito.ArgumentMatchers.eq(1),
+                org.mockito.ArgumentMatchers.contains("batch 2/2"));
+        assertThat(labels.getValue()).contains(
+                "Sinh Unit Test - batch 1/2: TC-1, TC-2, TC-3, TC-4, TC-5, TC-6, TC-7, TC-8",
+                "Sinh Unit Test - batch 2/2: TC-9");
+    }
+
     private static TestCase approvedCase(Long id, Long planId) {
         TestCase testCase = new TestCase();
         testCase.setId(id);

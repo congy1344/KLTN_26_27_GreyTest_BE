@@ -1,13 +1,17 @@
 package com.greytest.controller;
 
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
@@ -62,5 +66,55 @@ class AdminControllerTest {
         user.setRole(role);
         user.setEnabled(true);
         return user;
+    }
+
+    @Test
+    void forwardsLockReasonToService() throws Exception {
+        AuthUser admin = user(UserRole.ADMIN);
+        when(authService.currentUser("Bearer admin-token")).thenReturn(admin);
+
+        mvc.perform(patch("/api/admin/users/2/status").header("Authorization", "Bearer admin-token")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"enabled\":false,\"reason\":\"Test account\"}"))
+                .andExpect(status().isOk());
+
+        verify(adminService).updateStatus(admin, 2L, false, "Test account");
+    }
+
+    @Test
+    void rejectsLockReasonLongerThan500Characters() throws Exception {
+        when(authService.currentUser("Bearer admin-token")).thenReturn(user(UserRole.ADMIN));
+
+        mvc.perform(patch("/api/admin/users/2/status").header("Authorization", "Bearer admin-token")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"enabled\":false,\"reason\":\"" + "x".repeat(501) + "\"}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("VALIDATION_ERROR"));
+
+        verifyNoInteractions(adminService);
+    }
+
+    @Test
+    void forwardsUnlimitedQuotaAsNull() throws Exception {
+        AuthUser admin = user(UserRole.ADMIN);
+        when(authService.currentUser("Bearer admin-token")).thenReturn(admin);
+
+        mvc.perform(patch("/api/admin/users/2/quota").header("Authorization", "Bearer admin-token")
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"quotaLimit\":null}"))
+                .andExpect(status().isOk());
+
+        verify(adminService).updateQuota(admin, 2L, null);
+    }
+
+    @Test
+    void forwardsTierUpdateToService() throws Exception {
+        AuthUser admin = user(UserRole.ADMIN);
+        when(authService.currentUser("Bearer admin-token")).thenReturn(admin);
+
+        mvc.perform(patch("/api/admin/users/2/tier").header("Authorization", "Bearer admin-token")
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"tier\":\"PRO\"}"))
+                .andExpect(status().isOk());
+
+        verify(adminService).updateTier(admin, 2L, com.greytest.entity.enums.UserTier.PRO);
     }
 }

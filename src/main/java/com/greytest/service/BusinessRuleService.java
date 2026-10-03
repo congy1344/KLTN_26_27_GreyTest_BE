@@ -20,6 +20,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 import com.greytest.dto.BusinessRuleDto;
 import com.greytest.dto.BusinessRuleReviewDto;
 import com.greytest.dto.GenerationProgressStage;
+import com.greytest.dto.SourceBranchDto;
 import com.greytest.dto.CreateBusinessRuleRequest;
 import com.greytest.dto.ReviewedBusinessRuleDto;
 import com.greytest.dto.UpdateBusinessRuleRequest;
@@ -565,9 +566,7 @@ public class BusinessRuleService {
         Map<String, BusinessRule> existingByKey = businessRuleRepository.findByProjectId(projectId).stream()
                 .filter(rule -> rule.getMethodId() != null)
                 .collect(Collectors.toMap(
-                        rule -> sourceBranchId(rule.getReviewNote()) != null
-                                ? branchKey(rule.getMethodId(), sourceBranchId(rule.getReviewNote()))
-                                : methodRuleKey(rule.getMethodId(), rule.getDescription()),
+                        rule -> sourceRuleKey(rule.getMethodId(), sourceBranchId(rule.getReviewNote()), rule.getDescription()),
                         rule -> rule,
                         (first, ignored) -> first));
         for (GeneratedBusinessRuleDto generatedRule : generatedRules) {
@@ -761,7 +760,7 @@ public class BusinessRuleService {
             throw new LlmResponseException("AI khong tra ve danh sach Business Rule hop le.");
         }
         Map<Long, Set<String>> returnedByMethod = new java.util.HashMap<>();
-        Set<String> uniqueAssignments = new HashSet<>();
+        Set<String> uniqueDecisionAssignments = new HashSet<>();
         Map<Long, Set<String>> descriptionsByMethod = new java.util.HashMap<>();
         for (GeneratedBusinessRuleDto rule : generatedRules) {
             if (rule == null || rule.methodId() == null
@@ -796,13 +795,12 @@ public class BusinessRuleService {
                 throw new LlmResponseException(
                         "AI chua gan source anchor cho Business Rule cua method " + rule.methodId() + ".");
             }
-            String assignment = branchId == null
-                    ? rule.methodId() + "\n" + descriptionKey(rule.description())
-                    : rule.methodId() + "\n" + branchId;
-            if (!uniqueAssignments.add(assignment)) {
+            String assignment = rule.methodId() + "\n" + branchId;
+            if (branchId != null && expected.contains(branchId)
+                    && !uniqueDecisionAssignments.add(assignment)) {
                 throw new LlmResponseException(
                         "AI sinh trung Business Rule cho method " + rule.methodId()
-                                + (branchId == null ? "." : ", quyet dinh " + branchId + "."));
+                                + ", quyet dinh " + branchId + ".");
             }
             if (branchId != null) {
                 if (expected.contains(branchId)) {
@@ -821,28 +819,29 @@ public class BusinessRuleService {
     }
 
     private Set<String> decisionIds(JavaMethod method) {
-        try {
-            return MethodBranchAnalyzer.analyze(method.getSourceCode(), method.getLineStart()).stream()
-                    .filter(branch -> !"STATEMENT".equals(branch.kind()))
-                    .map(com.greytest.dto.SourceBranchDto::branchId)
-                    .map(this::decisionId)
-                    .collect(Collectors.toCollection(LinkedHashSet::new));
-        } catch (IllegalStateException exception) {
-            throw new InvalidProjectStatusException(
-                    "Khong the xac minh control-flow cua method " + method.getMethodName()
-                            + ". Hay phan tich lai project.");
-        }
+        return sourceBranches(method).stream()
+                .filter(branch -> !"STATEMENT".equals(branch.kind()))
+                .map(SourceBranchDto::branchId)
+                .map(this::decisionId)
+                .collect(Collectors.toCollection(LinkedHashSet::new));
     }
 
     private Set<String> sourceAnchorIds(Long methodId) {
         JavaMethod method = javaMethodRepository.findById(methodId)
                 .orElseThrow(() -> new LlmResponseException(
                         "Khong tim thay Service method " + methodId + " de xac minh source anchor."));
+        return sourceBranches(method).stream()
+                .filter(branch -> "STATEMENT".equals(branch.kind()))
+                .map(SourceBranchDto::branchId)
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+    }
+
+    private List<SourceBranchDto> sourceBranches(JavaMethod method) {
         try {
-            return MethodBranchAnalyzer.analyze(method.getSourceCode(), method.getLineStart()).stream()
-                    .filter(branch -> "STATEMENT".equals(branch.kind()))
-                    .map(com.greytest.dto.SourceBranchDto::branchId)
-                    .collect(Collectors.toCollection(LinkedHashSet::new));
+            List<SourceBranchDto> branches = MethodBranchAnalyzer.analyze(
+                    method.getSourceCode(), method.getLineStart());
+            validateSourceRanges(method, branches);
+            return branches;
         } catch (IllegalStateException exception) {
             throw new InvalidProjectStatusException(
                     "Khong the xac minh source anchor cua method " + method.getMethodName()
@@ -850,11 +849,28 @@ public class BusinessRuleService {
         }
     }
 
+    /** Xác minh mọi anchor AI dùng đều nằm trong phạm vi method đã phân tích. */
+    private void validateSourceRanges(JavaMethod method, List<SourceBranchDto> branches) {
+        Integer methodStart = method.getLineStart();
+        Integer methodEnd = method.getLineEnd();
+        if (methodStart == null || methodEnd == null || methodStart <= 0 || methodEnd < methodStart) return;
+        boolean invalidRange = branches.stream().anyMatch(branch -> branch.lineStart() == null
+                || branch.lineEnd() == null
+                || branch.lineStart() < methodStart
+                || branch.lineEnd() > methodEnd
+                || branch.lineEnd() < branch.lineStart());
+        if (invalidRange) {
+            throw new InvalidProjectStatusException(
+                    "Range source cua source anchor nam ngoai method " + method.getMethodName()
+                            + ". Hay phan tich lai project.");
+        }
+    }
+
     private int branchOrder(Long methodId, String branchId) {
         JavaMethod method = javaMethodRepository.findById(methodId).orElse(null);
         if (method == null || branchId == null) return Integer.MAX_VALUE;
-        List<String> branchIds = MethodBranchAnalyzer.analyze(method.getSourceCode(), method.getLineStart()).stream()
-                .map(com.greytest.dto.SourceBranchDto::branchId)
+        List<String> branchIds = sourceBranches(method).stream()
+                .map(SourceBranchDto::branchId)
                 .map(this::decisionId)
                 .distinct()
                 .toList();
@@ -908,10 +924,8 @@ public class BusinessRuleService {
         Set<String> keys = new HashSet<>();
         for (BusinessRule rule : rules) {
             String branchId = sourceBranchId(rule.getReviewNote());
-            if (branchId != null && rule.getMethodId() != null) {
-                keys.add(branchKey(rule.getMethodId(), branchId));
-            } else if (rule.getMethodId() != null && rule.getDescription() != null) {
-                keys.add(methodRuleKey(rule.getMethodId(), rule.getDescription()));
+            if (rule.getMethodId() != null) {
+                keys.add(sourceRuleKey(rule.getMethodId(), branchId, rule.getDescription()));
             }
         }
         return keys;
@@ -932,7 +946,7 @@ public class BusinessRuleService {
             Long currentRuleId,
             Long methodId,
             String branchId) {
-        if (branchId == null) return;
+        if (branchId == null || isStatementAnchor(branchId)) return;
         for (BusinessRule rule : rules) {
             if (currentRuleId != null && currentRuleId.equals(rule.getId())) continue;
             if (methodId.equals(rule.getMethodId())
@@ -949,7 +963,7 @@ public class BusinessRuleService {
             if (rule.getMethodId() == null) continue;
             String rawBranchId = rawSourceBranchId(rule.getReviewNote());
             String branchId = decisionId(rawBranchId);
-            if (branchId != null) {
+            if (branchId != null && !isStatementAnchor(branchId)) {
                 branchesByDecision.computeIfAbsent(
                         branchKey(rule.getMethodId(), branchId), ignored -> new ArrayList<>())
                         .add(rawBranchId);
@@ -978,10 +992,17 @@ public class BusinessRuleService {
     }
 
     private String generatedRuleKey(GeneratedBusinessRuleDto rule) {
-        String branchId = decisionId(rule.branchId());
-        return branchId == null
-                ? methodRuleKey(rule.methodId(), rule.description())
-                : branchKey(rule.methodId(), branchId);
+        return sourceRuleKey(rule.methodId(), decisionId(rule.branchId()), rule.description());
+    }
+
+    private String sourceRuleKey(Long methodId, String branchId, String description) {
+        return branchId == null || isStatementAnchor(branchId)
+                ? methodRuleKey(methodId, description)
+                : branchKey(methodId, branchId);
+    }
+
+    private boolean isStatementAnchor(String branchId) {
+        return branchId != null && branchId.startsWith("STMT-");
     }
 
     private String methodRuleKey(Long methodId, String description) {

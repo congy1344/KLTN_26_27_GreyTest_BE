@@ -25,7 +25,7 @@ public final class GenerationResponseDtos {
     public record GeneratedBusinessRuleDto(
             @JsonProperty("method_id") @NotNull Long methodId,
             @NotBlank String description,
-            @NotBlank @Pattern(regexp = "VALIDATION|BUSINESS_LOGIC|SIDE_EFFECT") String category,
+            @NotBlank @Pattern(regexp = "VALIDATION|BUSINESS_LOGIC|SIDE_EFFECT|INTEGRATION") String category,
             @JsonProperty("branch_id") String branchId) {
 
         public GeneratedBusinessRuleDto(Long methodId, String description, String category) {

@@ -26,6 +26,7 @@ import com.greytest.dto.admin.AdminDtos.UserSummaryDto;
 import com.greytest.dto.admin.UpdateQuotaRequest;
 import com.greytest.dto.admin.UpdateUserRoleRequest;
 import com.greytest.dto.admin.UpdateUserStatusRequest;
+import com.greytest.dto.admin.UpdateUserTierRequest;
 import com.greytest.entity.AuthUser;
 import com.greytest.entity.enums.ActivityAction;
 import com.greytest.entity.enums.UserRole;
@@ -65,7 +66,7 @@ public class AdminController {
             @RequestAttribute(AdminAuthorizationInterceptor.ADMIN_USER_ATTRIBUTE) AuthUser admin,
             @PathVariable Long userId,
             @Valid @RequestBody UpdateUserStatusRequest request) {
-        return service.updateStatus(admin, userId, request.enabled());
+        return service.updateStatus(admin, userId, request.enabled(), request.reason());
     }
 
     @PatchMapping("/users/{userId}/role")
@@ -74,6 +75,14 @@ public class AdminController {
             @PathVariable Long userId,
             @Valid @RequestBody UpdateUserRoleRequest request) {
         return service.updateRole(admin, userId, request.role());
+    }
+
+    @PatchMapping("/users/{userId}/tier")
+    public UserSummaryDto tier(
+            @RequestAttribute(AdminAuthorizationInterceptor.ADMIN_USER_ATTRIBUTE) AuthUser admin,
+            @PathVariable Long userId,
+            @Valid @RequestBody UpdateUserTierRequest request) {
+        return service.updateTier(admin, userId, request.tier());
     }
 
     @PatchMapping("/users/{userId}/quota")

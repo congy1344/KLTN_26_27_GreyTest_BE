@@ -2,6 +2,7 @@ package com.greytest.repository;
 
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Optional;
 
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
@@ -16,6 +17,10 @@ public interface UserActivityLogRepository
         extends JpaRepository<UserActivityLog, Long>, JpaSpecificationExecutor<UserActivityLog> {
 
     long countByUserId(Long userId);
+
+    long countByUserIdAndActionTypeIn(Long userId, List<ActivityAction> actionTypes);
+
+    Optional<UserActivityLog> findFirstByUserIdOrderByCreatedAtDesc(Long userId);
 
     long countByActionType(ActivityAction actionType);
 

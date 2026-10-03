@@ -1,6 +1,8 @@
 package com.greytest.service;
 
 import java.util.Map;
+import java.util.Collections;
+import java.util.HashMap;
 
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -26,7 +28,7 @@ public class UserActivityService {
         activity.setUserId(userId);
         activity.setActionType(action);
         activity.setRelatedProjectId(projectId);
-        activity.setMetadata(metadata == null ? Map.of() : Map.copyOf(metadata));
+        activity.setMetadata(metadata == null ? Map.of() : Collections.unmodifiableMap(new HashMap<>(metadata)));
         repository.save(activity);
     }
 }
