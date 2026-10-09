@@ -50,6 +50,18 @@ class TestCaseServiceTest {
 
     @InjectMocks private TestCaseService service;
 
+    private void mockPersistedCases() {
+        List<TestCase> persisted = new java.util.ArrayList<>();
+        when(cases.saveAll(org.mockito.ArgumentMatchers.anyList())).thenAnswer(invocation -> {
+            List<TestCase> saved = invocation.getArgument(0);
+            persisted.addAll(saved);
+            return saved;
+        });
+        when(cases.findByTestPlanId(org.mockito.ArgumentMatchers.anyLong())).thenAnswer(invocation -> {
+            Long planId = invocation.getArgument(0);
+            return persisted.stream().filter(testCase -> planId.equals(testCase.getTestPlanId())).toList();
+        });
+    }
     private Project project(ProjectStatus status) {
         Project project = new Project();
         project.setId(1L);
@@ -122,8 +134,7 @@ class TestCaseServiceTest {
                             .map(id -> generatedCase(id, "case " + id))
                             .toList());
                 });
-        when(cases.saveAll(org.mockito.ArgumentMatchers.anyList()))
-                .thenAnswer(invocation -> invocation.getArgument(0));
+        mockPersistedCases();
 
         var result = service.generate(1L);
 
@@ -162,8 +173,7 @@ class TestCaseServiceTest {
                             .map(id -> generatedCase(id, "case " + id))
                             .toList());
                 });
-        when(cases.saveAll(org.mockito.ArgumentMatchers.anyList()))
-                .thenAnswer(invocation -> invocation.getArgument(0));
+        mockPersistedCases();
 
         var result = service.generate(1L);
 
@@ -237,7 +247,7 @@ class TestCaseServiceTest {
     }
 
     @Test
-    void generateReportsSaveStepWhenFailureHappensAfterLastBatch() {
+    void generateReportsBatchWhenPersistenceOfThatBatchFails() {
         project(ProjectStatus.PLAN_APPROVED);
         TestPlan plan = approvedPlan(20L, false);
         when(plans.findByProjectId(1L)).thenReturn(List.of(plan));
@@ -253,7 +263,7 @@ class TestCaseServiceTest {
         verify(generationProgress).fail(
                 org.mockito.ArgumentMatchers.eq(1L),
                 org.mockito.ArgumentMatchers.eq(com.greytest.dto.GenerationProgressStage.TEST_CASE),
-                org.mockito.ArgumentMatchers.contains("bước kiểm tra và lưu Test Case"));
+                org.mockito.ArgumentMatchers.contains("Dừng ở batch 1."));
     }
 
     @Test
@@ -280,8 +290,7 @@ class TestCaseServiceTest {
                 generatedCase(20L, "average with valid values", values, "15"),
                 generatedCase(21L, "mixed values return their average", values, "15"),
                 generatedCase(21L, "empty values return zero", java.util.Map.of("values", List.of()), "0"))));
-        when(cases.saveAll(org.mockito.ArgumentMatchers.anyList()))
-                .thenAnswer(invocation -> invocation.getArgument(0));
+        mockPersistedCases();
 
         var result = service.generate(1L);
 
@@ -313,8 +322,7 @@ class TestCaseServiceTest {
         when(ai.generateTestCases(1L, Set.of(20L, 21L))).thenReturn(new TestCaseResponseDto(List.of(
                 generatedCase(20L, "first trace", values, "EXCELLENT"),
                 generatedCase(21L, "second trace", values, "EXCELLENT"))));
-        when(cases.saveAll(org.mockito.ArgumentMatchers.anyList()))
-                .thenAnswer(invocation -> invocation.getArgument(0));
+        mockPersistedCases();
 
         assertThat(service.generate(1L)).extracting("testPlanId").containsExactly(20L, 21L);
     }
@@ -335,15 +343,14 @@ class TestCaseServiceTest {
         when(ai.generateTestCases(1L, Set.of(20L))).thenReturn(new TestCaseResponseDto(List.of(
                 generatedCase(20L, "repository miss", "repository returns empty", testData, "not found"),
                 generatedCase(20L, "inactive user", "repository returns an inactive user", testData, "not found"))));
-        when(cases.saveAll(org.mockito.ArgumentMatchers.anyList()))
-                .thenAnswer(invocation -> invocation.getArgument(0));
+        mockPersistedCases();
 
         assertThat(service.generate(1L)).extracting("preconditions")
                 .containsExactly("repository returns empty", "repository returns an inactive user");
     }
 
     @Test
-    void generateDoesNotPersistWhenALateBatchFails() {
+    void generateKeepsEarlierCommittedBatchWhenLaterBatchFails() {
         project(ProjectStatus.PLAN_APPROVED);
         int firstBatchSize = com.greytest.service.agent.GenerationContextBuilder.MAX_TEST_CASE_PLANS;
         List<TestPlan> approvedPlans = LongStream.rangeClosed(1, firstBatchSize + 1)
@@ -376,7 +383,11 @@ class TestCaseServiceTest {
                 .isInstanceOf(LlmResponseException.class)
                 .hasMessageContaining("second batch failed");
         verify(cases, org.mockito.Mockito.never()).deleteAll(org.mockito.ArgumentMatchers.anyList());
-        verify(cases, org.mockito.Mockito.never()).saveAll(org.mockito.ArgumentMatchers.anyList());
+        ArgumentCaptor<List<TestCase>> savedBatch = ArgumentCaptor.forClass(List.class);
+        verify(cases).saveAll(savedBatch.capture());
+        assertThat(savedBatch.getValue()).hasSize(firstBatchSize);
+        assertThat(savedBatch.getValue()).extracting(TestCase::getTestPlanId)
+                .containsExactlyInAnyOrderElementsOf(LongStream.rangeClosed(1, firstBatchSize).boxed().toList());
         verify(projects, org.mockito.Mockito.never()).save(org.mockito.ArgumentMatchers.any());
     }
 
@@ -398,6 +409,27 @@ class TestCaseServiceTest {
                 .hasMessageContaining("thay doi");
         verify(cases, org.mockito.Mockito.never()).deleteAll(org.mockito.ArgumentMatchers.anyList());
         verify(cases, org.mockito.Mockito.never()).saveAll(org.mockito.ArgumentMatchers.anyList());
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"title", "status"})
+    void generateRejectsChangedPlanInputsBeforeSavingBatch(String changedField) {
+        project(ProjectStatus.PLAN_APPROVED);
+        TestPlan original = approvedPlan(20L, false);
+        original.setTitle("Original requirement");
+        TestPlan current = approvedPlan(20L, false);
+        current.setTitle(changedField.equals("title") ? "Changed requirement" : original.getTitle());
+        if (changedField.equals("status")) current.setStatus(ReviewStatus.PENDING_REVIEW);
+        when(plans.findByProjectId(1L)).thenReturn(List.of(original), List.of(current));
+        when(plans.existsById(20L)).thenReturn(true);
+        when(plans.findById(20L)).thenReturn(Optional.of(original));
+        when(ai.generateTestCases(1L, Set.of(20L)))
+                .thenReturn(new TestCaseResponseDto(List.of(generatedCase(20L, "case 20"))));
+
+        assertThatThrownBy(() -> service.generate(1L))
+                .isInstanceOf(InvalidProjectStatusException.class).hasMessageContaining("thay doi");
+        verify(cases, org.mockito.Mockito.never()).saveAll(org.mockito.ArgumentMatchers.anyList());
+        verify(projects, org.mockito.Mockito.never()).save(org.mockito.ArgumentMatchers.any());
     }
 
     @Test
@@ -500,8 +532,7 @@ class TestCaseServiceTest {
                         20L, "BOUNDARY", "Equality despite source > check", "ready",
                         java.util.Map.of("balance", 100, "amount", 100),
                         "Transfer succeeds", "HIGH", "BR-001 -> TP-001"))));
-        when(cases.saveAll(org.mockito.ArgumentMatchers.anyList()))
-                .thenAnswer(invocation -> invocation.getArgument(0));
+        mockPersistedCases();
 
         var result = service.generateSupplemental(1L, List.of(new CoverageGapDto(
                 11L, "OrderService", "createOrder", java.math.BigDecimal.valueOf(40),

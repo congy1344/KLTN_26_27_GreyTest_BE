@@ -126,6 +126,29 @@ class TestPlanServiceTest {
     }
 
     @Test
+    void resumeKeepsCoveredPlanAndGeneratesOnlyMissingRule() {
+        mockProject(ProjectStatus.BR_APPROVED);
+        BusinessRule covered = approvedRule(7L, 11L);
+        BusinessRule missing = approvedRule(8L, 12L);
+        TestPlan existing = plan(99L, 7L, "Existing plan");
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(covered, missing));
+        when(testPlanRepository.findByProjectId(1L)).thenReturn(List.of(existing));
+        when(aiAgentService.generateTestPlan(1L, Set.of(8L))).thenReturn(new TestPlanResponseDto(List.of(
+                generatedPlan(12L, 8L, List.of(8L), "Missing rule plan"))));
+        mockTestPlanSaveAll();
+        mockProjectSave();
+
+        service().generate(1L, (String) null, true);
+
+        verify(aiAgentService).generateTestPlan(1L, Set.of(8L));
+        verify(testPlanRepository, never()).deleteAll(any());
+        ArgumentCaptor<List<TestPlan>> saved = ArgumentCaptor.forClass(List.class);
+        verify(testPlanRepository).saveAll(saved.capture());
+        assertThat(saved.getValue()).singleElement()
+                .satisfies(plan -> assertThat(plan.getBusinessRuleId()).isEqualTo(8L));
+    }
+
+    @Test
     void generateBatchesApprovedRulesToAvoidTruncatedJson() {
         Project project = mockProject(ProjectStatus.BR_APPROVED);
         List<BusinessRule> rules = List.of(

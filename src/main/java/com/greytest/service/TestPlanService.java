@@ -269,7 +269,10 @@ public class TestPlanService {
         AtomicInteger planCounter = new AtomicInteger(baseNumber);
 
         List<List<BusinessRule>> batchesToRun = allBatches.stream()
-                .filter(batch -> batch.stream().anyMatch(rule -> !alreadyCoveredRuleIds.contains(rule.getId())))
+                .filter(batch -> !resume || batch.stream().anyMatch(rule -> !alreadyCoveredRuleIds.contains(rule.getId())))
+                .map(batch -> resume
+                        ? batch.stream().filter(rule -> !alreadyCoveredRuleIds.contains(rule.getId())).toList()
+                        : batch)
                 .toList();
 
         List<TestPlan> allSavedPlans = new java.util.concurrent.CopyOnWriteArrayList<>();
@@ -280,7 +283,7 @@ public class TestPlanService {
                 batchesToRun,
                 () -> generationProgressService.isPaused(projectId, GenerationProgressStage.TEST_PLAN),
                 batch -> {
-                    int batchIdx = allBatches.indexOf(batch) + 1;
+                    int batchIdx = allBatches.indexOf(allBatches.stream().filter(original -> original.containsAll(batch)).findFirst().orElseThrow()) + 1;
                     String summary = formatRuleBatchSummary(batch);
                     generationProgressService.log(projectId, GenerationProgressStage.TEST_PLAN,
                             "Đang gọi AI sinh Test Plan cho batch " + batchIdx + "/" + totalBatches
@@ -291,7 +294,7 @@ public class TestPlanService {
                 },
                 (completedRunBatch, batchPlans) -> {
                     List<BusinessRule> currentBatch = batchesToRun.get(completedRunBatch - 1);
-                    int actualBatchIdx = allBatches.indexOf(currentBatch) + 1;
+                    int actualBatchIdx = allBatches.indexOf(allBatches.stream().filter(original -> original.containsAll(currentBatch)).findFirst().orElseThrow()) + 1;
                     // Lưu ngay batch này vào CSDL để không mất dữ liệu nếu bị ngắt quãng giữa chừng
                     List<TestPlan> saved = transactions.execute(status -> persistBatch(projectId, targetRules, batchPlans, planCounter, deletedPlanIds));
                     if (saved != null) allSavedPlans.addAll(saved);

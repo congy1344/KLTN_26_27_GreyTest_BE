@@ -303,7 +303,9 @@ public class BusinessRuleService {
         int lastAttemptedBatchNumber = firstPendingBatchIndex + 1;
         try {
         for (int i = 0; i < totalBatches; i++) {
-            Set<Long> activeMethodIds = allBatches.get(i);
+            Set<Long> activeMethodIds = allBatches.get(i).stream()
+                    .filter(uncoveredMethodIds::contains)
+                    .collect(Collectors.toSet());
             boolean needsRun = activeMethodIds.stream().anyMatch(uncoveredMethodIds::contains);
             if (!needsRun) {
                 // Batch này đã được sinh và lưu trước đó, bỏ qua để tiếp tục batch dang dở
@@ -348,6 +350,7 @@ public class BusinessRuleService {
             return created;
         }
 
+        lastAttemptedBatchNumber = totalBatches + 1;
         generationProgressService.log(projectId, GenerationProgressStage.BUSINESS_RULE,
                 "Đang kiểm tra tính nhất quán và hoàn tất cập nhật trạng thái...");
         project.setStatus(ProjectStatus.BR_PENDING_REVIEW);

@@ -38,7 +38,7 @@ class AIAgentServiceJavaVersionTest {
         AtomicReference<String> capturedPrompt = new AtomicReference<>();
         LlmClient client = prompt -> {
             capturedPrompt.set(prompt);
-            return "{\"unit_tests\":[{\"case_id\":1,\"test_class_name\":\"GeneratedServiceTest\",\"test_method_name\":\"case1\",\"package_name\":\"demo\",\"generation_type\":\"NEW_TEST\",\"source_code\":\"package demo; class GeneratedServiceTest {}\"}]}";
+            return "{\"unit_tests\":[{\"case_id\":1,\"test_class_name\":\"GeneratedServiceTest\",\"test_method_name\":\"case1\",\"package_name\":\"demo\",\"generation_type\":\"NEW_TEST\",\"source_code\":\"package demo; import org.junit.Test; import static org.junit.Assert.assertEquals; public class GeneratedServiceTest { @Test public void case1() { assertEquals(1, 1); } }\"}]}";
         };
         AIAgentService service = new AIAgentService(
                 contextBuilder,

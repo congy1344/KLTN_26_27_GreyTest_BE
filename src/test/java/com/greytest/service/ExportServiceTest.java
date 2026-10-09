@@ -113,7 +113,7 @@ class ExportServiceTest {
                 "\"filePath\" : \"src/test/java/UserServiceTest.java\"");
         assertThat(json).doesNotContain("sourceCode");
         assertThat(project.getStatus()).isEqualTo(ProjectStatus.COMPLETED);
-        verify(projects, times(2)).save(project);
+        verify(projects, times(1)).save(project);
         verify(cases, times(2)).findByTestPlanIdIn(List.of(20L, 21L));
         verify(unitTests, times(2)).findByTestCaseIdIn(List.of(30L, 31L));
         verify(cases, never()).findByTestPlanId(20L);

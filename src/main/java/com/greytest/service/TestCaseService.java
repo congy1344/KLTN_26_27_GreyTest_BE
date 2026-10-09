@@ -138,6 +138,8 @@ public class TestCaseService {
         int baseNumber = nextCaseNumber();
         java.util.concurrent.atomic.AtomicInteger caseCounter = new java.util.concurrent.atomic.AtomicInteger(baseNumber);
         List<TestCaseDto> allSavedCases = new java.util.concurrent.CopyOnWriteArrayList<>();
+        var expectedPlans = targetPlans.stream().collect(java.util.stream.Collectors.toMap(
+                TestPlan::getId, this::snapshot));
 
         try {
             List<List<GeneratedTestCaseDto>> generatedBatches = LlmBatchExecutor.mapOrSequential(
@@ -156,6 +158,14 @@ public class TestCaseService {
                         int batchIndex = batchNumber <= batchIndexes.size() ? batchIndexes.get(batchNumber - 1) : -1;
                         List<TestPlan> currentBatchPlans = batchNumber <= batches.size() ? batches.get(batchNumber - 1) : List.of();
                         List<TestCase> saved = transactions.execute(status -> {
+                            // Không lưu case sinh từ plan đã bị thay đổi trong lúc chờ AI.
+                            var currentPlans = plans.findByProjectId(projectId).stream()
+                                    .collect(java.util.stream.Collectors.toMap(TestPlan::getId, this::snapshot));
+                            for (TestPlan plan : currentBatchPlans) {
+                                if (!expectedPlans.get(plan.getId()).equals(currentPlans.get(plan.getId()))) {
+                                    throw new InvalidProjectStatusException("Test Plan da thay doi trong khi sinh Test Case.");
+                                }
+                            }
                             List<GeneratedTestCaseDto> uniqueBatch = deduplicate(validBatch, currentBatchPlans);
                             int[] number = {caseCounter.get()};
                             var savedEntities = cases.saveAll(uniqueBatch.stream()

@@ -157,7 +157,7 @@ class BusinessRuleServiceTest {
         verify(generationProgressService).fail(
                 org.mockito.ArgumentMatchers.eq(1L),
                 org.mockito.ArgumentMatchers.eq(com.greytest.dto.GenerationProgressStage.BUSINESS_RULE),
-                org.mockito.ArgumentMatchers.contains("Đã lưu 3 Business Rule từ các batch trước."));
+                org.mockito.ArgumentMatchers.contains("Đã lưu 3 Business Rule trong phiên này."));
         verify(transactionManager).commit(transactionStatus);
         verify(transactionManager).rollback(transactionStatus);
     }    @Test
@@ -436,15 +436,9 @@ class BusinessRuleServiceTest {
                 """);
         mockServiceMethods(method);
         when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of());
-        when(aiAgentService.generateBusinessRules(1L, Set.of(11L))).thenReturn(
-                new BusinessRuleResponseDto(List.of(
-                        new GeneratedBusinessRuleDto(11L, "Khi tìm user, service trả về user theo id.",
-                                "BUSINESS_LOGIC", "STMT-1"))));
-        mockBusinessRuleSave();
-
         assertThatThrownBy(() -> service().generate(1L))
                 .isInstanceOf(InvalidProjectStatusException.class)
-                .hasMessageContaining("range source");
+                .hasMessageContaining("Range source");
     }
 
     @Test
@@ -811,12 +805,11 @@ class BusinessRuleServiceTest {
 
 
     @Test
-    void regenerateBackfillsAndUpdatesUntouchedAiRuleAfterCompletedGeneration() {
+    void generateSkipsFullyCoveredUntouchedAiRule() {
         Project project = new Project();
         project.setId(1L);
         project.setStatus(ProjectStatus.BR_PENDING_REVIEW);
         when(projectRepository.findById(1L)).thenReturn(Optional.of(project));
-        mockProjectSave();
 
         JavaMethod branchedMethod = method(11L, "findUser");
         branchedMethod.setSourceCode("""
@@ -831,21 +824,13 @@ class BusinessRuleServiceTest {
         existing.setIsModified(false);
         existing.setReviewNote("SOURCE_BRANCH:IF-1\nChi mo ta nhanh if.");
         when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(existing));
-        when(aiAgentService.generateBusinessRules(1L, Set.of(11L))).thenReturn(
-                new BusinessRuleResponseDto(List.of(new GeneratedBusinessRuleDto(
-                        11L,
-                        "Tra ve user neu ton tai; neu khong thi tra ve missing.",
-                        "BUSINESS_LOGIC",
-                        "IF-1"))));
-        mockBusinessRuleSave();
-
         List<BusinessRuleDto> regenerated = service().generate(1L);
 
-        assertThat(regenerated).extracting(BusinessRuleDto::id).containsExactly(7L);
+        assertThat(regenerated).isEmpty();
         assertThat(existing.getDescription())
-                .isEqualTo("Tra ve user neu ton tai; neu khong thi tra ve missing.");
+                .isEqualTo("Tra ve user neu dieu kien dung.");
         assertThat(existing.getSource()).isEqualTo(RuleSource.AI_GENERATED);
-        verify(aiAgentService).generateBusinessRules(1L, Set.of(11L));
+        org.mockito.Mockito.verifyNoInteractions(aiAgentService);
     }
     @Test
     void generateOnlyAcceptsRulesForMethodsWithoutBusinessRule() {
@@ -1050,7 +1035,7 @@ class BusinessRuleServiceTest {
 
         assertThatThrownBy(() -> service().approve(1L))
                 .isInstanceOf(InvalidProjectStatusException.class)
-                .hasMessageContaining("Khong the xac minh control-flow", "phan tich lai project");
+                .hasMessageContaining("Khong the xac minh source anchor", "phan tich lai project");
     }
 
     @Test
