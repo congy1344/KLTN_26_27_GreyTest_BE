@@ -62,6 +62,34 @@ class TestCaseServiceTest {
     }
 
     @Test
+    void oraclePreflightFailureDoesNotDeleteCasesOrGenerate() {
+        project(ProjectStatus.PLAN_APPROVED);
+        TestPlan plan = approvedPlan(20L, false);
+        when(plans.findByProjectId(1L)).thenReturn(List.of(plan));
+        org.mockito.Mockito.doThrow(new InvalidProjectStatusException("BR chưa APPROVED"))
+                .when(ai).validateTestCasePrerequisites(1L, Set.of(20L));
+
+        assertThatThrownBy(() -> service.generate(1L)).isInstanceOf(InvalidProjectStatusException.class);
+        verify(ai, org.mockito.Mockito.never()).generateTestCases(org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.anySet());
+        verify(cases, org.mockito.Mockito.never()).deleteAll(org.mockito.ArgumentMatchers.any());
+    }
+
+    @Test
+    void pendingPlanIsRejectedBeforeDeletingCasesOrCallingAi() {
+        project(ProjectStatus.PLAN_APPROVED);
+        TestPlan pending = new TestPlan();
+        pending.setId(20L);
+        pending.setProjectId(1L);
+        pending.setStatus(ReviewStatus.PENDING_REVIEW);
+        when(plans.findByProjectId(1L)).thenReturn(List.of(pending));
+
+        assertThatThrownBy(() -> service.generate(1L)).isInstanceOf(LlmResponseException.class);
+        org.mockito.Mockito.verifyNoInteractions(ai);
+        org.mockito.Mockito.verify(cases, org.mockito.Mockito.never()).deleteAll(org.mockito.ArgumentMatchers.any());
+        assertThat(pending.getStatus()).isEqualTo(ReviewStatus.PENDING_REVIEW);
+    }
+
+    @Test
     void generateChoPhepRegenerateSauKhiDaCoCoverage() {
         // Guard mở cho vòng regenerate: ở COVERAGE_ANALYZED vẫn qua được guard —
         // lỗi ném ra là của bước sau (AI trả rỗng), không phải lỗi chặn status
@@ -100,6 +128,45 @@ class TestCaseServiceTest {
         var result = service.generate(1L);
 
         assertThat(result).hasSize(11);
+        ArgumentCaptor<Set<Long>> batches = ArgumentCaptor.forClass(Set.class);
+        verify(ai, org.mockito.Mockito.times(2)).generateTestCases(
+                org.mockito.ArgumentMatchers.eq(1L), batches.capture());
+        assertThat(batches.getAllValues()).extracting(Set::size).containsExactly(8, 3);
+        assertThat(batches.getAllValues().stream().flatMap(Set::stream))
+                .containsExactlyInAnyOrderElementsOf(LongStream.rangeClosed(1, 11).boxed().toList());
+    }
+
+    @Test
+    void generationSelectsApprovedPlansAndExcludesPendingSibling() {
+        project(ProjectStatus.PLAN_APPROVED);
+        List<TestPlan> approvedPlans = LongStream.rangeClosed(1, 11)
+                .mapToObj(id -> {
+                    TestPlan plan = new TestPlan();
+                    plan.setId(id);
+                    plan.setProjectId(1L);
+                    plan.setStatus(ReviewStatus.APPROVED);
+                    when(plans.existsById(id)).thenReturn(true);
+                    when(plans.findById(id)).thenReturn(Optional.of(plan));
+                    return plan;
+                })
+                .toList();
+        TestPlan pendingSibling = approvedPlan(12L, false);
+        pendingSibling.setStatus(ReviewStatus.PENDING_REVIEW);
+        var mixedPlans = new java.util.ArrayList<>(approvedPlans);
+        mixedPlans.add(pendingSibling);
+        when(plans.findByProjectId(1L)).thenReturn(mixedPlans);
+        when(ai.generateTestCases(org.mockito.ArgumentMatchers.eq(1L), org.mockito.ArgumentMatchers.<Set<Long>>any()))
+                .thenAnswer(invocation -> {
+                    Set<Long> planIds = invocation.getArgument(1);
+                    return new TestCaseResponseDto(planIds.stream()
+                            .map(id -> generatedCase(id, "case " + id))
+                            .toList());
+                });
+        when(cases.saveAll(org.mockito.ArgumentMatchers.anyList()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        var result = service.generate(1L);
+
         ArgumentCaptor<Set<Long>> batches = ArgumentCaptor.forClass(Set.class);
         verify(ai, org.mockito.Mockito.times(2)).generateTestCases(
                 org.mockito.ArgumentMatchers.eq(1L), batches.capture());
@@ -415,9 +482,13 @@ class TestCaseServiceTest {
         BusinessRule rule = new BusinessRule();
         rule.setId(7L);
         rule.setMethodId(11L);
+        rule.setDescription("Allow transfer when balance >= amount");
+        rule.setStatus(ReviewStatus.APPROVED);
         TestCase oldCase = new TestCase();
         oldCase.setId(30L);
         oldCase.setCaseCode("TC-001");
+        oldCase.setExpectedResult("Transfer succeeds");
+        oldCase.setTestData(java.util.Map.of("balance", 101, "amount", 100));
         when(plans.findById(20L)).thenReturn(Optional.of(plan));
         when(plans.existsById(20L)).thenReturn(true);
         when(plans.findByProjectId(1L)).thenReturn(List.of(plan));
@@ -426,8 +497,9 @@ class TestCaseServiceTest {
         when(ai.generateCoverageRefinement(org.mockito.ArgumentMatchers.eq(1L),
                 org.mockito.ArgumentMatchers.eq(2), org.mockito.ArgumentMatchers.anyList()))
                 .thenReturn(new TestCaseResponseDto(List.of(new GeneratedTestCaseDto(
-                        20L, "EXCEPTION", "missing branch", "ready", java.util.Map.of(),
-                        "throws", "HIGH", "BR-001 -> TP-001"))));
+                        20L, "BOUNDARY", "Equality despite source > check", "ready",
+                        java.util.Map.of("balance", 100, "amount", 100),
+                        "Transfer succeeds", "HIGH", "BR-001 -> TP-001"))));
         when(cases.saveAll(org.mockito.ArgumentMatchers.anyList()))
                 .thenAnswer(invocation -> invocation.getArgument(0));
 
@@ -438,6 +510,11 @@ class TestCaseServiceTest {
         assertThat(result).hasSize(1);
         assertThat(result.get(0).caseCode()).isEqualTo("TC-002");
         assertThat(result.get(0).status()).isEqualTo(ReviewStatus.APPROVED);
+        assertThat(result.get(0).expectedResult()).isEqualTo("Transfer succeeds");
+        assertThat(result.get(0).testData()).containsEntry("balance", 100).containsEntry("amount", 100);
+        assertThat(oldCase.getExpectedResult()).isEqualTo("Transfer succeeds");
+        assertThat(oldCase.getTestData()).containsEntry("balance", 101);
+        assertThat(rule.getDescription()).isEqualTo("Allow transfer when balance >= amount");
         verify(cases, org.mockito.Mockito.never()).deleteAll(org.mockito.ArgumentMatchers.anyList());
         verify(projects).save(project);
     }

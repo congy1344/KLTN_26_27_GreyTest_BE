@@ -313,7 +313,7 @@ public class GoogleLlmClient implements LlmClient {
         ObjectNode schema = objectSchema();
         ObjectNode properties = schema.putObject("properties");
         properties.set("rule_id", type("integer"));
-        properties.set("verdict", enumSchema("OK", "NEEDS_REVISION", "DUPLICATE", "WRONG_METHOD", "TOO_VAGUE"));
+        properties.set("verdict", enumSchema("OK", "NEEDS_REVISION", "DUPLICATE", "WRONG_METHOD", "TOO_VAGUE", "SOURCE_MISMATCH"));
         properties.set("suggested_description", nullableStringSchema());
         properties.set("reason", type("string"));
         required(schema, "rule_id", "verdict", "suggested_description", "reason");

@@ -63,6 +63,20 @@ class TestPlanServiceTest {
     }
 
     @Test
+    void pendingRuleIsRejectedBeforeDeletingPlansOrCallingAi() {
+        mockProject(ProjectStatus.BR_APPROVED);
+        BusinessRule pending = approvedRule(7L);
+        pending.setStatus(ReviewStatus.PENDING_REVIEW);
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(pending));
+
+        assertThatThrownBy(() -> service().generate(1L))
+                .isInstanceOf(com.greytest.exception.InvalidProjectStatusException.class)
+                .hasMessageContaining("APPROVED");
+        org.mockito.Mockito.verifyNoInteractions(aiAgentService, testPlanRepository);
+        assertThat(pending.getStatus()).isEqualTo(ReviewStatus.PENDING_REVIEW);
+    }
+
+    @Test
     void generatePersistsValidAiPlansAndDeletesOldPlans() {
         Project project = mockProject(ProjectStatus.BR_APPROVED);
         BusinessRule rule = approvedRule(7L);
@@ -83,6 +97,30 @@ class TestPlanServiceTest {
         });
         verify(testPlanRepository).deleteAll(List.of(oldPlan));
         verify(testPlanRepository).flush();
+        verify(aiAgentService).generateTestPlan(1L, Set.of(7L));
+        assertThat(project.getStatus()).isEqualTo(ProjectStatus.PLAN_PENDING_REVIEW);
+    }
+
+    @Test
+    void generateUsesApprovedRulesAndExcludesPendingSibling() {
+        Project project = mockProject(ProjectStatus.BR_APPROVED);
+        BusinessRule rule = approvedRule(7L);
+        BusinessRule pendingSibling = approvedRule(8L);
+        pendingSibling.setStatus(ReviewStatus.PENDING_REVIEW);
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(rule, pendingSibling));
+        when(aiAgentService.generateTestPlan(eq(1L), anySet())).thenReturn(new TestPlanResponseDto(List.of(
+                generatedPlan(11L, 7L, List.of(7L), "Happy path"))));
+        when(testPlanRepository.findByProjectId(1L)).thenReturn(List.of());
+        mockTestPlanSaveAll();
+        mockProjectSave();
+
+        List<TestPlanDto> plans = service().generate(1L);
+
+        assertThat(plans).singleElement().satisfies(plan -> {
+            assertThat(plan.businessRuleId()).isEqualTo(7L);
+            assertThat(plan.planCode()).isEqualTo("TP-001");
+            assertThat(plan.status()).isEqualTo(ReviewStatus.PENDING_REVIEW);
+        });
         verify(aiAgentService).generateTestPlan(1L, Set.of(7L));
         assertThat(project.getStatus()).isEqualTo(ProjectStatus.PLAN_PENDING_REVIEW);
     }
@@ -448,6 +486,9 @@ class TestPlanServiceTest {
         BusinessRule ruleServiceA = approvedRule(1L, 101L);
         BusinessRule ruleServiceB = approvedRule(2L, 202L);
 
+        BusinessRule pendingSibling = approvedRule(3L, 202L);
+        pendingSibling.setStatus(ReviewStatus.PENDING_REVIEW);
+
         TestPlan existingPlan1 = plan(91L, 1L, "Service A Plan 1");
         existingPlan1.setPlanCode("TP-001");
         TestPlan existingPlan2 = plan(92L, 1L, "Service A Plan 2");
@@ -455,7 +496,7 @@ class TestPlanServiceTest {
 
         when(scopeResolver.resolve(1L, "service-b")).thenReturn(
                 new ServiceScopeResolver.ServiceScope("service-b", Set.of(), Set.of(202L)));
-        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(ruleServiceA, ruleServiceB));
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(ruleServiceA, ruleServiceB, pendingSibling));
         when(testPlanRepository.findByProjectId(1L)).thenReturn(List.of(existingPlan1, existingPlan2));
         when(aiAgentService.generateTestPlan(eq(1L), eq(Set.of(2L)))).thenReturn(new TestPlanResponseDto(List.of(
                 generatedPlan(202L, 2L, List.of(2L), "Service B Plan 1"))));

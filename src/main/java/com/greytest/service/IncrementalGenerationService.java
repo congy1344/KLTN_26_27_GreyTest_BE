@@ -150,6 +150,7 @@ public class IncrementalGenerationService {
             throw new IllegalArgumentException("Bản cập nhật phải ở trạng thái ANALYZED trước khi sinh AI: " + update.getStatus());
         }
 
+        if (stage != GenerationProgressStage.BUSINESS_RULE) requireAppliedBusinessRuleChanges(projectId, updateId);
         update.setStatus(SourceUpdateStatus.GENERATING);
         sourceUpdateRepository.save(update);
 
@@ -183,15 +184,23 @@ public class IncrementalGenerationService {
         if (response != null && response.rules() != null) {
             int nextBrNumber = nextBusinessRuleNumber(projectId);
             for (var br : response.rules()) {
+                if (br == null || !targetMethodIds.contains(br.methodId())) continue;
                 SourceUpdateItem item = new SourceUpdateItem();
                 item.setSourceUpdateId(updateId);
                 item.setTargetType(SourceUpdateTargetType.BUSINESS_RULE);
-                BusinessRule existing = businessRuleRepository != null
+                List<BusinessRule> methodRules = businessRuleRepository != null
                         ? businessRuleRepository.findByProjectId(projectId).stream()
-                                .filter(r -> Objects.equals(r.getMethodId(), br.methodId()))
-                                .findFirst().orElse(null)
-                        : null;
+                                .filter(r -> Objects.equals(r.getMethodId(), br.methodId())).toList()
+                        : List.of();
+                BusinessRule existing = methodRules.stream()
+                        .filter(rule -> br.branchId() != null && Objects.equals(sourceBranchId(rule.getReviewNote()), decisionId(br.branchId())))
+                        .findFirst().orElse(methodRules.size() == 1 && response.rules().stream()
+                                .filter(candidate -> candidate != null && Objects.equals(candidate.methodId(), br.methodId())).count() == 1
+                                && (br.branchId() == null || sourceBranchId(methodRules.get(0).getReviewNote()) == null)
+                                ? methodRules.get(0) : null);
                 if (existing != null) {
+                    item = existingProposal(updateId, SourceUpdateTargetType.BUSINESS_RULE, existing.getId());
+                    if (isUserDecision(item)) continue;
                     item.setTargetId(existing.getId());
                     item.setAction(SourceUpdateAction.UPDATE);
                     item.setReason("Cập nhật Business Rule theo method bị thay đổi");
@@ -202,6 +211,7 @@ public class IncrementalGenerationService {
                     newRule.setMethodId(br.methodId());
                     newRule.setRuleCode(String.format("BR-%03d", nextBrNumber++));
                     newRule.setDescription(br.description());
+                    if (br.branchId() != null) newRule.setReviewNote("SOURCE_BRANCH:" + decisionId(br.branchId()));
                     newRule.setSource(RuleSource.AI_GENERATED);
                     newRule.setStatus(ReviewStatus.APPROVED);
                     newRule.setIsModified(false);
@@ -211,7 +221,10 @@ public class IncrementalGenerationService {
                     item.setReason("Thêm mới Business Rule cho method mới");
                 }
                 item.setAfterData(toJson(br));
-                item.setReviewStatus(SourceUpdateReviewStatus.ACCEPTED);
+                // Sinh lại không phải là đồng ý thay đổi yêu cầu đã duyệt.
+                item.setReviewStatus(existing != null && existing.getStatus() == ReviewStatus.APPROVED
+                        && !Objects.equals(existing.getDescription(), br.description())
+                        ? SourceUpdateReviewStatus.PENDING : SourceUpdateReviewStatus.ACCEPTED);
                 sourceUpdateItemRepository.save(item);
             }
         }
@@ -305,14 +318,6 @@ public class IncrementalGenerationService {
         TestCaseResponseDto response = aiAgentService.generateTestCases(projectId, planIds);
 
         if (response != null && response.cases() != null) {
-            // Xóa các đề xuất TEST_CASE cũ của bản cập nhật này nếu đã sinh trước đó
-            List<SourceUpdateItem> existingItems = sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId);
-            for (SourceUpdateItem item : existingItems) {
-                if (item.getTargetType() == SourceUpdateTargetType.TEST_CASE && item.getAction() != SourceUpdateAction.REMOVE) {
-                    sourceUpdateItemRepository.delete(item);
-                }
-            }
-
             // Nhóm các test case mới theo planId
             Map<Long, List<GeneratedTestCaseDto>> newCasesByPlan = response.cases().stream()
                     .filter(Objects::nonNull)
@@ -328,14 +333,22 @@ public class IncrementalGenerationService {
                 int matchCount = Math.min(oldCases.size(), newCases.size());
                 // Cập nhật các case tương ứng
                 for (int i = 0; i < matchCount; i++) {
-                    SourceUpdateItem item = new SourceUpdateItem();
+                    TestCase oldCase = oldCases.get(i);
+                    GeneratedTestCaseDto proposed = newCases.get(i);
+                    SourceUpdateItem item = existingProposal(updateId, SourceUpdateTargetType.TEST_CASE, oldCase.getId());
+                    if (isUserDecision(item)) continue;
                     item.setSourceUpdateId(updateId);
                     item.setTargetType(SourceUpdateTargetType.TEST_CASE);
                     item.setTargetId(oldCases.get(i).getId());
                     item.setAction(SourceUpdateAction.UPDATE);
                     item.setReason("Cập nhật Test Case theo Test Plan bị ảnh hưởng");
-                    item.setAfterData(toJson(newCases.get(i)));
-                    item.setReviewStatus(SourceUpdateReviewStatus.ACCEPTED);
+                    item.setAfterData(toJson(proposed));
+                    // Kỳ vọng và dữ liệu đã duyệt chỉ đổi sau khi người dùng chấp nhận đề xuất.
+                    item.setReviewStatus(oldCase.getStatus() == ReviewStatus.APPROVED
+                            && (!Objects.equals(oldCase.getExpectedResult(), proposed.expectedResult())
+                                    || !Objects.equals(oldCase.getTestData(), proposed.testData())
+                                    || !Objects.equals(oldCase.getPreconditions(), proposed.preconditions()))
+                            ? SourceUpdateReviewStatus.PENDING : SourceUpdateReviewStatus.ACCEPTED);
                     sourceUpdateItemRepository.save(item);
                 }
 
@@ -372,13 +385,16 @@ public class IncrementalGenerationService {
 
                 // Nếu số case cũ nhiều hơn mới: đánh dấu xóa các case thừa
                 for (int i = matchCount; i < oldCases.size(); i++) {
-                    SourceUpdateItem item = new SourceUpdateItem();
+                    SourceUpdateItem item = existingProposal(updateId, SourceUpdateTargetType.TEST_CASE, oldCases.get(i).getId());
+                    if (isUserDecision(item)) continue;
                     item.setSourceUpdateId(updateId);
                     item.setTargetType(SourceUpdateTargetType.TEST_CASE);
                     item.setTargetId(oldCases.get(i).getId());
                     item.setAction(SourceUpdateAction.REMOVE);
                     item.setReason("Xóa Test Case cũ không còn phù hợp");
-                    item.setReviewStatus(SourceUpdateReviewStatus.ACCEPTED);
+                    item.setAfterData(null);
+                    item.setReviewStatus(oldCases.get(i).getStatus() == ReviewStatus.APPROVED
+                            ? SourceUpdateReviewStatus.PENDING : SourceUpdateReviewStatus.ACCEPTED);
                     sourceUpdateItemRepository.save(item);
                 }
             }
@@ -423,6 +439,60 @@ public class IncrementalGenerationService {
                 item.setAfterData(toJson(ut));
                 item.setReviewStatus(SourceUpdateReviewStatus.ACCEPTED);
                 sourceUpdateItemRepository.save(item);
+            }
+        }
+    }
+
+    /** Tái sử dụng đề xuất của analysis để không có hai quyết định cho cùng artifact. */
+    private SourceUpdateItem existingProposal(Long updateId, SourceUpdateTargetType targetType, Long targetId) {
+        List<SourceUpdateItem> matches = sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId).stream()
+                .filter(item -> item.getTargetType() == targetType && Objects.equals(item.getTargetId(), targetId))
+                .toList();
+        SourceUpdateItem item = matches.stream().filter(this::isUserDecision).findFirst()
+                .orElse(matches.isEmpty() ? new SourceUpdateItem() : matches.get(0));
+        for (SourceUpdateItem duplicate : matches) {
+            if (duplicate != item && !isUserDecision(duplicate)) sourceUpdateItemRepository.delete(duplicate);
+        }
+        item.setSourceUpdateId(updateId);
+        item.setTargetType(targetType);
+        return item;
+    }
+
+    private boolean isUserDecision(SourceUpdateItem item) {
+        return item.getReviewStatus() == SourceUpdateReviewStatus.MODIFIED
+                || item.getReviewStatus() == SourceUpdateReviewStatus.REJECTED;
+    }
+
+    private String sourceBranchId(String reviewNote) {
+        if (reviewNote == null || !reviewNote.startsWith("SOURCE_BRANCH:")) return null;
+        return decisionId(reviewNote.substring("SOURCE_BRANCH:".length()).split("\\R", 2)[0]);
+    }
+
+    private String decisionId(String branchId) {
+        if (branchId == null || branchId.isBlank()) return null;
+        String normalized = branchId.trim();
+        int separator = normalized.indexOf("::");
+        return separator < 0 ? normalized.replaceFirst("-(TRUE|FALSE)$", "") : normalized.substring(0, separator);
+    }
+
+    /** Không sinh downstream bằng oracle cũ sau khi user đã chọn đổi yêu cầu trong draft. */
+    private void requireAppliedBusinessRuleChanges(Long projectId, Long updateId) {
+        if (businessRuleRepository == null) return;
+        Map<Long, BusinessRule> rules = businessRuleRepository.findByProjectId(projectId).stream()
+                .collect(Collectors.toMap(BusinessRule::getId, rule -> rule));
+        for (SourceUpdateItem item : sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId)) {
+            if (item.getTargetType() != SourceUpdateTargetType.BUSINESS_RULE || item.getAction() != SourceUpdateAction.UPDATE
+                    || item.getAfterData() == null || (item.getReviewStatus() != SourceUpdateReviewStatus.ACCEPTED
+                    && item.getReviewStatus() != SourceUpdateReviewStatus.MODIFIED)) continue;
+            BusinessRule current = rules.get(item.getTargetId());
+            if (current == null) continue;
+            try {
+                var proposed = objectMapper.readValue(item.getAfterData(), com.greytest.dto.agent.GenerationResponseDtos.GeneratedBusinessRuleDto.class);
+                if (!Objects.equals(current.getDescription(), proposed.description())) {
+                    throw new IllegalArgumentException("Hãy áp dụng cập nhật Business Rule trước, rồi review hoặc sinh lại Test Plan/Test Case/Unit Test theo BR mới.");
+                }
+            } catch (JsonProcessingException e) {
+                throw new IllegalArgumentException("Đề xuất Business Rule không hợp lệ; cần kiểm tra trước khi sinh downstream.", e);
             }
         }
     }

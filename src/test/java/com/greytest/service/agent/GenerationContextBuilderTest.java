@@ -266,7 +266,7 @@ class GenerationContextBuilderTest {
         mockCommonInputs();
         BusinessRule approved = ruleEntity(7L, 11L, ReviewStatus.APPROVED);
         approved.setReviewNote("SOURCE_BRANCH:IF-1-FALSE\nLegacy data.");
-        when(businessRuleRepository.findByProjectIdAndStatus(1L, ReviewStatus.APPROVED))
+        when(businessRuleRepository.findByProjectId(1L))
                 .thenReturn(List.of(approved));
 
         TestPlanContextDto context = builder.buildTestPlanContext(1L);
@@ -282,7 +282,7 @@ class GenerationContextBuilderTest {
         when(analysisService.getAnalysisResult(1L)).thenReturn(analysisWithServiceMethods(7));
         when(manifestService.exportManifest(1L)).thenReturn(manifest());
         when(existingTestService.list(1L)).thenReturn(List.of());
-        when(businessRuleRepository.findByProjectIdAndStatus(1L, ReviewStatus.APPROVED))
+        when(businessRuleRepository.findByProjectId(1L))
                 .thenReturn(LongStream.rangeClosed(1, 7)
                         .mapToObj(id -> ruleEntity(id, id, ReviewStatus.APPROVED))
                         .toList());
@@ -300,7 +300,7 @@ class GenerationContextBuilderTest {
         when(analysisService.getAnalysisResult(1L)).thenReturn(analysis());
         BusinessRule firstRule = ruleEntity(7L, 11L, ReviewStatus.APPROVED);
         BusinessRule secondRule = ruleEntity(8L, 12L, ReviewStatus.APPROVED);
-        when(businessRuleRepository.findByProjectIdAndStatus(1L, ReviewStatus.APPROVED))
+        when(businessRuleRepository.findByProjectId(1L))
                 .thenReturn(List.of(firstRule, secondRule));
         TestPlan firstPlan = testPlan(20L, 7L, "TP-001");
         TestPlan secondPlan = testPlan(21L, 8L, "TP-002");
@@ -328,8 +328,8 @@ class GenerationContextBuilderTest {
                 51L, 1L, "src/test/java/demo/UserControllerTest.java", "demo", "UserControllerTest",
                 30L, null, List.of(), List.of(), "class UserControllerTest {}", null);
         when(existingTestService.list(1L)).thenReturn(List.of(existingTest(), unrelatedTest));
-        when(businessRuleRepository.findByProjectIdAndStatus(1L, ReviewStatus.APPROVED))
-                .thenReturn(List.of(ruleEntity(7L, 11L, ReviewStatus.APPROVED)));
+        when(businessRuleRepository.findByProjectId(1L))
+                .thenReturn(List.of(ruleEntity(7L, 11L, ReviewStatus.APPROVED), ruleEntity(8L, 11L, ReviewStatus.APPROVED)));
         TestPlan plan = new TestPlan();
         plan.setId(20L);
         plan.setProjectId(1L);
@@ -382,7 +382,7 @@ class GenerationContextBuilderTest {
     @Test
     void unitTestBatchContextStaysBoundedForOneLargePlan() {
         mockCommonInputs();
-        when(businessRuleRepository.findByProjectIdAndStatus(1L, ReviewStatus.APPROVED))
+        when(businessRuleRepository.findByProjectId(1L))
                 .thenReturn(List.of(ruleEntity(7L, 11L, ReviewStatus.APPROVED)));
         TestPlan plan = testPlan(20L, 7L, "TP-001");
         when(testPlanRepository.findByProjectId(1L)).thenReturn(List.of(plan));
@@ -441,7 +441,7 @@ class GenerationContextBuilderTest {
                 List.of(), List.of(service, appointment, exception, defaultPackageType), List.of(), List.of());
         when(analysisService.getAnalysisResult(1L)).thenReturn(enriched);
         when(existingTestService.list(1L)).thenReturn(List.of());
-        when(businessRuleRepository.findByProjectIdAndStatus(1L, ReviewStatus.APPROVED))
+        when(businessRuleRepository.findByProjectId(1L))
                 .thenReturn(List.of(ruleEntity(7L, 11L, ReviewStatus.APPROVED)));
         when(testPlanRepository.findByProjectId(1L)).thenReturn(List.of(testPlan(20L, 7L, "TP-001")));
         when(testPlanCoveredRuleRepository.findByTestPlanIdIn(List.of(20L)))
@@ -464,9 +464,87 @@ class GenerationContextBuilderTest {
     }
 
     @Test
+    void normalContextsExcludePendingRulesPlansAndCases() {
+        mockCommonInputs();
+        JavaMethodDto transfer = new JavaMethodDto(
+                11L, "transfer", "boolean", List.of(new MethodParamDto("balance", "int"),
+                new MethodParamDto("amount", "int")), List.of(), "PUBLIC",
+                "public boolean transfer(int balance, int amount) { return balance > amount; }",
+                1, 1, List.of(), List.of());
+        JavaClassDto service = new JavaClassDto(
+                10L, "demo", "TransferService", "demo.TransferService", "SERVICE",
+                "src/main/java/demo/TransferService.java",
+                "class TransferService { public boolean transfer(int balance, int amount) { return balance > amount; } }",
+                List.of(), List.of(transfer));
+        when(analysisService.getAnalysisResult(1L)).thenReturn(new AnalysisResultDto(
+                1L, "demo", "ANALYZED", 1, 1, 0, 0, 0, 0, 1, 1, 0,
+                List.of(), List.of(service), List.of(), List.of()));
+        BusinessRule approved = ruleEntity(7L, 11L, ReviewStatus.APPROVED);
+        approved.setDescription("Allow transfer when balance >= amount");
+        BusinessRule pending = ruleEntity(8L, 12L, ReviewStatus.PENDING_REVIEW);
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(approved, pending));
+        TestPlan approvedPlan = testPlan(20L, 7L, "TP-001");
+        TestPlan pendingPlan = testPlan(21L, 7L, "TP-002");
+        pendingPlan.setStatus(ReviewStatus.PENDING_REVIEW);
+        when(testPlanRepository.findByProjectId(1L)).thenReturn(List.of(approvedPlan, pendingPlan));
+        when(testPlanCoveredRuleRepository.findByTestPlanIdIn(List.of(20L)))
+                .thenReturn(List.of(coveredRule(20L, 7L)));
+        TestCase approvedCase = new TestCase();
+        approvedCase.setId(30L);
+        approvedCase.setTestPlanId(20L);
+        approvedCase.setCaseCode("TC-001");
+        approvedCase.setStatus(ReviewStatus.APPROVED);
+        approvedCase.setTestData(Map.of("balance", 100, "amount", 100));
+        approvedCase.setExpectedResult("Transfer succeeds when balance equals amount");
+        TestCase pendingCase = new TestCase();
+        pendingCase.setId(31L);
+        pendingCase.setTestPlanId(20L);
+        pendingCase.setCaseCode("TC-002");
+        pendingCase.setStatus(ReviewStatus.PENDING_REVIEW);
+        when(testCaseRepository.findByTestPlanId(20L)).thenReturn(List.of(approvedCase, pendingCase));
+
+        assertThat(builder.buildTestPlanContext(1L).approvedBusinessRules()).extracting("id").containsExactly(7L);
+        var caseContext = builder.buildTestCaseContext(1L);
+        assertThat(caseContext.approvedBusinessRules()).extracting("id").containsExactly(7L);
+        assertThat(caseContext.approvedTestPlans()).extracting("id").containsExactly(20L);
+        var unitContext = builder.buildUnitTestContext(1L, Set.of(30L));
+        assertThat(unitContext.approvedBusinessRules()).extracting("id").containsExactly(7L);
+        assertThat(unitContext.approvedTestPlans()).extracting("id").containsExactly(20L);
+        assertThat(unitContext.approvedTestCases()).extracting("id").containsExactly(30L);
+        assertThat(unitContext.existingApprovedTestCases()).isEmpty();
+        assertThat(unitContext.classes().get(0).methods().get(0).sourceCode()).contains("balance > amount");
+        assertThat(unitContext.approvedTestCases().get(0).testData()).isEqualTo(Map.of("balance", 100, "amount", 100));
+        assertThat(unitContext.approvedBusinessRules().get(0).description()).contains("balance >= amount");
+        assertThat(unitContext.approvedTestCases().get(0).expectedResult()).isEqualTo(approvedCase.getExpectedResult());
+        org.mockito.Mockito.verify(testCaseRepository, org.mockito.Mockito.never()).findByTestPlanId(21L);
+    }
+
+    @Test
+    void contextRejectsApprovedDescendantsWhenRequiredRuleIsPending() {
+        mockCommonInputs();
+        BusinessRule pending = ruleEntity(7L, 11L, ReviewStatus.PENDING_REVIEW);
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(pending));
+        TestPlan plan = testPlan(20L, 7L, "TP-001");
+        when(testPlanRepository.findByProjectId(1L)).thenReturn(List.of(plan));
+        TestCase testCase = new TestCase();
+        testCase.setId(30L);
+        testCase.setTestPlanId(20L);
+        testCase.setCaseCode("TC-001");
+        testCase.setStatus(ReviewStatus.APPROVED);
+        when(testCaseRepository.findByTestPlanId(20L)).thenReturn(List.of(testCase));
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> builder.buildTestCaseContext(1L, Set.of(20L)))
+                .isInstanceOf(com.greytest.exception.InvalidProjectStatusException.class);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> builder.buildUnitTestContext(1L, Set.of(30L)))
+                .isInstanceOf(com.greytest.exception.InvalidProjectStatusException.class);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> builder.buildTestPlanContext(1L, Set.of(7L)))
+                .isInstanceOf(com.greytest.exception.InvalidProjectStatusException.class);
+    }
+
+    @Test
     void unitTestContextUsesCandidateSourceForChangedMethod() {
         mockCommonInputs();
-        when(businessRuleRepository.findByProjectIdAndStatus(1L, ReviewStatus.APPROVED))
+        when(businessRuleRepository.findByProjectId(1L))
                 .thenReturn(List.of(ruleEntity(7L, 11L, ReviewStatus.APPROVED)));
         TestPlan plan = testPlan(20L, 7L, "TP-001");
         TestCase testCase = new TestCase();
@@ -475,6 +553,9 @@ class GenerationContextBuilderTest {
         testCase.setCaseCode("TC-001");
         testCase.setPriority(Priority.HIGH);
         testCase.setStatus(ReviewStatus.APPROVED);
+        testCase.setExpectedResult("Approved result remains unchanged");
+        testCase.setTestData(Map.of("email", "approved@example.com"));
+        testCase.setPreconditions("Approved setup");
         when(testPlanRepository.findByProjectId(1L)).thenReturn(List.of(plan));
         when(testPlanCoveredRuleRepository.findByTestPlanIdIn(List.of(20L)))
                 .thenReturn(List.of(coveredRule(20L, 7L)));
@@ -491,12 +572,15 @@ class GenerationContextBuilderTest {
 
         assertThat(context.classes().get(0).methods().get(0).sourceCode())
                 .contains("repository.save(new User(email))");
+        assertThat(context.approvedTestCases().get(0).expectedResult()).isEqualTo(testCase.getExpectedResult());
+        assertThat(context.approvedTestCases().get(0).testData()).isEqualTo(testCase.getTestData());
+        assertThat(context.approvedTestCases().get(0).preconditions()).isEqualTo(testCase.getPreconditions());
     }
 
     @Test
     void unitTestContextOmitsDeletedMethod() {
         mockCommonInputs();
-        when(businessRuleRepository.findByProjectIdAndStatus(1L, ReviewStatus.APPROVED))
+        when(businessRuleRepository.findByProjectId(1L))
                 .thenReturn(List.of(ruleEntity(7L, 12L, ReviewStatus.APPROVED)));
         TestPlan plan = testPlan(20L, 7L, "TP-001");
         TestCase testCase = new TestCase();
@@ -525,7 +609,7 @@ class GenerationContextBuilderTest {
     void refinementContextContainsOnlyGapMethodsAndTheirPlans() {
         mockCommonInputs();
         BusinessRule approved = ruleEntity(7L, 11L, ReviewStatus.APPROVED);
-        when(businessRuleRepository.findByProjectIdAndStatus(1L, ReviewStatus.APPROVED))
+        when(businessRuleRepository.findByProjectId(1L))
                 .thenReturn(List.of(approved));
         TestPlan plan = new TestPlan();
         plan.setId(20L);

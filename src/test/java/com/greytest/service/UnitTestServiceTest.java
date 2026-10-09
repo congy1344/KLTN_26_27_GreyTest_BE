@@ -7,6 +7,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.stream.LongStream;
@@ -48,11 +49,82 @@ class UnitTestServiceTest {
     @InjectMocks private UnitTestService service;
 
     @Test
+    void scopedPendingCaseIsRejectedBeforeDeletingExistingUnitTests() {
+        Project project = new Project();
+        project.setId(1L);
+        project.setStatus(ProjectStatus.CASE_PENDING_REVIEW);
+        var resolver = org.mockito.Mockito.mock(ServiceScopeResolver.class);
+        var artifacts = org.mockito.Mockito.mock(ServicePipelineStatusService.class);
+        var scope = new ServiceScopeResolver.ServiceScope("service-a", Set.of(), Set.of(11L));
+        when(projects.findById(1L)).thenReturn(Optional.of(project));
+        when(resolver.resolve(1L, "service-a")).thenReturn(scope);
+        TestPlan plan = new TestPlan();
+        plan.setId(20L);
+        plan.setProjectId(1L);
+        plan.setStatus(ReviewStatus.APPROVED);
+        when(plans.findById(20L)).thenReturn(Optional.of(plan));
+        TestCase pending = approvedCase(31L, 20L);
+        pending.setStatus(ReviewStatus.PENDING_REVIEW);
+        when(artifacts.cases(1L, scope)).thenReturn(List.of(pending));
+        var scopedService = new UnitTestService(units, cases, plans, projects, ai, files,
+                transactionManager, generationProgress, resolver, artifacts);
+
+        assertThatThrownBy(() -> scopedService.generate(1L, "service-a"))
+                .isInstanceOf(LlmResponseException.class);
+        org.mockito.Mockito.verifyNoInteractions(ai, units);
+    }
+
+    @Test
+    void oraclePreflightFailurePreservesExistingUnitTests() {
+        Project project = new Project();
+        project.setId(1L);
+        project.setStatus(ProjectStatus.CASE_APPROVED);
+        TestPlan plan = new TestPlan();
+        plan.setId(20L);
+        plan.setProjectId(1L);
+        plan.setStatus(ReviewStatus.APPROVED);
+        TestCase testCase = approvedCase(31L, 20L);
+        when(projects.findById(1L)).thenReturn(Optional.of(project));
+        when(plans.findById(20L)).thenReturn(Optional.of(plan));
+        when(cases.findAll()).thenReturn(List.of(testCase));
+        org.mockito.Mockito.doThrow(new com.greytest.exception.InvalidProjectStatusException("BR chưa APPROVED"))
+                .when(ai).validateUnitTestPrerequisites(1L, Set.of(31L));
+
+        assertThatThrownBy(() -> service.generate(1L)).isInstanceOf(com.greytest.exception.InvalidProjectStatusException.class);
+        verify(ai, never()).generateUnitTests(org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.anySet());
+        org.mockito.Mockito.verifyNoInteractions(units);
+    }
+
+    @Test
+    void pendingCaseIsRejectedBeforeDeletingExistingUnitTestsOrCallingAi() {
+        Project project = new Project();
+        project.setId(1L);
+        project.setStatus(ProjectStatus.CASE_APPROVED);
+        TestPlan plan = new TestPlan();
+        plan.setId(20L);
+        plan.setProjectId(1L);
+        plan.setStatus(ReviewStatus.APPROVED);
+        TestCase pending = new TestCase();
+        pending.setId(31L);
+        pending.setTestPlanId(20L);
+        pending.setStatus(ReviewStatus.PENDING_REVIEW);
+        when(projects.findById(1L)).thenReturn(Optional.of(project));
+        when(plans.findById(20L)).thenReturn(Optional.of(plan));
+        when(cases.findAll()).thenReturn(List.of(pending));
+
+        assertThatThrownBy(() -> service.generate(1L)).isInstanceOf(LlmResponseException.class)
+                .hasMessageContaining("approve");
+        org.mockito.Mockito.verifyNoInteractions(ai, units);
+        assertThat(pending.getStatus()).isEqualTo(ReviewStatus.PENDING_REVIEW);
+    }
+
+    @Test
     void refinementGeneratesOnlyNewCasesAndPreservesOldUnitTests() {
         Project project = new Project();
         project.setId(1L);
         project.setStatus(ProjectStatus.CASE_APPROVED);
         TestPlan plan = new TestPlan();
+        plan.setStatus(ReviewStatus.APPROVED);
         plan.setId(20L);
         plan.setProjectId(1L);
         TestCase testCase = new TestCase();
@@ -93,6 +165,7 @@ class UnitTestServiceTest {
         project.setId(1L);
         project.setStatus(ProjectStatus.CASE_APPROVED);
         TestPlan plan = new TestPlan();
+        plan.setStatus(ReviewStatus.APPROVED);
         plan.setId(20L);
         plan.setProjectId(1L);
         TestCase testCase = approvedCase(31L, 20L);
@@ -105,7 +178,9 @@ class UnitTestServiceTest {
 
         when(projects.findById(1L)).thenReturn(Optional.of(project));
         when(projects.findByIdForUpdate(1L)).thenReturn(Optional.of(project));
-        when(cases.findAll()).thenReturn(List.of(testCase));
+        TestCase pendingSibling = approvedCase(32L, 20L);
+        pendingSibling.setStatus(ReviewStatus.PENDING_REVIEW);
+        when(cases.findAll()).thenReturn(List.of(testCase, pendingSibling));
         when(cases.findById(31L)).thenReturn(Optional.of(testCase));
         when(plans.findById(20L)).thenReturn(Optional.of(plan));
         when(ai.generateUnitTests(1L, Set.of(31L)))
@@ -129,6 +204,7 @@ class UnitTestServiceTest {
         project.setId(1L);
         project.setStatus(ProjectStatus.CASE_APPROVED);
         TestPlan plan = new TestPlan();
+        plan.setStatus(ReviewStatus.APPROVED);
         plan.setId(20L);
         plan.setProjectId(1L);
         List<TestCase> approved = LongStream.rangeClosed(1, 11).mapToObj(id -> {
@@ -172,6 +248,7 @@ class UnitTestServiceTest {
         project.setId(1L);
         project.setStatus(ProjectStatus.CASE_APPROVED);
         TestPlan plan = new TestPlan();
+        plan.setStatus(ReviewStatus.APPROVED);
         plan.setId(20L);
         plan.setProjectId(1L);
         List<TestCase> approved = LongStream.rangeClosed(1, 5).mapToObj(id -> {
@@ -220,6 +297,7 @@ class UnitTestServiceTest {
         project.setId(1L);
         project.setStatus(ProjectStatus.CASE_APPROVED);
         TestPlan plan = new TestPlan();
+        plan.setStatus(ReviewStatus.APPROVED);
         plan.setId(20L);
         plan.setProjectId(1L);
         TestCase testCase = new TestCase();
@@ -244,6 +322,7 @@ class UnitTestServiceTest {
         project.setId(1L);
         project.setStatus(ProjectStatus.CASE_APPROVED);
         TestPlan plan = new TestPlan();
+        plan.setStatus(ReviewStatus.APPROVED);
         plan.setId(20L);
         plan.setProjectId(1L);
         TestCase testCase = new TestCase();
@@ -269,11 +348,45 @@ class UnitTestServiceTest {
     }
 
     @Test
+    void generationStoresApprovedEqualityAssertionWithoutExecutingProduction() {
+        Project project = new Project();
+        project.setId(1L);
+        project.setStatus(ProjectStatus.CASE_APPROVED);
+        TestPlan plan = new TestPlan();
+        plan.setStatus(ReviewStatus.APPROVED);
+        plan.setId(20L);
+        plan.setProjectId(1L);
+        TestCase testCase = new TestCase();
+        testCase.setId(31L);
+        testCase.setTestPlanId(20L);
+        testCase.setStatus(ReviewStatus.APPROVED);
+        when(projects.findById(1L)).thenReturn(Optional.of(project));
+        when(projects.findByIdForUpdate(1L)).thenReturn(Optional.of(project));
+        when(cases.findById(31L)).thenReturn(Optional.of(testCase));
+        when(plans.findById(20L)).thenReturn(Optional.of(plan));
+        testCase.setExpectedResult("Transfer succeeds when balance equals amount");
+        testCase.setTestData(Map.of("balance", 100, "amount", 100));
+        when(ai.generateUnitTests(1L, Set.of(31L))).thenReturn(new UnitTestResponseDto(List.of(
+                generated(31L, "package demo; class ServiceTest { "
+                        + "@org.junit.jupiter.api.Test void case31(){ "
+                        + "TransferService service = new TransferService(); "
+                        + "org.junit.jupiter.api.Assertions.assertTrue(service.transfer(100, 100)); } }"))));
+        when(units.saveAll(org.mockito.ArgumentMatchers.anyList())).thenAnswer(invocation -> invocation.getArgument(0));
+
+        var result = service.generateSupplemental(1L, List.of(31L));
+
+        assertThat(result).singleElement().satisfies(test ->
+                assertThat(test.sourceCode()).contains("assertTrue(service.transfer(100, 100))"));
+        verify(ai).generateUnitTests(1L, Set.of(31L));
+    }
+
+    @Test
     void generationRetriesInitialSingleCaseOnce() {
         Project project = new Project();
         project.setId(1L);
         project.setStatus(ProjectStatus.CASE_APPROVED);
         TestPlan plan = new TestPlan();
+        plan.setStatus(ReviewStatus.APPROVED);
         plan.setId(20L);
         plan.setProjectId(1L);
         TestCase testCase = new TestCase();
@@ -307,6 +420,7 @@ class UnitTestServiceTest {
         project.setId(1L);
         project.setStatus(ProjectStatus.CASE_APPROVED);
         TestPlan plan = new TestPlan();
+        plan.setStatus(ReviewStatus.APPROVED);
         plan.setId(20L);
         plan.setProjectId(1L);
         List<TestCase> approved = LongStream.rangeClosed(1, 5).mapToObj(id -> {
@@ -346,6 +460,7 @@ class UnitTestServiceTest {
         project.setId(1L);
         project.setStatus(ProjectStatus.CASE_APPROVED);
         TestPlan plan = new TestPlan();
+        plan.setStatus(ReviewStatus.APPROVED);
         plan.setId(20L);
         plan.setProjectId(1L);
         List<TestCase> approved = LongStream.rangeClosed(1, 6).mapToObj(id -> {
@@ -380,6 +495,7 @@ class UnitTestServiceTest {
         project.setId(1L);
         project.setStatus(ProjectStatus.CASE_APPROVED);
         TestPlan plan = new TestPlan();
+        plan.setStatus(ReviewStatus.APPROVED);
         plan.setId(20L);
         plan.setProjectId(1L);
         List<TestCase> approved = LongStream.rangeClosed(1, 6).mapToObj(id -> {
@@ -421,6 +537,7 @@ class UnitTestServiceTest {
         project.setId(1L);
         project.setStatus(ProjectStatus.CASE_APPROVED);
         TestPlan plan = new TestPlan();
+        plan.setStatus(ReviewStatus.APPROVED);
         plan.setId(20L);
         plan.setProjectId(1L);
         TestCase oldCase = new TestCase();
@@ -470,6 +587,7 @@ class UnitTestServiceTest {
         project.setId(1L);
         project.setStatus(ProjectStatus.CASE_APPROVED);
         TestPlan plan = new TestPlan();
+        plan.setStatus(ReviewStatus.APPROVED);
         plan.setId(20L);
         plan.setProjectId(1L);
         TestCase testCase = new TestCase();
@@ -494,6 +612,7 @@ class UnitTestServiceTest {
         project.setId(1L);
         project.setStatus(ProjectStatus.CASE_APPROVED);
         TestPlan plan = new TestPlan();
+        plan.setStatus(ReviewStatus.APPROVED);
         plan.setId(20L);
         plan.setProjectId(1L);
 
@@ -536,6 +655,7 @@ class UnitTestServiceTest {
                 .mapToObj(id -> approvedCase(id, 20L))
                 .toList();
         TestPlan plan = new TestPlan();
+        plan.setStatus(ReviewStatus.APPROVED);
         plan.setId(20L);
         plan.setProjectId(1L);
         when(projects.findById(1L)).thenReturn(Optional.of(project));

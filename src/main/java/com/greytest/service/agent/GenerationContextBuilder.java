@@ -43,6 +43,7 @@ import com.greytest.dto.agent.GenerationContextDtos.TestCaseContextItemDto;
 import com.greytest.dto.agent.GenerationContextDtos.TestPlanContextDto;
 import com.greytest.dto.agent.GenerationContextDtos.TestPlanContextItemDto;
 import com.greytest.dto.agent.GenerationContextDtos.UnitTestContextDto;
+import com.greytest.exception.InvalidProjectStatusException;
 import com.greytest.entity.BusinessRule;
 import com.greytest.entity.TestCase;
 import com.greytest.entity.TestPlan;
@@ -402,6 +403,7 @@ public class GenerationContextBuilder {
         List<BusinessRuleContextDto> approvedRules = approvedBusinessRules(projectId).stream()
                 .filter(rule -> targetRuleIds == null || targetRuleIds.isEmpty() || targetRuleIds.contains(rule.id()))
                 .toList();
+        requireRequestedIds(targetRuleIds, approvedRules.stream().map(BusinessRuleContextDto::id).collect(java.util.stream.Collectors.toSet()), "Business Rule");
         return new TestPlanContextDto(
                 project(analysis),
                 summary(projectId, analysis),
@@ -431,6 +433,8 @@ public class GenerationContextBuilder {
         List<BusinessRuleContextDto> approvedRules = approvedBusinessRules(projectId).stream()
                 .filter(rule -> targetRuleIds.contains(rule.id()))
                 .toList();
+        requireRequestedIds(targetPlanIds, targetPlans.stream().map(TestPlanContextItemDto::id).collect(java.util.stream.Collectors.toSet()), "Test Plan");
+        requireApprovedRuleLinks(targetPlans, approvedRules);
         Set<Long> targetMethodIds = methodIds(approvedRules);
         Set<Long> targetClassIds = analysis.classes().stream()
                 .filter(javaClass -> javaClass.methods().stream()
@@ -515,6 +519,8 @@ public class GenerationContextBuilder {
         List<BusinessRuleContextDto> targetRules = approvedBusinessRules(projectId).stream()
                 .filter(rule -> targetRuleIds.contains(rule.id()))
                 .toList();
+        requireRequestedIds(targetCaseIds, targetCases.stream().map(TestCaseContextItemDto::id).collect(java.util.stream.Collectors.toSet()), "Test Case");
+        requireApprovedRuleLinks(targetPlans, targetRules);
         Set<Long> targetMethodIds = methodIds(targetRules);
         Set<Long> targetClassIds = analysis.classes().stream()
                 .filter(javaClass -> javaClass.methods().stream()
@@ -549,6 +555,22 @@ public class GenerationContextBuilder {
                 context.existingApprovedTestCases(),
                 context.previousGeneratedUnitTests(),
                 context.existingTests());
+    }
+
+    /** Không dùng artifact chưa duyệt hoặc thiếu cha đã duyệt làm oracle. */
+    private void requireRequestedIds(Set<Long> requested, Set<Long> approved, String artifact) {
+        if (requested != null && !requested.isEmpty() && !approved.containsAll(requested)) {
+            throw new InvalidProjectStatusException(artifact + " được chọn chưa APPROVED hoặc thiếu liên kết đã duyệt.");
+        }
+    }
+
+    private void requireApprovedRuleLinks(List<TestPlanContextItemDto> plans, List<BusinessRuleContextDto> rules) {
+        Set<Long> approvedIds = rules.stream().map(BusinessRuleContextDto::id).collect(java.util.stream.Collectors.toSet());
+        for (TestPlanContextItemDto plan : plans) {
+            if (!approvedIds.contains(plan.businessRuleId()) || !approvedIds.containsAll(plan.coveredRuleIds())) {
+                throw new InvalidProjectStatusException("Test Plan " + plan.id() + " thiếu Business Rule APPROVED.");
+            }
+        }
     }
 
     private List<ClassContextDto> replaceChangedMethodSources(
@@ -771,7 +793,7 @@ public class GenerationContextBuilder {
 
     private List<BusinessRuleContextDto> approvedBusinessRules(Long projectId) {
         return businessRuleRepository.findByProjectId(projectId).stream()
-                .filter(rule -> rule.getStatus() == ReviewStatus.APPROVED || rule.getStatus() == ReviewStatus.PENDING_REVIEW)
+                .filter(rule -> rule.getStatus() == ReviewStatus.APPROVED)
                 .map(this::ruleContext)
                 .sorted(Comparator.comparingInt((BusinessRuleContextDto rule) -> ruleNumber(rule.ruleCode()))
                         .thenComparing(BusinessRuleContextDto::ruleCode))
@@ -840,7 +862,7 @@ public class GenerationContextBuilder {
 
     private List<TestPlanContextItemDto> approvedTestPlans(Long projectId) {
         List<TestPlan> plans = testPlanRepository.findByProjectId(projectId).stream()
-                .filter(plan -> plan.getStatus() == ReviewStatus.APPROVED || plan.getStatus() == ReviewStatus.PENDING_REVIEW)
+                .filter(plan -> plan.getStatus() == ReviewStatus.APPROVED)
                 .sorted(Comparator.comparing(TestPlan::getPlanCode))
                 .toList();
         Map<Long, List<Long>> coveredRuleIds = coveredRuleIdsByPlan(plans);
@@ -872,7 +894,7 @@ public class GenerationContextBuilder {
     private List<TestCaseContextItemDto> approvedTestCases(Long projectId) {
         return approvedTestPlans(projectId).stream()
                 .flatMap(plan -> testCaseRepository.findByTestPlanId(plan.id()).stream())
-                .filter(testCase -> testCase.getStatus() == ReviewStatus.APPROVED || testCase.getStatus() == ReviewStatus.PENDING_REVIEW)
+                .filter(testCase -> testCase.getStatus() == ReviewStatus.APPROVED)
                 .map(this::testCaseContext)
                 .sorted(Comparator.comparing(TestCaseContextItemDto::caseCode))
                 .toList();
@@ -881,7 +903,7 @@ public class GenerationContextBuilder {
     private List<TestCaseContextItemDto> approvedTestCases(List<TestPlanContextItemDto> plans) {
         return plans.stream()
                 .flatMap(plan -> testCaseRepository.findByTestPlanId(plan.id()).stream())
-                .filter(testCase -> testCase.getStatus() == ReviewStatus.APPROVED || testCase.getStatus() == ReviewStatus.PENDING_REVIEW)
+                .filter(testCase -> testCase.getStatus() == ReviewStatus.APPROVED)
                 .map(this::testCaseContext)
                 .sorted(Comparator.comparing(TestCaseContextItemDto::caseCode))
                 .toList();

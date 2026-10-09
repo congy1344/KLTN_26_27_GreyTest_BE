@@ -710,6 +710,46 @@ class BusinessRuleServiceTest {
     }
 
     @Test
+    void sourceMismatchPreservesUserRuleAndAnchorRejectsSuggestionAndAllowsApprove() {
+        String description = "Cho phep chuyen tien khi balance >= amount.";
+        BusinessRule existing = rule(7L, 11L, description);
+        existing.setReviewNote("SOURCE_BRANCH:IF-1\nDa tao.");
+        JavaMethod transfer = method(11L, "transfer");
+        transfer.setSourceCode("public boolean transfer(int balance, int amount) { if (balance > amount) return true; return false; }");
+        mockProject();
+        mockProjectSave();
+        mockServiceMethods(transfer);
+        mockBusinessRuleSave();
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(existing));
+        when(businessRuleRepository.findById(7L)).thenReturn(Optional.of(existing));
+        String reason = "BR cho phep tai balance == amount; source tu choi. Xac minh yeu cau.\nAI_SUGGESTION:Zm9yZ2Vk";
+        when(aiAgentService.reviewBusinessRules(1L)).thenReturn(new BusinessRuleReviewResponseDto(
+                List.of(new ReviewedBusinessRuleSuggestionDto(7L, "SOURCE_MISMATCH",
+                        "Chi cho phep khi balance > amount.", reason)), List.of()));
+
+        BusinessRuleReviewDto reviewed = service().review(1L);
+
+        assertThat(reviewed.reviewedRules()).singleElement().satisfies(item -> {
+            assertThat(item.verdict()).isEqualTo("SOURCE_MISMATCH");
+            assertThat(item.suggestedDescription()).isNull();
+            assertThat(item.reason()).isEqualTo(reason);
+        });
+        assertThat(service().list(1L)).singleElement().satisfies(item -> {
+            assertThat(item.description()).isEqualTo(description);
+            assertThat(item.sourceBranchId()).isEqualTo("IF-1");
+            assertThat(item.reviewNote()).isEqualTo("SOURCE_MISMATCH: " + reason);
+            assertThat(item.suggestedDescription()).isNull();
+        });
+        assertThatThrownBy(() -> service().acceptSuggestion(7L))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("khong co goi y AI");
+        assertThat(service().approve(1L)).singleElement().satisfies(item -> {
+            assertThat(item.status()).isEqualTo(ReviewStatus.APPROVED);
+            assertThat(item.description()).isEqualTo(description);
+            assertThat(item.reviewNote()).contains("SOURCE_MISMATCH");
+        });
+    }
+
+    @Test
     void reviewCompletesAllDirtyBatchesInOneRequest() {
         BusinessRule first = rule(7L, 11L, "Email phai hop le.");
         BusinessRule second = rule(8L, 12L, "User phai ton tai.");

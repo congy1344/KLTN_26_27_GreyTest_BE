@@ -40,7 +40,7 @@ public final class GenerationResponseDtos {
 
     public record ReviewedBusinessRuleSuggestionDto(
             @JsonProperty("rule_id") @NotNull Long ruleId,
-            @NotBlank @Pattern(regexp = "OK|NEEDS_REVISION|DUPLICATE|WRONG_METHOD|TOO_VAGUE") String verdict,
+            @NotBlank @Pattern(regexp = "OK|NEEDS_REVISION|DUPLICATE|WRONG_METHOD|TOO_VAGUE|SOURCE_MISMATCH") String verdict,
             @JsonProperty("suggested_description") String suggestedDescription,
             @NotBlank String reason) {
     }

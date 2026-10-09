@@ -106,6 +106,17 @@ class GoogleLlmClientTest {
     }
 
     @Test
+    void reviewSchemaSupportsSourceMismatchVerdict() throws Exception {
+        var verdicts = objectMapper.readTree(client("test-key", URI.create("http://127.0.0.1:1/v1beta/interactions"))
+                .requestBody("# Prompt: business-rule-review\nContext: {}"))
+                .path("response_format").path("schema").path("properties").path("reviewed_rules")
+                .path("items").path("properties").path("verdict").path("enum");
+
+        assertThat(verdicts).extracting(value -> value.asText())
+                .containsExactly("OK", "NEEDS_REVISION", "DUPLICATE", "WRONG_METHOD", "TOO_VAGUE", "SOURCE_MISMATCH");
+    }
+
+    @Test
     void schemaUsesPromptHeaderOnly() throws Exception {
         GoogleLlmClient client = client("test-key", URI.create("http://127.0.0.1:1/v1beta/interactions"));
 

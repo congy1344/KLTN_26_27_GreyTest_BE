@@ -184,7 +184,7 @@ public class TestPlanService {
             queriedRules = businessRuleRepository.findByProjectIdAndStatus(projectId, ReviewStatus.APPROVED);
         }
         List<BusinessRule> allApprovedRules = queriedRules.stream()
-                .filter(rule -> rule.getStatus() == ReviewStatus.APPROVED || rule.getStatus() == ReviewStatus.PENDING_REVIEW)
+                .filter(rule -> rule.getStatus() == ReviewStatus.APPROVED)
                 .filter(rule -> scopedMethodIds == null || (rule.getMethodId() != null && scopedMethodIds.contains(rule.getMethodId()))).toList();
         if (allApprovedRules.isEmpty()) {
             throw new InvalidProjectStatusException("Can co it nhat mot Business Rule APPROVED truoc khi sinh Test Plan.");
@@ -351,12 +351,6 @@ public class TestPlanService {
         List<TestPlan> savedPlans = testPlanRepository.saveAll(
                 validDrafts.stream().map(GeneratedPlanDraft::plan).toList());
         testPlanCoveredRuleRepository.saveAll(coveredRuleLinks(savedPlans, validDrafts));
-        targetRules.forEach(rule -> {
-            if (rule.getStatus() == ReviewStatus.PENDING_REVIEW) {
-                rule.setStatus(ReviewStatus.APPROVED);
-                businessRuleRepository.save(rule);
-            }
-        });
         return savedPlans;
     }
 

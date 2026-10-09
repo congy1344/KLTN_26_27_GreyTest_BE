@@ -30,6 +30,7 @@ import com.greytest.dto.agent.GenerationContextDtos.TestCaseContextItemDto;
 import com.greytest.dto.agent.GenerationContextDtos.TestPlanContextItemDto;
 import com.greytest.dto.agent.GenerationContextDtos.UnitTestContextDto;
 import com.greytest.dto.agent.GenerationResponseDtos.BusinessRuleResponseDto;
+import com.greytest.dto.agent.GenerationResponseDtos.BusinessRuleReviewResponseDto;
 import com.greytest.dto.agent.GenerationResponseDtos.GeneratedUnitTestDto;
 import com.greytest.dto.agent.GenerationResponseDtos.TestCaseResponseDto;
 import com.greytest.dto.agent.GenerationResponseDtos.UnitTestResponseDto;
@@ -81,15 +82,15 @@ class AgentGatewayTest {
                 "Java 8-compatible",
                 "do not use `List.of`, `Set.of`, `Map.of`",
                         "detected JUnit framework's built-in assertions",
-                "null selector never reaches",
-                "MimeMessageHelper(message, true)",
-                "ASCII-only subject",
+                "separate approved null-input contract",
+                "approved expected MIME/content behavior",
+                "Preserve Unicode subject, body and filename",
                 "Initialize every fixture",
                 "include Feign/WebClient collaborators",
                 "never call a method or getter on a fixture field before assigning it",
                 "Match test dependency wiring to the production class",
                 "verifyNoInteractions",
-                "perform a compile pass");
+                "check technical consistency");
         assertThat(prompt).doesNotContain("Treat production source and existing test source in context as authoritative");
     }
 
@@ -277,15 +278,37 @@ class AgentGatewayTest {
     }
 
     @Test
-    void aiAgentRetriesUnitTestWhenSemanticValidatorFindsWrongSwitchException(@TempDir Path tempDir) throws Exception {
+    void aiAgentPreservesApprovedExceptionDespiteCurrentNullSwitchBehavior(@TempDir Path tempDir) throws Exception {
+        GenerationContextBuilder contextBuilder = mock(GenerationContextBuilder.class);
+        when(contextBuilder.buildUnitTestContext(1L, java.util.Set.of(40L))).thenReturn(unitTestContext());
+        LlmClient client = mock(LlmClient.class);
+        String approvedTest = objectMapper.writeValueAsString(new UnitTestResponseDto(List.of(
+                generatedUnitTest("@org.junit.Test(expected=IllegalArgumentException.class) "
+                        + "public void testCase(){ service.findReadyToNotify(null); }"))));
+        when(client.complete(org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.any(LlmRequestOptions.class))).thenReturn(approvedTest);
+        AIAgentService service = new AIAgentService(
+                contextBuilder, promptManager, client, parser,
+                new AiContextLogService(objectMapper, tempDir.toString()));
+
+        UnitTestResponseDto response = service.generateUnitTests(1L, java.util.Set.of(40L));
+
+        assertThat(response.unitTests()).singleElement()
+                .satisfies(test -> assertThat(test.sourceCode()).contains("IllegalArgumentException"));
+        verify(client).complete(org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.any(LlmRequestOptions.class));
+    }
+
+    @Test
+    void aiAgentRetriesTechnicalErrorWithoutChangingApprovedOracle(@TempDir Path tempDir) throws Exception {
         GenerationContextBuilder contextBuilder = mock(GenerationContextBuilder.class);
         when(contextBuilder.buildUnitTestContext(1L, java.util.Set.of(40L))).thenReturn(unitTestContext());
         LlmClient client = mock(LlmClient.class);
         String invalid = objectMapper.writeValueAsString(new UnitTestResponseDto(List.of(
                 generatedUnitTest("@org.junit.Test(expected=IllegalArgumentException.class) "
-                        + "public void testCase(){ service.findReadyToNotify(null); }"))));
+                        + "public void testCase(){ org.mockito.Mockito.verifyZeroInteractions(service); service.findReadyToNotify(null); }"))));
         String valid = objectMapper.writeValueAsString(new UnitTestResponseDto(List.of(
-                generatedUnitTest("@org.junit.Test(expected=NullPointerException.class) "
+                generatedUnitTest("@org.junit.Test(expected=IllegalArgumentException.class) "
                         + "public void testCase(){ service.findReadyToNotify(null); }"))));
         when(client.complete(org.mockito.ArgumentMatchers.anyString(),
                 org.mockito.ArgumentMatchers.any(LlmRequestOptions.class))).thenReturn(invalid, valid);
@@ -295,13 +318,15 @@ class AgentGatewayTest {
 
         UnitTestResponseDto response = service.generateUnitTests(1L, java.util.Set.of(40L));
 
-        assertThat(response.unitTests()).singleElement()
-                .satisfies(test -> assertThat(test.sourceCode()).contains("NullPointerException"));
+        assertThat(response.unitTests()).singleElement().satisfies(test ->
+                assertThat(test.sourceCode()).contains("IllegalArgumentException", "findReadyToNotify(null)")
+                        .doesNotContain("verifyZeroInteractions"));
         var prompts = org.mockito.ArgumentCaptor.forClass(String.class);
         verify(client, org.mockito.Mockito.times(2)).complete(
                 prompts.capture(), org.mockito.ArgumentMatchers.any(LlmRequestOptions.class));
         assertThat(prompts.getAllValues().get(1)).contains(
-                "Unit Test semantic correction", "throws NullPointerException before default");
+                "Unit Test semantic correction", "Fix only the reported technical errors",
+                "preserve approved test inputs, preconditions, expected results and business assertions");
     }
 
     @Test
@@ -439,6 +464,24 @@ class AgentGatewayTest {
     }
 
     @Test
+    void reviewParserAcceptsSourceMismatchAndRejectsUnknownVerdict() {
+        String json = """
+                {"reviewed_rules":[{"rule_id":7,"verdict":"SOURCE_MISMATCH",
+                  "suggested_description":null,"reason":"BR allows equality; code rejects it. Verify requirements."}],
+                 "suggested_rules":[]}
+                """;
+
+        assertThat(parser.parse(json, BusinessRuleReviewResponseDto.class).reviewedRules())
+                .singleElement().satisfies(item -> {
+                    assertThat(item.verdict()).isEqualTo("SOURCE_MISMATCH");
+                    assertThat(item.suggestedDescription()).isNull();
+                });
+        assertThatThrownBy(() -> parser.parse(json.replace("SOURCE_MISMATCH", "UNSUPPORTED"),
+                BusinessRuleReviewResponseDto.class))
+                .isInstanceOf(LlmResponseException.class).hasMessageContaining("LLM response khong dung schema");
+    }
+
+    @Test
     void parserAcceptsIntegrationBusinessRuleCategory() {
         String responseJson = """
                 {
@@ -546,12 +589,12 @@ class AgentGatewayTest {
                 1L, "demo", "Service", "demo.Service", "SERVICE", "src/main/java/demo/Service.java",
                 null, List.of(), List.of(method));
         BusinessRuleContextDto rule = new BusinessRuleContextDto(
-                20L, 10L, "BR-001", "rule", null, "AI", "APPROVED", false, "SWITCH-1");
+                20L, 10L, "BR-001", "Null input must throw IllegalArgumentException", null, "USER_ADDED", "APPROVED", false, "SWITCH-1");
         TestPlanContextItemDto plan = new TestPlanContextItemDto(
                 30L, 20L, List.of(20L), "TP-001", "plan", "plan", "EXCEPTION", "APPROVED", false);
         TestCaseContextItemDto testCase = new TestCaseContextItemDto(
-                40L, 30L, "TC-001", "EXCEPTION", "case", "setup", Map.of(),
-                "throws", "HIGH", "BR-001 -> TP-001", "APPROVED", false);
+                40L, 30L, "TC-001", "EXCEPTION", "Null input", "setup", Map.of("input", "null"),
+                "throws IllegalArgumentException", "HIGH", "BR-001 -> TP-001", "APPROVED", false);
         return new UnitTestContextDto(null, null, List.of(javaClass), List.of(rule), List.of(plan),
                 List.of(testCase), List.of(), List.of(), List.of());
     }

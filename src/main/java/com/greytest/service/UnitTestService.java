@@ -61,6 +61,7 @@ public class UnitTestService {
         if(scope==null)ensureCanGenerate(project);
         var approved=scope==null?approvedCases(projectId):approvedCases(projectId,scope);
         if(approved.isEmpty()) throw new LlmResponseException("Khong co Test Case da approve de sinh Unit Test.");
+        ai.validateUnitTestPrerequisites(projectId, approved.stream().map(TestCase::getId).collect(java.util.stream.Collectors.toSet()));
         List<List<TestCase>> allBatches = caseBatches(approved);
 
         List<TestCase> target;
@@ -157,6 +158,7 @@ public class UnitTestService {
         var targetIds=new java.util.HashSet<>(caseIds);
         var target=caseIds.stream().map(id->cases.findById(id).orElse(null)).filter(java.util.Objects::nonNull).filter(c->approvedCase(c,projectId)).toList();
         if(target.size()!=targetIds.size()) throw new InvalidProjectStatusException("Test Case bổ sung không hợp lệ.");
+        ai.validateUnitTestPrerequisites(projectId, targetIds);
         startProgress(projectId, target, "Bắt đầu sinh Unit Test bổ sung cho coverage gap.");
         try {
         var generated=generateBatches(projectId,target);
@@ -424,7 +426,7 @@ public class UnitTestService {
     private void ensureCanGenerate(Project p){if(!Set.of(ProjectStatus.CASE_PENDING_REVIEW, ProjectStatus.CASE_APPROVED, ProjectStatus.TEST_GENERATED, ProjectStatus.COVERAGE_ANALYZED, ProjectStatus.COMPLETED).contains(p.getStatus())) throw new InvalidProjectStatusException("Chi sinh Unit Test sau khi Test Case da co.");}
     private List<TestCase> approvedCases(Long projectId){return cases.findAll().stream().filter(c->approvedCase(c,projectId)).sorted(java.util.Comparator.comparing(TestCase::getId)).toList();}
     private Project lockedProject(Long id){return projects.findByIdForUpdate(id).orElseThrow(()->new ProjectNotFoundException(id));}
-    private List<TestCase> approvedCases(Long projectId,ServiceScopeResolver.ServiceScope scope){return scopedArtifacts.cases(projectId,scope).stream().filter(c->c.getStatus()==ReviewStatus.APPROVED || c.getStatus()==ReviewStatus.PENDING_REVIEW).sorted(java.util.Comparator.comparing(TestCase::getId)).toList();}
+    private List<TestCase> approvedCases(Long projectId,ServiceScopeResolver.ServiceScope scope){return scopedArtifacts.cases(projectId,scope).stream().filter(c->approvedCase(c,projectId)).sorted(java.util.Comparator.comparing(TestCase::getId)).toList();}
     /** Xóa unit test của vòng trước để sinh lại không bị nhân đôi record. */
     private void deleteOldUnitTests(List<TestCase> approved){ approved.stream().map(c->units.findByTestCaseId(c.getId())).filter(java.util.Objects::nonNull).forEach(units::delete); units.flush(); }
     private boolean valid(GeneratedUnitTestDto x,Long projectId){if(x==null)return false; TestCase c=cases.findById(x.caseId()).orElse(null); return c!=null&&approvedCase(c,projectId)&&x.sourceCode()!=null&&!x.sourceCode().isBlank()&&validIdentifier(x.testClassName())&&validIdentifier(x.testMethodName())&&validPackage(x.packageName())&&containsExactlyOneRequestedTest(x)&&hasInitializedReferencedFixtures(x);}
@@ -751,7 +753,7 @@ public class UnitTestService {
     }
     private boolean validIdentifier(String value){return value!=null&&javax.lang.model.SourceVersion.isIdentifier(value)&&!javax.lang.model.SourceVersion.isKeyword(value);}
     private boolean validPackage(String value){return value!=null&&!value.isBlank()&&java.util.Arrays.stream(value.split("\\.",-1)).allMatch(this::validIdentifier);}
-    private boolean approvedCase(TestCase c,Long projectId){TestPlan p=plans.findById(c.getTestPlanId()).orElse(null); return p!=null&&projectId.equals(p.getProjectId())&&(c.getStatus()==ReviewStatus.APPROVED || c.getStatus()==ReviewStatus.PENDING_REVIEW);}
+    private boolean approvedCase(TestCase c,Long projectId){TestPlan p=plans.findById(c.getTestPlanId()).orElse(null); return p!=null&&projectId.equals(p.getProjectId())&&p.getStatus()==ReviewStatus.APPROVED&&c.getStatus()==ReviewStatus.APPROVED;}
     private UnitTest from(GeneratedUnitTestDto x){UnitTest u=new UnitTest();u.setTestCaseId(x.caseId());u.setTestClassName(x.testClassName());u.setTestMethodName(x.testMethodName());u.setPackageName(x.packageName());u.setGenerationType(x.generationType());u.setSourceCode(withTraceComment(x));u.setFilePath("src/test/java/"+x.packageName().replace('.','/')+"/"+x.testClassName()+".java"); return u;}
     private String withTraceComment(GeneratedUnitTestDto x){
         String source = sanitizeSourceCode(x.sourceCode());

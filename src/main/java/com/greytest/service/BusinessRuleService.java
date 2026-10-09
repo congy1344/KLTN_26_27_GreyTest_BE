@@ -519,6 +519,11 @@ public class BusinessRuleService {
         for (ReviewedBusinessRuleSuggestionDto suggestion : suggestions) {
             BusinessRule rule = rulesById.get(suggestion.ruleId());
             if (rule == null) continue;
+            // Bất đồng với source không phải đề xuất thay yêu cầu của người dùng.
+            if ("SOURCE_MISMATCH".equals(suggestion.verdict())) {
+                suggestion = new ReviewedBusinessRuleSuggestionDto(
+                        suggestion.ruleId(), suggestion.verdict(), null, suggestion.reason());
+            }
             rule.setReviewNote(withSourceBranch(
                     sourceBranchId(rule.getReviewNote()),
                     reviewNote(suggestion)));

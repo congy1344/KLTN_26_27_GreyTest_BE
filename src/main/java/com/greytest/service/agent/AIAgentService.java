@@ -161,6 +161,16 @@ public class AIAgentService {
                 TestPlanResponseDto.class, correction);
     }
 
+    /** Kiểm tra oracle đã duyệt trước khi service thay thế dữ liệu cũ; không gọi LLM. */
+    public void validateTestCasePrerequisites(Long projectId, Set<Long> planIds) {
+        contextBuilder.buildTestCaseContext(projectId, planIds);
+    }
+
+    /** Kiểm tra đầy đủ BR/Plan/Case đã duyệt trước khi xóa Unit Test cũ. */
+    public void validateUnitTestPrerequisites(Long projectId, Set<Long> caseIds) {
+        contextBuilder.buildUnitTestContext(projectId, caseIds);
+    }
+
     public TestCaseResponseDto generateTestCases(Long projectId) {
         return call(projectId, "test-case", contextBuilder.buildTestCaseContext(projectId), TestCaseResponseDto.class);
     }
@@ -264,8 +274,10 @@ public class AIAgentService {
                 if (isUnitTestSemanticError(exception)) {
                     attemptPrompt = prompt + "\n\n# Unit Test semantic correction\n"
                             + exception.getMessage().substring(UNIT_TEST_SEMANTIC_ERROR.length())
-                            + "\nRegenerate the complete unit_tests array. Production source is authoritative; "
-                            + "replace every fragile assertion described above and return strict JSON only.";
+                            + "\nRegenerate the complete unit_tests array. Fix only the reported technical errors; "
+                            + "preserve approved test inputs, preconditions, expected results and business assertions. "
+                            + "Production source is authoritative only for package, API, signature, type and wiring compatibility. "
+                            + "Do not change an assertion or input to make a test pass on current production behavior. Return strict JSON only.";
                     continue;
                 } else if (isMalformedJson(exception)) {
                     attemptPrompt = prompt + "\n\n# JSON correction\nThe previous response was not valid JSON. Regenerate the complete response as strict RFC 8259 JSON. Check every quote, comma, object and array brace; do not add or omit braces, and do not use markdown fences or Java literals.";

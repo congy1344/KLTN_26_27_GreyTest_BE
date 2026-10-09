@@ -77,7 +77,7 @@ public class TestCaseService {
             throw new InvalidProjectStatusException("Project da co Test Case. Hay chon mot Test Plan cu the de sinh lai.");
         }
         List<TestPlan> approvedPlans = projectPlans.stream()
-                .filter(plan -> plan.getStatus() == ReviewStatus.APPROVED || plan.getStatus() == ReviewStatus.PENDING_REVIEW)
+                .filter(plan -> plan.getStatus() == ReviewStatus.APPROVED)
                 .sorted(Comparator.comparing(TestPlan::getId))
                 .toList();
         if (approvedPlans.isEmpty()) {
@@ -93,6 +93,8 @@ public class TestCaseService {
                     "Tat ca Test Plan da co Test Case.");
             return list(projectId);
         }
+
+        ai.validateTestCasePrerequisites(projectId, targetPlans.stream().map(TestPlan::getId).collect(java.util.stream.Collectors.toSet()));
 
         // Nếu sinh lại từ đầu: xóa case cũ TRƯỚC khi bắt đầu gọi AI,
         // để mỗi batch mới lưu vào DB ngay mà không bị trùng.
@@ -475,7 +477,7 @@ public class TestCaseService {
         p.setStatus(ProjectStatus.CASE_APPROVED);projects.save(p);
         return entities.stream().map(this::dto).toList();
     }
-    private boolean isValid(GeneratedTestCaseDto c, Long projectId){ if(c==null||!plans.existsById(c.planId())||parseTypeOrNull(c.testType())==null) return false; var p=plans.findById(c.planId()).orElse(null); return p!=null&&projectId.equals(p.getProjectId())&&(p.getStatus()==ReviewStatus.APPROVED || p.getStatus()==ReviewStatus.PENDING_REVIEW); }
+    private boolean isValid(GeneratedTestCaseDto c, Long projectId){ if(c==null||!plans.existsById(c.planId())||parseTypeOrNull(c.testType())==null) return false; var p=plans.findById(c.planId()).orElse(null); return p!=null&&projectId.equals(p.getProjectId())&&(p.getStatus()==ReviewStatus.APPROVED); }
     private TestCase from(GeneratedTestCaseDto x,int n){ TestCase c=new TestCase(); c.setTestPlanId(x.planId()); c.setCaseCode("TC-"+String.format("%03d", n)); c.setTestType(parseType(x.testType())); c.setDescription(x.description()); c.setPreconditions(x.preconditions()); c.setTestData(x.testData()); c.setExpectedResult(x.expectedResult()); c.setPriority(Priority.valueOf(x.priority())); c.setTraceSource(x.traceSource()); c.setStatus(ReviewStatus.PENDING_REVIEW); c.setIsModified(false); return c; }
     private TestCase supplemental(GeneratedTestCaseDto x,int n,int round){ TestCase c=from(x,n); c.setStatus(ReviewStatus.APPROVED); if(!x.traceSource().contains("JaCoCo")) c.setTraceSource(x.traceSource()+" -> JaCoCo round "+round); return c; }
     private int nextCaseNumber(){ return cases.findAll().stream().map(TestCase::getCaseCode).filter(java.util.Objects::nonNull).filter(code->code.matches("TC-\\d+")).mapToInt(code->Integer.parseInt(code.substring(3))).max().orElse(0)+1; }

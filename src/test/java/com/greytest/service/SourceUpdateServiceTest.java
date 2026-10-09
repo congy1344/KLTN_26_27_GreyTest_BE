@@ -51,6 +51,7 @@ import com.greytest.repository.SourceUpdateItemRepository;
 import com.greytest.repository.SourceUpdateRepository;
 import com.greytest.repository.TestCaseRepository;
 import com.greytest.repository.TestPlanRepository;
+import com.greytest.repository.TestPlanCoveredRuleRepository;
 import com.greytest.repository.UnitTestRepository;
 import com.greytest.service.storage.SourceRevisionStorageService;
 import com.greytest.service.storage.SourceRevisionStorageService.SnapshotResult;
@@ -83,6 +84,7 @@ class SourceUpdateServiceTest {
     private BusinessRuleRepository businessRuleRepository;
     @Mock
     private TestPlanRepository testPlanRepository;
+    @Mock private TestPlanCoveredRuleRepository testPlanCoveredRuleRepository;
     @Mock
     private TestCaseRepository testCaseRepository;
     @Mock
@@ -109,6 +111,7 @@ class SourceUpdateServiceTest {
                 impactAnalysisService,
                 businessRuleRepository,
                 testPlanRepository,
+                testPlanCoveredRuleRepository,
                 testCaseRepository,
                 unitTestRepository,
                 javaClassRepository,
@@ -450,7 +453,9 @@ class SourceUpdateServiceTest {
 
         SourceUpdateItem pending = new SourceUpdateItem();
         pending.setSourceUpdateId(200L);
-        pending.setTargetType(SourceUpdateTargetType.METHOD);
+        pending.setTargetType(SourceUpdateTargetType.BUSINESS_RULE);
+        pending.setTargetId(201L);
+        pending.setAfterData("{\"method_id\":101,\"description\":\"Allow balance > amount\",\"category\":\"BUSINESS_LOGIC\"}");
         pending.setAction(SourceUpdateAction.UPDATE);
         pending.setReviewStatus(SourceUpdateReviewStatus.PENDING);
         when(sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(200L))
@@ -459,6 +464,158 @@ class SourceUpdateServiceTest {
         assertThatThrownBy(() -> service.applyUpdate(10L, 200L, user))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("PENDING");
+        verify(projectRepository, never()).save(any());
+        verify(businessRuleRepository, never()).save(any());
+    }
+
+    @Test
+    void rejectedOracleUpdatesLeaveApprovedRuleAndCaseUnchanged() {
+        applyOracleProposal(SourceUpdateReviewStatus.REJECTED);
+    }
+
+    @Test
+    void explicitlyAcceptedOracleUpdatesApplyNewRuleAndCase() {
+        applyOracleProposal(SourceUpdateReviewStatus.ACCEPTED);
+    }
+
+    @Test
+    void unchangedAcceptedBusinessRuleDoesNotInvalidateDescendants() {
+        applyOracleProposal(SourceUpdateReviewStatus.ACCEPTED, false);
+    }
+
+    @Test
+    void acceptedPlanAddingSecondaryCoverageInSameApplyIsInvalidatedWithoutPersistedLink() {
+        applyOracleProposal(SourceUpdateReviewStatus.ACCEPTED, true, true);
+    }
+
+    private void applyOracleProposal(SourceUpdateReviewStatus decision) {
+        applyOracleProposal(decision, true);
+    }
+
+    private void applyOracleProposal(SourceUpdateReviewStatus decision, boolean ruleChanges) {
+        applyOracleProposal(decision, ruleChanges, false);
+    }
+
+    private void applyOracleProposal(SourceUpdateReviewStatus decision, boolean ruleChanges, boolean newSecondaryLink) {
+        AuthUser user = user(1L);
+        Project currentProject = project(10L, 1L);
+        when(projectRepository.findById(10L)).thenReturn(Optional.of(currentProject));
+        SourceUpdate update = new SourceUpdate();
+        update.setId(200L);
+        update.setProjectId(10L);
+        update.setCandidateRevisionId(102L);
+        update.setStatus(SourceUpdateStatus.READY_TO_APPLY);
+        when(sourceUpdateRepository.findByIdAndProjectId(200L, 10L)).thenReturn(Optional.of(update));
+        SourceRevision candidate = new SourceRevision();
+        candidate.setId(102L);
+        candidate.setStoragePath("/tmp/candidate");
+        when(sourceRevisionRepository.findById(102L)).thenReturn(Optional.of(candidate));
+        com.greytest.entity.BusinessRule rule = new com.greytest.entity.BusinessRule();
+        rule.setId(201L);
+        rule.setDescription("Allow balance >= amount");
+        rule.setSource(com.greytest.entity.enums.RuleSource.USER_MODIFIED);
+        rule.setStatus(com.greytest.entity.enums.ReviewStatus.APPROVED);
+        when(businessRuleRepository.findByProjectId(10L)).thenReturn(List.of(rule));
+        SourceUpdateItem ruleItem = new SourceUpdateItem();
+        ruleItem.setId(601L);
+        ruleItem.setTargetType(SourceUpdateTargetType.BUSINESS_RULE);
+        ruleItem.setTargetId(201L);
+        ruleItem.setAction(SourceUpdateAction.UPDATE);
+        ruleItem.setReviewStatus(decision);
+        ruleItem.setAfterData("{\"method_id\":101,\"description\":\"Allow balance > amount\",\"category\":\"BUSINESS_LOGIC\"}");
+        if (!ruleChanges) ruleItem.setAfterData(ruleItem.getAfterData().replace("balance > amount", "balance >= amount"));
+        TestCase testCase = new TestCase();
+        testCase.setId(401L);
+        testCase.setExpectedResult("Transfer succeeds");
+        testCase.setStatus(com.greytest.entity.enums.ReviewStatus.APPROVED);
+        TestPlan anchorPlan = new TestPlan();
+        anchorPlan.setId(301L);
+        anchorPlan.setBusinessRuleId(201L);
+        anchorPlan.setStatus(com.greytest.entity.enums.ReviewStatus.APPROVED);
+        TestPlan coveredPlan = new TestPlan();
+        coveredPlan.setId(302L);
+        coveredPlan.setBusinessRuleId(202L);
+        coveredPlan.setStatus(com.greytest.entity.enums.ReviewStatus.APPROVED);
+        TestCase coveredCase = new TestCase();
+        coveredCase.setId(402L);
+        coveredCase.setExpectedResult("Old covered oracle");
+        coveredCase.setStatus(com.greytest.entity.enums.ReviewStatus.APPROVED);
+        TestPlan unrelatedPlan = new TestPlan();
+        unrelatedPlan.setId(303L);
+        unrelatedPlan.setBusinessRuleId(203L);
+        unrelatedPlan.setStatus(com.greytest.entity.enums.ReviewStatus.APPROVED);
+        SourceUpdateItem planItem = new SourceUpdateItem();
+        planItem.setId(603L);
+        planItem.setTargetType(SourceUpdateTargetType.TEST_PLAN);
+        planItem.setTargetId(301L);
+        planItem.setAction(SourceUpdateAction.UPDATE);
+        planItem.setReviewStatus(decision);
+        planItem.setAfterData("""
+                {"method_id":101,"rule_id":201,"covered_rule_ids":[201],"title":"Accepted plan",
+                 "description":"Accepted plan description","test_type":"BOUNDARY"}
+                """);
+        SourceUpdateItem secondaryItem = new SourceUpdateItem();
+        secondaryItem.setId(604L);
+        secondaryItem.setTargetType(SourceUpdateTargetType.TEST_PLAN);
+        secondaryItem.setTargetId(302L);
+        secondaryItem.setAction(SourceUpdateAction.UPDATE);
+        secondaryItem.setReviewStatus(decision);
+        secondaryItem.setAfterData("""
+                {"method_id":101,"rule_id":202,"covered_rule_ids":[201,202],"title":"New secondary coverage",
+                 "description":"New coverage link","test_type":"BOUNDARY"}
+                """);
+        SourceUpdateItem caseItem = new SourceUpdateItem();
+        caseItem.setId(602L);
+        caseItem.setTargetType(SourceUpdateTargetType.TEST_CASE);
+        caseItem.setTargetId(401L);
+        caseItem.setAction(SourceUpdateAction.UPDATE);
+        caseItem.setReviewStatus(decision);
+        caseItem.setAfterData("""
+                {"plan_id":301,"test_type":"BOUNDARY","description":"Equality","preconditions":"Valid account",
+                 "test_data":{"balance":100,"amount":100},"expected_result":"Transfer rejected",
+                 "priority":"HIGH","trace_source":"BR-001 -> TP-001"}
+                """);
+        when(sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(200L))
+                .thenReturn(newSecondaryLink ? List.of(ruleItem, planItem, secondaryItem, caseItem) : List.of(ruleItem, planItem, caseItem));
+        if (decision == SourceUpdateReviewStatus.ACCEPTED) {
+            when(businessRuleRepository.findById(201L)).thenReturn(Optional.of(rule));
+            when(testCaseRepository.findById(401L)).thenReturn(Optional.of(testCase));
+            when(testPlanRepository.findById(301L)).thenReturn(Optional.of(anchorPlan));
+            if (newSecondaryLink) when(testPlanRepository.findById(302L)).thenReturn(Optional.of(coveredPlan));
+            when(testPlanRepository.findByProjectId(10L)).thenReturn(List.of(anchorPlan, coveredPlan, unrelatedPlan));
+            if (ruleChanges) {
+                var link = new com.greytest.entity.TestPlanCoveredRule();
+                link.setBusinessRuleId(201L);
+                link.setTestPlanId(302L);
+                when(testPlanCoveredRuleRepository.findByBusinessRuleId(201L)).thenReturn(newSecondaryLink ? List.of() : List.of(link));
+                when(testCaseRepository.findByTestPlanId(301L)).thenReturn(List.of(testCase));
+                when(testCaseRepository.findByTestPlanId(302L)).thenReturn(List.of(coveredCase));
+            }
+        }
+
+        service.applyUpdate(10L, 200L, user);
+
+        assertThat(rule.getDescription()).isEqualTo(decision == SourceUpdateReviewStatus.ACCEPTED && ruleChanges
+                ? "Allow balance > amount" : "Allow balance >= amount");
+        assertThat(testCase.getExpectedResult()).isEqualTo(decision == SourceUpdateReviewStatus.ACCEPTED
+                ? "Transfer rejected" : "Transfer succeeds");
+        if (decision == SourceUpdateReviewStatus.REJECTED) {
+            verify(businessRuleRepository, never()).save(any());
+            verify(testCaseRepository, never()).save(any());
+        } else {
+            var expectedStatus = ruleChanges ? com.greytest.entity.enums.ReviewStatus.PENDING_REVIEW
+                    : com.greytest.entity.enums.ReviewStatus.APPROVED;
+            assertThat(anchorPlan.getStatus()).isEqualTo(expectedStatus);
+            assertThat(coveredPlan.getStatus()).isEqualTo(expectedStatus);
+            assertThat(testCase.getStatus()).isEqualTo(expectedStatus);
+            assertThat(coveredCase.getStatus()).isEqualTo(expectedStatus);
+            assertThat(coveredCase.getExpectedResult()).isEqualTo("Old covered oracle");
+            if (ruleChanges) assertThat(currentProject.getStatus()).isEqualTo(com.greytest.entity.enums.ProjectStatus.PLAN_PENDING_REVIEW);
+        }
+        assertThat(unrelatedPlan.getStatus()).isEqualTo(com.greytest.entity.enums.ReviewStatus.APPROVED);
+        verify(unitTestRepository, never()).delete(any());
+        verify(testCaseRepository, never()).deleteById(any());
+        verify(testPlanRepository, never()).deleteById(any());
     }
 
     @Test

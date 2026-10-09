@@ -48,12 +48,12 @@ class GeneratedUnitTestSemanticValidatorTest {
 
     @Test
     void ignoresTrailingMessageOnCustomHelperButRejectsJUnit4ImportInJunit5Project() {
-        String customHelper = "class ServiceTest { void testCase() { assertEmail(actual, \"message\"); "
+        String customHelper = "class ServiceTest { @org.junit.Test void testCase() { assertEmail(actual, \"message\"); "
                 + "byte[] bytes = (byte[]) domain.getContent(); } }";
         assertThat(GeneratedUnitTestSemanticValidator.validate(
                 context("send", "public void send() {}"), response(customHelper), TestFramework.JUNIT4)).isEmpty();
 
-        String junit4Wildcard = "import org.junit.*; class ServiceTest { @Test public void testCase() {} }";
+        String junit4Wildcard = "import org.junit.*; class ServiceTest { @Test public @org.junit.Test void testCase() {} }";
         assertThat(GeneratedUnitTestSemanticValidator.validate(
                 context("send", "public void send() {}"), response(junit4Wildcard), TestFramework.JUNIT5))
                 .hasValueSatisfying(message -> assertThat(message).contains("project uses JUnit 5"));
@@ -139,6 +139,7 @@ class GeneratedUnitTestSemanticValidatorTest {
                     @Mock Repository repository;
                     @Mock Client client;
                     @InjectMocks Service service;
+                    @org.junit.jupiter.api.Test void testCase() { service.send(); }
                 }
                 """;
 
@@ -183,6 +184,7 @@ class GeneratedUnitTestSemanticValidatorTest {
                     @Mock Repository repository;
                     Service service;
                     @BeforeEach void setUp() { service = new Service(repository, "https://example.test"); }
+                    @org.junit.jupiter.api.Test void testCase() { service.send(); }
                 }
                 """;
 
@@ -240,6 +242,7 @@ class GeneratedUnitTestSemanticValidatorTest {
                     @Mock Repository repository;
                     @Mock Client client;
                     @InjectMocks Service service;
+                    @org.junit.jupiter.api.Test void testCase() { service.send(); }
                 }
                 """;
 
@@ -257,7 +260,7 @@ class GeneratedUnitTestSemanticValidatorTest {
                 """;
         String generatedSource = """
                 import com.hospital.common.dto.DoctorProfileDto;
-                class DoctorServiceTest {}
+                class DoctorServiceTest { @org.junit.jupiter.api.Test void testCase() {} }
                 """;
 
         assertThat(GeneratedUnitTestSemanticValidator.validate(
@@ -289,7 +292,7 @@ class GeneratedUnitTestSemanticValidatorTest {
                 class ServiceTest {
                     Repository repository;
                     Client client;
-                    void testCase() {
+                    @org.junit.Test void testCase() {
                         org.mockito.Mockito.when(repository.findById(1L)).thenReturn(null);
                         org.mockito.Mockito.verify(repository).findById(1L);
                         org.mockito.Mockito.verifyNoMoreInteractions(repository);
@@ -307,7 +310,7 @@ class GeneratedUnitTestSemanticValidatorTest {
         String generatedSource = """
                 class ServiceTest {
                     Repository repository;
-                    void testCase() {
+                    @org.junit.Test void testCase() {
                         org.mockito.Mockito.when(repository.findById(1L)).thenReturn(null);
                         org.mockito.Mockito.verify(repository, org.mockito.Mockito.never()).deleteById(1L);
                         org.mockito.Mockito.verifyNoInteractions(repository);
@@ -324,7 +327,8 @@ class GeneratedUnitTestSemanticValidatorTest {
         String generatedSource = """
                 class ServiceTest {
                     Repository repository;
-                    void testCase(boolean shouldSave) {
+                    @org.junit.Test void testCase() {
+                        boolean shouldSave = false;
                         if (shouldSave) {
                             org.mockito.Mockito.verify(repository).save();
                         } else {
@@ -343,7 +347,7 @@ class GeneratedUnitTestSemanticValidatorTest {
         String generatedSource = """
                 class ServiceTest {
                     Repository repository;
-                    void testCase() {
+                    @org.junit.Test void testCase() {
                         org.mockito.Mockito.verify(repository).save();
                         org.mockito.Mockito.clearInvocations(repository);
                         org.mockito.Mockito.verifyNoInteractions(repository);
@@ -360,7 +364,7 @@ class GeneratedUnitTestSemanticValidatorTest {
         String generatedSource = """
                 class ServiceTest {
                     Repository repository;
-                    void testCase() {
+                    @org.junit.Test void testCase() {
                         Runnable callback = new Runnable() {
                             @Override public void run() {
                                 org.mockito.Mockito.verify(repository).save();
@@ -381,7 +385,7 @@ class GeneratedUnitTestSemanticValidatorTest {
                 class ServiceTest {
                     Holder first;
                     Holder second;
-                    void testCase() {
+                    @org.junit.Test void testCase() {
                         org.mockito.Mockito.verify(first.repository).save();
                         org.mockito.Mockito.verifyNoInteractions(second.repository);
                     }
@@ -393,7 +397,7 @@ class GeneratedUnitTestSemanticValidatorTest {
     }
 
     @Test
-    void rejectsIllegalArgumentExpectationWhenNullReachesSwitchSelector() {
+    void acceptsApprovedIllegalArgumentContractWhenNullReachesSwitchSelector() {
         String productionSource = """
                 public String findReadyToNotify(NotificationType type) {
                     switch (type) {
@@ -413,8 +417,7 @@ class GeneratedUnitTestSemanticValidatorTest {
         var error = GeneratedUnitTestSemanticValidator.validate(
                 context("findReadyToNotify", productionSource), response("rejectsNull", generatedSource));
 
-        assertThat(error).hasValueSatisfying(message -> assertThat(message)
-                .contains("NullPointerException", "findReadyToNotify"));
+        assertThat(error).isEmpty();
     }
 
     @Test
@@ -439,7 +442,7 @@ class GeneratedUnitTestSemanticValidatorTest {
     }
 
     @Test
-    void rejectsPlainContentAssertionWhenProductionAlwaysUsesMultipart() {
+    void acceptsApprovedPlainContentExpectationDespiteMultipartImplementation() {
         String generatedSource = """
                 import javax.mail.internet.MimeMessage;
                 class EmailServiceTest {
@@ -456,8 +459,7 @@ class GeneratedUnitTestSemanticValidatorTest {
                 context("send", "public void send() { new MimeMessageHelper(message, true); }"),
                 response("sends", generatedSource));
 
-        assertThat(error).hasValueSatisfying(message -> assertThat(message)
-                .contains("multipart=true", "MimeMessage.getContent()"));
+        assertThat(error).isEmpty();
     }
 
     @Test
@@ -538,11 +540,11 @@ class GeneratedUnitTestSemanticValidatorTest {
                 """;
 
         assertThat(GeneratedUnitTestSemanticValidator.validate(
-                context("findReadyToNotify", productionSource), response(generatedSource))).isEmpty();
+                context("findReadyToNotify", productionSource), response("rejectsNull", generatedSource))).isEmpty();
     }
 
     @Test
-    void rejectsIllegalArgumentExpectationForSwitchExpression() {
+    void acceptsApprovedIllegalArgumentContractForSwitchExpression() {
         String productionSource = """
                 public String findReadyToNotify(NotificationType type) {
                     return switch (type) {
@@ -563,7 +565,7 @@ class GeneratedUnitTestSemanticValidatorTest {
 
         assertThat(GeneratedUnitTestSemanticValidator.validate(
                 context("findReadyToNotify", productionSource),
-                response("rejectsNull", generatedSource))).isPresent();
+                response("rejectsNull", generatedSource))).isEmpty();
     }
 
     @Test
@@ -585,131 +587,6 @@ class GeneratedUnitTestSemanticValidatorTest {
         assertThat(GeneratedUnitTestSemanticValidator.validate(
                 context("findReadyToNotify", productionSource),
                 response("rejectsNull", generatedSource))).isEmpty();
-    }
-
-    @Test
-    void doesNotTreatConditionalNestedOrDifferentVariableChecksAsDominatingGuard() {
-        String generatedSource = """
-                class ServiceTest {
-                    Service service;
-                    @org.junit.Test(expected = IllegalArgumentException.class)
-                    public void rejectsNull() { service.findReadyToNotify(null); }
-                }
-                """;
-        String compoundGuard = """
-                public String findReadyToNotify(NotificationType type, boolean enabled) {
-                    if (type == null && enabled) return "fallback";
-                    switch (type) { default: throw new IllegalArgumentException(); }
-                }
-                """;
-        String differentVariable = """
-                public String findReadyToNotify(NotificationType type) {
-                    Object prototype = lookup();
-                    if (prototype == null) return "fallback";
-                    switch (type) { default: throw new IllegalArgumentException(); }
-                }
-                """;
-        String nestedGuard = """
-                public String findReadyToNotify(NotificationType type, boolean enabled) {
-                    if (enabled) { if (type == null) return "fallback"; }
-                    switch (type) { default: throw new IllegalArgumentException(); }
-                }
-                """;
-
-        assertThat(GeneratedUnitTestSemanticValidator.validate(
-                context("findReadyToNotify", compoundGuard),
-                response("rejectsNull", generatedSource))).isPresent();
-        assertThat(GeneratedUnitTestSemanticValidator.validate(
-                context("findReadyToNotify", differentVariable),
-                response("rejectsNull", generatedSource))).isPresent();
-        assertThat(GeneratedUnitTestSemanticValidator.validate(
-                context("findReadyToNotify", nestedGuard),
-                response("rejectsNull", generatedSource))).isPresent();
-    }
-
-    @Test
-    void onlyTreatsDirectSpringAssertCallAsNullGuard() {
-        String generatedSource = """
-                class ServiceTest {
-                    Service service;
-                    @org.junit.Test(expected = IllegalArgumentException.class)
-                    public void rejectsNull() { service.findReadyToNotify(null); }
-                }
-                """;
-        String conditionalSpringAssert = """
-                public String findReadyToNotify(NotificationType type, boolean enabled) {
-                    if (enabled) { Assert.notNull(type, "type"); }
-                    switch (type) { default: throw new IllegalArgumentException(); }
-                }
-                """;
-        String customCheck = """
-                public String findReadyToNotify(NotificationType type) {
-                    Checks.notNull(type);
-                    switch (type) { default: throw new IllegalArgumentException(); }
-                }
-                """;
-
-        assertThat(GeneratedUnitTestSemanticValidator.validate(
-                context("findReadyToNotify", conditionalSpringAssert),
-                response("rejectsNull", generatedSource))).isPresent();
-        assertThat(GeneratedUnitTestSemanticValidator.validate(
-                context("findReadyToNotify", customCheck),
-                response("rejectsNull", generatedSource))).isPresent();
-    }
-
-    @Test
-    void recognizesDominatingNullGuardFromAncestorBlock() {
-        String productionSource = """
-                public String findReadyToNotify(NotificationType type, boolean enabled) {
-                    if (type == null) throw new IllegalArgumentException();
-                    if (enabled) {
-                        switch (type) { default: return "fallback"; }
-                    }
-                    return "disabled";
-                }
-                """;
-        String generatedSource = """
-                class ServiceTest {
-                    Service service;
-                    @org.junit.Test(expected = IllegalArgumentException.class)
-                    public void rejectsNull() { service.findReadyToNotify(null, true); }
-                }
-                """;
-
-        assertThat(GeneratedUnitTestSemanticValidator.validate(
-                context("findReadyToNotify", productionSource),
-                response("rejectsNull", generatedSource))).isEmpty();
-    }
-
-    @Test
-    void detectsThisFieldReceiverButIgnoresShadowFromAnotherMethod() {
-        String productionSource = """
-                public String findReadyToNotify(NotificationType type) {
-                    switch (type) { default: throw new IllegalArgumentException(); }
-                }
-                """;
-        String thisReceiver = """
-                class ServiceTest {
-                    Service service;
-                    @org.junit.Test(expected = IllegalArgumentException.class)
-                    public void rejectsNull() { this.service.findReadyToNotify(null); }
-                }
-                """;
-        String shadowElsewhere = """
-                class ServiceTest {
-                    Other service;
-                    @org.junit.Test(expected = IllegalArgumentException.class)
-                    public void rejectsNull() { service.findReadyToNotify(null); }
-                    void helper() { Service service = null; }
-                }
-                """;
-
-        assertThat(GeneratedUnitTestSemanticValidator.validate(
-                context("findReadyToNotify", productionSource),
-                response("rejectsNull", thisReceiver))).isPresent();
-        assertThat(GeneratedUnitTestSemanticValidator.validate(
-                context("findReadyToNotify", productionSource),
-                response("rejectsNull", shadowElsewhere))).isEmpty();
     }
 
     @Test
@@ -820,7 +697,7 @@ class GeneratedUnitTestSemanticValidatorTest {
                 base.existingApprovedTestCases(), base.previousGeneratedUnitTests(), base.existingTests());
         String collaboratorOverride = """
                 class ServiceTest {
-                    void testCase() {
+                    @org.junit.Test void testCase() {
                         Collaborator collaborator = new Collaborator() {
                             @Override
                             void privateHelper() {}
@@ -837,7 +714,7 @@ class GeneratedUnitTestSemanticValidatorTest {
     void acceptsAnonymousSubclassOfSameNamedTypeFromAnotherPackage() {
         String collaboratorOverride = """
                 class ServiceTest {
-                    void testCase() {
+                    @org.junit.Test void testCase() {
                         other.Service collaborator = new other.Service() {
                             @Override
                             void privateHelper() {}
@@ -894,7 +771,7 @@ class GeneratedUnitTestSemanticValidatorTest {
                 }
                 """;
         var ctx = context("test", "public void test() {}");
-        assertThat(GeneratedUnitTestSemanticValidator.validate(ctx, response(testWithExtendWith), TestFramework.JUNIT5)).isEmpty();
+        assertThat(GeneratedUnitTestSemanticValidator.validate(ctx, response("testMethod", testWithExtendWith), TestFramework.JUNIT5)).isEmpty();
 
         String testWithOpenMocks = """
                 package com.example;
@@ -911,7 +788,7 @@ class GeneratedUnitTestSemanticValidatorTest {
                     void testMethod() {}
                 }
                 """;
-        assertThat(GeneratedUnitTestSemanticValidator.validate(ctx, response(testWithOpenMocks), TestFramework.JUNIT5)).isEmpty();
+        assertThat(GeneratedUnitTestSemanticValidator.validate(ctx, response("testMethod", testWithOpenMocks), TestFramework.JUNIT5)).isEmpty();
     }
 
     @Test

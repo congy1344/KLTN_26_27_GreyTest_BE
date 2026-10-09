@@ -69,6 +69,7 @@ import com.greytest.repository.JavaClassRepository;
 import com.greytest.repository.JavaMethodRepository;
 import com.greytest.repository.TestCaseRepository;
 import com.greytest.repository.TestPlanRepository;
+import com.greytest.repository.TestPlanCoveredRuleRepository;
 import com.greytest.repository.UnitTestRepository;
 import com.greytest.service.diff.ImpactAnalysisService;
 import com.greytest.service.diff.SourceDiffService;
@@ -98,6 +99,7 @@ public class SourceUpdateService {
     private final ImpactAnalysisService impactAnalysisService;
     private final BusinessRuleRepository businessRuleRepository;
     private final TestPlanRepository testPlanRepository;
+    private final TestPlanCoveredRuleRepository testPlanCoveredRuleRepository;
     private final TestCaseRepository testCaseRepository;
     private final UnitTestRepository unitTestRepository;
     private final JavaClassRepository javaClassRepository;
@@ -115,6 +117,7 @@ public class SourceUpdateService {
             ImpactAnalysisService impactAnalysisService,
             BusinessRuleRepository businessRuleRepository,
             TestPlanRepository testPlanRepository,
+            TestPlanCoveredRuleRepository testPlanCoveredRuleRepository,
             TestCaseRepository testCaseRepository,
             UnitTestRepository unitTestRepository,
             JavaClassRepository javaClassRepository,
@@ -130,6 +133,7 @@ public class SourceUpdateService {
         this.impactAnalysisService = impactAnalysisService;
         this.businessRuleRepository = businessRuleRepository;
         this.testPlanRepository = testPlanRepository;
+        this.testPlanCoveredRuleRepository = testPlanCoveredRuleRepository;
         this.testCaseRepository = testCaseRepository;
         this.unitTestRepository = unitTestRepository;
         this.javaClassRepository = javaClassRepository;
@@ -538,6 +542,8 @@ public class SourceUpdateService {
         Map<Long, Long> ruleIdMap = new HashMap<>();
         Map<Long, Long> planIdMap = new HashMap<>();
         Map<Long, Long> caseIdMap = new HashMap<>();
+        Set<Long> changedOracleRuleIds = new HashSet<>();
+        Set<Long> appliedPlansCoveringChangedRules = new HashSet<>();
 
         for (SourceUpdateItem item : items) {
             if (item.getAction() != SourceUpdateAction.REMOVE && item.getTargetType() == SourceUpdateTargetType.METHOD) {
@@ -555,6 +561,7 @@ public class SourceUpdateService {
                         GeneratedBusinessRuleDto dto = objectMapper.readValue(item.getAfterData(), GeneratedBusinessRuleDto.class);
                         if (item.getTargetId() != null && item.getAction() == SourceUpdateAction.UPDATE) {
                             businessRuleRepository.findById(item.getTargetId()).ifPresent(rule -> {
+                                if (!Objects.equals(rule.getDescription(), dto.description())) changedOracleRuleIds.add(rule.getId());
                                 rule.setDescription(dto.description());
                                 rule.setStatus(ReviewStatus.APPROVED);
                                 rule.setIsModified(false);
@@ -605,6 +612,7 @@ public class SourceUpdateService {
                                 plan.setIsModified(false);
                                 testPlanRepository.save(plan);
                                 planIdMap.put(item.getTargetId(), plan.getId());
+                                if (coversChangedOracle(dto, changedOracleRuleIds, ruleIdMap)) appliedPlansCoveringChangedRules.add(plan.getId());
                             });
                         } else {
                             TestPlan plan = new TestPlan();
@@ -617,6 +625,7 @@ public class SourceUpdateService {
                             plan.setStatus(ReviewStatus.APPROVED);
                             plan.setIsModified(false);
                             plan = testPlanRepository.save(plan);
+                            if (coversChangedOracle(dto, changedOracleRuleIds, ruleIdMap)) appliedPlansCoveringChangedRules.add(plan.getId());
                             if (item.getTargetId() != null) {
                                 planIdMap.put(item.getTargetId(), plan.getId());
                             }
@@ -754,8 +763,12 @@ public class SourceUpdateService {
         update.setStatus(SourceUpdateStatus.APPLIED);
         update = sourceUpdateRepository.save(update);
 
+        boolean invalidatedPlans = invalidateChangedOracleDescendants(projectId, changedOracleRuleIds, appliedPlansCoveringChangedRules);
         boolean hasUnitTests = items.stream().anyMatch(i -> i.getTargetType() == SourceUpdateTargetType.UNIT_TEST);
-        if (hasUnitTests) {
+        if (invalidatedPlans) {
+            project.setStatus(ProjectStatus.PLAN_PENDING_REVIEW);
+            projectRepository.save(project);
+        } else if (hasUnitTests) {
             project.setStatus(ProjectStatus.TEST_GENERATED);
             projectRepository.save(project);
         }
@@ -763,6 +776,34 @@ public class SourceUpdateService {
         log.info("Đã áp dụng thành công bản cập nhật {} cho project {}: {} classes, {} methods",
                 updateId, projectId, currentClasses.size(), totalMethods);
         return sourceUpdateMapper.toUpdateDto(update, items);
+    }
+
+    /** Giữ output cũ để đối chiếu, nhưng không gọi chúng là đã duyệt theo yêu cầu vừa thay đổi. */
+    private boolean invalidateChangedOracleDescendants(Long projectId, Set<Long> changedRuleIds, Set<Long> appliedPlanIds) {
+        if (changedRuleIds.isEmpty()) return false;
+        Set<Long> planIds = new HashSet<>(appliedPlanIds);
+        for (Long ruleId : changedRuleIds) {
+            testPlanCoveredRuleRepository.findByBusinessRuleId(ruleId).forEach(link -> planIds.add(link.getTestPlanId()));
+        }
+        List<TestPlan> affectedPlans = testPlanRepository.findByProjectId(projectId).stream()
+                .filter(plan -> changedRuleIds.contains(plan.getBusinessRuleId()) || planIds.contains(plan.getId())).toList();
+        for (TestPlan plan : affectedPlans) {
+            plan.setStatus(ReviewStatus.PENDING_REVIEW);
+            plan.setIsModified(true);
+            testPlanRepository.save(plan);
+            for (TestCase testCase : testCaseRepository.findByTestPlanId(plan.getId())) {
+                testCase.setStatus(ReviewStatus.PENDING_REVIEW);
+                testCase.setIsModified(true);
+                testCaseRepository.save(testCase);
+            }
+        }
+        return !affectedPlans.isEmpty();
+    }
+
+    /** Bao gồm liên kết mới trong payload đã áp dụng, kể cả chưa có persisted coverage link. */
+    private boolean coversChangedOracle(GeneratedTestPlanDto dto, Set<Long> changedRuleIds, Map<Long, Long> ruleIdMap) {
+        return dto.coveredRuleIds() != null && dto.coveredRuleIds().stream()
+                .map(ruleId -> ruleIdMap.getOrDefault(ruleId, ruleId)).anyMatch(changedRuleIds::contains);
     }
 
     private void applyMethodUpdate(Long projectId, SourceUpdateItem item) {
