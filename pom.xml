@@ -94,6 +94,13 @@
             <version>6.3.3</version>
         </dependency>
 
+        <!-- JWT chuẩn cho phiên đăng nhập; quyền hiện tại vẫn được kiểm tra từ DB. -->
+        <dependency>
+            <groupId>com.nimbusds</groupId>
+            <artifactId>nimbus-jose-jwt</artifactId>
+            <version>10.10</version>
+        </dependency>
+
         <!-- ponytail: LLM client thêm khi tích hợp AI Agent (xem AI_AGENT.md) -->
 
         <dependency>

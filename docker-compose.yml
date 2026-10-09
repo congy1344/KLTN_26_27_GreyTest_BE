@@ -29,7 +29,7 @@ services:
       LLM_API_KEY6: ${LLM_API_KEY6:-}
       LLM_API_KEY7: ${LLM_API_KEY7:-}
       LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
-      LLM_OPENAI_URL: ${LLM_OPENAI_URL:-https://api.openai.com/v1/chat/completions}
+      LLM_OPENAI_URL: ${LLM_OPENAI_URL:-https://api.vietapi.tech/v1/chat/completions}
       LLM_MAX_TOKENS_BUSINESS_RULE: ${LLM_MAX_TOKENS_BUSINESS_RULE:-4096}
       LLM_MAX_TOKENS_BUSINESS_RULE_REVIEW: ${LLM_MAX_TOKENS_BUSINESS_RULE_REVIEW:-4096}
       LLM_MAX_TOKENS_TEST_PLAN: ${LLM_MAX_TOKENS_TEST_PLAN:-6144}

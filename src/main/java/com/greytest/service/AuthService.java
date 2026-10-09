@@ -1,12 +1,12 @@
 package com.greytest.service;
 
 import java.nio.charset.StandardCharsets;
+import java.text.ParseException;
 import java.time.Duration;
-import java.util.Base64;
+import java.util.Date;
+import java.util.List;
 import java.util.Optional;
-
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
+import java.util.UUID;
 
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
@@ -23,17 +23,26 @@ import com.greytest.entity.AuthUser;
 import com.greytest.entity.enums.UserRole;
 import com.greytest.exception.AuthException;
 import com.greytest.repository.AuthUserRepository;
+import com.nimbusds.jose.JOSEException;
+import com.nimbusds.jose.JOSEObjectType;
+import com.nimbusds.jose.JWSAlgorithm;
+import com.nimbusds.jose.JWSHeader;
+import com.nimbusds.jose.crypto.MACSigner;
+import com.nimbusds.jose.crypto.MACVerifier;
+import com.nimbusds.jwt.JWTClaimsSet;
+import com.nimbusds.jwt.SignedJWT;
 
-/** Quản lý đăng ký, đăng nhập và xác thực phiên làm việc của GreyTest. */
+/** Quản lý đăng ký, đăng nhập và xác thực JWT HS256 của GreyTest. */
 @Service
 public class AuthService {
 
-    private static final String HMAC_ALGORITHM = "HmacSHA256";
     private static final Duration TOKEN_TTL = Duration.ofDays(7);
+    private static final String TOKEN_ISSUER = "greytest";
+    private static final String TOKEN_AUDIENCE = "greytest-api";
 
     private final AuthUserRepository userRepository;
     private final PasswordEncoder passwordEncoder = new BCryptPasswordEncoder();
-    private final String tokenSecret;
+    private final byte[] tokenSecret;
 
     public AuthService(
             AuthUserRepository userRepository,
@@ -42,7 +51,7 @@ public class AuthService {
             throw new IllegalStateException("GREYTEST_AUTH_TOKEN_SECRET phai co it nhat 32 bytes");
         }
         this.userRepository = userRepository;
-        this.tokenSecret = tokenSecret;
+        this.tokenSecret = tokenSecret.getBytes(StandardCharsets.UTF_8);
     }
 
     @Transactional
@@ -101,11 +110,23 @@ public class AuthService {
     }
 
     private String issueToken(AuthUser user) {
-        long expiresAt = System.currentTimeMillis() + TOKEN_TTL.toMillis();
-        String payload = user.getId() + ":" + expiresAt;
-        String encodedPayload = base64Url(payload.getBytes(StandardCharsets.UTF_8));
-        String signature = sign(encodedPayload);
-        return encodedPayload + "." + signature;
+        Date now = new Date();
+        JWTClaimsSet claims = new JWTClaimsSet.Builder()
+                .subject(user.getId().toString())
+                .issuer(TOKEN_ISSUER)
+                .audience(TOKEN_AUDIENCE)
+                .issueTime(now)
+                .expirationTime(new Date(now.getTime() + TOKEN_TTL.toMillis()))
+                .jwtID(UUID.randomUUID().toString())
+                .build();
+        SignedJWT jwt = new SignedJWT(new JWSHeader.Builder(JWSAlgorithm.HS256)
+                .type(JOSEObjectType.JWT).build(), claims);
+        try {
+            jwt.sign(new MACSigner(tokenSecret));
+            return jwt.serialize();
+        } catch (JOSEException exception) {
+            throw new IllegalStateException("Khong tao duoc JWT dang nhap", exception);
+        }
     }
 
     private Optional<Long> parseBearerToken(String authorizationHeader) {
@@ -114,32 +135,32 @@ public class AuthService {
                 return Optional.empty();
             }
             String token = authorizationHeader.substring("Bearer ".length()).trim();
-            String[] parts = token.split("\\.", 2);
-            if (parts.length != 2 || !constantTimeEquals(sign(parts[0]), parts[1])) {
+            if (token.length() > 4096) return Optional.empty();
+            SignedJWT jwt = SignedJWT.parse(token);
+            JWSHeader header = jwt.getHeader();
+            // Chỉ nhận hợp đồng JWT của ứng dụng, không chọn thuật toán theo token gửi lên.
+            if (!JWSAlgorithm.HS256.equals(header.getAlgorithm())
+                    || !JOSEObjectType.JWT.equals(header.getType())
+                    || !header.isBase64URLEncodePayload()
+                    || (header.getCriticalParams() != null && !header.getCriticalParams().isEmpty())
+                    || !jwt.verify(new MACVerifier(tokenSecret))) {
                 return Optional.empty();
             }
-            String payload = new String(Base64.getUrlDecoder().decode(parts[0]), StandardCharsets.UTF_8);
-            String[] payloadParts = payload.split(":", 2);
-            if (payloadParts.length != 2) {
+            JWTClaimsSet claims = jwt.getJWTClaimsSet();
+            Date now = new Date();
+            Date expiresAt = claims.getExpirationTime();
+            Date issuedAt = claims.getIssueTime();
+            if (!TOKEN_ISSUER.equals(claims.getIssuer())
+                    || !List.of(TOKEN_AUDIENCE).equals(claims.getAudience())
+                    || expiresAt == null || !expiresAt.after(now)
+                    || issuedAt == null || issuedAt.after(now) || !issuedAt.before(expiresAt)
+                    || (claims.getNotBeforeTime() != null && claims.getNotBeforeTime().after(now))) {
                 return Optional.empty();
             }
-            long expiresAt = Long.parseLong(payloadParts[1]);
-            if (expiresAt < System.currentTimeMillis()) {
-                return Optional.empty();
-            }
-            return Optional.of(Long.parseLong(payloadParts[0]));
-        } catch (RuntimeException exception) {
+            long userId = Long.parseLong(claims.getSubject());
+            return userId > 0 ? Optional.of(userId) : Optional.empty();
+        } catch (ParseException | JOSEException | IllegalArgumentException exception) {
             return Optional.empty();
-        }
-    }
-
-    private String sign(String encodedPayload) {
-        try {
-            Mac mac = Mac.getInstance(HMAC_ALGORITHM);
-            mac.init(new SecretKeySpec(tokenSecret.getBytes(StandardCharsets.UTF_8), HMAC_ALGORITHM));
-            return base64Url(mac.doFinal(encodedPayload.getBytes(StandardCharsets.UTF_8)));
-        } catch (Exception exception) {
-            throw new IllegalStateException("Khong tao duoc token dang nhap", exception);
         }
     }
 
@@ -157,21 +178,6 @@ public class AuthService {
             throw new AuthException("ACCOUNT_DISABLED", "Tài khoản của bạn đã bị vô hiệu hóa", HttpStatus.FORBIDDEN);
         }
         return user;
-    }
-
-    private boolean constantTimeEquals(String expected, String actual) {
-        byte[] left = expected.getBytes(StandardCharsets.UTF_8);
-        byte[] right = actual.getBytes(StandardCharsets.UTF_8);
-        if (left.length != right.length) return false;
-        int result = 0;
-        for (int i = 0; i < left.length; i++) {
-            result |= left[i] ^ right[i];
-        }
-        return result == 0;
-    }
-
-    private String base64Url(byte[] bytes) {
-        return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
     }
 
     private String normalizeEmail(String email) {
