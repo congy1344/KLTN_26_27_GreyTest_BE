@@ -55,10 +55,8 @@ public class GenerationProgressController {
     public GenerationProgressDto pause(
             @PathVariable Long projectId,
             @PathVariable GenerationProgressStage stage,
-            @RequestHeader(value = "Authorization", required = false) String authorization) {
-        if (authorization != null && !authorization.isBlank()) {
-            projectService.requireAccess(projectId, authService.currentUser(authorization));
-        }
+            @RequestHeader("Authorization") String authorization) {
+        projectService.requireAccess(projectId, authService.currentUser(authorization));
         if (jobService != null) {
             jobService.pause(projectId, stage);
         } else {

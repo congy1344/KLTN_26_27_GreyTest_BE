@@ -10,6 +10,7 @@ import java.net.http.HttpClient;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -21,6 +22,7 @@ import java.util.HashMap;
 import javax.tools.ToolProvider;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -43,9 +45,25 @@ class ApprovedBusinessRuleOracleAcceptanceTest {
                 }
             }
             """;
-    private static final Path OUTPUT = Path.of("target", "approved-br-oracle");
+    private static final Path OUTPUT = Path.of(System.getProperty("greytest.oracle.output", "target/approved-br-oracle"));
     private final ObjectMapper mapper = new ObjectMapper();
     private final PromptManager prompts = new PromptManager(mapper);
+
+    @Test
+    void failedCallRecordsTimingWithoutProviderErrorContent(@TempDir Path directory) throws Exception {
+        try (var factory = Validation.buildDefaultValidatorFactory()) {
+            var parser = new GenerationResponseParser(mapper, factory.getValidator());
+            LlmClient failed = prompt -> { throw new IllegalStateException("private-provider-content"); };
+            assertThatThrownBy(() -> generate(directory, "test-plan", Map.of(), TestPlanResponseDto.class, failed, parser))
+                    .isInstanceOf(AssertionError.class).hasMessageContaining("Provider call failed");
+            String evidence = Files.readString(directory.resolve("attempts.jsonl"));
+            var attempt = mapper.readTree(evidence);
+            assertThat(attempt.path("elapsedMillis").asDouble()).isGreaterThanOrEqualTo(0);
+            assertThat(attempt.path("status").asText()).isEqualTo("PROVIDER_ERROR");
+            assertThat(attempt.path("retryCount").asInt()).isZero();
+            assertThat(evidence).doesNotContain("private-provider-content");
+        }
+    }
 
     @Test
     void sameApprovedEqualityAssertionPassesCorrectCodeAndDetectsFaultyCode() throws Exception {
@@ -103,12 +121,22 @@ class ApprovedBusinessRuleOracleAcceptanceTest {
     @Test
     @EnabledIfSystemProperty(named = "greytest.oracle.live", matches = "true")
     void realProviderPreservesApprovedOracleAcrossDirectAndReviewedPaths() throws Exception {
+        // Trial live phải dùng thư mục mới, tránh đọc cache hoặc gộp token của lần chạy cũ.
+        for (String artifact : List.of("environment.json", "direct", "review", "reviewed", "usage")) {
+            assertThat(OUTPUT.resolve(artifact)).as("Fresh output directory required for live provider run").doesNotExist();
+        }
         Map<String, String> env = environment();
         assertThat(env.get("LLM_API_KEY")).as("Provider credentials are available").isNotBlank();
+        Files.createDirectories(OUTPUT);
+        String model = env.getOrDefault("LLM_OPENAI_MODEL", env.getOrDefault("LLM_MODEL", "gpt-5.6-luna"));
+        URI endpoint = URI.create(env.getOrDefault("LLM_OPENAI_URL", "https://api.vietapi.tech/v1/chat/completions"));
+        Files.writeString(OUTPUT.resolve("environment.json"), mapper.writeValueAsString(Map.of(
+                "model", model, "providerHost", endpoint.getHost(), "temperature", 0.0,
+                "maxOutputTokens", 6000, "javaVersion", System.getProperty("java.version"),
+                "approvalActor", "AUTOMATED_FIXTURE", "scope", "synthetic fixture; not human UAT or HITL")));
+        var usage = new LlmUsageRecorder(mapper, true, OUTPUT.resolve("usage"), OUTPUT.getFileName().toString(), "GREYTEST_SYNTHETIC_PILOT");
         LlmClient client = new OpenAiLlmClient(mapper, HttpClient.newHttpClient(), env.get("LLM_API_KEY"),
-                env.getOrDefault("LLM_OPENAI_MODEL", env.getOrDefault("LLM_MODEL", "gpt-5.6-luna")),
-                0.0, 6000, Duration.ofSeconds(120),
-                URI.create(env.getOrDefault("LLM_OPENAI_URL", "https://api.vietapi.tech/v1/chat/completions")));
+                model, 0.0, 6000, Duration.ofSeconds(120), endpoint, usage);
         try (var factory = Validation.buildDefaultValidatorFactory()) {
             var parser = new GenerationResponseParser(mapper, factory.getValidator());
             runPath("direct", client, parser, null);
@@ -146,7 +174,8 @@ class ApprovedBusinessRuleOracleAcceptanceTest {
         assertThat(plans.stream().anyMatch(plan -> plan.id().equals(equality.planId()))).isTrue();
         Files.writeString(OUTPUT.resolve(path).resolve("case-review.txt"),
                 "Independent ground truth: positive equality balance=amount succeeds, returns 0.\n"
-                + "Fixture HITL selected positive equality case; generated input and expected result retained before approval.\n"
+                + "Automated fixture selected positive equality case under frozen policy; this is not human HITL.\n"
+                + "Generated input and expected result retained before controlled fixture approval.\n"
                 + "Expected result retained verbatim: " + equality.expectedResult() + "\n"
                 + "Other generated cases, including zero amounts outside the stated domain, were not approved.\n");
         var approvedCase = new TestCaseContextItemDto(1L, equality.planId(), "TC-001", equality.testType(),
@@ -167,7 +196,11 @@ class ApprovedBusinessRuleOracleAcceptanceTest {
 
     private <T> T generate(String path, String stage, Object context, Class<T> type, LlmClient client,
             GenerationResponseParser parser) throws Exception {
-        Path directory = OUTPUT.resolve(path);
+        return generate(OUTPUT.resolve(path), stage, context, type, client, parser);
+    }
+
+    private <T> T generate(Path directory, String stage, Object context, Class<T> type, LlmClient client,
+            GenerationResponseParser parser) throws Exception {
         Files.createDirectories(directory);
         String prompt = prompts.render(stage, Map.of("context_json", context));
         Path promptFile = directory.resolve(stage + ".prompt.md");
@@ -177,15 +210,27 @@ class ApprovedBusinessRuleOracleAcceptanceTest {
             return parser.parse(Files.readString(responseFile), type);
         }
         Files.writeString(directory.resolve(stage + ".prompt.md"), prompt);
-        String raw;
+        long started = System.nanoTime();
+        String status = "PROVIDER_ERROR";
         try {
-            raw = client.complete(prompt, new LlmRequestOptions(6000));
-        } catch (LlmResponseException exception) {
-            // Không đưa response HTTP/provider hoặc credential vào báo cáo test.
-            throw new AssertionError("Provider call failed for " + stage + "; inspect provider configuration privately");
+            String raw;
+            try {
+                raw = client.complete(prompt, new LlmRequestOptions(6000));
+            } catch (RuntimeException exception) {
+                // Không đưa response HTTP/provider hoặc credential vào báo cáo test.
+                throw new AssertionError("Provider call failed for " + stage + "; inspect provider configuration privately");
+            }
+            Files.writeString(responseFile, raw);
+            status = "PARSE_ERROR";
+            T result = parser.parse(raw, type);
+            status = "SUCCESS";
+            return result;
+        } finally {
+            Files.writeString(directory.resolve("attempts.jsonl"), mapper.writeValueAsString(Map.of(
+                    "stage", stage, "status", status, "elapsedMillis", (System.nanoTime() - started) / 1_000_000.0,
+                    "retryCount", 0, "providerTokens", "see usage/calls.jsonl; unavailable is N/A")) + "\n",
+                    StandardOpenOption.CREATE, StandardOpenOption.APPEND);
         }
-        Files.writeString(directory.resolve(stage + ".response.json"), raw);
-        return parser.parse(raw, type);
     }
 
     private boolean equalityData(Map<String, Object> data) {

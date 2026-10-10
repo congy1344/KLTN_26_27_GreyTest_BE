@@ -1,6 +1,7 @@
 package com.greytest.controller;
 
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -103,5 +104,12 @@ class GenerationProgressControllerTest {
     void requiresAuthorizationHeader() throws Exception {
         mockMvc.perform(get("/api/projects/1/generation-progress/TEST_PLAN"))
                 .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void pauseRequiresAuthorizationBeforeChangingJob() throws Exception {
+        mockMvc.perform(post("/api/projects/1/generation-progress/TEST_PLAN/pause"))
+                .andExpect(status().isUnauthorized());
+        verifyNoInteractions(jobService, progressService);
     }
 }
