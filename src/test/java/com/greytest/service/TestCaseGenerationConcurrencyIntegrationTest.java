@@ -35,7 +35,7 @@ import com.greytest.repository.TestPlanRepository;
 import com.greytest.service.agent.AIAgentService;
 import com.greytest.exception.GenerationInProgressException;
 
-@SpringBootTest
+@SpringBootTest(properties = "greytest.auth.token-secret=test-only-token-secret-at-least-32-bytes")
 class TestCaseGenerationConcurrencyIntegrationTest {
 
     @Autowired private TestCaseService service;
