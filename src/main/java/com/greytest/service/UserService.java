@@ -1,5 +1,6 @@
 package com.greytest.service;
 
+import java.time.LocalDate;
 import java.util.Map;
 
 import org.springframework.stereotype.Service;
@@ -32,19 +33,27 @@ public class UserService {
     }
 
     /**
-     * Nâng cấp tài khoản hiện tại từ FREE lên PRO và tăng quota lên mức gói Pro (1.000 lượt/tháng).
+     * Nâng cấp tài khoản hiện tại từ FREE lên PRO và tăng quota lên mức gói Pro (300 lượt/tuần).
      */
     @Transactional
     public UserQuotaResponse upgradeToPro(AuthUser currentUser) {
+        return upgradeToTier(currentUser, UserTier.PRO);
+    }
+
+    /**
+     * Nâng cấp tài khoản người dùng lên gói chỉ định (FREE, PLUS, PRO).
+     */
+    @Transactional
+    public UserQuotaResponse upgradeToTier(AuthUser currentUser, UserTier targetTier) {
         AuthUser user = users.findById(currentUser.getId()).orElse(currentUser);
         UserTier previousTier = user.getTier() != null ? user.getTier() : UserTier.FREE;
-        user.setTier(UserTier.PRO);
+        user.setTier(targetTier);
         users.save(user);
 
-        UsageQuota quota = quotaService.upgradeToPro(user.getId());
+        UsageQuota quota = quotaService.upgradeToTier(user.getId(), targetTier);
 
         activityService.record(user.getId(), ActivityAction.USER_UPGRADE_TIER, null,
-                Map.of("previousTier", previousTier.name(), "newTier", UserTier.PRO.name()));
+                Map.of("previousTier", previousTier.name(), "newTier", targetTier.name()));
 
         return toQuotaResponse(user.getTier(), quota);
     }
@@ -62,13 +71,17 @@ public class UserService {
     private UserQuotaResponse toQuotaResponse(UserTier tier, UsageQuota quota) {
         Integer limit = quota.getQuotaLimit();
         Integer remaining = limit == null ? null : Math.max(limit - quota.getQuotaUsed(), 0);
+        boolean isWeekly = tier == UserTier.PRO || tier == UserTier.PLUS || (limit != null && limit > quotaService.getDefaultLimit());
+        LocalDate resetDate = isWeekly
+                ? (quota.getPeriodStart() != null ? quota.getPeriodStart().plusWeeks(1) : null)
+                : (quota.getPeriodStart() != null ? quota.getPeriodStart().plusMonths(1) : null);
         return new UserQuotaResponse(
-                tier != null ? tier : UserTier.FREE,
+                tier != null ? tier : (isWeekly ? UserTier.PLUS : UserTier.FREE),
                 limit,
                 quota.getQuotaUsed(),
                 remaining,
                 quota.getPeriodStart(),
-                quota.getPeriodStart().plusMonths(1),
+                resetDate,
                 limit != null && quota.getQuotaUsed() >= limit
         );
     }

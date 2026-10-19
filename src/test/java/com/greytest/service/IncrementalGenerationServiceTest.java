@@ -205,12 +205,14 @@ class IncrementalGenerationServiceTest {
         GeneratedUnitTestDto generated = new GeneratedUnitTestDto(
                 401L, "OrderServiceTest", "calculatesDiscount", "com.example",
                 "IMPROVE_EXISTING_TEST", "package com.example; class OrderServiceTest {}");
-        when(aiAgentService.generateUnitTests(eq(10L), eq(Set.of(401L)), any()))
+        java.nio.file.Path candidate = java.nio.file.Path.of("candidate-snapshot");
+        when(sourceUpdateService.getCandidateSourcePath(update)).thenReturn(candidate);
+        when(aiAgentService.generateSnapshotUnitTests(10L, Set.of(401L), candidate))
                 .thenReturn(new UnitTestResponseDto(List.of(generated)));
 
         service.generateIncrementalStage(10L, 200L, GenerationProgressStage.UNIT_TEST, user);
 
-        verify(aiAgentService).generateUnitTests(eq(10L), eq(Set.of(401L)), any());
+        verify(aiAgentService).generateSnapshotUnitTests(10L, Set.of(401L), candidate);
         var itemCaptor = org.mockito.ArgumentCaptor.forClass(SourceUpdateItem.class);
         verify(sourceUpdateItemRepository).save(itemCaptor.capture());
         assertThat(itemCaptor.getValue().getAction()).isEqualTo(
@@ -280,5 +282,61 @@ class IncrementalGenerationServiceTest {
         service.generateIncrementalStage(10L, 200L, GenerationProgressStage.BUSINESS_RULE, user);
 
         verify(aiAgentService).generateBusinessRules(10L, Set.of(102L));
+    }
+
+    @Test
+    void addedMethodKeepsSignatureFromCandidateSource() {
+        AuthUser user = new AuthUser();
+        user.setId(1L);
+        user.setRole(UserRole.USER);
+        Project project = new Project();
+        project.setId(10L);
+        project.setOwnerUserId(1L);
+        when(projectRepository.findById(10L)).thenReturn(Optional.of(project));
+
+        SourceUpdate update = new SourceUpdate();
+        update.setId(200L);
+        update.setProjectId(10L);
+        update.setStatus(SourceUpdateStatus.ANALYZED);
+        update.setImpactSummary("""
+                {"changedMethods":[{
+                    "className":"OrderService","qualifiedClassName":"com.example.OrderService",
+                    "methodName":"createUser","signature":"createUser(String)",
+                    "methodKey":"com.example.OrderService#createUser(String)","diffType":"ADDED",
+                    "afterSource":"public User createUser(String email) throws IOException { return null; }"
+                }]}
+                """);
+        when(sourceUpdateRepository.findByIdAndProjectIdForUpdate(200L, 10L)).thenReturn(Optional.of(update));
+        when(sourceUpdateRepository.save(any(SourceUpdate.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        JavaClass serviceClass = new JavaClass();
+        serviceClass.setId(50L);
+        serviceClass.setClassName("OrderService");
+        serviceClass.setQualifiedName("com.example.OrderService");
+        when(javaClassRepository.findByProjectId(10L)).thenReturn(List.of(serviceClass));
+        JavaMethod oldSignature = new JavaMethod();
+        oldSignature.setId(101L);
+        oldSignature.setMethodName("createUser");
+        oldSignature.setParameters(List.of(new com.greytest.entity.MethodParam("id", "Long")));
+        when(javaMethodRepository.findByClassId(50L)).thenReturn(List.of(oldSignature));
+        when(javaMethodRepository.save(any(JavaMethod.class))).thenAnswer(inv -> {
+            JavaMethod method = inv.getArgument(0);
+            method.setId(102L);
+            return method;
+        });
+        when(aiAgentService.generateBusinessRules(eq(10L), eq(Set.of(102L))))
+                .thenReturn(new BusinessRuleResponseDto(List.of()));
+
+        service.generateIncrementalStage(10L, 200L, GenerationProgressStage.BUSINESS_RULE, user);
+
+        var captor = org.mockito.ArgumentCaptor.forClass(JavaMethod.class);
+        verify(javaMethodRepository).save(captor.capture());
+        assertThat(captor.getValue().getReturnType()).isEqualTo("User");
+        assertThat(captor.getValue().getParameters())
+                .containsExactly(new com.greytest.entity.MethodParam("email", "String"));
+        assertThat(captor.getValue().getThrowsList()).containsExactly("IOException");
+        assertThat(captor.getValue().getVisibility()).isEqualTo(com.greytest.entity.enums.Visibility.PUBLIC);
+        assertThat(oldSignature.getParameters())
+                .containsExactly(new com.greytest.entity.MethodParam("id", "Long"));
     }
 }

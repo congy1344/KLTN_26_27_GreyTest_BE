@@ -39,8 +39,7 @@ class GoogleLlmClientTest {
         Map<String, String> prompts = Map.of(
                 "# Prompt: business-rule\nContext: {}", "rules",
                 "# Prompt: business-rule-review\nContext: {}", "reviewed_rules",
-                "# Prompt: test-plan\nContext: {}", "plans",
-                "# Prompt: unit-test\nContext: {}", "unit_tests");
+                "# Prompt: test-plan\nContext: {}", "plans");
 
         for (Map.Entry<String, String> entry : prompts.entrySet()) {
             var root = objectMapper.readTree(client.requestBody(entry.getKey()));
@@ -50,6 +49,17 @@ class GoogleLlmClientTest {
             assertThat(responseFormat.path("mime_type").asText()).isEqualTo("application/json");
             assertThat(responseFormat.path("schema").path("properties").has(entry.getValue())).isTrue();
         }
+    }
+
+    @Test
+    void unitTestPromptAllowsSourceEvidenceErrorsWithoutForcingUnitTests() throws Exception {
+        GoogleLlmClient client = client("test-key", URI.create("http://127.0.0.1:1/v1beta/interactions"));
+
+        var responseFormat = objectMapper.readTree(client.requestBody("# Prompt: unit-test\nContext: {}"))
+                .path("response_format");
+
+        assertThat(responseFormat.path("mime_type").asText()).isEqualTo("application/json");
+        assertThat(responseFormat.has("schema")).isFalse();
     }
 
     @Test
@@ -288,7 +298,9 @@ class GoogleLlmClientTest {
         List<String> apiKeys = new CopyOnWriteArrayList<>();
         server.createContext("/", exchange -> {
             apiKeys.add(exchange.getRequestHeaders().getFirst("x-goog-api-key"));
-            String response = "{\"error\":{\"message\":\"Please retry in 3.5s.\"}}";
+            String response = "primary-key".equals(apiKeys.get(apiKeys.size() - 1))
+                    ? "{\"error\":{\"message\":\"Please retry in 600s.\"}}"
+                    : "{\"error\":{\"message\":\"Please retry in 30s.\"}}";
             byte[] bytes = response.getBytes(StandardCharsets.UTF_8);
             exchange.sendResponseHeaders(429, bytes.length);
             exchange.getResponseBody().write(bytes);
@@ -303,8 +315,8 @@ class GoogleLlmClientTest {
 
             assertThatThrownBy(() -> client.complete("Prompt text"))
                     .isInstanceOfSatisfying(LlmResponseException.class, exception -> {
-                        assertThat(exception.isRetryable()).isFalse();
-                        assertThat(exception.getRetryAfterMillis()).isGreaterThanOrEqualTo(3_500);
+                        assertThat(exception.isRetryable()).isTrue();
+                        assertThat(exception.getRetryAfterMillis()).isBetween(29_000L, 30_000L);
                     });
             assertThat(apiKeys).containsExactly("primary-key", "fallback-key");
         } finally {

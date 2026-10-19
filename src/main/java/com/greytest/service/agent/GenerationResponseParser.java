@@ -5,7 +5,9 @@ import java.util.Comparator;
 import org.springframework.stereotype.Service;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.greytest.dto.agent.GenerationResponseDtos.UnitTestResponseDto;
 
 import jakarta.validation.Validator;
 
@@ -28,7 +30,9 @@ public class GenerationResponseParser {
             throw new LlmResponseException("LLM response rong.");
         }
         try {
-            T parsed = objectMapper.readValue(normalizeJsonNumericSuffixes(jsonPayload(response)), responseType);
+            String payload = normalizeJsonNumericSuffixes(jsonPayload(response));
+            if (responseType == UnitTestResponseDto.class) rejectUnitTestGenerationError(payload);
+            T parsed = objectMapper.readValue(payload, responseType);
             if (parsed == null) {
                 throw new LlmResponseException("LLM response khong dung schema: payload null");
             }
@@ -45,6 +49,28 @@ public class GenerationResponseParser {
             // Output hỏng do model nondeterminism (cắt cụt, lặp từ...) → cho phép gọi lại lần 2
             throw new LlmResponseException("LLM response khong phai JSON hop le.", exception, true);
         }
+    }
+
+    private void rejectUnitTestGenerationError(String payload) throws JsonProcessingException {
+        JsonNode root = objectMapper.readTree(payload);
+        if (root == null || !root.has("generation_error")) return;
+        // Thiếu source hoặc lệch Test Case phải dừng rõ lý do; retry cùng dữ kiện dễ ép AI bịa test.
+        JsonNode error = root.get("generation_error");
+        if (root.has("unit_tests")) {
+            throw new LlmResponseException("LLM response khong dung schema: generation_error cannot accompany unit_tests.");
+        }
+        JsonNode caseId = error.path("case_id");
+        JsonNode reason = error.path("reason");
+        JsonNode details = error.path("details");
+        if (!error.isObject() || !caseId.isIntegralNumber() || !caseId.canConvertToLong() || caseId.asLong() <= 0
+                || !reason.isTextual() || !("MISSING_SOURCE".equals(reason.asText())
+                        || "UNSUPPORTED_BEHAVIOR".equals(reason.asText()))
+                || !details.isTextual() || details.asText().isBlank()) {
+            throw new LlmResponseException("LLM response khong dung schema: generation_error requires a positive case_id, "
+                    + "reason MISSING_SOURCE or UNSUPPORTED_BEHAVIOR, and nonempty details.");
+        }
+        throw new LlmResponseException("Khong the sinh Unit Test cho case_id=" + caseId.asLong()
+                + " (" + reason.asText() + "): " + details.asText());
     }
 
     private String jsonPayload(String response) {

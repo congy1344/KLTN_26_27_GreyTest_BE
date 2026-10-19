@@ -37,7 +37,7 @@ class UserServiceTest {
     }
 
     @Test
-    void upgradesUserToProAndSetsQuotaTo1000() {
+    void upgradesUserToProAndSetsQuotaTo300() {
         AuthUser user = new AuthUser();
         user.setId(42L);
         user.setEmail("user@example.com");
@@ -48,24 +48,56 @@ class UserServiceTest {
 
         UsageQuota proQuota = new UsageQuota();
         proQuota.setUserId(42L);
-        proQuota.setQuotaLimit(1000);
+        proQuota.setQuotaLimit(300);
         proQuota.setQuotaUsed(100);
         proQuota.setPeriodStart(LocalDate.of(2026, 10, 1));
 
-        when(usageQuotaService.upgradeToPro(42L)).thenReturn(proQuota);
+        when(usageQuotaService.upgradeToTier(42L, UserTier.PRO)).thenReturn(proQuota);
+        when(usageQuotaService.getProLimit()).thenReturn(300);
 
         UserQuotaResponse response = userService.upgradeToPro(user);
 
         assertThat(user.getTier()).isEqualTo(UserTier.PRO);
         assertThat(response.tier()).isEqualTo(UserTier.PRO);
-        assertThat(response.limit()).isEqualTo(1000);
+        assertThat(response.limit()).isEqualTo(300);
         assertThat(response.used()).isEqualTo(100);
-        assertThat(response.remaining()).isEqualTo(900);
+        assertThat(response.remaining()).isEqualTo(200);
+        assertThat(response.resetDate()).isEqualTo(LocalDate.of(2026, 10, 8));
         assertThat(response.exceeded()).isFalse();
 
         verify(authUserRepository).save(user);
-        verify(usageQuotaService).upgradeToPro(42L);
+        verify(usageQuotaService).upgradeToTier(42L, UserTier.PRO);
         verify(userActivityService).record(eq(42L), eq(ActivityAction.USER_UPGRADE_TIER), any(), any());
+    }
+
+    @Test
+    void upgradesUserToPlusAndSetsQuota() {
+        AuthUser user = new AuthUser();
+        user.setId(42L);
+        user.setEmail("user@example.com");
+        user.setRole(UserRole.USER);
+        user.setTier(UserTier.FREE);
+
+        when(authUserRepository.findById(42L)).thenReturn(Optional.of(user));
+
+        UsageQuota plusQuota = new UsageQuota();
+        plusQuota.setUserId(42L);
+        plusQuota.setQuotaLimit(200);
+        plusQuota.setQuotaUsed(50);
+        plusQuota.setPeriodStart(LocalDate.of(2026, 10, 1));
+
+        when(usageQuotaService.upgradeToTier(42L, UserTier.PLUS)).thenReturn(plusQuota);
+
+        UserQuotaResponse response = userService.upgradeToTier(user, UserTier.PLUS);
+
+        assertThat(user.getTier()).isEqualTo(UserTier.PLUS);
+        assertThat(response.tier()).isEqualTo(UserTier.PLUS);
+        assertThat(response.limit()).isEqualTo(200);
+        assertThat(response.used()).isEqualTo(50);
+        assertThat(response.remaining()).isEqualTo(150);
+
+        verify(authUserRepository).save(user);
+        verify(usageQuotaService).upgradeToTier(42L, UserTier.PLUS);
     }
 
     @Test

@@ -474,6 +474,50 @@ class TestPlanServiceTest {
         });
     }
 
+    @Test
+    void resumeSendsOnlyUncoveredRulesFromPartiallyCoveredBatch() {
+        Project project = mockProject(ProjectStatus.BR_APPROVED);
+        BusinessRule covered = approvedRule(7L, 11L);
+        BusinessRule missing = approvedRule(8L, 11L);
+        TestPlan existingPlan = plan(90L, 7L, "Existing plan");
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(covered, missing));
+        when(testPlanRepository.findByProjectId(1L)).thenReturn(List.of(existingPlan));
+        when(testPlanCoveredRuleRepository.findByTestPlanId(90L)).thenReturn(List.of(coveredRule(90L, 7L)));
+        when(aiAgentService.generateTestPlan(eq(1L), eq(Set.of(8L)))).thenReturn(new TestPlanResponseDto(List.of(
+                generatedPlan(11L, 8L, List.of(8L), "Missing rule"))));
+        mockTestPlanSaveAll();
+        mockProjectSave();
+
+        service().generate(1L, (String) null, true);
+
+        verify(aiAgentService).generateTestPlan(1L, Set.of(8L));
+    }
+
+    @Test
+    void resumeKeepsProgressWhenNoBatchIsCompleteYet() {
+        Project project = mockProject(ProjectStatus.BR_APPROVED);
+        BusinessRule rule = approvedRule(7L, 11L);
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(rule));
+        when(testPlanRepository.findByProjectId(1L)).thenReturn(List.of());
+        when(aiAgentService.generateTestPlan(1L, Set.of(7L)))
+                .thenThrow(new LlmResponseException("stop after progress setup"));
+
+        assertThatThrownBy(() -> service().generate(1L, (String) null, true))
+                .isInstanceOf(LlmResponseException.class);
+
+        verify(generationProgressService).resume(
+                eq(1L),
+                eq(com.greytest.dto.GenerationProgressStage.TEST_PLAN),
+                org.mockito.ArgumentMatchers.anyList(),
+                eq(Set.of()),
+                org.mockito.ArgumentMatchers.contains("batch 1/1"));
+        verify(generationProgressService, never()).start(
+                eq(1L),
+                eq(com.greytest.dto.GenerationProgressStage.TEST_PLAN),
+                org.mockito.ArgumentMatchers.anyList(),
+                org.mockito.ArgumentMatchers.anyString());
+    }
+
     private TestPlan plan(Long id, Long ruleId, String title) {
         TestPlan plan = new TestPlan();
         plan.setId(id);

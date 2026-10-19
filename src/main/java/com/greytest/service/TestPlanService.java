@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -20,6 +21,7 @@ import com.greytest.dto.CreateTestPlanRequest;
 import com.greytest.dto.GenerationProgressStage;
 import com.greytest.dto.TestPlanDto;
 import com.greytest.dto.UpdateTestPlanRequest;
+import com.greytest.exception.UsageQuotaExceededException;
 import com.greytest.dto.agent.GenerationResponseDtos.GeneratedTestPlanDto;
 import com.greytest.dto.agent.GenerationResponseDtos.TestPlanResponseDto;
 import com.greytest.entity.BusinessRule;
@@ -209,6 +211,14 @@ public class TestPlanService {
         if (targetRules.isEmpty()) {
             generationProgressService.log(projectId, GenerationProgressStage.TEST_PLAN,
                     "Tat ca Business Rule da duoc bao phu boi Test Plan.");
+            transactions.executeWithoutResult(status -> {
+                Project currentProject = projectRepository.findById(projectId)
+                        .orElseThrow(() -> new ProjectNotFoundException(projectId));
+                currentProject.setStatus(ProjectStatus.PLAN_PENDING_REVIEW);
+                projectRepository.save(currentProject);
+            });
+            generationProgressService.completeAfterCommit(projectId, GenerationProgressStage.TEST_PLAN,
+                    "Hoan tat: tat ca Business Rule da duoc bao phu boi Test Plan.");
             return existingPlans.stream().map(this::toDto).toList();
         }
 
@@ -240,23 +250,42 @@ public class TestPlanService {
         }
         stepLabels.add("Kiểm tra và lưu Test Plan vào CSDL");
 
-        int firstPendingBatchIndex = -1;
-        for (int i = 0; i < totalBatches; i++) {
-            if (allBatches.get(i).stream().anyMatch(rule -> !alreadyCoveredRuleIds.contains(rule.getId()))) {
-                firstPendingBatchIndex = i;
-                break;
+        Set<Integer> completedBatchIndices = new LinkedHashSet<>();
+        if (resume) {
+            for (int i = 0; i < totalBatches; i++) {
+                if (allBatches.get(i).stream().allMatch(rule -> alreadyCoveredRuleIds.contains(rule.getId()))) {
+                    completedBatchIndices.add(i);
+                }
             }
         }
-        if (firstPendingBatchIndex < 0) {
-            firstPendingBatchIndex = totalBatches;
-        }
 
-        if (resume && firstPendingBatchIndex > 0) {
-            generationProgressService.resume(projectId, GenerationProgressStage.TEST_PLAN, stepLabels, firstPendingBatchIndex,
-                    "Tiếp tục sinh Test Plan từ batch " + (firstPendingBatchIndex + 1) + "/" + totalBatches + " (" + targetRules.size() + " Business Rule còn thiếu).");
+        List<List<BusinessRule>> batchesToRun = resume
+                ? allBatches.stream()
+                        .filter(batch -> batch.stream().anyMatch(rule -> !alreadyCoveredRuleIds.contains(rule.getId())))
+                        .toList()
+                : allBatches;
+
+        List<Integer> batchIndexesToRun = java.util.stream.IntStream.range(0, totalBatches)
+                .filter(i -> !completedBatchIndices.contains(i))
+                .boxed()
+                .toList();
+
+        String batchDetailList = batchIndexesToRun.stream()
+                .map(idx -> "batch " + (idx + 1) + "/" + totalBatches)
+                .collect(Collectors.joining(", "));
+        String progressMessage = resume
+                ? "Tiếp tục sinh Test Plan cho " + batchesToRun.size() + " batch còn thiếu (" + batchDetailList + ")."
+                : "Đã nhóm " + allApprovedRules.size() + " Business Rule thành " + totalBatches + " batch.";
+
+        if (resume) {
+            generationProgressService.resume(projectId, GenerationProgressStage.TEST_PLAN, stepLabels, completedBatchIndices, progressMessage);
+            for (int compIdx : completedBatchIndices) {
+                generationProgressService.log(projectId, GenerationProgressStage.TEST_PLAN,
+                        "Batch " + (compIdx + 1) + "/" + totalBatches + ": Đã có sẵn trong CSDL ("
+                                + formatRuleBatchSummary(allBatches.get(compIdx)) + ").");
+            }
         } else {
-            generationProgressService.start(projectId, GenerationProgressStage.TEST_PLAN, stepLabels,
-                    "Đã nhóm " + allApprovedRules.size() + " Business Rule thành " + totalBatches + " batch.");
+            generationProgressService.start(projectId, GenerationProgressStage.TEST_PLAN, stepLabels, progressMessage);
         }
 
         // Đếm plan number tăng dần qua các batch; dùng AtomicInteger để thread-safe
@@ -268,10 +297,6 @@ public class TestPlanService {
                 : 1;
         AtomicInteger planCounter = new AtomicInteger(baseNumber);
 
-        List<List<BusinessRule>> batchesToRun = allBatches.stream()
-                .filter(batch -> batch.stream().anyMatch(rule -> !alreadyCoveredRuleIds.contains(rule.getId())))
-                .toList();
-
         List<TestPlan> allSavedPlans = new java.util.concurrent.CopyOnWriteArrayList<>();
         try {
         // Mỗi batch được lưu ngay vào CSDL qua callback onCompleted
@@ -280,25 +305,42 @@ public class TestPlanService {
                 batchesToRun,
                 () -> generationProgressService.isPaused(projectId, GenerationProgressStage.TEST_PLAN),
                 batch -> {
-                    int batchIdx = allBatches.indexOf(batch) + 1;
+                    int batchIdx = allBatches.indexOf(batch);
                     String summary = formatRuleBatchSummary(batch);
+                    generationProgressService.setStepStatus(projectId, GenerationProgressStage.TEST_PLAN, batchIdx, com.greytest.dto.GenerationProgressStepStatus.RUNNING);
                     generationProgressService.log(projectId, GenerationProgressStage.TEST_PLAN,
-                            "Đang gọi AI sinh Test Plan cho batch " + batchIdx + "/" + totalBatches
+                            "Đang gọi AI sinh Test Plan cho batch " + (batchIdx + 1) + "/" + totalBatches
                                      + " (" + summary + ")...");
-                    Set<Long> batchRuleIds = ruleIds(batch);
-                    TestPlanResponseDto response = generateValidatedTestPlans(projectId, batchRuleIds, rulesByMethod(batch));
+                    List<BusinessRule> batchForGeneration = resume
+                            ? batch.stream()
+                                    .filter(rule -> !alreadyCoveredRuleIds.contains(rule.getId()))
+                                    .toList()
+                            : batch;
+                    Set<Long> batchRuleIds = ruleIds(batchForGeneration);
+                    TestPlanResponseDto response = generateValidatedTestPlans(
+                            projectId, batchRuleIds, rulesByMethod(batchForGeneration));
                     return response.plans();
                 },
                 (completedRunBatch, batchPlans) -> {
                     List<BusinessRule> currentBatch = batchesToRun.get(completedRunBatch - 1);
-                    int actualBatchIdx = allBatches.indexOf(currentBatch) + 1;
+                    int actualBatchIdx = allBatches.indexOf(currentBatch);
+                    List<BusinessRule> generatedBatch = resume
+                            ? currentBatch.stream()
+                                    .filter(rule -> !alreadyCoveredRuleIds.contains(rule.getId()))
+                                    .toList()
+                            : currentBatch;
                     // Lưu ngay batch này vào CSDL để không mất dữ liệu nếu bị ngắt quãng giữa chừng
                     List<TestPlan> saved = transactions.execute(status -> persistBatch(projectId, targetRules, batchPlans, planCounter, deletedPlanIds));
                     if (saved != null) allSavedPlans.addAll(saved);
-                    String summary = formatRuleBatchSummary(currentBatch);
-                    generationProgressService.advance(projectId, GenerationProgressStage.TEST_PLAN,
-                            "Batch " + actualBatchIdx + "/" + totalBatches + ": đã kiểm tra & lưu "
-                                    + batchPlans.size() + " Test Plan (" + summary + ").");
+                    String summary = formatRuleBatchSummary(generatedBatch);
+                    if (actualBatchIdx >= 0) {
+                        generationProgressService.advanceStep(projectId, GenerationProgressStage.TEST_PLAN, actualBatchIdx,
+                                "Batch " + (actualBatchIdx + 1) + "/" + totalBatches + ": đã kiểm tra & lưu "
+                                        + batchPlans.size() + " Test Plan (" + summary + ").");
+                    } else {
+                        generationProgressService.advance(projectId, GenerationProgressStage.TEST_PLAN,
+                                "Batch: đã kiểm tra & lưu " + batchPlans.size() + " Test Plan (" + summary + ").");
+                    }
                 });
 
         if (generationProgressService.isPaused(projectId, GenerationProgressStage.TEST_PLAN)) {
@@ -327,15 +369,32 @@ public class TestPlanService {
                 List<TestPlanDto> fromRepo = testPlanRepository.findByProjectId(projectId).stream().map(this::toDto).toList();
                 return fromRepo.isEmpty() ? allSavedPlans.stream().map(this::toDto).toList() : fromRepo;
             }
+            boolean isQuota = isUsageQuotaExceeded(exception);
             int failedBatch = LlmBatchExecutor.failedBatch(exception, 0);
-            String failureLocation = failedBatch > 0
-                    ? "Dừng ở batch " + failedBatch + "."
+            int originalBatch = failedBatch > 0 && failedBatch <= batchIndexesToRun.size()
+                    ? batchIndexesToRun.get(failedBatch - 1) + 1
+                    : failedBatch;
+            String failureLocation = originalBatch > 0
+                    ? "Dừng ở batch " + originalBatch + "."
                     : "Dừng ở bước kiểm tra và lưu Test Plan.";
+            String detailMsg = isQuota
+                    ? " Bạn đã sử dụng hết quota LLM trong tháng này. Vui lòng nâng cấp lên gói PRO để tiếp tục sinh."
+                    : " Sinh Test Plan thất bại; các batch đã sinh trước đó đã được lưu an toàn. Bạn có thể nhấn 'Tiếp tục sinh' để chạy tiếp.";
             generationProgressService.fail(projectId, GenerationProgressStage.TEST_PLAN,
-                    failureLocation + " Sinh Test Plan thất bại; các batch đã sinh trước đó đã được lưu an toàn."
-                            + " Bạn có thể nhấn 'Tiếp tục sinh' để chạy tiếp.");
+                    failureLocation + detailMsg);
             throw LlmBatchExecutor.originalFailure(exception);
         }
+    }
+
+    private boolean isUsageQuotaExceeded(Throwable exception) {
+        Throwable current = exception;
+        while (current != null) {
+            if (current instanceof UsageQuotaExceededException) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
     }
 
     /**

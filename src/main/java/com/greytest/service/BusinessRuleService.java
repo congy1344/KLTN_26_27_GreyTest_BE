@@ -38,6 +38,7 @@ import com.greytest.entity.enums.ReviewStatus;
 import com.greytest.entity.enums.RuleSource;
 import com.greytest.exception.InvalidProjectStatusException;
 import com.greytest.exception.ProjectNotFoundException;
+import com.greytest.exception.UsageQuotaExceededException;
 import com.greytest.repository.BusinessRuleRepository;
 import com.greytest.repository.JavaClassRepository;
 import com.greytest.repository.JavaMethodRepository;
@@ -242,10 +243,10 @@ public class BusinessRuleService {
         boolean backfillAiRules = effectiveStatus == ProjectStatus.BR_PENDING_REVIEW
                 && existingRules.stream().anyMatch(rule -> rule.getSource() == RuleSource.AI_GENERATED
                         && !Boolean.TRUE.equals(rule.getIsModified()));
-        // Chỉ sinh cho method chưa cover đủ decision — method đã có đủ BR sẽ được bỏ qua,
-        // đảm bảo khi resume sẽ tiếp tục từ batch dang dở thay vì chạy lại từ đầu
+        // Khi backfillAiRules (trạng thái BR_PENDING_REVIEW có rule AI chưa sửa): cho phép sinh lại để cập nhật
+        // Khi chạy mới/resume: chỉ sinh cho method chưa cover đủ decision
         Set<Long> uncoveredMethodIds = serviceMethods.stream()
-                .filter(method -> needsGeneration(method, existingRules))
+                .filter(method -> backfillAiRules || needsGeneration(method, existingRules))
                 .map(JavaMethod::getId)
                 .collect(Collectors.toCollection(HashSet::new));
         if (uncoveredMethodIds.isEmpty()) {
@@ -303,9 +304,11 @@ public class BusinessRuleService {
         int lastAttemptedBatchNumber = firstPendingBatchIndex + 1;
         try {
         for (int i = 0; i < totalBatches; i++) {
-            Set<Long> activeMethodIds = allBatches.get(i);
-            boolean needsRun = activeMethodIds.stream().anyMatch(uncoveredMethodIds::contains);
-            if (!needsRun) {
+            Set<Long> batchMethodIds = allBatches.get(i);
+            Set<Long> activeMethodIds = batchMethodIds.stream()
+                    .filter(uncoveredMethodIds::contains)
+                    .collect(Collectors.toCollection(LinkedHashSet::new));
+            if (activeMethodIds.isEmpty()) {
                 // Batch này đã được sinh và lưu trước đó, bỏ qua để tiếp tục batch dang dở
                 continue;
             }
@@ -348,6 +351,7 @@ public class BusinessRuleService {
             return created;
         }
 
+        lastAttemptedBatchNumber = totalBatches + 1;
         generationProgressService.log(projectId, GenerationProgressStage.BUSINESS_RULE,
                 "Đang kiểm tra tính nhất quán và hoàn tất cập nhật trạng thái...");
         project.setStatus(ProjectStatus.BR_PENDING_REVIEW);
@@ -359,17 +363,31 @@ public class BusinessRuleService {
             if (generationProgressService.isPaused(projectId, GenerationProgressStage.BUSINESS_RULE)) {
                 return created;
             }
+            boolean isQuota = isUsageQuotaExceeded(exception);
             String failureLocation = lastAttemptedBatchNumber <= totalBatches
                     ? "Dừng ở batch " + lastAttemptedBatchNumber + "/" + totalBatches + "."
                     : "Dừng ở bước kiểm tra và lưu Business Rule.";
             String persistedSummary = created.isEmpty()
                     ? "Chưa lưu thêm Business Rule nào trong phiên này."
                     : "Đã lưu " + created.size() + " Business Rule trong phiên này.";
+            String detailMsg = isQuota
+                    ? " Bạn đã sử dụng hết quota LLM trong tháng này. Vui lòng nâng cấp lên gói PRO để tiếp tục sinh."
+                    : " Sinh Business Rule thất bại; xem thông báo lỗi để biết chi tiết.";
             generationProgressService.fail(projectId, GenerationProgressStage.BUSINESS_RULE,
-                    failureLocation + " " + persistedSummary
-                            + " Sinh Business Rule thất bại; xem thông báo lỗi để biết chi tiết.");
+                    failureLocation + " " + persistedSummary + detailMsg);
             throw exception;
         }
+    }
+
+    private boolean isUsageQuotaExceeded(Throwable exception) {
+        Throwable current = exception;
+        while (current != null) {
+            if (current instanceof UsageQuotaExceededException) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
     }
 
     private String formatMethodBatchSummary(Set<Long> methodIds, Map<Long, String> methodNameMap) {

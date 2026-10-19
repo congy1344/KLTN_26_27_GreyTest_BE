@@ -142,7 +142,6 @@ public class GoogleLlmClient implements LlmClient {
         // Mỗi worker giữ một điểm bắt đầu khác nhau để không dồn request đồng thời vào cùng key.
         int startIndex = Math.floorMod(activeKeyIndex.getAndIncrement(), apiKeys.size());
         String lastQuotaResponse = null;
-        long retryAfterMillis = 0;
         long earliestCooldown = Long.MAX_VALUE;
         for (int offset = 0; offset < apiKeys.size(); offset++) {
             int index = (startIndex + offset) % apiKeys.size();
@@ -180,7 +179,6 @@ public class GoogleLlmClient implements LlmClient {
                 if (quotaExceeded(status, response.body())) {
                     lastQuotaResponse = response.body();
                     long keyDelay = Math.max(retryAfterMillis(response), DEFAULT_QUOTA_COOLDOWN_MILLIS);
-                    retryAfterMillis = Math.max(retryAfterMillis, keyDelay);
                     long deadline = System.currentTimeMillis() + keyDelay;
                     long appliedDeadline = cooldownUntilMillis.accumulateAndGet(index, deadline, Math::max);
                     earliestCooldown = Math.min(earliestCooldown, appliedDeadline);
@@ -196,14 +194,12 @@ public class GoogleLlmClient implements LlmClient {
             }
         }
         if (lastQuotaResponse != null || earliestCooldown != Long.MAX_VALUE) {
-            long remainingCooldown = earliestCooldown == Long.MAX_VALUE
-                    ? retryAfterMillis
-                    : Math.max(earliestCooldown - System.currentTimeMillis(), 0);
+            long remainingCooldown = Math.max(earliestCooldown - System.currentTimeMillis(), 0);
             throw new LlmResponseException(
                     "Google Gemini API loi HTTP 429: "
                             + (lastQuotaResponse == null ? "Tat ca API key dang trong thoi gian cho quota." : snippet(lastQuotaResponse)),
-                    false,
-                    Math.max(retryAfterMillis, remainingCooldown));
+                    true,
+                    remainingCooldown);
         }
         throw new LlmResponseException("Khong co Google Gemini API key kha dung.");
     }
@@ -279,7 +275,9 @@ public class GoogleLlmClient implements LlmClient {
             return null;
         }
         if (promptHeader.equals("# prompt: unit-test")) {
-            return responseSchema("unit_tests", unitTestSchema());
+            // Cho phép cả unit_tests và generation_error; schema bắt buộc unit_tests sẽ ép AI bịa khi thiếu source.
+            // Giữ JSON mode; parser và semantic validator kiểm tra hai dạng phản hồi ở tầng ứng dụng.
+            return null;
         }
         return null;
     }
@@ -330,20 +328,6 @@ public class GoogleLlmClient implements LlmClient {
         properties.set("description", type("string"));
         properties.set("test_type", enumSchema("HAPPY_PATH", "BOUNDARY", "EXCEPTION", "EDGE"));
         required(schema, "method_id", "rule_id", "covered_rule_ids", "title", "description", "test_type");
-        return schema;
-    }
-
-    private ObjectNode unitTestSchema() {
-        ObjectNode schema = objectSchema();
-        ObjectNode properties = schema.putObject("properties");
-        properties.set("case_id", type("integer"));
-        properties.set("test_class_name", type("string"));
-        properties.set("test_method_name", type("string"));
-        properties.set("package_name", type("string"));
-        properties.set("generation_type", enumSchema("NEW_TEST", "IMPROVE_EXISTING_TEST", "SUPPLEMENT_EXISTING_TEST"));
-        properties.set("source_code", type("string"));
-        required(schema, "case_id", "test_class_name", "test_method_name", "package_name",
-                "generation_type", "source_code");
         return schema;
     }
 

@@ -385,6 +385,26 @@ public class SourceUpdateService {
     }
 
     /**
+     * Đọc đường dẫn snapshot ứng viên của bản nháp đã được kiểm tra quyền truy cập.
+     */
+    @Transactional(readOnly = true)
+    public Path getCandidateSourcePath(SourceUpdate update) {
+        if (update.getCandidateRevisionId() == null) {
+            throw new IllegalArgumentException("Bản cập nhật không có snapshot ứng viên");
+        }
+        SourceRevision candidate = sourceRevisionRepository.findById(update.getCandidateRevisionId())
+                .orElseThrow(() -> new IllegalArgumentException("Không tìm thấy snapshot ứng viên"));
+        if (!Objects.equals(candidate.getProjectId(), update.getProjectId())) {
+            throw new IllegalArgumentException("Snapshot ứng viên không thuộc project của bản cập nhật");
+        }
+        if (candidate.getStoragePath() == null || candidate.getStoragePath().isBlank()
+                || !Files.isDirectory(Path.of(candidate.getStoragePath()))) {
+            throw new IllegalArgumentException("Snapshot source cập nhật không còn tồn tại. Vui lòng tải lại source.");
+        }
+        return Path.of(candidate.getStoragePath());
+    }
+
+    /**
      * Lấy thông tin chi tiết một bản nháp cập nhật.
      */
     @Transactional(readOnly = true)

@@ -16,11 +16,14 @@ import java.util.Set;
 import com.github.javaparser.ast.body.FieldDeclaration;
 import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration;
 import com.github.javaparser.ast.body.ConstructorDeclaration;
+import com.github.javaparser.ast.body.EnumDeclaration;
 import com.github.javaparser.ast.body.MethodDeclaration;
+import com.github.javaparser.ast.body.Parameter;
 import com.greytest.dto.agent.GenerationContextDtos.ClassContextDto;
 import com.github.javaparser.ast.body.VariableDeclarator;
 import com.github.javaparser.ast.expr.Expression;
 import com.github.javaparser.ast.expr.AnnotationExpr;
+import com.github.javaparser.ast.expr.BinaryExpr;
 import com.github.javaparser.ast.expr.FieldAccessExpr;
 import com.github.javaparser.ast.expr.InstanceOfExpr;
 import com.github.javaparser.ast.expr.LambdaExpr;
@@ -28,9 +31,11 @@ import com.github.javaparser.ast.expr.MethodCallExpr;
 import com.github.javaparser.ast.expr.NormalAnnotationExpr;
 import com.github.javaparser.ast.expr.NullLiteralExpr;
 import com.github.javaparser.ast.expr.ObjectCreationExpr;
+import com.github.javaparser.ast.type.ClassOrInterfaceType;
 import com.github.javaparser.ast.stmt.IfStmt;
 import com.github.javaparser.ast.stmt.ExpressionStmt;
 import com.github.javaparser.ast.stmt.BlockStmt;
+import com.github.javaparser.ast.stmt.AssertStmt;
 import com.github.javaparser.ast.stmt.SwitchEntry;
 import com.github.javaparser.ast.stmt.SwitchStmt;
 import com.greytest.dto.agent.GenerationContextDtos.BusinessRuleContextDto;
@@ -57,25 +62,44 @@ public final class GeneratedUnitTestSemanticValidator {
             UnitTestContextDto context,
             UnitTestResponseDto response,
             TestFramework framework) {
-        if (context == null || response == null || response.unitTests() == null) return Optional.empty();
+        if (context == null || response == null) return Optional.empty();
         Map<Long, MethodContextDto> methodsByCaseId = methodsByCaseId(context);
         List<String> problems = new ArrayList<>();
+        validateContext(context).ifPresent(problems::add);
+        validateResponseCoverage(context, response, problems);
+        if (response.unitTests() == null) {
+            return problems.isEmpty() ? Optional.empty() : Optional.of(String.join(" ", problems));
+        }
         for (GeneratedUnitTestDto test : response.unitTests()) {
             if (test == null) continue;
             if (test.sourceCode() == null) {
                 problems.add("Test case " + test.caseId() + " must contain valid Java test source.");
                 continue;
             }
+            if (parseCompilationUnit(test.sourceCode()).isEmpty()) {
+                problems.add("Test case " + test.caseId() + " must contain valid Java test source.");
+                continue;
+            }
             MethodContextDto productionMethod = methodsByCaseId.get(test.caseId());
             validateFrameworkCompatibility(test, framework, problems);
             validateZeroSkippingPolicy(test, problems);
+            validatePlaceholderHelpers(test, problems);
+            validateJavaAssertions(test, problems);
+            validateDateTimeMethods(context, test, problems);
+            validateUnsupportedTestInfrastructure(test, problems);
             validateNoLenientStubbing(test, problems);
             validateRemovedMockitoApis(test, problems);
             validateMockitoRunnerOrExtension(test, framework, problems);
             validateJUnit5AssertionOrder(test, framework, problems);
             validateMockitoVerifyNoInteractions(test, problems);
+            validateMockitoMatcherConsistency(test, problems);
+            validateRepositorySaveMatcherType(test, problems);
+            validateMockitoSettingsSyntax(test, problems);
             validateImportsFromContext(context, productionMethod, test, problems);
             validateMockedEnums(context, test, problems);
+            validateEnumReferences(context, test, problems);
+            validateEnumFixtureValues(context, productionMethod, test, problems);
+            validateProductionMethodCalls(context, productionMethod, test, problems);
             validateInjectMocksStubbing(test, problems);
             validateSutDependencyMocks(context, productionMethod, test, problems);
             validatePrivateMethodCalls(context, test, problems);
@@ -83,8 +107,418 @@ public final class GeneratedUnitTestSemanticValidator {
             validateContentCast(test, problems);
             validateMultipartAssumption(productionMethod, test, problems);
             validateNullSwitchExpectation(productionMethod, test, problems);
+            validateTransactionTemplateStubbing(productionMethod, test, problems);
+            validateCancelledTimestamp(productionMethod, test, problems);
+            validateSuccessfulRepositoryLookup(productionMethod, test, problems);
         }
         return problems.isEmpty() ? Optional.empty() : Optional.of(String.join(" ", problems));
+    }
+
+    /** Chặn Test Case đã duyệt trỏ tới method không còn trong source trước khi gọi LLM. */
+    public static Optional<String> validateContext(UnitTestContextDto context) {
+        if (context == null || context.classes() == null || context.approvedTestCases() == null) {
+            return Optional.empty();
+        }
+        Map<Long, MethodContextDto> methods = methodsByCaseId(context);
+        for (var testCase : context.approvedTestCases()) {
+            MethodContextDto method = methods.get(testCase.id());
+            if (method == null) {
+                return Optional.of("The approved Test Case " + testCase.id()
+                        + " has no matching production method in the current generation context. "
+                        + "Refresh its Business Rule, Test Plan and Test Case before generation.");
+            }
+            ClassContextDto javaClass = context.classes().stream()
+                    .filter(clazz -> method.classQualifiedName().equals(clazz.qualifiedName()))
+                    .findFirst().orElse(null);
+            if (javaClass == null) continue;
+            Optional<ClassOrInterfaceDeclaration> declaration = serviceDeclaration(javaClass);
+            if (declaration.isPresent() && declaration.get().getExtendedTypes().isEmpty()
+                    && declaration.get().getMethods().stream()
+                    .noneMatch(candidate -> candidate.getNameAsString().equals(method.methodName()))) {
+                return Optional.of("The approved Test Case " + testCase.id() + " references '"
+                        + method.methodName() + "', which does not exist in the current production source of "
+                        + javaClass.className() + ". Refresh its Business Rule, Test Plan and Test Case before generation.");
+            }
+        }
+        return Optional.empty();
+    }
+
+    private static void validateResponseCoverage(
+            UnitTestContextDto context,
+            UnitTestResponseDto response,
+            List<String> problems) {
+        if (context.approvedTestCases() == null) return;
+
+        Set<Long> expected = new HashSet<>();
+        context.approvedTestCases().stream()
+                .filter(java.util.Objects::nonNull)
+                .map(testCase -> testCase.id())
+                .forEach(expected::add);
+
+        Set<Long> actual = new HashSet<>();
+        Set<Long> duplicates = new HashSet<>();
+        if (response.unitTests() != null) {
+            response.unitTests().forEach(test -> {
+                if (test == null) {
+                    problems.add("Unit Test response must not contain null items.");
+                    return;
+                }
+                if (test.caseId() == null) {
+                    problems.add("Unit Test response items must contain a non-null case_id.");
+                    return;
+                }
+                if (!actual.add(test.caseId())) duplicates.add(test.caseId());
+            });
+        }
+
+        if (response.unitTests() == null && !expected.isEmpty()) {
+            problems.add("Unit Test response must contain exactly one generated test for every approved Test Case; response unit_tests is missing.");
+            return;
+        }
+        if (response.unitTests() != null && response.unitTests().size() != expected.size()) {
+            problems.add("Unit Test response must contain exactly one generated test for every approved Test Case; expected "
+                    + expected.size() + " item(s) but received " + response.unitTests().size() + ".");
+        }
+        if (!duplicates.isEmpty()) {
+            problems.add("Unit Test response contains duplicate case IDs: " + duplicates + ".");
+        }
+        Set<Long> missing = new HashSet<>(expected);
+        missing.removeAll(actual);
+        if (!missing.isEmpty()) {
+            problems.add("Unit Test response is missing case IDs: " + missing
+                    + "; it must contain exactly one generated test for every approved Test Case.");
+        }
+        Set<Long> unexpected = new HashSet<>(actual);
+        unexpected.removeAll(expected);
+        if (!unexpected.isEmpty()) {
+            problems.add("Unit Test response contains unexpected case IDs: " + unexpected + ".");
+        }
+    }
+
+    private static void validateJavaAssertions(
+            GeneratedUnitTestDto generatedTest,
+            List<String> problems) {
+        Optional<CompilationUnit> parsed = parseCompilationUnit(generatedTest.sourceCode());
+        if (parsed.isPresent() && !parsed.get().findAll(AssertStmt.class).isEmpty()) {
+            problems.add("Do not use the Java assert statement; use standard JUnit assertions instead.");
+        }
+    }
+
+    private static void validateDateTimeMethods(
+            UnitTestContextDto context, GeneratedUnitTestDto test, List<String> problems) {
+        parseCompilationUnit(test.sourceCode()).ifPresent(source -> source.findAll(MethodCallExpr.class).stream()
+                .filter(call -> "atStartOfDay".equals(call.getNameAsString()))
+                .filter(call -> call.getScope()
+                        .map(scope -> isLocalDateTimeExpression(scope, source, context)).orElse(false))
+                .forEach(call -> problems.add("LocalDateTime has no atStartOfDay() method. "
+                        + "Use LocalDate.atStartOfDay() or compare with LocalDateTime.now().")));
+    }
+
+    private static boolean isLocalDateTimeExpression(
+            Expression expression, CompilationUnit source, UnitTestContextDto context) {
+        if (expression.isNameExpr()) {
+            String name = expression.asNameExpr().getNameAsString();
+            return source.findAll(VariableDeclarator.class).stream()
+                    .anyMatch(variable -> name.equals(variable.getNameAsString())
+                            && "LocalDateTime".equals(simpleType(variable.getType().asString())));
+        }
+        if (expression.isFieldAccessExpr()) {
+            FieldAccessExpr field = expression.asFieldAccessExpr();
+            if ("this".equals(field.getScope().toString())) {
+                return source.findAll(VariableDeclarator.class).stream()
+                        .anyMatch(variable -> field.getNameAsString().equals(variable.getNameAsString())
+                                && "LocalDateTime".equals(simpleType(variable.getType().asString())));
+            }
+            return isLocalDateTimeMember(field.getScope(), field.getNameAsString(), source, context);
+        }
+        if (!expression.isMethodCallExpr()) return false;
+        MethodCallExpr call = expression.asMethodCallExpr();
+        if ("atDate".equals(call.getNameAsString())) return true;
+        if (call.getNameAsString().startsWith("get") && call.getScope().isPresent()
+                && isLocalDateTimeMember(call.getScope().get(), call.getNameAsString(), source, context)) return true;
+        if (Set.of("now", "of", "parse").contains(call.getNameAsString())
+                && call.getScope().map(scope -> "LocalDateTime".equals(simpleType(scope.toString())))
+                        .orElse(false)) return true;
+        return Set.of("plusDays", "minusDays", "plusHours", "minusHours", "plusMinutes", "minusMinutes",
+                "plusSeconds", "minusSeconds", "plusNanos", "minusNanos", "withYear", "withMonth",
+                "withDayOfMonth", "withHour", "withMinute", "withSecond", "withNano")
+                .contains(call.getNameAsString())
+                && call.getScope().map(scope -> isLocalDateTimeExpression(scope, source, context)).orElse(false);
+    }
+
+    private static boolean isLocalDateTimeMember(
+            Expression receiver, String member, CompilationUnit testSource, UnitTestContextDto context) {
+        if (!receiver.isNameExpr() || context.classes() == null) return false;
+        String receiverName = receiver.asNameExpr().getNameAsString();
+        String declaredType = testSource.findAll(VariableDeclarator.class).stream()
+                .filter(variable -> receiverName.equals(variable.getNameAsString()))
+                .map(variable -> variable.getType().asString()).findFirst().orElse(null);
+        if (declaredType == null) return false;
+        List<ClassContextDto> matchingClasses = context.classes().stream()
+                .filter(clazz -> declaredType.equals(clazz.qualifiedName())
+                        || declaredType.equals(clazz.className()))
+                .toList();
+        if (matchingClasses.size() != 1 || matchingClasses.get(0).validationSourceCode() == null) return false;
+        return parseCompilationUnit(matchingClasses.get(0).validationSourceCode())
+                .map(declaration -> declaration.findAll(MethodDeclaration.class).stream()
+                        .anyMatch(method -> member.equals(method.getNameAsString())
+                                && "LocalDateTime".equals(simpleType(method.getType().asString())))
+                        || declaration.findAll(VariableDeclarator.class).stream()
+                                .anyMatch(field -> (member.equals(field.getNameAsString())
+                                        || member.startsWith("get") && member.length() > 3
+                                        && (Character.toLowerCase(member.charAt(3)) + member.substring(4))
+                                                .equals(field.getNameAsString()))
+                                        && "LocalDateTime".equals(simpleType(field.getType().asString()))))
+                .orElse(false);
+    }
+
+    private static void validateCancelledTimestamp(
+            MethodContextDto productionMethod, GeneratedUnitTestDto test, List<String> problems) {
+        if (productionMethod == null || productionMethod.sourceCode() == null) return;
+        Optional<MethodDeclaration> production = parseMethod(productionMethod.sourceCode());
+        Optional<CompilationUnit> parsedTest = parseCompilationUnit(test.sourceCode());
+        if (production.isEmpty() || parsedTest.isEmpty()) return;
+        int statusParameter = cancelledStatusParameter(production.get());
+        if (statusParameter < 0) return;
+        findTestMethod(parsedTest.get(), test.testMethodName()).ifPresent(testMethod -> {
+            Set<String> returnedResults = new HashSet<>();
+            testMethod.findAll(VariableDeclarator.class).stream()
+                    .filter(variable -> variable.getInitializer().filter(Expression::isMethodCallExpr).isPresent())
+                    .filter(variable -> {
+                        MethodCallExpr call = variable.getInitializer().get().asMethodCallExpr();
+                        return productionMethod.methodName().equals(call.getNameAsString())
+                                && isProductionReceiver(testMethod, call, productionMethod.classQualifiedName())
+                                && call.getArguments().size() > statusParameter
+                                && isCancelledValue(call.getArgument(statusParameter), testMethod);
+                    })
+                    .map(variable -> variable.getNameAsString()).forEach(returnedResults::add);
+            if (returnedResults.isEmpty()) return;
+            testMethod.findAll(MethodCallExpr.class).stream()
+                    .filter(call -> "assertNull".equals(call.getNameAsString()) && !call.getArguments().isEmpty())
+                    .filter(call -> call.getArgument(0).isMethodCallExpr()
+                            && "getCancelledAt".equals(call.getArgument(0).asMethodCallExpr().getNameAsString())
+                            && call.getArgument(0).asMethodCallExpr().getScope()
+                                    .map(scope -> returnedResults.contains(scope.toString())).orElse(false))
+                    .forEach(call -> problems.add("cancelledAt is set when status is CANCELLED; "
+                            + "use assertNotNull(result.getCancelledAt())."));
+        });
+    }
+
+    private static int cancelledStatusParameter(MethodDeclaration production) {
+        for (MethodCallExpr call : production.findAll(MethodCallExpr.class)) {
+            if (!"setCancelledAt".equals(call.getNameAsString()) || call.getArguments().size() != 1
+                    || !call.getArgument(0).isMethodCallExpr()
+                    || !"now".equals(call.getArgument(0).asMethodCallExpr().getNameAsString())) continue;
+            IfStmt branch = call.findAncestor(IfStmt.class).orElse(null);
+            if (branch == null || !branch.getCondition().isBinaryExpr()) continue;
+            BinaryExpr condition = branch.getCondition().asBinaryExpr();
+            if (condition.getOperator() != BinaryExpr.Operator.EQUALS) continue;
+            Expression status = condition.getLeft().isFieldAccessExpr()
+                    && "CANCELLED".equals(condition.getLeft().asFieldAccessExpr().getNameAsString())
+                    ? condition.getRight() : condition.getRight().isFieldAccessExpr()
+                    && "CANCELLED".equals(condition.getRight().asFieldAccessExpr().getNameAsString())
+                    ? condition.getLeft() : null;
+            if (status == null || !status.isNameExpr()) continue;
+            for (int index = 0; index < production.getParameters().size(); index++) {
+                if (status.asNameExpr().getNameAsString()
+                        .equals(production.getParameter(index).getNameAsString())) return index;
+            }
+        }
+        return -1;
+    }
+
+    private static boolean isCancelledValue(Expression value, MethodDeclaration testMethod) {
+        if (value.isFieldAccessExpr()) {
+            return "CANCELLED".equals(value.asFieldAccessExpr().getNameAsString());
+        }
+        if (!value.isNameExpr()) return false;
+        String variableName = value.asNameExpr().getNameAsString();
+        return testMethod.findAll(VariableDeclarator.class).stream()
+                .filter(variable -> variableName.equals(variable.getNameAsString()))
+                .flatMap(variable -> variable.getInitializer().stream())
+                .anyMatch(initializer -> initializer.isFieldAccessExpr()
+                        && "CANCELLED".equals(initializer.asFieldAccessExpr().getNameAsString()));
+    }
+
+    private static void validateSuccessfulRepositoryLookup(
+            MethodContextDto productionMethod, GeneratedUnitTestDto test, List<String> problems) {
+        if (productionMethod == null || productionMethod.sourceCode() == null) return;
+        Optional<MethodDeclaration> production = parseMethod(productionMethod.sourceCode());
+        Optional<CompilationUnit> parsedTest = parseCompilationUnit(test.sourceCode());
+        if (production.isEmpty() || parsedTest.isEmpty()) return;
+        findTestMethod(parsedTest.get(), test.testMethodName()).ifPresent(testMethod -> {
+            List<MethodCallExpr> invocations = testMethod.findAll(MethodCallExpr.class).stream()
+                    .filter(call -> productionMethod.methodName().equals(call.getNameAsString())
+                            && isProductionReceiver(testMethod, call, productionMethod.classQualifiedName()))
+                    .filter(call -> call.findAncestor(LambdaExpr.class)
+                            .flatMap(lambda -> lambda.findAncestor(MethodCallExpr.class))
+                            .filter(assertion -> "assertThrows".equals(assertion.getNameAsString()))
+                            .isEmpty())
+                    .toList();
+            for (MethodCallExpr invocation : invocations) {
+            if (invocation.getArguments().isEmpty()) continue;
+            for (MethodCallExpr lookup : production.get().findAll(MethodCallExpr.class)) {
+                if (!"findById".equals(lookup.getNameAsString()) || lookup.getScope().isEmpty()
+                        || !lookup.getScope().get().isNameExpr()) continue;
+                if (!requiresPresentLookup(lookup, production.get())) continue;
+                if (production.get().getParameters().isEmpty() || lookup.getArguments().size() != 1
+                        || !lookup.getArgument(0).isNameExpr()
+                        || !production.get().getParameter(0).getNameAsString()
+                                .equals(lookup.getArgument(0).asNameExpr().getNameAsString())) continue;
+                if (lookup.findAncestor(IfStmt.class)
+                        .filter(branch -> !branch.getCondition().findAll(MethodCallExpr.class).contains(lookup))
+                        .isPresent()
+                        || hasGuaranteedEarlyReturn(production.get(), lookup, invocation)) continue;
+                String repository = lookup.getScope().get().asNameExpr().getNameAsString();
+                boolean mocked = parsedTest.get().findAll(FieldDeclaration.class).stream()
+                        .filter(field -> field.getAnnotationByName("Mock").isPresent())
+                        .flatMap(field -> field.getVariables().stream())
+                        .anyMatch(variable -> repository.equals(variable.getNameAsString()));
+                if (!mocked) continue;
+                String requestedId = invocation.getArgument(0).toString();
+                Set<String> requestedIds = new HashSet<>();
+                requestedIds.add(requestedId);
+                if (invocation.getArgument(0).isNameExpr()) {
+                    testMethod.findAll(VariableDeclarator.class).stream()
+                            .filter(variable -> requestedId.equals(variable.getNameAsString()))
+                            .flatMap(variable -> variable.getInitializer().stream())
+                            .map(Expression::toString).forEach(requestedIds::add);
+                }
+                boolean stubbed = parsedTest.get().findAll(MethodCallExpr.class).stream()
+                        .filter(call -> "findById".equals(call.getNameAsString()))
+                        .filter(call -> !call.getArguments().isEmpty()
+                                && (requestedIds.contains(call.getArgument(0).toString())
+                                        || isMockitoMatcher(call.getArgument(0), parsedTest.get())))
+                        .filter(call -> call.findAncestor(MethodDeclaration.class)
+                                .map(method -> method == testMethod && appearsBefore(call, invocation)
+                                        || method.getAnnotationByName("BeforeEach").isPresent()
+                                        || method.getAnnotationByName("Before").isPresent())
+                                .orElse(false))
+                        .anyMatch(call -> isNonEmptyFindByIdStub(call, repository));
+                if (!stubbed) {
+                    problems.add("Successful " + productionMethod.methodName() + " requires a stub for "
+                            + repository + ".findById(" + requestedId
+                            + "), returning Optional.of(entity), before Act.");
+                }
+            }
+            }
+        });
+    }
+
+    private static boolean requiresPresentLookup(MethodCallExpr lookup, MethodDeclaration production) {
+        if (lookup.findAncestor(MethodCallExpr.class)
+                .filter(parent -> "orElseThrow".equals(parent.getNameAsString())
+                        && parent.getScope().map(scope -> scope == lookup).orElse(false))
+                .isPresent()) return true;
+        MethodCallExpr emptyCheck = lookup.findAncestor(MethodCallExpr.class)
+                .filter(parent -> "isEmpty".equals(parent.getNameAsString())
+                        && parent.getScope().map(scope -> scope == lookup).orElse(false))
+                .orElse(null);
+        if (emptyCheck != null && emptyCheck.findAncestor(IfStmt.class)
+                .filter(branch -> branch.getCondition() == emptyCheck && emptyBranchAlwaysThrows(branch))
+                .isPresent()) return true;
+        VariableDeclarator optional = lookup.findAncestor(VariableDeclarator.class).orElse(null);
+        if (optional == null || optional.getInitializer().isEmpty()
+                || !optional.getInitializer().get().findAll(MethodCallExpr.class).contains(lookup)) return false;
+        return production.findAll(IfStmt.class).stream()
+                .filter(branch -> appearsBefore(lookup, branch) && branch.getCondition().isMethodCallExpr())
+                .filter(branch -> {
+                    MethodCallExpr condition = branch.getCondition().asMethodCallExpr();
+                    return "isEmpty".equals(condition.getNameAsString())
+                            && condition.getScope()
+                                    .map(scope -> optional.getNameAsString().equals(scope.toString()))
+                                    .orElse(false);
+                })
+                .anyMatch(GeneratedUnitTestSemanticValidator::emptyBranchAlwaysThrows);
+    }
+
+    private static boolean emptyBranchAlwaysThrows(IfStmt branch) {
+        if (branch.getThenStmt().isThrowStmt()) return true;
+        if (!branch.getThenStmt().isBlockStmt()) return false;
+        var statements = branch.getThenStmt().asBlockStmt().getStatements();
+        return !statements.isEmpty() && statements.get(statements.size() - 1).isThrowStmt()
+                && statements.stream().limit(statements.size() - 1)
+                        .allMatch(statement -> statement.isExpressionStmt());
+    }
+
+    private static boolean isNonEmptyFindByIdStub(MethodCallExpr lookup, String repository) {
+        if (lookup.getScope().map(scope -> repository.equals(scope.toString())).orElse(false)) {
+            MethodCallExpr when = lookup.findAncestor(MethodCallExpr.class).orElse(null);
+            if (when == null || !Set.of("when", "given").contains(when.getNameAsString())) return false;
+            MethodCallExpr returnCall = when.findAncestor(MethodCallExpr.class).orElse(null);
+            return returnCall != null && Set.of("thenReturn", "willReturn").contains(returnCall.getNameAsString())
+                    && !returnCall.getArguments().isEmpty() && isOptionalOf(returnCall.getArgument(0));
+        }
+        MethodCallExpr when = lookup.getScope().filter(Expression::isMethodCallExpr)
+                .map(Expression::asMethodCallExpr).orElse(null);
+        if (when == null || !"when".equals(when.getNameAsString())
+                || when.getArguments().size() != 1
+                || !repository.equals(when.getArgument(0).toString())) return false;
+        MethodCallExpr doReturn = when.getScope().filter(Expression::isMethodCallExpr)
+                .map(Expression::asMethodCallExpr).orElse(null);
+        return doReturn != null && "doReturn".equals(doReturn.getNameAsString())
+                && !doReturn.getArguments().isEmpty() && isOptionalOf(doReturn.getArgument(0));
+    }
+
+    private static boolean isOptionalOf(Expression expression) {
+        if (!expression.isMethodCallExpr()) return false;
+        MethodCallExpr call = expression.asMethodCallExpr();
+        return "of".equals(call.getNameAsString())
+                && call.getScope().map(scope -> "Optional".equals(simpleType(scope.toString()))).orElse(false);
+    }
+
+    private static void validateUnsupportedTestInfrastructure(
+            GeneratedUnitTestDto generatedTest,
+            List<String> problems) {
+        Optional<CompilationUnit> parsed = parseCompilationUnit(generatedTest.sourceCode());
+        if (parsed.isEmpty()) return;
+        CompilationUnit cu = parsed.get();
+        if (cu.findAll(AnnotationExpr.class).stream()
+                .anyMatch(annotation -> "SpringBootTest".equals(annotation.getName().getIdentifier()))) {
+            problems.add("Do not use @SpringBootTest for generated unit tests; use Mockito unit-test wiring.");
+        }
+        if (cu.findAll(AnnotationExpr.class).stream()
+                .anyMatch(annotation -> "Autowired".equals(annotation.getName().getIdentifier()))) {
+            problems.add("Do not use @Autowired in generated unit tests; declare collaborators with @Mock.");
+        }
+        boolean hasMockitoStaticImport = cu.getImports().stream()
+                .filter(imported -> imported.isStatic())
+                .anyMatch(imported -> "org.mockito.Mockito.mockStatic".equals(imported.getNameAsString())
+                        || imported.isAsterisk() && "org.mockito.Mockito".equals(imported.getNameAsString()));
+        boolean usesMockitoStaticMock = cu.findAll(MethodCallExpr.class).stream()
+                .filter(call -> "mockStatic".equals(call.getNameAsString()))
+                .anyMatch(call -> call.getScope().map(scope ->
+                        "Mockito".equals(scope.toString()) || "org.mockito.Mockito".equals(scope.toString()))
+                        .orElse(hasMockitoStaticImport));
+        boolean importsMockitoMockedStatic = cu.getImports().stream()
+                .filter(imported -> !imported.isStatic())
+                .anyMatch(imported -> "org.mockito.MockedStatic".equals(imported.getNameAsString())
+                        || imported.isAsterisk() && "org.mockito".equals(imported.getNameAsString()));
+        boolean usesMockitoMockedStatic = cu.findAll(ClassOrInterfaceType.class).stream()
+                .anyMatch(type -> "org.mockito.MockedStatic".equals(type.getNameWithScope())
+                        || "MockedStatic".equals(type.getNameAsString()) && importsMockitoMockedStatic);
+        if (usesMockitoStaticMock || usesMockitoMockedStatic) {
+            problems.add("Do not use static mocking in generated unit tests; execute static helpers with real fixtures.");
+        }
+        boolean mocksPageType = cu.findAll(MethodCallExpr.class).stream()
+                .filter(call -> "mock".equals(call.getNameAsString()) && !call.getArguments().isEmpty())
+                .anyMatch(call -> call.getArgument(0).toString()
+                        .matches("(?:[A-Za-z_$][\\w$]*\\.)*(?:Page|Pageable)\\.class"));
+        boolean declaresPageMock = cu.findAll(FieldDeclaration.class).stream()
+                .filter(field -> field.getAnnotationByName("Mock").isPresent())
+                .map(field -> simpleType(field.getElementType().asString()))
+                .anyMatch(GeneratedUnitTestSemanticValidator::isPageType);
+        boolean declaresPageParameter = cu.findAll(Parameter.class).stream()
+                .filter(parameter -> parameter.getAnnotationByName("Mock").isPresent())
+                .map(parameter -> simpleType(parameter.getType().asString()))
+                .anyMatch(GeneratedUnitTestSemanticValidator::isPageType);
+        if (mocksPageType || declaresPageMock || declaresPageParameter) {
+            problems.add("Do not mock Page/Pageable; use a real PageImpl and PageRequest fixture.");
+        }
+    }
+
+    private static boolean isPageType(String type) {
+        return "Page".equals(type) || "Pageable".equals(type);
     }
 
     private static void validateInjectMocksStubbing(
@@ -249,7 +683,9 @@ public final class GeneratedUnitTestSemanticValidator {
         boolean hasSkippedComment = parsed.get().getAllContainedComments().stream()
                 .map(Comment::getContent)
                 .anyMatch(comment -> comment.trim().matches("(?is)^skipped\\b.*")
-                        || comment.matches("(?is).*@(?:[\\w.]*)(?:Test|TestFactory|TestTemplate|Disabled|Ignore)\\b.*"));
+                        || comment.lines().map(String::trim).anyMatch(line -> line.matches(
+                                "(?i)\\*?\\s*@(?:(?:org\\.junit(?:\\.jupiter\\.api)?\\.)?"
+                                        + "(?:Test|TestFactory|TestTemplate|Disabled|Ignore))\\b.*")));
         boolean hasDisabledAnnotation = parsed.get().findAll(AnnotationExpr.class).stream()
                 .map(annotation -> annotation.getNameAsString())
                 .anyMatch(name -> name.equals("Disabled") || name.endsWith(".Disabled")
@@ -266,6 +702,40 @@ public final class GeneratedUnitTestSemanticValidator {
             problems.add("Test case " + generatedTest.caseId() + " must declare @Test on generated method '"
                     + generatedTest.testMethodName() + "'.");
         }
+    }
+
+    private static void validatePlaceholderHelpers(GeneratedUnitTestDto test, List<String> problems) {
+        parseCompilationUnit(test.sourceCode()).flatMap(source -> findTestMethod(source, test.testMethodName()))
+                .ifPresent(method -> {
+                    boolean expectsException = method.getAnnotations().stream()
+                            .filter(AnnotationExpr::isNormalAnnotationExpr)
+                            .flatMap(annotation -> annotation.asNormalAnnotationExpr().getPairs().stream())
+                            .anyMatch(pair -> "expected".equals(pair.getNameAsString()));
+                    if (expectsException) return;
+                    method.findAncestor(ClassOrInterfaceDeclaration.class).ifPresent(owner -> {
+                        for (MethodCallExpr call : method.findAll(MethodCallExpr.class)) {
+                            if (call.getScope().filter(scope -> !scope.isThisExpr()).isPresent()
+                                    || call.findAncestor(LambdaExpr.class).isPresent()
+                                    || call.findAncestor(com.github.javaparser.ast.stmt.TryStmt.class).isPresent()) continue;
+                            var helpers = owner.getMethodsByName(call.getNameAsString()).stream()
+                                    .filter(helper -> helper.getParameters().size() == call.getArguments().size()).toList();
+                            // Chỉ chặn khi xác định được helper; tên và số tham số chưa đủ chọn overload.
+                            if (helpers.size() != 1) continue;
+                            for (MethodDeclaration helper : helpers) {
+                                if (helper.getBody().isEmpty()) continue;
+                                var statements = helper.getBody().get().getStatements();
+                                if (statements.size() != 1 || !statements.get(0).isThrowStmt()) continue;
+                                Expression thrown = statements.get(0).asThrowStmt().getExpression();
+                                if (thrown.isObjectCreationExpr() && "UnsupportedOperationException".equals(
+                                        simpleType(thrown.asObjectCreationExpr().getType().asString()))) {
+                                    problems.add("Test case " + test.caseId() + " calls placeholder helper '"
+                                            + helper.getNameAsString() + "' that always throws UnsupportedOperationException. "
+                                            + "Use real production DTOs and their declared generic types instead.");
+                                }
+                            }
+                        }
+                    });
+                });
     }
 
     private static boolean isTestMethodAnnotation(String annotationName) {
@@ -431,6 +901,207 @@ public final class GeneratedUnitTestSemanticValidator {
                         + "; enum values are final and an exhaustive switch default may be unreachable."));
     }
 
+    private static void validateEnumReferences(
+            UnitTestContextDto context,
+            GeneratedUnitTestDto generatedTest,
+            List<String> problems) {
+        if (context.classes() == null) return;
+        Optional<CompilationUnit> parsed = parseCompilationUnit(generatedTest.sourceCode());
+        if (parsed.isEmpty()) return;
+        CompilationUnit testSource = parsed.get();
+        Map<String, String> enumNames = new HashMap<>();
+        Map<String, Set<String>> enumConstants = new HashMap<>();
+        for (ClassContextDto javaClass : context.classes()) {
+            if (!"ENUM".equalsIgnoreCase(javaClass.classType()) || javaClass.qualifiedName() == null
+                    || javaClass.validationSourceCode() == null) continue;
+            parseCompilationUnit(javaClass.validationSourceCode()).ifPresent(source -> source.findAll(EnumDeclaration.class)
+                    .stream().filter(declaration -> declaration.getNameAsString().equals(javaClass.className()))
+                    .findFirst().ifPresent(declaration -> {
+                        enumNames.put(javaClass.className(), javaClass.qualifiedName());
+                        enumConstants.put(javaClass.qualifiedName(), declaration.getEntries().stream()
+                                .map(entry -> entry.getNameAsString()).collect(java.util.stream.Collectors.toSet()));
+                    }));
+        }
+        testSource.getImports().stream().filter(imported -> !imported.isStatic() && !imported.isAsterisk())
+                .map(imported -> imported.getNameAsString())
+                .filter(enumConstants::containsKey)
+                .forEach(qualifiedName -> enumNames.put(
+                        qualifiedName.substring(qualifiedName.lastIndexOf('.') + 1), qualifiedName));
+        for (EnumDeclaration declaration : testSource.findAll(EnumDeclaration.class)) {
+            enumNames.put(declaration.getNameAsString(), declaration.getNameAsString());
+        }
+
+        for (ObjectCreationExpr creation : testSource.findAll(ObjectCreationExpr.class)) {
+            String type = creation.getType().getNameWithScope();
+            if (enumNames.containsKey(creation.getType().getNameAsString())) {
+                problems.add("Do not instantiate enum " + type + "; use a declared constant directly.");
+            }
+        }
+        for (ClassOrInterfaceType type : testSource.findAll(ClassOrInterfaceType.class)) {
+            String expected = enumNames.get(type.getNameAsString());
+            if (expected != null && !type.getNameWithScope().equals(type.getNameAsString())
+                    && !type.getNameWithScope().equals(expected)
+                    && !enumConstants.containsKey(type.getNameWithScope())) {
+                problems.add("Enum type '" + type.getNameWithScope() + "' is not declared in context; use "
+                        + expected + ".");
+            }
+        }
+        for (FieldAccessExpr access : testSource.findAll(FieldAccessExpr.class)) {
+            String scope = access.getScope().toString();
+            int dot = scope.lastIndexOf('.');
+            String simple = scope.substring(dot + 1);
+            String expected = enumNames.get(simple);
+            if (expected == null) continue;
+            if (enumConstants.containsKey(scope)) expected = scope;
+            if (dot >= 0 && !scope.equals(expected)) {
+                problems.add("Enum type '" + scope + "' is not declared in context; use " + expected + ".");
+            }
+            if (enumConstants.containsKey(expected)
+                    && !enumConstants.get(expected).contains(access.getNameAsString())) {
+                problems.add("Enum constant '" + access.getNameAsString() + "' does not exist in " + expected + ".");
+            }
+        }
+        for (MethodCallExpr call : testSource.findAll(MethodCallExpr.class)) {
+            if (!"valueOf".equals(call.getNameAsString()) || call.getArguments().size() != 1
+                    || !call.getArgument(0).isStringLiteralExpr() || call.getScope().isEmpty()) continue;
+            String scope = call.getScope().get().toString();
+            String expected = enumNames.get(scope.substring(scope.lastIndexOf('.') + 1));
+            if (enumConstants.containsKey(scope)) expected = scope;
+            if (expected != null && scope.contains(".") && !scope.equals(expected)) {
+                problems.add("Enum type '" + scope + "' is not declared in context; use " + expected + ".");
+            }
+            if (expected != null && enumConstants.containsKey(expected)
+                    && !enumConstants.get(expected).contains(call.getArgument(0).asStringLiteralExpr().asString())) {
+                problems.add("Enum constant '" + call.getArgument(0).asStringLiteralExpr().asString()
+                        + "' does not exist in " + expected + ".");
+            }
+        }
+        Set<String> simpleReferences = new HashSet<>();
+        testSource.findAll(ClassOrInterfaceType.class).stream()
+                .filter(type -> type.getNameWithScope().equals(type.getNameAsString()))
+                .map(ClassOrInterfaceType::getNameAsString).forEach(simpleReferences::add);
+        testSource.findAll(FieldAccessExpr.class).stream()
+                .map(FieldAccessExpr::getScope).filter(Expression::isNameExpr)
+                .map(scope -> scope.asNameExpr().getNameAsString()).forEach(simpleReferences::add);
+        testSource.findAll(MethodCallExpr.class).stream()
+                .flatMap(call -> call.getScope().stream()).filter(Expression::isNameExpr)
+                .map(scope -> scope.asNameExpr().getNameAsString()).forEach(simpleReferences::add);
+        for (String name : simpleReferences) {
+            String expected = enumNames.get(name);
+            if (expected == null || !enumConstants.containsKey(expected)) continue;
+            boolean samePackage = testSource.getPackageDeclaration()
+                    .map(declaration -> declaration.getNameAsString().equals(packageName(expected))).orElse(false);
+            boolean imported = testSource.getImports().stream()
+                    .anyMatch(declaration -> !declaration.isStatic() && declaration.getNameAsString().equals(expected));
+            if (!samePackage && !imported) {
+                problems.add("Enum " + name + " requires import " + expected + ".");
+            }
+        }
+    }
+
+    private static void validateEnumFixtureValues(
+            UnitTestContextDto context, MethodContextDto productionMethod,
+            GeneratedUnitTestDto test, List<String> problems) {
+        CompilationUnit source = parseCompilationUnit(test.sourceCode()).orElse(null);
+        if (source == null) return;
+        Set<String> enumTypes = new HashSet<>(Set.of("Enum"));
+        context.classes().stream().filter(clazz -> "ENUM".equalsIgnoreCase(clazz.classType()))
+                .map(ClassContextDto::className).forEach(enumTypes::add);
+        List<Expression> fixtures = new ArrayList<>();
+        for (VariableDeclarator variable : source.findAll(VariableDeclarator.class)) {
+            if (!enumTypes.contains(simpleType(variable.getType().asString()))) continue;
+            variable.getInitializer().ifPresent(fixtures::add);
+            MethodDeclaration owner = variable.findAncestor(MethodDeclaration.class).orElse(null);
+            source.findAll(com.github.javaparser.ast.expr.AssignExpr.class).stream()
+                    .filter(assignment -> mockReference(assignment.getTarget())
+                            .map(variable.getNameAsString()::equals).orElse(false))
+                    .filter(assignment -> owner != null
+                            ? assignment.findAncestor(MethodDeclaration.class).orElse(null) == owner
+                            : assignment.getTarget().isFieldAccessExpr()
+                                    || assignment.findAncestor(MethodDeclaration.class)
+                                            .map(method -> method.findAll(VariableDeclarator.class).stream()
+                                                    .noneMatch(local -> local.getNameAsString()
+                                                            .equals(variable.getNameAsString())))
+                                            .orElse(true))
+                    .map(assignment -> assignment.getValue()).forEach(fixtures::add);
+        }
+        if (productionMethod != null && productionMethod.sourceCode() != null) {
+            parseMethod(productionMethod.sourceCode()).ifPresent(method -> {
+                for (MethodDeclaration testMethod : source.findAll(MethodDeclaration.class)) {
+                    for (MethodCallExpr call : testMethod.findAll(MethodCallExpr.class)) {
+                        if (!method.getNameAsString().equals(call.getNameAsString())
+                                || call.getArguments().size() != method.getParameters().size()
+                                || !isProductionReceiver(testMethod, call, productionMethod.classQualifiedName())) continue;
+                        for (int index = 0; index < method.getParameters().size(); index++) {
+                            if (enumTypes.contains(simpleType(method.getParameter(index).getType().asString()))) {
+                                fixtures.add(call.getArgument(index));
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        // Giá trị Enum trả về từ SUT/getter vẫn hợp lệ để kiểm tra kết quả.
+        Set<String> forbiddenFactories = Set.of("assertThrows", "assertThrowsExactly", "forName",
+                "getEnumConstants", "getField", "getDeclaredField");
+        if (fixtures.stream().flatMap(fixture -> fixture.findAll(MethodCallExpr.class).stream())
+                .anyMatch(call -> forbiddenFactories.contains(call.getNameAsString()))) {
+            problems.add("Enum fixtures and arguments must use a declared project enum constant or null; "
+                    + "do not use reflection, assertThrows results, or method-call expressions to manufacture an Enum.");
+        }
+    }
+
+    private static void validateProductionMethodCalls(
+            UnitTestContextDto context,
+            MethodContextDto productionMethod,
+            GeneratedUnitTestDto generatedTest,
+            List<String> problems) {
+        if (context.classes() == null || productionMethod == null) return;
+        Optional<CompilationUnit> parsedTest = parseCompilationUnit(generatedTest.sourceCode());
+        if (parsedTest.isEmpty()) return;
+        for (ClassContextDto javaClass : context.classes()) {
+            if (!javaClass.qualifiedName().equals(productionMethod.classQualifiedName())) continue;
+            Optional<ClassOrInterfaceDeclaration> declaration = serviceDeclaration(javaClass);
+            if (declaration.isEmpty() || !declaration.get().getExtendedTypes().isEmpty()) continue;
+            Set<String> declaredMethods = declaration.get().getMethods().stream()
+                    .map(MethodDeclaration::getNameAsString).collect(java.util.stream.Collectors.toSet());
+            for (MethodDeclaration testMethod : parsedTest.get().findAll(MethodDeclaration.class)) {
+                for (MethodCallExpr call : testMethod.findAll(MethodCallExpr.class)) {
+                    if (!isProductionReceiver(testMethod, call, javaClass.qualifiedName())) continue;
+                    String methodName = call.getNameAsString();
+                    if (!declaredMethods.contains(methodName)
+                            && !Set.of("toString", "hashCode", "equals", "getClass", "wait", "notify", "notifyAll")
+                                    .contains(methodName)) {
+                        problems.add("Method '" + methodName + "' does not exist in the current production source of "
+                                + javaClass.className() + ". Call an existing method from the approved Test Case.");
+                    }
+                }
+            }
+        }
+    }
+
+    private static void validateRepositorySaveMatcherType(GeneratedUnitTestDto test, List<String> problems) {
+        parseCompilationUnit(test.sourceCode()).ifPresent(source -> source.findAll(MethodCallExpr.class).stream()
+                .filter(call -> "save".equals(call.getNameAsString()))
+                .flatMap(call -> call.getArguments().stream())
+                .filter(Expression::isMethodCallExpr)
+                .map(Expression::asMethodCallExpr)
+                .filter(matcher -> "any".equals(matcher.getNameAsString()) && matcher.getArguments().size() == 1
+                        && matcher.getArgument(0).isClassExpr() && isMockitoMatcher(matcher, source))
+                .map(matcher -> simpleType(matcher.getArgument(0).asClassExpr().getType().asString()))
+                .filter(type -> type.endsWith("Repository"))
+                .forEach(type -> problems.add("Repository.save(...) requires an entity matcher, not " + type
+                        + ". Use any(Entity.class) with the entity type accepted by save.")));
+    }
+
+    private static void validateMockitoSettingsSyntax(GeneratedUnitTestDto test, List<String> problems) {
+        parseCompilationUnit(test.sourceCode()).ifPresent(source -> source.findAll(AnnotationExpr.class).stream()
+                .filter(annotation -> "MockitoSettings".equals(annotation.getName().getIdentifier()))
+                .filter(AnnotationExpr::isSingleMemberAnnotationExpr)
+                .forEach(annotation -> problems.add("@MockitoSettings requires strictness = Strictness.STRICT_STUBS, "
+                        + "not a positional value.")));
+    }
+
     private static void validateContentCast(GeneratedUnitTestDto generatedTest, List<String> problems) {
         String source = generatedTest.sourceCode();
         boolean usesJavaMailPart = source.matches(
@@ -566,6 +1237,383 @@ public final class GeneratedUnitTestSemanticValidator {
         }
     }
 
+    private static void validateMockitoMatcherConsistency(
+            GeneratedUnitTestDto generatedTest,
+            List<String> problems) {
+        if (generatedTest == null || generatedTest.sourceCode() == null) return;
+        Optional<CompilationUnit> parsed = parseCompilationUnit(generatedTest.sourceCode());
+        if (parsed.isEmpty()) return;
+        CompilationUnit cu = parsed.get();
+
+        for (MethodCallExpr call : cu.findAll(MethodCallExpr.class)) {
+            if ("when".equals(call.getNameAsString()) && !call.getArguments().isEmpty()
+                    && isMockitoWhenCall(call, cu)) {
+                Expression target = call.getArgument(0);
+                if (target.isMethodCallExpr()) {
+                    validateMatcherArguments(target.asMethodCallExpr(), cu, problems);
+                }
+            }
+            if (call.getScope().filter(Expression::isMethodCallExpr)
+                    .map(Expression::asMethodCallExpr)
+                    .filter(scope -> "verify".equals(scope.getNameAsString())
+                            && isMockitoApiCall(scope, "verify", cu))
+                    .isPresent()) {
+                validateMatcherArguments(call, cu, problems);
+            }
+            if (call.getScope().filter(Expression::isMethodCallExpr)
+                    .map(Expression::asMethodCallExpr)
+                    .filter(scope -> "when".equals(scope.getNameAsString())
+                            && isMockitoWhenCall(scope, cu)
+                            && scope.getScope().filter(Expression::isMethodCallExpr)
+                            .map(Expression::asMethodCallExpr)
+                            .filter(stubber -> isMockitoStubber(stubber, cu))
+                            .isPresent())
+                    .isPresent()) {
+                validateMatcherArguments(call, cu, problems);
+            }
+        }
+    }
+
+    private static void validateMatcherArguments(
+            MethodCallExpr invocation,
+            CompilationUnit cu,
+            List<String> problems) {
+        if (invocation.getArguments().isEmpty()) return;
+        boolean hasMatcher = invocation.getArguments().stream()
+                .anyMatch(argument -> isMockitoMatcher(argument, cu));
+        boolean hasRawArgument = invocation.getArguments().stream()
+                .anyMatch(argument -> !isMockitoMatcher(argument, cu));
+        if (hasMatcher && hasRawArgument) {
+            problems.add("In Mockito when/verify invocations, once one argument is a matcher, all arguments must use Mockito matchers; wrap literals and constants with eq(...).");
+        }
+    }
+
+    private static boolean isMockitoMatcher(Expression expression, CompilationUnit cu) {
+        if (!expression.isMethodCallExpr()) return false;
+        MethodCallExpr matcher = expression.asMethodCallExpr();
+        String name = matcher.getNameAsString();
+        if (!Set.of(
+                "any", "anyBoolean", "anyByte", "anyChar", "anyDouble", "anyFloat", "anyInt",
+                "anyLong", "anyShort", "anyString", "anyList", "anyMap", "anySet", "anyCollection",
+                "argThat", "capture", "contains", "endsWith", "eq", "isA", "isAny", "isNotNull",
+                "isNull", "matches", "nullable", "not", "notNull", "refEq", "same", "startsWith")
+                .contains(name)) return false;
+        if (matcher.getScope().isPresent()) {
+            String scope = matcher.getScope().get().toString();
+            if (scope.equals("Mockito") || scope.equals("org.mockito.Mockito")
+                    || scope.equals("ArgumentMatchers") || scope.equals("org.mockito.ArgumentMatchers")
+                    || scope.equals("AdditionalMatchers") || scope.equals("org.mockito.AdditionalMatchers")) {
+                return true;
+            }
+            if ("capture".equals(name) && isArgumentCaptorScope(matcher.getScope().get(), cu)) return true;
+            return false;
+        }
+        return cu.getImports().stream()
+                .filter(imported -> imported.isStatic())
+                .anyMatch(imported -> imported.isAsterisk()
+                        && ("org.mockito.Mockito".equals(imported.getNameAsString())
+                        || "org.mockito.ArgumentMatchers".equals(imported.getNameAsString())
+                        || "org.mockito.AdditionalMatchers".equals(imported.getNameAsString()))
+                        || !imported.isAsterisk()
+                        && ("org.mockito.Mockito." + name).equals(imported.getNameAsString())
+                        || ("org.mockito.ArgumentMatchers." + name).equals(imported.getNameAsString())
+                        || ("org.mockito.AdditionalMatchers." + name).equals(imported.getNameAsString()));
+    }
+
+    private static boolean isArgumentCaptorScope(Expression scope, CompilationUnit cu) {
+        if (scope.isMethodCallExpr()) {
+            MethodCallExpr call = scope.asMethodCallExpr();
+            return "forClass".equals(call.getNameAsString())
+                    && call.getScope().map(value -> "ArgumentCaptor".equals(value.toString())
+                    || "org.mockito.ArgumentCaptor".equals(value.toString())).orElse(false);
+        }
+        if (!scope.isNameExpr()) return false;
+        String name = scope.asNameExpr().getNameAsString();
+        return cu.findAll(VariableDeclarator.class).stream()
+                .filter(variable -> name.equals(variable.getNameAsString()))
+                .anyMatch(variable -> variable.getType().asString().contains("ArgumentCaptor"));
+    }
+
+    private static boolean isMockitoWhenCall(MethodCallExpr call, CompilationUnit cu) {
+        if (!isMockitoApiCall(call, "when", cu)) {
+            return call.getScope().filter(Expression::isMethodCallExpr)
+                    .map(Expression::asMethodCallExpr)
+                    .map(stubber -> isMockitoStubber(stubber, cu))
+                    .orElse(false);
+        }
+        return true;
+    }
+
+    private static boolean isMockitoStubber(MethodCallExpr call, CompilationUnit cu) {
+        return Set.of("doAnswer", "doCallRealMethod", "doNothing", "doReturn", "doThrow")
+                .contains(call.getNameAsString()) && isMockitoApiCall(call, call.getNameAsString(), cu);
+    }
+
+    private static boolean isMockitoApiCall(MethodCallExpr call, String methodName, CompilationUnit cu) {
+        if (!methodName.equals(call.getNameAsString())) return false;
+        if (call.getScope().isPresent()) {
+            return isMockitoScope(call.getScope().get());
+        }
+        return cu.getImports().stream()
+                .filter(imported -> imported.isStatic())
+                .anyMatch(imported -> imported.isAsterisk()
+                        && ("org.mockito.Mockito".equals(imported.getNameAsString())
+                        || "org.mockito.BDDMockito".equals(imported.getNameAsString()))
+                        || !imported.isAsterisk()
+                        && ("org.mockito.Mockito." + methodName).equals(imported.getNameAsString())
+                        || ("org.mockito.BDDMockito." + methodName).equals(imported.getNameAsString()));
+    }
+
+    private static void validateTransactionTemplateStubbing(
+            MethodContextDto productionMethod,
+            GeneratedUnitTestDto generatedTest,
+            List<String> problems) {
+        if (productionMethod == null || productionMethod.sourceCode() == null
+                || generatedTest == null || generatedTest.sourceCode() == null) return;
+        Optional<MethodDeclaration> parsedProduction = parseMethod(productionMethod.sourceCode());
+        if (parsedProduction.isEmpty()) return;
+        List<MethodCallExpr> productionTransactionCalls = parsedProduction.get().findAll(MethodCallExpr.class).stream()
+                .filter(GeneratedUnitTestSemanticValidator::isTransactionMethod)
+                .toList();
+        if (productionTransactionCalls.isEmpty()) return;
+
+        Optional<CompilationUnit> parsed = parseCompilationUnit(generatedTest.sourceCode());
+        if (parsed.isEmpty()) return;
+        CompilationUnit cu = parsed.get();
+        boolean mocksTransactionTemplate = cu.findAll(FieldDeclaration.class).stream()
+                .filter(field -> field.getAnnotationByName("Mock").isPresent())
+                .anyMatch(field -> "TransactionTemplate".equals(simpleType(field.getElementType().asString())))
+                || cu.findAll(MethodCallExpr.class).stream()
+                .filter(call -> "mock".equals(call.getNameAsString()) && !call.getArguments().isEmpty())
+                .anyMatch(call -> call.getArgument(0).isClassExpr()
+                        && "TransactionTemplate".equals(simpleType(
+                        call.getArgument(0).asClassExpr().getType().asString())));
+        if (!mocksTransactionTemplate) return;
+
+        List<MethodCallExpr> transactionStubs = cu.findAll(MethodCallExpr.class).stream()
+                .filter(GeneratedUnitTestSemanticValidator::isTransactionMethod)
+                .filter(call -> transactionStubber(call, cu).isPresent())
+                .toList();
+        if (transactionStubs.isEmpty()) {
+            if (testCanEnterTransaction(productionMethod, generatedTest)) {
+                problems.add(transactionCallbackError());
+            }
+            return;
+        }
+
+        Set<String> productionReceivers = productionTransactionCalls.stream()
+                .flatMap(call -> call.getScope().stream())
+                .flatMap(scope -> mockReference(scope).stream())
+                .collect(java.util.stream.Collectors.toSet());
+        if (productionReceivers.isEmpty()) {
+            problems.add(transactionCallbackError());
+            return;
+        }
+        List<MethodCallExpr> relevantStubs = transactionStubs.stream()
+                .filter(stub -> transactionStubReceiver(stub, cu)
+                        .map(productionReceivers::contains)
+                        .orElse(false))
+                .toList();
+        if (relevantStubs.isEmpty()
+                || relevantStubs.stream().anyMatch(stub -> !transactionStubInvokesCallback(stub, cu))) {
+            problems.add(transactionCallbackError());
+        }
+    }
+
+    private static boolean isTransactionMethod(MethodCallExpr call) {
+        return "execute".equals(call.getNameAsString())
+                || "executeWithoutResult".equals(call.getNameAsString());
+    }
+
+    private static Optional<MethodCallExpr> transactionStubber(
+            MethodCallExpr transactionCall,
+            CompilationUnit cu) {
+        return transactionCall.getScope().filter(Expression::isMethodCallExpr)
+                .map(Expression::asMethodCallExpr)
+                .filter(whenCall -> "when".equals(whenCall.getNameAsString())
+                        && isMockitoWhenCall(whenCall, cu))
+                .flatMap(whenCall -> whenCall.getScope()
+                        .filter(Expression::isMethodCallExpr)
+                        .map(Expression::asMethodCallExpr))
+                .filter(stubber -> isMockitoStubber(stubber, cu));
+    }
+
+    private static Optional<String> transactionStubReceiver(
+            MethodCallExpr transactionCall,
+            CompilationUnit cu) {
+        return transactionCall.getScope().filter(Expression::isMethodCallExpr)
+                .map(Expression::asMethodCallExpr)
+                .filter(whenCall -> "when".equals(whenCall.getNameAsString())
+                        && isMockitoWhenCall(whenCall, cu))
+                .filter(whenCall -> !whenCall.getArguments().isEmpty())
+                .flatMap(whenCall -> mockReference(whenCall.getArgument(0)));
+    }
+
+    private static boolean transactionStubInvokesCallback(
+            MethodCallExpr transactionCall,
+            CompilationUnit cu) {
+        MethodCallExpr stubber = transactionStubber(transactionCall, cu)
+                .orElse(null);
+        if (stubber == null) return false;
+        String callbackMethod = "executeWithoutResult".equals(transactionCall.getNameAsString())
+                ? "accept" : "doInTransaction";
+        return stubber.findAll(MethodCallExpr.class).stream()
+                .filter(call -> callbackMethod.equals(call.getNameAsString()))
+                .anyMatch(callback -> callback.getScope()
+                        .map(GeneratedUnitTestSemanticValidator::isFirstInvocationArgument)
+                        .orElse(false));
+    }
+
+    private static boolean isFirstInvocationArgument(Expression expression) {
+        while (expression.isEnclosedExpr() || expression.isCastExpr()) {
+            expression = expression.isEnclosedExpr()
+                    ? expression.asEnclosedExpr().getInner()
+                    : expression.asCastExpr().getExpression();
+        }
+        if (!expression.isMethodCallExpr()) return false;
+        MethodCallExpr call = expression.asMethodCallExpr();
+        return "getArgument".equals(call.getNameAsString())
+                && call.getArguments().size() == 1
+                && call.getArgument(0).isIntegerLiteralExpr()
+                && "0".equals(call.getArgument(0).asIntegerLiteralExpr().getValue());
+    }
+
+    private static String transactionCallbackError() {
+        return "A mocked TransactionTemplate must use doAnswer to invoke the transaction callback: "
+                + "executeWithoutResult Consumer callback needs getArgument(0).accept(...), while execute needs "
+                + "getArgument(0).doInTransaction(...); otherwise the production transaction body is never executed.";
+    }
+
+    private static boolean testCanEnterTransaction(
+            MethodContextDto productionMethod,
+            GeneratedUnitTestDto generatedTest) {
+        Optional<MethodDeclaration> production = parseMethod(productionMethod.sourceCode());
+        Optional<CompilationUnit> parsedTest = parseCompilationUnit(generatedTest.sourceCode());
+        if (production.isEmpty() || parsedTest.isEmpty()) return false;
+        Optional<MethodDeclaration> testMethod = findTestMethod(parsedTest.get(), generatedTest.testMethodName());
+        if (testMethod.isEmpty()) return false;
+
+        List<MethodCallExpr> transactionCalls = production.get().findAll(MethodCallExpr.class).stream()
+                .filter(GeneratedUnitTestSemanticValidator::isTransactionMethod)
+                .toList();
+        if (transactionCalls.isEmpty()) return false;
+
+        return testMethod.get().findAll(MethodCallExpr.class).stream()
+                .filter(call -> productionMethod.methodName().equals(call.getNameAsString()))
+                .filter(call -> isProductionReceiver(
+                        testMethod.get(), call, productionMethod.classQualifiedName()))
+                .anyMatch(invocation -> transactionCalls.stream()
+                        .noneMatch(transactionCall -> hasGuaranteedEarlyReturn(
+                                production.get(), transactionCall, invocation)));
+    }
+
+    private static boolean hasGuaranteedEarlyReturn(
+            MethodDeclaration production,
+            MethodCallExpr transactionCall,
+            MethodCallExpr invocation) {
+        return production.findAll(IfStmt.class).stream()
+                .filter(statement -> statement.findAncestor(LambdaExpr.class).isEmpty())
+                .filter(statement -> statement.findAncestor(com.github.javaparser.ast.stmt.ForStmt.class).isEmpty())
+                .filter(statement -> statement.findAncestor(com.github.javaparser.ast.stmt.ForEachStmt.class).isEmpty())
+                .filter(statement -> statement.findAncestor(com.github.javaparser.ast.stmt.WhileStmt.class).isEmpty())
+                .filter(statement -> statement.findAncestor(com.github.javaparser.ast.stmt.DoStmt.class).isEmpty())
+                .filter(statement -> sameBlock(statement, transactionCall))
+                .filter(statement -> appearsBefore(statement, transactionCall))
+                .anyMatch(statement -> conditionMatchesInvocation(
+                        statement.getCondition(), production, invocation)
+                        .map(thenSelected -> thenSelected
+                                ? exitsBeforeSwitch(statement.getThenStmt())
+                                : statement.getElseStmt()
+                                        .map(branch -> exitsBeforeSwitch(branch))
+                                        .orElse(false))
+                        .orElse(false));
+    }
+
+    private static Optional<Boolean> conditionMatchesInvocation(
+            Expression condition,
+            MethodDeclaration production,
+            MethodCallExpr invocation) {
+        return evaluateCondition(condition, production, invocation);
+    }
+
+    private static Optional<Boolean> evaluateCondition(
+            Expression condition,
+            MethodDeclaration production,
+            MethodCallExpr invocation) {
+        Expression unwrapped = condition;
+        while (unwrapped.isEnclosedExpr()) unwrapped = unwrapped.asEnclosedExpr().getInner();
+        if (unwrapped.isUnaryExpr()
+                && unwrapped.asUnaryExpr().getOperator()
+                        == com.github.javaparser.ast.expr.UnaryExpr.Operator.LOGICAL_COMPLEMENT) {
+            return evaluateCondition(unwrapped.asUnaryExpr().getExpression(), production, invocation)
+                    .map(value -> !value);
+        }
+        if (unwrapped.isBinaryExpr()) {
+            BinaryExpr binary = unwrapped.asBinaryExpr();
+            Optional<Boolean> left = evaluateCondition(binary.getLeft(), production, invocation);
+            Optional<Boolean> right = evaluateCondition(binary.getRight(), production, invocation);
+            if (binary.getOperator() == BinaryExpr.Operator.OR) {
+                if (left.isPresent() && left.get()) return Optional.of(true);
+                if (right.isPresent() && right.get()) return Optional.of(true);
+                return left.isPresent() && right.isPresent() ? Optional.of(false) : Optional.empty();
+            }
+            if (binary.getOperator() == BinaryExpr.Operator.AND) {
+                if (left.isPresent() && !left.get()) return Optional.of(false);
+                if (right.isPresent() && !right.get()) return Optional.of(false);
+                return left.isPresent() && right.isPresent() ? Optional.of(true) : Optional.empty();
+            }
+            if (binary.getOperator() == BinaryExpr.Operator.EQUALS
+                    || binary.getOperator() == BinaryExpr.Operator.NOT_EQUALS) {
+                Optional<Boolean> leftNull = nullness(binary.getLeft(), production, invocation);
+                Optional<Boolean> rightNull = nullness(binary.getRight(), production, invocation);
+                if (leftNull.isPresent() && rightNull.isPresent()) {
+                    boolean equal = leftNull.get().equals(rightNull.get());
+                    return Optional.of(binary.getOperator() == BinaryExpr.Operator.EQUALS ? equal : !equal);
+                }
+            }
+            return Optional.empty();
+        }
+        if (!unwrapped.isNameExpr()) return Optional.empty();
+        return booleanParameterValue(unwrapped.asNameExpr().getNameAsString(), production, invocation);
+    }
+
+    private static Optional<Boolean> booleanParameterValue(
+            String parameterName,
+            MethodDeclaration production,
+            MethodCallExpr invocation) {
+        for (int index = 0; index < production.getParameters().size(); index++) {
+            if (parameterName.equals(production.getParameter(index).getNameAsString())
+                    && invocation.getArguments().size() > index) {
+                Expression argument = invocation.getArgument(index);
+                return argument.isBooleanLiteralExpr()
+                        ? Optional.of(argument.asBooleanLiteralExpr().getValue())
+                        : Optional.empty();
+            }
+        }
+        return Optional.empty();
+    }
+
+    private static Optional<Boolean> nullness(
+            Expression expression,
+            MethodDeclaration production,
+            MethodCallExpr invocation) {
+        Expression unwrapped = expression;
+        while (unwrapped.isEnclosedExpr()) unwrapped = unwrapped.asEnclosedExpr().getInner();
+        if (unwrapped.isNullLiteralExpr()) return Optional.of(true);
+        if (unwrapped.isBooleanLiteralExpr()) return Optional.of(false);
+        if (!unwrapped.isNameExpr()) return Optional.empty();
+        for (int index = 0; index < production.getParameters().size(); index++) {
+            if (unwrapped.asNameExpr().getNameAsString().equals(production.getParameter(index).getNameAsString())
+                    && invocation.getArguments().size() > index) {
+                Expression argument = invocation.getArgument(index);
+                if (argument.isNullLiteralExpr()) return Optional.of(true);
+                if (argument.isLiteralExpr()) return Optional.of(false);
+                return Optional.empty();
+            }
+        }
+        return Optional.empty();
+    }
+
     private static Optional<String> mockReference(Expression expression) {
         if (expression.isNameExpr()) return Optional.of(expression.asNameExpr().getNameAsString());
         if (expression.isFieldAccessExpr()) {
@@ -574,7 +1622,17 @@ public final class GeneratedUnitTestSemanticValidator {
                     ? fieldAccess.getNameAsString()
                     : fieldAccess.toString());
         }
+        if (expression.isMethodCallExpr()) return Optional.of(expression.toString());
+        if (expression.isEnclosedExpr()) return mockReference(expression.asEnclosedExpr().getInner());
+        if (expression.isCastExpr()) return mockReference(expression.asCastExpr().getExpression());
         return Optional.empty();
+    }
+
+    private static boolean sameBlock(Node first, Node second) {
+        return first.findAncestor(BlockStmt.class)
+                .flatMap(firstBlock -> second.findAncestor(BlockStmt.class)
+                        .map(firstBlock::equals))
+                .orElse(false);
     }
 
     private static boolean isPositiveVerification(MethodCallExpr verifyCall) {
@@ -628,57 +1686,151 @@ public final class GeneratedUnitTestSemanticValidator {
         Optional<CompilationUnit> parsed = parseCompilationUnit(generatedTest.sourceCode());
         if (parsed.isEmpty()) return;
 
-        Map<String, String> knownQualifiedNames = new HashMap<>();
+        Map<String, Set<String>> knownQualifiedNames = new HashMap<>();
+        Set<String> knownStaticImports = new HashSet<>();
         for (ClassContextDto clazz : context.classes()) {
             if (clazz.className() != null && clazz.qualifiedName() != null) {
-                knownQualifiedNames.put(clazz.className(), clazz.qualifiedName());
+                knownQualifiedNames.computeIfAbsent(clazz.className(), ignored -> new HashSet<>())
+                        .add(clazz.qualifiedName());
             }
-            if (clazz.sourceCode() != null) {
-                for (String line : clazz.sourceCode().split("\n")) {
-                    String trimmed = line.trim();
-                    if (trimmed.startsWith("import ") && trimmed.endsWith(";")) {
-                        String imported = trimmed.substring(7, trimmed.length() - 1).trim();
-                        if (!imported.startsWith("static ") && !imported.endsWith(".*")) {
-                            int dot = imported.lastIndexOf('.');
-                            if (dot > 0) {
-                                String simple = imported.substring(dot + 1);
-                                knownQualifiedNames.put(simple, imported);
-                            }
+            if (clazz.validationSourceCode() != null) {
+                parseCompilationUnit(clazz.validationSourceCode()).ifPresent(source -> source.getImports().forEach(imported -> {
+                    if (imported.isStatic()) {
+                        knownStaticImports.add(imported.getNameAsString()
+                                + (imported.isAsterisk() ? ".*" : ""));
+                    } else if (!imported.isAsterisk()) {
+                        String importedFqn = imported.getNameAsString();
+                        int dot = importedFqn.lastIndexOf('.');
+                        if (dot > 0) {
+                            String simple = importedFqn.substring(dot + 1);
+                            knownQualifiedNames.computeIfAbsent(simple, ignored -> new HashSet<>())
+                                    .add(importedFqn);
                         }
                     }
-                }
+                }));
             }
         }
 
+        Set<String> knownProjectPackages = context.classes().stream()
+                .map(ClassContextDto::qualifiedName)
+                .map(GeneratedUnitTestSemanticValidator::packageName)
+                .filter(java.util.Objects::nonNull)
+                .collect(java.util.stream.Collectors.toSet());
+        microserviceRoot(productionMethod).ifPresent(knownProjectPackages::add);
+
         for (var importDecl : parsed.get().getImports()) {
-            if (importDecl.isStatic() || importDecl.isAsterisk()) continue;
+            if (importDecl.isStatic()) {
+                String importedStatic = importDecl.getNameAsString();
+                boolean exactProductionImport = knownStaticImports.contains(importedStatic)
+                        || importDecl.isAsterisk() && knownStaticImports.contains(importedStatic + ".*");
+                boolean projectOwned = isProjectStaticImport(
+                        importedStatic, importDecl.isAsterisk(), knownQualifiedNames,
+                        knownProjectPackages, productionMethod);
+                if (projectOwned && !exactProductionImport) {
+                    problems.add("Unknown project static import '" + importDecl.toString().trim()
+                            + "'. Use the exact static import declared by the production source.");
+                }
+                continue;
+            }
             String importedFqn = importDecl.getNameAsString();
+            if (importDecl.isAsterisk()) {
+                String importedPackage = importedFqn;
+                if (isProjectPackage(importedPackage, knownProjectPackages)) {
+                    problems.add("Do not use guessed wildcard project import '" + importedFqn
+                            + "'. Use the exact import for each type declared in source context.");
+                }
+                continue;
+            }
             int dot = importedFqn.lastIndexOf('.');
             if (dot > 0) {
                 String simpleName = importedFqn.substring(dot + 1);
-                String expectedFqn = knownQualifiedNames.get(simpleName);
-                if (expectedFqn != null && !expectedFqn.equals(importedFqn)) {
+                Set<String> expectedFqns = knownQualifiedNames.get(simpleName);
+                boolean usedByTarget = isUsedByTargetService(context, productionMethod, importedFqn);
+                if (expectedFqns == null && isProjectPackage(importedFqn.substring(0, dot), knownProjectPackages)
+                        && !usedByTarget) {
+                    problems.add("Unknown project import '" + importedFqn
+                            + "'. Do not guess a package; use the exact FQN declared in source context.");
+                }
+                if (expectedFqns != null && !usedByTarget
+                        && (expectedFqns.size() > 1 || !expectedFqns.contains(importedFqn))) {
+                    String expected = expectedFqns.size() == 1
+                            ? expectedFqns.iterator().next()
+                            : "ambiguous declarations; use the exact import used by the target production class";
                     problems.add("Invalid import '" + importDecl.toString().trim() + "'. "
-                            + "Class " + simpleName + " is declared as " + expectedFqn + " in this project. "
-                            + "Use the exact import: import " + expectedFqn + ";");
+                            + "Class " + simpleName + " is declared as " + expected + " in this project. "
+                            + "Use the exact import: import " + expected + ";");
                 }
             }
         }
 
         microserviceRoot(productionMethod).ifPresent(serviceRoot -> {
-            String organizationRoot = serviceRoot.substring(0, serviceRoot.lastIndexOf('.'));
+            String[] serviceParts = serviceRoot.split("\\.");
+            if (serviceParts.length == 2
+                    && java.util.Set.of("com", "org", "net", "io", "javax", "jakarta")
+                            .contains(serviceParts[0])) return;
+            int serviceSeparator = serviceRoot.lastIndexOf('.');
+            if (serviceSeparator < 0) return;
+            String organizationRoot = serviceRoot.substring(0, serviceSeparator);
             for (var importDecl : parsed.get().getImports()) {
-                if (importDecl.isStatic() || importDecl.isAsterisk()) continue;
+                if (importDecl.isStatic()) continue;
                 String importedFqn = importDecl.getNameAsString();
+                boolean projectOwned = importedFqn.startsWith(organizationRoot + ".");
+                if (importDecl.isAsterisk()) {
+                    if (projectOwned) {
+                        problems.add("Do not use guessed wildcard project import '" + importedFqn
+                                + "'. Use the exact import for each type declared in source context.");
+                    }
+                    continue;
+                }
+                int dot = importedFqn.lastIndexOf('.');
+                String simpleName = dot > 0 ? importedFqn.substring(dot + 1) : importedFqn;
+                Set<String> expectedFqns = knownQualifiedNames.get(simpleName);
+                boolean usedByTarget = isUsedByTargetService(context, productionMethod, importedFqn);
+                if (projectOwned && expectedFqns == null && !usedByTarget) {
+                    problems.add("Unknown project import '" + importedFqn
+                            + "'. Do not guess a package; use the exact FQN declared in source context.");
+                }
                 if (importedFqn.startsWith(organizationRoot + ".")
                         && !importedFqn.startsWith(serviceRoot + ".")
-                        && !isUsedByTargetService(context, productionMethod, importedFqn)) {
+                        && !usedByTarget) {
                     problems.add("Import '" + importedFqn + "' belongs to another microservice. "
                             + "Only import DTOs and models under " + serviceRoot
                             + ", except clients declared under " + serviceRoot + ".client.");
                 }
             }
         });
+    }
+
+    private static boolean isProjectPackage(String importedPackage, Set<String> knownProjectPackages) {
+        return knownProjectPackages.stream()
+                .anyMatch(knownPackage -> importedPackage.equals(knownPackage)
+                        || importedPackage.startsWith(knownPackage + ".")
+                        || knownPackage.startsWith(importedPackage + "."));
+    }
+
+    private static boolean isProjectStaticImport(
+            String importedStatic,
+            boolean wildcard,
+            Map<String, Set<String>> knownQualifiedNames,
+            Set<String> knownProjectPackages,
+            MethodContextDto productionMethod) {
+        boolean matchesKnownType = knownQualifiedNames.values().stream()
+                .flatMap(Set::stream)
+                .anyMatch(qualifiedName -> importedStatic.equals(qualifiedName)
+                        || importedStatic.startsWith(qualifiedName + "."));
+        if (matchesKnownType) return true;
+
+        String owner = wildcard ? importedStatic
+                : importedStatic.substring(0, importedStatic.lastIndexOf('.'));
+        return isProjectPackage(owner, knownProjectPackages)
+                || microserviceRoot(productionMethod)
+                        .map(root -> importedStatic.startsWith(root + "."))
+                        .orElse(false);
+    }
+
+    private static String packageName(String qualifiedName) {
+        int lastDot = qualifiedName == null ? -1 : qualifiedName.lastIndexOf('.');
+        return lastDot > 0 ? qualifiedName.substring(0, lastDot) : null;
     }
 
     private static void validateSutDependencyMocks(
@@ -769,16 +1921,34 @@ public final class GeneratedUnitTestSemanticValidator {
             UnitTestContextDto context,
             MethodContextDto productionMethod,
             String importedFqn) {
+        if (context == null || productionMethod == null || productionMethod.classQualifiedName() == null) return false;
         return context.classes().stream()
                 .filter(javaClass -> productionMethod.classQualifiedName().equals(javaClass.qualifiedName()))
-                .map(ClassContextDto::sourceCode)
+                .map(ClassContextDto::validationSourceCode)
                 .filter(java.util.Objects::nonNull)
-                .anyMatch(source -> source.contains("import " + importedFqn + ";") || source.contains(importedFqn));
+                .anyMatch(source -> sourceContainsExactQualifiedName(source, importedFqn));
+    }
+
+    private static boolean sourceContainsExactQualifiedName(String source, String qualifiedName) {
+        Optional<CompilationUnit> parsed = parseCompilationUnit(source);
+        if (parsed.isPresent()) {
+            boolean exactImport = parsed.get().getImports().stream()
+                    .anyMatch(imported -> !imported.isStatic()
+                            && !imported.isAsterisk()
+                            && imported.getNameAsString().equals(qualifiedName));
+            boolean qualifiedType = parsed.get().findAll(ClassOrInterfaceType.class).stream()
+                    .anyMatch(type -> type.getNameWithScope().equals(qualifiedName));
+            boolean qualifiedCreation = parsed.get().findAll(ObjectCreationExpr.class).stream()
+                    .anyMatch(creation -> creation.getType().getNameWithScope().equals(qualifiedName));
+            if (exactImport || qualifiedType || qualifiedCreation) return true;
+            return false;
+        }
+        return false;
     }
 
     private static Optional<ClassOrInterfaceDeclaration> serviceDeclaration(ClassContextDto sut) {
-        if (sut.sourceCode() == null || sut.className() == null) return Optional.empty();
-        return parseCompilationUnit(sut.sourceCode()).flatMap(source -> source.findAll(ClassOrInterfaceDeclaration.class).stream()
+        if (sut.validationSourceCode() == null || sut.className() == null) return Optional.empty();
+        return parseCompilationUnit(sut.validationSourceCode()).flatMap(source -> source.findAll(ClassOrInterfaceDeclaration.class).stream()
                 .filter(declaration -> declaration.getFullyQualifiedName()
                         .map(name -> name.equals(sut.qualifiedName()))
                         .orElse(declaration.getNameAsString().equals(sut.className())
@@ -789,8 +1959,12 @@ public final class GeneratedUnitTestSemanticValidator {
     private static Optional<String> microserviceRoot(MethodContextDto productionMethod) {
         if (productionMethod == null || productionMethod.classQualifiedName() == null) return Optional.empty();
         String[] parts = productionMethod.classQualifiedName().split("\\.");
-        if (parts.length < 4 || !"service".equals(parts[3])) return Optional.empty();
-        return Optional.of(parts[0] + "." + parts[1] + "." + parts[2]);
+        for (int index = 1; index < parts.length - 1; index++) {
+            if ("service".equalsIgnoreCase(parts[index])) {
+                return Optional.of(String.join(".", java.util.Arrays.copyOf(parts, index)));
+            }
+        }
+        return Optional.empty();
     }
 
     private static String simpleType(String type) {
@@ -926,7 +2100,13 @@ public final class GeneratedUnitTestSemanticValidator {
             String classQualifiedName) {
         if (call.getScope().isEmpty() || classQualifiedName == null) return false;
         String expectedSimpleName = classQualifiedName.substring(classQualifiedName.lastIndexOf('.') + 1);
-        Expression scope = call.getScope().get();
+        return isProductionReceiver(testMethod, call.getScope().get(), expectedSimpleName);
+    }
+
+    private static boolean isProductionReceiver(
+            MethodDeclaration testMethod,
+            Expression scope,
+            String expectedSimpleName) {
         if (scope.isObjectCreationExpr()) {
             return expectedSimpleName.equals(scope.asObjectCreationExpr().getType().getNameAsString());
         }
@@ -935,9 +2115,24 @@ public final class GeneratedUnitTestSemanticValidator {
             return expectedSimpleName.equals(name)
                     || isVariableOfType(testMethod, name, expectedSimpleName);
         }
-        return scope.isFieldAccessExpr()
-                && scope.asFieldAccessExpr().getScope().isThisExpr()
-                && isVariableOfType(testMethod, scope.asFieldAccessExpr().getNameAsString(), expectedSimpleName);
+        if (scope.isFieldAccessExpr()) {
+            var fieldAccess = scope.asFieldAccessExpr();
+            return fieldAccess.getScope().isThisExpr()
+                    ? isVariableOfType(testMethod, fieldAccess.getNameAsString(), expectedSimpleName)
+                    : isProductionReceiver(testMethod, fieldAccess.getScope(), expectedSimpleName);
+        }
+        if (scope.isMethodCallExpr()) {
+            MethodCallExpr helperCall = scope.asMethodCallExpr();
+            if (helperCall.getScope().isEmpty()) {
+                return testMethod.findAncestor(ClassOrInterfaceDeclaration.class)
+                        .map(type -> type.getMethods().stream()
+                                .filter(method -> method.getNameAsString().equals(helperCall.getNameAsString()))
+                                .map(method -> simpleType(method.getType().asString()))
+                                .anyMatch(expectedSimpleName::equals))
+                        .orElse(false);
+            }
+        }
+        return false;
     }
 
     private static boolean isVariableOfType(

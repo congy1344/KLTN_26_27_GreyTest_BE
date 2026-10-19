@@ -39,6 +39,20 @@ class GenerationProgressServiceTest {
     }
 
     @Test
+    void queueStartsFreshStateAfterPreviousGenerationCompleted() {
+        service.start(9L, GenerationProgressStage.TEST_PLAN, 2, "Lần chạy trước.");
+        service.complete(9L, GenerationProgressStage.TEST_PLAN, "Đã xong.");
+
+        service.queue(9L, GenerationProgressStage.TEST_PLAN, "Lần chạy mới.");
+
+        GenerationProgressDto queued = service.get(9L, GenerationProgressStage.TEST_PLAN);
+        assertThat(queued.status()).isEqualTo(GenerationProgressStatus.QUEUED);
+        assertThat(queued.percent()).isZero();
+        assertThat(queued.steps()).singleElement()
+                .satisfies(step -> assertThat(step.status()).isEqualTo(GenerationProgressStepStatus.WAITING));
+    }
+
+    @Test
     void renamesQueuedStepWhenWorkerFailsBeforeStarting() {
         service.queue(9L, GenerationProgressStage.TEST_PLAN, "Đã vào hàng đợi.");
         service.fail(9L, GenerationProgressStage.TEST_PLAN, "Tác vụ AI không thể hoàn tất.");
@@ -241,6 +255,90 @@ class GenerationProgressServiceTest {
         assertThat(paused.completedSteps()).isEqualTo(1);
         assertThat(paused.logs()).extracting(log -> log.message())
                 .contains("Đã tạm dừng tác vụ.");
+    }
+
+    @Test
+    void resumesWithNonContiguousCompletedStepsAndPreservesExistingLogs() {
+        service.start(9L, GenerationProgressStage.UNIT_TEST, 4, "Lần chạy đầu tiên.");
+        service.advance(9L, GenerationProgressStage.UNIT_TEST, "Batch 1 đã xong.");
+        service.pause(9L, GenerationProgressStage.UNIT_TEST, "Tạm dừng sau batch 1 và batch 3.");
+
+        java.util.List<String> labels = java.util.List.of("Batch 1/4", "Batch 2/4", "Batch 3/4", "Batch 4/4");
+        // Giả sử batch 1 (index 0) và batch 3 (index 2) đã có trong DB
+        service.resume(9L, GenerationProgressStage.UNIT_TEST, labels, java.util.Set.of(0, 2), "Tiếp tục sinh batch 2 và 4.");
+
+        GenerationProgressDto progress = service.get(9L, GenerationProgressStage.UNIT_TEST);
+        assertThat(progress.completedSteps()).isEqualTo(2);
+        assertThat(progress.totalSteps()).isEqualTo(4);
+        assertThat(progress.percent()).isEqualTo(50);
+        assertThat(progress.steps().get(0).status()).isEqualTo(GenerationProgressStepStatus.COMPLETED);
+        assertThat(progress.steps().get(1).status()).isEqualTo(GenerationProgressStepStatus.WAITING);
+        assertThat(progress.steps().get(2).status()).isEqualTo(GenerationProgressStepStatus.COMPLETED);
+        assertThat(progress.steps().get(3).status()).isEqualTo(GenerationProgressStepStatus.WAITING);
+        assertThat(progress.logs()).extracting(l -> l.message())
+                .contains("Lần chạy đầu tiên.", "Batch 1 đã xong.", "Tạm dừng sau batch 1 và batch 3.", "Tiếp tục sinh batch 2 và 4.");
+    }
+
+    @Test
+    void capsPreservedLogsAfterResume() {
+        service.start(9L, GenerationProgressStage.UNIT_TEST, 2, "Bắt đầu.");
+        for (int index = 0; index < 38; index++) {
+            service.log(9L, GenerationProgressStage.UNIT_TEST, "Log cũ " + index);
+        }
+        service.pause(9L, GenerationProgressStage.UNIT_TEST, "Tạm dừng.");
+
+        service.resume(9L, GenerationProgressStage.UNIT_TEST,
+                java.util.List.of("Batch 1/2", "Batch 2/2"), java.util.Set.of(0), "Tiếp tục.");
+
+        assertThat(service.get(9L, GenerationProgressStage.UNIT_TEST).logs()).hasSizeLessThanOrEqualTo(40);
+    }
+
+    @Test
+    void tracksGranularStepStatusesForParallelExecution() {
+        java.util.List<String> labels = java.util.List.of("Batch 1/4", "Batch 2/4", "Batch 3/4", "Batch 4/4");
+        service.start(9L, GenerationProgressStage.UNIT_TEST, labels, "Bắt đầu sinh 4 batch.");
+
+        // Worker chạy song song batch 2 (index 1) và batch 4 (index 3)
+        service.setStepStatus(9L, GenerationProgressStage.UNIT_TEST, 1, GenerationProgressStepStatus.RUNNING);
+        service.setStepStatus(9L, GenerationProgressStage.UNIT_TEST, 3, GenerationProgressStepStatus.RUNNING);
+
+        GenerationProgressDto dto = service.get(9L, GenerationProgressStage.UNIT_TEST);
+        assertThat(dto.steps().get(1).status()).isEqualTo(GenerationProgressStepStatus.RUNNING);
+        assertThat(dto.steps().get(3).status()).isEqualTo(GenerationProgressStepStatus.RUNNING);
+
+        // Batch 4 hoàn thành trước batch 2
+        service.advanceStep(9L, GenerationProgressStage.UNIT_TEST, 3, "Batch 4 đã lưu.");
+
+        GenerationProgressDto afterBatch4 = service.get(9L, GenerationProgressStage.UNIT_TEST);
+        assertThat(afterBatch4.steps().get(3).status()).isEqualTo(GenerationProgressStepStatus.COMPLETED);
+        assertThat(afterBatch4.steps().get(1).status()).isEqualTo(GenerationProgressStepStatus.RUNNING);
+        assertThat(afterBatch4.completedSteps()).isEqualTo(1);
+    }
+
+    @Test
+    void ignoresLateRunningUpdateAfterPause() {
+        java.util.List<String> labels = java.util.List.of("Batch 1/2", "Batch 2/2");
+        service.start(9L, GenerationProgressStage.UNIT_TEST, labels, "Bắt đầu sinh 2 batch.");
+        service.pause(9L, GenerationProgressStage.UNIT_TEST, "Đã tạm dừng tác vụ.");
+
+        service.setStepStatus(9L, GenerationProgressStage.UNIT_TEST, 0, GenerationProgressStepStatus.RUNNING);
+
+        assertThat(service.get(9L, GenerationProgressStage.UNIT_TEST).steps().get(0).status())
+                .isEqualTo(GenerationProgressStepStatus.WAITING);
+    }
+
+    @Test
+    void marksAllRunningBatchesFailedWhenParallelGenerationFails() {
+        java.util.List<String> labels = java.util.List.of("Batch 1/3", "Batch 2/3", "Batch 3/3");
+        service.start(9L, GenerationProgressStage.UNIT_TEST, labels, "Bắt đầu sinh 3 batch.");
+        service.setStepStatus(9L, GenerationProgressStage.UNIT_TEST, 0, GenerationProgressStepStatus.RUNNING);
+        service.setStepStatus(9L, GenerationProgressStage.UNIT_TEST, 2, GenerationProgressStepStatus.RUNNING);
+
+        service.fail(9L, GenerationProgressStage.UNIT_TEST, "Sinh batch thất bại.");
+
+        GenerationProgressDto progress = service.get(9L, GenerationProgressStage.UNIT_TEST);
+        assertThat(progress.steps().get(0).status()).isEqualTo(GenerationProgressStepStatus.FAILED);
+        assertThat(progress.steps().get(2).status()).isEqualTo(GenerationProgressStepStatus.FAILED);
     }
 
     private static final class MutableClock extends Clock {

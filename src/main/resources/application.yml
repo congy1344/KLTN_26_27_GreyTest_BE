@@ -38,7 +38,16 @@ greytest:
     token-secret: ${GREYTEST_AUTH_TOKEN_SECRET:}
   usage:
     default-monthly-llm-quota: ${GREYTEST_DEFAULT_MONTHLY_LLM_QUOTA:100}
-    pro-monthly-llm-quota: ${GREYTEST_PRO_MONTHLY_LLM_QUOTA:1000}
+    plus-weekly-llm-quota: ${GREYTEST_PLUS_WEEKLY_LLM_QUOTA:200}
+    pro-monthly-llm-quota: ${GREYTEST_PRO_MONTHLY_LLM_QUOTA:300}
+
+# Cổng thanh toán VNPay Sandbox
+vnpay:
+  tmn-code: ${VNPAY_TMN_CODE:CGXZLS0Z}
+  hash-secret: ${VNPAY_HASH_SECRET:XNBCJFAKAZQSGTARRLGCHVZWCIOIGSHN}
+  pay-url: ${VNPAY_PAY_URL:https://sandbox.vnpayment.vn/paymentv2/vpcpay.html}
+  return-url: ${VNPAY_RETURN_URL:http://localhost:5173/payment/vnpay-return}
+
   llm-cache:
     max-entries: ${GREYTEST_LLM_CACHE_MAX_ENTRIES:500}
   llm-batch:

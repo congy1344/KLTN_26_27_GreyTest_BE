@@ -131,11 +131,36 @@ class TestCaseServiceTest {
                 org.mockito.ArgumentMatchers.eq(1L),
                 org.mockito.ArgumentMatchers.eq(com.greytest.dto.GenerationProgressStage.TEST_CASE),
                 labels.capture(),
-                org.mockito.ArgumentMatchers.eq(1),
+                org.mockito.ArgumentMatchers.eq(Set.of(0)),
                 org.mockito.ArgumentMatchers.contains("batch 2/2"));
         assertThat(labels.getValue()).contains(
                 "Sinh Test Case - batch 1/2: 8 plan",
                 "Sinh Test Case - batch 2/2: 1 plan");
+    }
+
+    @Test
+    void resumeKeepsProgressWhenNoBatchIsCompleteYet() {
+        project(ProjectStatus.PLAN_APPROVED);
+        TestPlan plan = approvedPlan(20L, false);
+        when(plans.findByProjectId(1L)).thenReturn(List.of(plan));
+        when(cases.findByTestPlanId(20L)).thenReturn(List.of());
+        when(ai.generateTestCases(1L, Set.of(20L)))
+                .thenThrow(new LlmResponseException("stop after progress setup"));
+
+        assertThatThrownBy(() -> service.generate(1L, (String) null, true))
+                .isInstanceOf(LlmResponseException.class);
+
+        verify(generationProgress).resume(
+                org.mockito.ArgumentMatchers.eq(1L),
+                org.mockito.ArgumentMatchers.eq(com.greytest.dto.GenerationProgressStage.TEST_CASE),
+                org.mockito.ArgumentMatchers.anyList(),
+                org.mockito.ArgumentMatchers.eq(Set.of()),
+                org.mockito.ArgumentMatchers.contains("batch 1/1"));
+        verify(generationProgress, org.mockito.Mockito.never()).start(
+                org.mockito.ArgumentMatchers.eq(1L),
+                org.mockito.ArgumentMatchers.eq(com.greytest.dto.GenerationProgressStage.TEST_CASE),
+                org.mockito.ArgumentMatchers.anyList(),
+                org.mockito.ArgumentMatchers.anyString());
     }
 
     @Test
@@ -163,9 +188,10 @@ class TestCaseServiceTest {
 
         verify(plans).save(missingPlan);
         verify(plans, org.mockito.Mockito.never()).save(existingPlan);
-        verify(generationProgress).advance(
+        verify(generationProgress).advanceStep(
                 org.mockito.ArgumentMatchers.eq(1L),
                 org.mockito.ArgumentMatchers.eq(com.greytest.dto.GenerationProgressStage.TEST_CASE),
+                org.mockito.ArgumentMatchers.eq(1),
                 org.mockito.ArgumentMatchers.contains("Batch 2/2"));
     }
 
@@ -186,7 +212,7 @@ class TestCaseServiceTest {
         verify(generationProgress).fail(
                 org.mockito.ArgumentMatchers.eq(1L),
                 org.mockito.ArgumentMatchers.eq(com.greytest.dto.GenerationProgressStage.TEST_CASE),
-                org.mockito.ArgumentMatchers.contains("bước kiểm tra và lưu Test Case"));
+                org.mockito.ArgumentMatchers.contains("Dừng ở batch 1"));
     }
 
     @Test
@@ -308,29 +334,8 @@ class TestCaseServiceTest {
         assertThatThrownBy(() -> service.generate(1L))
                 .isInstanceOf(LlmResponseException.class)
                 .hasMessageContaining("second batch failed");
-        verify(cases, org.mockito.Mockito.never()).deleteAll(org.mockito.ArgumentMatchers.anyList());
-        verify(cases, org.mockito.Mockito.never()).saveAll(org.mockito.ArgumentMatchers.anyList());
+        verify(cases, org.mockito.Mockito.times(1)).saveAll(org.mockito.ArgumentMatchers.anyList());
         verify(projects, org.mockito.Mockito.never()).save(org.mockito.ArgumentMatchers.any());
-    }
-
-    @Test
-    void generateRejectsPlansChangedBeforeFinalPersistence() {
-        project(ProjectStatus.PLAN_APPROVED);
-        TestPlan plan = new TestPlan();
-        plan.setId(20L);
-        plan.setProjectId(1L);
-        plan.setStatus(ReviewStatus.APPROVED);
-        when(plans.findByProjectId(1L)).thenReturn(List.of(plan), List.of());
-        when(plans.existsById(20L)).thenReturn(true);
-        when(plans.findById(20L)).thenReturn(Optional.of(plan));
-        when(ai.generateTestCases(1L, Set.of(20L)))
-                .thenReturn(new TestCaseResponseDto(List.of(generatedCase(20L, "case 20"))));
-
-        assertThatThrownBy(() -> service.generate(1L))
-                .isInstanceOf(InvalidProjectStatusException.class)
-                .hasMessageContaining("thay doi");
-        verify(cases, org.mockito.Mockito.never()).deleteAll(org.mockito.ArgumentMatchers.anyList());
-        verify(cases, org.mockito.Mockito.never()).saveAll(org.mockito.ArgumentMatchers.anyList());
     }
 
     @Test

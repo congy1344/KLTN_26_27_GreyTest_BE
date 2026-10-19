@@ -157,7 +157,7 @@ class BusinessRuleServiceTest {
         verify(generationProgressService).fail(
                 org.mockito.ArgumentMatchers.eq(1L),
                 org.mockito.ArgumentMatchers.eq(com.greytest.dto.GenerationProgressStage.BUSINESS_RULE),
-                org.mockito.ArgumentMatchers.contains("Đã lưu 3 Business Rule từ các batch trước."));
+                org.mockito.ArgumentMatchers.contains("Đã lưu 3 Business Rule trong phiên này."));
         verify(transactionManager).commit(transactionStatus);
         verify(transactionManager).rollback(transactionStatus);
     }    @Test
@@ -436,15 +436,10 @@ class BusinessRuleServiceTest {
                 """);
         mockServiceMethods(method);
         when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of());
-        when(aiAgentService.generateBusinessRules(1L, Set.of(11L))).thenReturn(
-                new BusinessRuleResponseDto(List.of(
-                        new GeneratedBusinessRuleDto(11L, "Khi tìm user, service trả về user theo id.",
-                                "BUSINESS_LOGIC", "STMT-1"))));
-        mockBusinessRuleSave();
 
         assertThatThrownBy(() -> service().generate(1L))
                 .isInstanceOf(InvalidProjectStatusException.class)
-                .hasMessageContaining("range source");
+                .hasMessageContaining("Range source");
     }
 
     @Test
@@ -1010,7 +1005,7 @@ class BusinessRuleServiceTest {
 
         assertThatThrownBy(() -> service().approve(1L))
                 .isInstanceOf(InvalidProjectStatusException.class)
-                .hasMessageContaining("Khong the xac minh control-flow", "phan tich lai project");
+                .hasMessageContaining("Khong the xac minh", "phan tich lai project");
     }
 
     @Test

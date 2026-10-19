@@ -25,6 +25,7 @@ import com.greytest.entity.enums.ReviewStatus;
 import com.greytest.entity.enums.TestType;
 import com.greytest.exception.InvalidProjectStatusException;
 import com.greytest.exception.ProjectNotFoundException;
+import com.greytest.exception.UsageQuotaExceededException;
 import com.greytest.repository.ProjectRepository;
 import com.greytest.repository.BusinessRuleRepository;
 import com.greytest.repository.TestCaseRepository;
@@ -91,6 +92,14 @@ public class TestCaseService {
         if (targetPlans.isEmpty()) {
             generationProgress.log(projectId, GenerationProgressStage.TEST_CASE,
                     "Tat ca Test Plan da co Test Case.");
+            transactions.executeWithoutResult(status -> {
+                Project currentProject = projects.findById(projectId)
+                        .orElseThrow(() -> new ProjectNotFoundException(projectId));
+                currentProject.setStatus(ProjectStatus.CASE_PENDING_REVIEW);
+                projects.save(currentProject);
+            });
+            generationProgress.completeAfterCommit(projectId, GenerationProgressStage.TEST_CASE,
+                    "Hoan tat: tat ca Test Plan da co Test Case.");
             return list(projectId);
         }
 
@@ -123,12 +132,30 @@ public class TestCaseService {
         }
         stepLabels.add("Kiểm tra và lưu Test Case vào CSDL");
 
-        int completedBatchCount = batchIndexes.get(0);
+        Set<Integer> completedBatchIndices = new LinkedHashSet<>();
+        if (resume) {
+            for (int i = 0; i < allBatches.size(); i++) {
+                List<TestPlan> batchPlans = allBatches.get(i);
+                boolean allInDb = batchPlans.stream().noneMatch(plan -> cases.findByTestPlanId(plan.getId()).isEmpty());
+                if (allInDb) {
+                    completedBatchIndices.add(i);
+                }
+            }
+        }
+
+        String batchDetailList = batchIndexes.stream()
+                .map(idx -> "batch " + (idx + 1) + "/" + allBatches.size())
+                .collect(java.util.stream.Collectors.joining(", "));
         String progressMessage = resume
-                ? "Tiếp tục sinh Test Case từ batch " + (completedBatchCount + 1) + "/" + allBatches.size() + "."
+                ? "Tiếp tục sinh Test Case cho " + batches.size() + " batch còn thiếu (" + batchDetailList + ")."
                 : "Đã nhóm " + targetPlans.size() + " Test Plan thành " + allBatches.size() + " batch.";
-        if (resume && completedBatchCount > 0) {
-            generationProgress.resume(projectId, GenerationProgressStage.TEST_CASE, stepLabels, completedBatchCount, progressMessage);
+        if (resume) {
+            generationProgress.resume(projectId, GenerationProgressStage.TEST_CASE, stepLabels, completedBatchIndices, progressMessage);
+            for (int compIdx : completedBatchIndices) {
+                generationProgress.log(projectId, GenerationProgressStage.TEST_CASE,
+                        "Batch " + (compIdx + 1) + "/" + allBatches.size() + ": Đã có sẵn trong CSDL ("
+                                + formatPlanBatchSummary(allBatches.get(compIdx)) + ").");
+            }
         } else {
             generationProgress.start(projectId, GenerationProgressStage.TEST_CASE, stepLabels, progressMessage);
         }
@@ -144,9 +171,10 @@ public class TestCaseService {
                     () -> generationProgress.isPaused(projectId, GenerationProgressStage.TEST_CASE),
                     batch -> {
                         String summary = formatPlanBatchSummary(batch);
-                        int batchIdx = batchIndexes.get(batches.indexOf(batch)) + 1;
+                        int batchIdx = batchIndexes.get(batches.indexOf(batch));
+                        generationProgress.setStepStatus(projectId, GenerationProgressStage.TEST_CASE, batchIdx, com.greytest.dto.GenerationProgressStepStatus.RUNNING);
                         generationProgress.log(projectId, GenerationProgressStage.TEST_CASE,
-                                "Đang gọi AI sinh Test Case cho batch " + batchIdx + "/" + allBatches.size()
+                                "Đang gọi AI sinh Test Case cho batch " + (batchIdx + 1) + "/" + allBatches.size()
                                         + " (" + summary + ")...");
                         return generateValidatedBatch(projectId, batch);
                     },
@@ -170,18 +198,26 @@ public class TestCaseService {
                         if (saved != null) {
                             allSavedCases.addAll(saved.stream().map(this::dto).toList());
                         }
-                        String summary = batchIndex >= 0 ? formatPlanBatchSummary(allBatches.get(batchIndex)) : "";
-                        generationProgress.advance(
-                                projectId,
-                                GenerationProgressStage.TEST_CASE,
-                                "Batch " + (batchIndex + 1) + "/" + allBatches.size() + ": đã lưu "
-                                        + validBatch.size() + " Test Case (" + summary + ").");
+                        String summary = formatPlanBatchSummary(currentBatchPlans);
+                        if (batchIndex >= 0) {
+                            generationProgress.advanceStep(
+                                    projectId,
+                                    GenerationProgressStage.TEST_CASE,
+                                    batchIndex,
+                                    "Batch " + (batchIndex + 1) + "/" + allBatches.size() + ": đã lưu "
+                                            + validBatch.size() + " Test Case (" + summary + ").");
+                        } else {
+                            generationProgress.advance(
+                                    projectId,
+                                    GenerationProgressStage.TEST_CASE,
+                                    "Batch: đã lưu " + validBatch.size() + " Test Case (" + summary + ").");
+                        }
                     });
 
             if (generationProgress.isPaused(projectId, GenerationProgressStage.TEST_CASE)) {
                 generationProgress.log(projectId, GenerationProgressStage.TEST_CASE,
                         "Tác vụ đã tạm dừng. Các Test Case đã sinh được lưu an toàn vào CSDL. Nhấn 'Tiếp tục sinh' khi bạn sẵn sàng.");
-                return list(projectId);
+                return allSavedCases.isEmpty() ? list(projectId) : allSavedCases;
             }
 
             transactions.executeWithoutResult(status -> {
@@ -192,11 +228,12 @@ public class TestCaseService {
 
             generationProgress.completeAfterCommit(projectId, GenerationProgressStage.TEST_CASE,
                     "Hoàn tất: đã lưu " + allSavedCases.size() + " Test Case và đưa project vào trạng thái chờ review.");
-            return list(projectId);
+            return allSavedCases.isEmpty() ? list(projectId) : allSavedCases;
         } catch (RuntimeException exception) {
             if (generationProgress.isPaused(projectId, GenerationProgressStage.TEST_CASE)) {
-                return list(projectId);
+                return allSavedCases.isEmpty() ? list(projectId) : allSavedCases;
             }
+            boolean isQuota = isUsageQuotaExceeded(exception);
             int failedBatch = LlmBatchExecutor.failedBatch(exception, 0);
             int originalBatch = failedBatch > 0 && failedBatch <= batchIndexes.size()
                     ? batchIndexes.get(failedBatch - 1) + 1
@@ -204,9 +241,11 @@ public class TestCaseService {
             String failureLocation = originalBatch > 0
                     ? "Dừng ở batch " + originalBatch + "."
                     : "Dừng ở bước kiểm tra và lưu Test Case.";
+            String detailMsg = isQuota
+                    ? " Bạn đã sử dụng hết quota LLM trong tháng này. Vui lòng nâng cấp lên gói PRO để tiếp tục sinh."
+                    : " Sinh Test Case thất bại; các batch đã sinh trước đó đã được lưu an toàn. Bạn có thể nhấn 'Tiếp tục sinh' để chạy tiếp.";
             generationProgress.fail(projectId, GenerationProgressStage.TEST_CASE,
-                    failureLocation + " Sinh Test Case thất bại; các batch đã sinh trước đó đã được lưu an toàn."
-                            + " Bạn có thể nhấn 'Tiếp tục sinh' để chạy tiếp.");
+                    failureLocation + detailMsg);
             throw LlmBatchExecutor.originalFailure(exception);
         }
     }
@@ -277,10 +316,24 @@ public class TestCaseService {
                 "Hoàn tất sinh lại " + (saved == null ? 0 : saved.size()) + " Test Case.");
         return saved;
         } catch (RuntimeException exception) {
-            generationProgress.fail(projectId, GenerationProgressStage.TEST_CASE,
-                    "Sinh lại " + plan.getPlanCode() + " thất bại; xem thông báo lỗi để biết chi tiết.");
+            boolean isQuota = isUsageQuotaExceeded(exception);
+            String detailMsg = isQuota
+                    ? " Bạn đã sử dụng hết quota LLM trong tháng này. Vui lòng nâng cấp lên gói PRO để tiếp tục sinh."
+                    : " Sinh lại " + plan.getPlanCode() + " thất bại; xem thông báo lỗi để biết chi tiết.";
+            generationProgress.fail(projectId, GenerationProgressStage.TEST_CASE, detailMsg);
             throw exception;
         }
+    }
+
+    private boolean isUsageQuotaExceeded(Throwable exception) {
+        Throwable current = exception;
+        while (current != null) {
+            if (current instanceof UsageQuotaExceededException) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
     }
 
     private List<TestCaseDto> persistGenerated(

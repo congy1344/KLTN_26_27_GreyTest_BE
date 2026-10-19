@@ -1,6 +1,7 @@
 package com.greytest.service.agent;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -8,8 +9,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.LongStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.greytest.dto.AnalysisManifestDto;
@@ -26,6 +30,8 @@ import com.greytest.dto.agent.GenerationContextDtos.BusinessRuleGenerationContex
 import com.greytest.dto.agent.GenerationContextDtos.BusinessRuleReviewContextDto;
 import com.greytest.dto.agent.GenerationContextDtos.TestCaseContextDto;
 import com.greytest.dto.agent.GenerationContextDtos.TestPlanContextDto;
+import com.greytest.dto.agent.GenerationResponseDtos.GeneratedUnitTestDto;
+import com.greytest.dto.agent.GenerationResponseDtos.UnitTestResponseDto;
 import com.greytest.dto.CoverageGapDto;
 import com.greytest.dto.diff.MethodDiffItem;
 import com.greytest.dto.diff.MethodDiffType;
@@ -266,7 +272,7 @@ class GenerationContextBuilderTest {
         mockCommonInputs();
         BusinessRule approved = ruleEntity(7L, 11L, ReviewStatus.APPROVED);
         approved.setReviewNote("SOURCE_BRANCH:IF-1-FALSE\nLegacy data.");
-        when(businessRuleRepository.findByProjectIdAndStatus(1L, ReviewStatus.APPROVED))
+        when(businessRuleRepository.findByProjectId(1L))
                 .thenReturn(List.of(approved));
 
         TestPlanContextDto context = builder.buildTestPlanContext(1L);
@@ -282,7 +288,7 @@ class GenerationContextBuilderTest {
         when(analysisService.getAnalysisResult(1L)).thenReturn(analysisWithServiceMethods(7));
         when(manifestService.exportManifest(1L)).thenReturn(manifest());
         when(existingTestService.list(1L)).thenReturn(List.of());
-        when(businessRuleRepository.findByProjectIdAndStatus(1L, ReviewStatus.APPROVED))
+        when(businessRuleRepository.findByProjectId(1L))
                 .thenReturn(LongStream.rangeClosed(1, 7)
                         .mapToObj(id -> ruleEntity(id, id, ReviewStatus.APPROVED))
                         .toList());
@@ -300,7 +306,7 @@ class GenerationContextBuilderTest {
         when(analysisService.getAnalysisResult(1L)).thenReturn(analysis());
         BusinessRule firstRule = ruleEntity(7L, 11L, ReviewStatus.APPROVED);
         BusinessRule secondRule = ruleEntity(8L, 12L, ReviewStatus.APPROVED);
-        when(businessRuleRepository.findByProjectIdAndStatus(1L, ReviewStatus.APPROVED))
+        when(businessRuleRepository.findByProjectId(1L))
                 .thenReturn(List.of(firstRule, secondRule));
         TestPlan firstPlan = testPlan(20L, 7L, "TP-001");
         TestPlan secondPlan = testPlan(21L, 8L, "TP-002");
@@ -328,7 +334,7 @@ class GenerationContextBuilderTest {
                 51L, 1L, "src/test/java/demo/UserControllerTest.java", "demo", "UserControllerTest",
                 30L, null, List.of(), List.of(), "class UserControllerTest {}", null);
         when(existingTestService.list(1L)).thenReturn(List.of(existingTest(), unrelatedTest));
-        when(businessRuleRepository.findByProjectIdAndStatus(1L, ReviewStatus.APPROVED))
+        when(businessRuleRepository.findByProjectId(1L))
                 .thenReturn(List.of(ruleEntity(7L, 11L, ReviewStatus.APPROVED)));
         TestPlan plan = new TestPlan();
         plan.setId(20L);
@@ -382,7 +388,7 @@ class GenerationContextBuilderTest {
     @Test
     void unitTestBatchContextStaysBoundedForOneLargePlan() {
         mockCommonInputs();
-        when(businessRuleRepository.findByProjectIdAndStatus(1L, ReviewStatus.APPROVED))
+        when(businessRuleRepository.findByProjectId(1L))
                 .thenReturn(List.of(ruleEntity(7L, 11L, ReviewStatus.APPROVED)));
         TestPlan plan = testPlan(20L, 7L, "TP-001");
         when(testPlanRepository.findByProjectId(1L)).thenReturn(List.of(plan));
@@ -409,6 +415,165 @@ class GenerationContextBuilderTest {
         assertThat(context.existingApprovedTestCases()).hasSize(10);
         assertThat(context.existingTests()).singleElement()
                 .extracting("sourceCode").asString().hasSizeLessThan(5_000);
+    }
+
+    @Test
+    void unitTestContextKeepsCompleteTargetSourcePastFourThousandCharacters() throws Exception {
+        mockCommonInputs();
+        String source = "package demo; class UserService { /*" + "x".repeat(4_100)
+                + "*/ public User createUser(String email) { return null; } }";
+        when(analysisService.getAnalysisResult(1L)).thenReturn(analysisWithServiceSource(source));
+        when(businessRuleRepository.findByProjectId(1L))
+                .thenReturn(List.of(ruleEntity(7L, 11L, ReviewStatus.APPROVED)));
+        TestPlan plan = testPlan(20L, 7L, "TP-001");
+        when(testPlanRepository.findByProjectId(1L)).thenReturn(List.of(plan));
+        when(testPlanCoveredRuleRepository.findByTestPlanIdIn(List.of(20L)))
+                .thenReturn(List.of(coveredRule(20L, 7L)));
+        TestCase testCase = new TestCase();
+        testCase.setId(30L);
+        testCase.setTestPlanId(20L);
+        testCase.setCaseCode("TC-001");
+        testCase.setPriority(Priority.HIGH);
+        testCase.setStatus(ReviewStatus.APPROVED);
+        when(testCaseRepository.findByTestPlanId(20L)).thenReturn(List.of(testCase));
+
+        var context = builder.buildUnitTestContext(1L, Set.of(30L));
+
+        assertThat(context.classes().get(0).sourceCode()).isEqualTo(source);
+        assertThat(context.classes().get(0).validationSourceCode()).isEqualTo(source);
+        assertThat(objectMapper.writeValueAsString(context)).contains("x".repeat(4_100));
+        assertThat(GeneratedUnitTestSemanticValidator.validateContext(context)).isEmpty();
+        String generated = "package demo; class UserServiceTest { UserService userService; "
+                + "@org.junit.jupiter.api.Test void testCase() { userService.complete(1L); } }";
+        var response = new UnitTestResponseDto(List.of(new GeneratedUnitTestDto(
+                30L, "UserServiceTest", "testCase", "demo", "NEW_TEST", generated)));
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context, response))
+                .hasValueSatisfying(message -> assertThat(message).contains("complete", "does not exist"));
+    }
+
+    @Test
+    void unitTestContextIncludesTransitiveGenericTypesWithoutUnrelatedClasses() {
+        mockCommonInputs();
+        stubApprovedUnitTestCase(11L);
+        AnalysisResultDto base = analysisWithServiceSource(
+                "class UserService { demo.domain.Recipient createUser(String email) { return null; } }");
+        JavaClassDto recipient = new JavaClassDto(81L, "demo.domain", "Recipient", "demo.domain.Recipient",
+                "ENTITY", "src/main/java/demo/domain/Recipient.java",
+                "class Recipient { java.util.Map<String, NotificationSettings> settings; }", List.of(), List.of());
+        JavaClassDto settings = new JavaClassDto(82L, "demo.domain", "NotificationSettings",
+                "demo.domain.NotificationSettings", "OTHER", "src/main/java/demo/domain/NotificationSettings.java",
+                "class NotificationSettings { Recipient owner; ScheduleMode mode; }", List.of(), List.of());
+        JavaClassDto mode = new JavaClassDto(83L, "demo.domain", "ScheduleMode", "demo.domain.ScheduleMode",
+                "ENUM", "src/main/java/demo/domain/ScheduleMode.java", "enum ScheduleMode { DAILY }",
+                List.of(), List.of());
+        JavaClassDto unrelated = new JavaClassDto(84L, "demo", "UnrelatedService", "demo.UnrelatedService",
+                "SERVICE", "src/main/java/demo/UnrelatedService.java", "class UnrelatedService {}",
+                List.of(), List.of());
+        when(analysisService.getAnalysisResult(1L)).thenReturn(new AnalysisResultDto(
+                base.projectId(), base.projectName(), base.status(), 5, base.totalMethods(), 0, 0, 0, 0, 5, 5, 0,
+                List.of(), List.of(base.classes().get(1), recipient, settings, mode, unrelated), List.of(), List.of()));
+
+        var context = builder.buildUnitTestContext(1L, Set.of(30L));
+
+        assertThat(context.classes()).extracting("qualifiedName").containsExactly(
+                "demo.UserService", "demo.domain.Recipient", "demo.domain.NotificationSettings", "demo.domain.ScheduleMode");
+        assertThat(context.classes().get(2).sourceCode()).contains("ScheduleMode mode");
+    }
+
+    @Test
+    void unitTestContextUsesWildcardImportsBeforeApplicationPackageFallback() {
+        mockCommonInputs();
+        stubApprovedUnitTestCase(11L);
+        AnalysisResultDto base = analysisWithServiceSource(
+                "package demo; import demo.model.*; class UserService { Recipient recipient; }");
+        JavaClassDto recipient = new JavaClassDto(81L, "demo.model", "Recipient", "demo.model.Recipient", "ENTITY",
+                "src/main/java/demo/model/Recipient.java", "class Recipient {}", List.of(), List.of());
+        JavaClassDto lookalike = new JavaClassDto(82L, "demo.other", "Recipient", "demo.other.Recipient", "ENTITY",
+                "src/main/java/demo/other/Recipient.java", "class Recipient {}", List.of(), List.of());
+        when(analysisService.getAnalysisResult(1L)).thenReturn(new AnalysisResultDto(
+                base.projectId(), base.projectName(), base.status(), 3, base.totalMethods(), 0, 0, 0, 0, 3, 3, 0,
+                List.of(), List.of(base.classes().get(1), recipient, lookalike), List.of(), List.of()));
+
+        assertThat(builder.buildUnitTestContext(1L, Set.of(30L)).classes()).extracting("qualifiedName")
+                .containsExactly("demo.UserService", "demo.model.Recipient");
+    }
+
+    @Test
+    void unitTestContextPrefersSamePackageOverWildcardImportedLookalikes() {
+        mockCommonInputs();
+        stubApprovedUnitTestCase(11L);
+        AnalysisResultDto base = analysisWithServiceSource(
+                "package demo; import demo.model.*; class UserService { Recipient recipient; }");
+        JavaClassDto recipient = new JavaClassDto(81L, "demo", "Recipient", "demo.Recipient", "ENTITY",
+                "src/main/java/demo/Recipient.java", "class Recipient {}", List.of(), List.of());
+        JavaClassDto lookalike = new JavaClassDto(82L, "demo.model", "Recipient", "demo.model.Recipient", "ENTITY",
+                "src/main/java/demo/model/Recipient.java", "class Recipient {}", List.of(), List.of());
+        when(analysisService.getAnalysisResult(1L)).thenReturn(new AnalysisResultDto(
+                base.projectId(), base.projectName(), base.status(), 3, base.totalMethods(), 0, 0, 0, 0, 3, 3, 0,
+                List.of(), List.of(base.classes().get(1), recipient, lookalike), List.of(), List.of()));
+
+        assertThat(builder.buildUnitTestContext(1L, Set.of(30L)).classes()).extracting("qualifiedName")
+                .containsExactly("demo.UserService", "demo.Recipient");
+    }
+
+    @Test
+    void unitTestContextIgnoresNameCollisionsOutsideTheApplicationPackage() {
+        mockCommonInputs();
+        stubApprovedUnitTestCase(11L);
+        AnalysisResultDto base = analysisWithServiceSource("class UserService { Recipient recipient; }");
+        JavaClassDto recipient = new JavaClassDto(81L, "demo.model", "Recipient", "demo.model.Recipient",
+                "ENTITY", "src/main/java/demo/model/Recipient.java", "class Recipient {}", List.of(), List.of());
+        JavaClassDto unrelated = new JavaClassDto(82L, "unrelated.app", "Recipient", "unrelated.app.Recipient",
+                "OTHER", "src/main/java/unrelated/app/Recipient.java", "class Recipient {}", List.of(), List.of());
+        when(analysisService.getAnalysisResult(1L)).thenReturn(new AnalysisResultDto(
+                base.projectId(), base.projectName(), base.status(), 3, base.totalMethods(), 0, 0, 0, 0, 3, 3, 0,
+                List.of(), List.of(base.classes().get(1), recipient, unrelated), List.of(), List.of()));
+
+        assertThat(builder.buildUnitTestContext(1L, Set.of(30L)).classes()).extracting("qualifiedName")
+                .containsExactly("demo.UserService", "demo.model.Recipient");
+    }
+
+    @Test
+    void unitTestContextRespectsExplicitImportsOverSamePackageLookalikes() {
+        mockCommonInputs();
+        stubApprovedUnitTestCase(11L);
+        AnalysisResultDto base = analysisWithServiceSource(
+                "package demo; import demo.api.Account; import java.util.Date; "
+                        + "class UserService { Account account; Date date; }");
+        JavaClassDto account = new JavaClassDto(81L, "demo.api", "Account", "demo.api.Account", "OTHER",
+                "src/main/java/demo/api/Account.java", "class Account {}", List.of(), List.of());
+        JavaClassDto lookalike = new JavaClassDto(82L, "demo", "Account", "demo.Account", "OTHER",
+                "src/main/java/demo/Account.java", "class Account {}", List.of(), List.of());
+        JavaClassDto date = new JavaClassDto(83L, "demo.model", "Date", "demo.model.Date", "OTHER",
+                "src/main/java/demo/model/Date.java", "class Date {}", List.of(), List.of());
+        when(analysisService.getAnalysisResult(1L)).thenReturn(new AnalysisResultDto(
+                base.projectId(), base.projectName(), base.status(), 4, base.totalMethods(), 0, 0, 0, 0, 4, 4, 0,
+                List.of(), List.of(base.classes().get(1), account, lookalike, date), List.of(), List.of()));
+
+        assertThat(builder.buildUnitTestContext(1L, Set.of(30L)).classes()).extracting("qualifiedName")
+                .containsExactly("demo.UserService", "demo.api.Account");
+    }
+
+    @Test
+    void unitTestContextDoesNotSilentlyDropDependenciesAtTheClassLimit() {
+        mockCommonInputs();
+        stubApprovedUnitTestCase(11L);
+        var classes = new java.util.ArrayList<JavaClassDto>();
+        StringBuilder fields = new StringBuilder();
+        for (int index = 0; index < 26; index++) {
+            fields.append(" Dep").append(index).append(" field").append(index).append(";");
+            classes.add(new JavaClassDto(100L + index, "demo", "Dep" + index, "demo.Dep" + index,
+                    "OTHER", "src/main/java/demo/Dep" + index + ".java", "class Dep" + index + " {}",
+                    List.of(), List.of()));
+        }
+        AnalysisResultDto base = analysisWithServiceSource("class UserService {" + fields + "}");
+        classes.add(base.classes().get(1));
+        when(analysisService.getAnalysisResult(1L)).thenReturn(new AnalysisResultDto(
+                base.projectId(), base.projectName(), base.status(), 27, base.totalMethods(), 0, 0, 0, 0, 27, 27, 0,
+                List.of(), classes, List.of(), List.of()));
+
+        assertThatThrownBy(() -> builder.buildUnitTestContext(1L, Set.of(30L)))
+                .isInstanceOf(LlmResponseException.class).hasMessageContaining("supporting production classes");
     }
 
     @Test
@@ -441,7 +606,7 @@ class GenerationContextBuilderTest {
                 List.of(), List.of(service, appointment, exception, defaultPackageType), List.of(), List.of());
         when(analysisService.getAnalysisResult(1L)).thenReturn(enriched);
         when(existingTestService.list(1L)).thenReturn(List.of());
-        when(businessRuleRepository.findByProjectIdAndStatus(1L, ReviewStatus.APPROVED))
+        when(businessRuleRepository.findByProjectId(1L))
                 .thenReturn(List.of(ruleEntity(7L, 11L, ReviewStatus.APPROVED)));
         when(testPlanRepository.findByProjectId(1L)).thenReturn(List.of(testPlan(20L, 7L, "TP-001")));
         when(testPlanCoveredRuleRepository.findByTestPlanIdIn(List.of(20L)))
@@ -466,19 +631,9 @@ class GenerationContextBuilderTest {
     @Test
     void unitTestContextUsesCandidateSourceForChangedMethod() {
         mockCommonInputs();
-        when(businessRuleRepository.findByProjectIdAndStatus(1L, ReviewStatus.APPROVED))
-                .thenReturn(List.of(ruleEntity(7L, 11L, ReviewStatus.APPROVED)));
-        TestPlan plan = testPlan(20L, 7L, "TP-001");
-        TestCase testCase = new TestCase();
-        testCase.setId(30L);
-        testCase.setTestPlanId(20L);
-        testCase.setCaseCode("TC-001");
-        testCase.setPriority(Priority.HIGH);
-        testCase.setStatus(ReviewStatus.APPROVED);
-        when(testPlanRepository.findByProjectId(1L)).thenReturn(List.of(plan));
-        when(testPlanCoveredRuleRepository.findByTestPlanIdIn(List.of(20L)))
-                .thenReturn(List.of(coveredRule(20L, 7L)));
-        when(testCaseRepository.findByTestPlanId(20L)).thenReturn(List.of(testCase));
+        when(analysisService.getAnalysisResult(1L)).thenReturn(analysisWithServiceSource(
+                "package demo; class UserService { User createUser(String email) { return null; } }"));
+        stubApprovedUnitTestCase(11L);
 
         MethodDiffItem changedMethod = new MethodDiffItem(
                 "UserService", "demo.UserService", "createUser", "createUser(String)",
@@ -496,19 +651,7 @@ class GenerationContextBuilderTest {
     @Test
     void unitTestContextOmitsDeletedMethod() {
         mockCommonInputs();
-        when(businessRuleRepository.findByProjectIdAndStatus(1L, ReviewStatus.APPROVED))
-                .thenReturn(List.of(ruleEntity(7L, 12L, ReviewStatus.APPROVED)));
-        TestPlan plan = testPlan(20L, 7L, "TP-001");
-        TestCase testCase = new TestCase();
-        testCase.setId(30L);
-        testCase.setTestPlanId(20L);
-        testCase.setCaseCode("TC-001");
-        testCase.setPriority(Priority.HIGH);
-        testCase.setStatus(ReviewStatus.APPROVED);
-        when(testPlanRepository.findByProjectId(1L)).thenReturn(List.of(plan));
-        when(testPlanCoveredRuleRepository.findByTestPlanIdIn(List.of(20L)))
-                .thenReturn(List.of(coveredRule(20L, 7L)));
-        when(testCaseRepository.findByTestPlanId(20L)).thenReturn(List.of(testCase));
+        stubApprovedUnitTestCase(12L);
 
         MethodDiffItem deletedMethod = new MethodDiffItem(
                 "UserService", "demo.UserService", "updateUser", "updateUser()",
@@ -522,10 +665,173 @@ class GenerationContextBuilderTest {
     }
 
     @Test
+    void deletedMethodDoesNotHideRemainingMethodFromValidation() {
+        mockCommonInputs();
+        String deleted = "User updateUser() { return null; }";
+        String source = "package demo; class UserService { "
+                + "User createUser(String email) { return null; } " + deleted + " }";
+        when(analysisService.getAnalysisResult(1L)).thenReturn(analysisWithServiceSource(source));
+        stubApprovedUnitTestCase(11L);
+        MethodDiffItem deletedMethod = new MethodDiffItem("UserService", "demo.UserService", "updateUser",
+                "updateUser()", "demo.UserService#updateUser()", MethodDiffType.DELETED, "Method deleted",
+                deleted, null, List.of(), true);
+
+        var context = builder.buildUnitTestContext(1L, Set.of(30L), List.of(deletedMethod));
+
+        assertThat(context.classes().get(0).validationSourceCode()).contains("createUser").doesNotContain("updateUser");
+        String generated = "package demo; class UserServiceTest { UserService userService; "
+                + "@org.junit.jupiter.api.Test void testCase() { userService.updateUser(); } }";
+        var response = new UnitTestResponseDto(List.of(new GeneratedUnitTestDto(
+                30L, "UserServiceTest", "testCase", "demo", "NEW_TEST", generated)));
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context, response))
+                .hasValueSatisfying(message -> assertThat(message).contains("updateUser", "does not exist"));
+    }
+
+    @Test
+    void changedMethodWithStaleSourceFailsBeforeGeneration() {
+        mockCommonInputs();
+        when(analysisService.getAnalysisResult(1L)).thenReturn(analysisWithServiceSource(
+                "package demo; class UserService { User createUser(String email) { return null; } }"));
+        stubApprovedUnitTestCase(11L);
+        MethodDiffItem changedMethod = new MethodDiffItem(
+                "UserService", "demo.UserService", "createUser", "createUser(String)",
+                "demo.UserService#createUser(String)", MethodDiffType.MODIFIED, "Logic changed",
+                "User createUser(String email) { throw new IllegalStateException(); }",
+                "User createUser(String email) { return repository.save(new User(email)); }",
+                List.of(), true);
+
+        assertThatThrownBy(() -> builder.buildUnitTestContext(1L, Set.of(30L), List.of(changedMethod)))
+                .isInstanceOf(LlmResponseException.class)
+                .hasMessageContaining("Cannot verify current source");
+    }
+
+    @Test
+    void addedMethodIsIncludedInValidationSource() {
+        mockCommonInputs();
+        when(analysisService.getAnalysisResult(1L)).thenReturn(analysisWithServiceSource(
+                "package demo; class UserService { User createUser(String email) { return null; } }"));
+        stubApprovedUnitTestCase(11L);
+        String added = "User updateUser() { return null; }";
+        MethodDiffItem addedMethod = new MethodDiffItem(
+                "UserService", "demo.UserService", "updateUser", "updateUser()",
+                "demo.UserService#updateUser()", MethodDiffType.ADDED, "Method added",
+                null, added, List.of(), true);
+
+        var context = builder.buildUnitTestContext(1L, Set.of(30L), List.of(addedMethod));
+
+        assertThat(context.classes().get(0).validationSourceCode()).contains("createUser", "updateUser()", "return null");
+        String generated = "package demo; class UserServiceTest { UserService userService; "
+                + "@org.junit.jupiter.api.Test void testCase() { userService.updateUser(); } }";
+        var response = new UnitTestResponseDto(List.of(new GeneratedUnitTestDto(
+                30L, "UserServiceTest", "testCase", "demo", "NEW_TEST", generated)));
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context, response)).isEmpty();
+    }
+
+    @Test
+    void newServiceClassWithoutSourceFailsBeforeGeneration() {
+        mockCommonInputs();
+        when(analysisService.getAnalysisResult(1L)).thenReturn(analysisWithServiceSource(null));
+        stubApprovedUnitTestCase(11L);
+        MethodDiffItem addedMethod = new MethodDiffItem(
+                "UserService", "demo.UserService", "createUser", "createUser(String)",
+                "demo.UserService#createUser(String)", MethodDiffType.ADDED, "Method added",
+                null, "User createUser(String email) { return null; }", List.of(), true);
+
+        assertThatThrownBy(() -> builder.buildUnitTestContext(1L, Set.of(30L), List.of(addedMethod)))
+                .isInstanceOf(LlmResponseException.class)
+                .hasMessageContaining("Cannot verify current source");
+    }
+
+    @Test
+    void snapshotContextRestoresImportsAndNewDependenciesWithoutChangingStoredIds(@TempDir Path snapshot) throws Exception {
+        mockCommonInputs();
+        AnalysisResultDto stored = analysisWithServiceSource("class UserService {}");
+        when(analysisService.getAnalysisResult(1L)).thenReturn(stored);
+        stubApprovedUnitTestCase(11L);
+        writeSnapshotSource(snapshot, "src/main/java/demo/UserService.java", """
+                package demo;
+                import demo.dto.NewState;
+                public class UserService {
+                    private NewState state;
+                    public User createUser(String email) {
+                        if (email == null) throw new IllegalArgumentException("email required");
+                        return new User(email);
+                    }
+                }
+                """);
+        writeSnapshotSource(snapshot, "src/main/java/demo/User.java",
+                "package demo; public class User { public User(String email) {} }");
+        writeSnapshotSource(snapshot, "src/main/java/demo/dto/NewState.java",
+                "package demo.dto; public enum NewState { ACTIVE }");
+
+        var context = builder.buildSnapshotUnitTestContext(1L, Set.of(30L), snapshot);
+
+        var service = context.classes().stream().filter(c -> c.qualifiedName().equals("demo.UserService")).findFirst().orElseThrow();
+        assertThat(service.id()).isEqualTo(10L);
+        assertThat(service.validationSourceCode()).contains("package demo;", "import demo.dto.NewState;", "email required");
+        assertThat(service.sourceCode()).isEqualTo(service.validationSourceCode());
+        assertThat(service.methods()).singleElement().satisfies(method -> {
+            assertThat(method.id()).isEqualTo(11L);
+            assertThat(method.sourceCode()).contains("new User(email)");
+            assertThat(method.lineStart()).isEqualTo(5);
+        });
+        assertThat(context.classes()).extracting("qualifiedName").contains("demo.User", "demo.dto.NewState");
+        assertThat(context.approvedBusinessRules()).extracting("id").containsExactly(7L);
+        assertThat(context.approvedTestPlans()).extracting("id").containsExactly(20L);
+        assertThat(context.approvedTestCases()).extracting("id").containsExactly(30L);
+        assertThat(stored.classes().get(1).sourceCode()).isEqualTo("class UserService {}");
+    }
+
+    @Test
+    void snapshotContextRejectsMissingTargetInsteadOfUsingOldDatabaseSource(@TempDir Path snapshot) throws Exception {
+        mockCommonInputs();
+        stubApprovedUnitTestCase(11L);
+        writeSnapshotSource(snapshot, "src/main/java/demo/User.java", "package demo; public class User {}");
+
+        assertThatThrownBy(() -> builder.buildSnapshotUnitTestContext(1L, Set.of(30L), snapshot))
+                .isInstanceOf(LlmResponseException.class).hasMessageContaining("target method");
+    }
+
+    @Test
+    void snapshotContextRejectsAmbiguousClassAcrossModules(@TempDir Path snapshot) throws Exception {
+        mockCommonInputs();
+        stubApprovedUnitTestCase(11L);
+        writeSnapshotSource(snapshot, "module-a/src/main/java/demo/UserService.java",
+                "package demo; class UserService { User createUser(String email) { return null; } }");
+        writeSnapshotSource(snapshot, "module-b/src/main/java/demo/UserService.java",
+                "package demo; class UserService { User createUser(String email) { throw new IllegalStateException(); } }");
+
+        assertThatThrownBy(() -> builder.buildSnapshotUnitTestContext(1L, Set.of(30L), snapshot))
+                .isInstanceOf(LlmResponseException.class).hasMessageContaining("Ambiguous");
+    }
+
+    private void writeSnapshotSource(Path snapshot, String relativePath, String source) throws Exception {
+        Path file = snapshot.resolve(relativePath);
+        Files.createDirectories(file.getParent());
+        Files.writeString(file, source);
+    }
+
+    @Test
+    void snapshotContextRejectsAmbiguousNewSupportingTypes(@TempDir Path snapshot) throws Exception {
+        mockCommonInputs();
+        stubApprovedUnitTestCase(11L);
+        writeSnapshotSource(snapshot, "src/main/java/demo/UserService.java",
+                "package demo; import demo.dto.NewState; class UserService { NewState state; "
+                        + "User createUser(String email) { return null; } }");
+        writeSnapshotSource(snapshot, "module-a/src/main/java/demo/dto/NewState.java",
+                "package demo.dto; public enum NewState { ACTIVE }");
+        writeSnapshotSource(snapshot, "module-b/src/main/java/demo/dto/NewState.java",
+                "package demo.dto; public enum NewState { INACTIVE }");
+
+        assertThatThrownBy(() -> builder.buildSnapshotUnitTestContext(1L, Set.of(30L), snapshot))
+                .isInstanceOf(LlmResponseException.class).hasMessageContaining("Ambiguous", "demo.dto.NewState");
+    }
+
+    @Test
     void refinementContextContainsOnlyGapMethodsAndTheirPlans() {
         mockCommonInputs();
         BusinessRule approved = ruleEntity(7L, 11L, ReviewStatus.APPROVED);
-        when(businessRuleRepository.findByProjectIdAndStatus(1L, ReviewStatus.APPROVED))
+        when(businessRuleRepository.findByProjectId(1L))
                 .thenReturn(List.of(approved));
         TestPlan plan = new TestPlan();
         plan.setId(20L);
@@ -643,6 +949,35 @@ class GenerationContextBuilderTest {
                         "createUser",
                         "userService",
                         "UserService")));
+    }
+
+    private AnalysisResultDto analysisWithServiceSource(String source) {
+        AnalysisResultDto base = analysis();
+        JavaClassDto previous = base.classes().get(1);
+        JavaClassDto service = new JavaClassDto(previous.id(), previous.packageName(), previous.className(),
+                previous.qualifiedName(), previous.classType(), previous.filePath(), source,
+                previous.annotations(), previous.methods());
+        return new AnalysisResultDto(base.projectId(), base.projectName(), base.status(), base.totalClasses(),
+                base.totalMethods(), base.totalEndpoints(), base.totalRelations(), base.totalControllerServiceRelations(),
+                base.existingTestFiles(), base.totalProductionFiles(), base.parsedProductionFiles(),
+                base.failedParseFiles(), base.failedParseFilePaths(), List.of(base.classes().get(0), service),
+                base.relations(), base.controllerServiceRelations());
+    }
+
+    private void stubApprovedUnitTestCase(Long methodId) {
+        when(businessRuleRepository.findByProjectId(1L))
+                .thenReturn(List.of(ruleEntity(7L, methodId, ReviewStatus.APPROVED)));
+        when(testPlanRepository.findByProjectId(1L))
+                .thenReturn(List.of(testPlan(20L, 7L, "TP-001")));
+        when(testPlanCoveredRuleRepository.findByTestPlanIdIn(List.of(20L)))
+                .thenReturn(List.of(coveredRule(20L, 7L)));
+        TestCase testCase = new TestCase();
+        testCase.setId(30L);
+        testCase.setTestPlanId(20L);
+        testCase.setCaseCode("TC-001");
+        testCase.setPriority(Priority.HIGH);
+        testCase.setStatus(ReviewStatus.APPROVED);
+        when(testCaseRepository.findByTestPlanId(20L)).thenReturn(List.of(testCase));
     }
 
     private AnalysisResultDto analysisWithServiceMethods(int count) {
