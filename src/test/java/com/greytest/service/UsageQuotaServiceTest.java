@@ -24,6 +24,18 @@ import com.greytest.entity.enums.ActivityAction;
 
 class UsageQuotaServiceTest {
 
+    @Test
+    void quotaPreflightDoesNotAcquireAWriteLockWhenTheQuotaIsMissing() {
+        UsageQuotaRepository repository = mock(UsageQuotaRepository.class);
+        when(repository.findByUserId(7L)).thenReturn(Optional.empty());
+        UsageQuotaService service = new UsageQuotaService(repository, null, 2, 300, AUGUST, "real");
+
+        service.checkQuotaAvailable(7L);
+
+        org.mockito.Mockito.verify(repository).findByUserId(7L);
+        org.mockito.Mockito.verify(repository, org.mockito.Mockito.never()).findByUserIdForUpdate(any());
+    }
+
     private static final Clock AUGUST = Clock.fixed(Instant.parse("2026-08-21T00:00:00Z"), ZoneOffset.UTC);
 
     @Test
@@ -75,6 +87,18 @@ class UsageQuotaServiceTest {
     }
 
     @Test
+    void consumesSpecifiedNumberOfUnitsPerCall() {
+        AtomicReference<UsageQuota> stored = new AtomicReference<>();
+        UsageQuotaRepository repository = repository(stored);
+        UsageQuotaService service = new UsageQuotaService(repository, 20, AUGUST);
+
+        UsageQuota quota = service.consumeLlmCall(7L, 11L, 8, java.util.Map.of("prompt", "unit-test"));
+
+        assertThat(quota.getQuotaUsed()).isEqualTo(8);
+        assertThat(stored.get().getQuotaUsed()).isEqualTo(8);
+    }
+
+    @Test
     void unlimitedQuotaAllowsCallsForRealProvider() {
         UsageQuota unlimited = new UsageQuota();
         unlimited.setUserId(7L);
@@ -116,8 +140,36 @@ class UsageQuotaServiceTest {
                 .hasMessageContaining("âm");
     }
 
+    @Test
+    void checkQuotaAvailablePassesWhenUnderLimit() {
+        UsageQuota finite = new UsageQuota();
+        finite.setUserId(7L);
+        finite.setQuotaLimit(2);
+        finite.setQuotaUsed(1);
+        finite.setPeriodStart(LocalDate.of(2026, 8, 1));
+        AtomicReference<UsageQuota> stored = new AtomicReference<>(finite);
+        UsageQuotaService service = new UsageQuotaService(repository(stored), null, 2, 300, AUGUST, "real");
+
+        service.checkQuotaAvailable(7L);
+    }
+
+    @Test
+    void checkQuotaAvailableThrowsWhenExceeded() {
+        UsageQuota finite = new UsageQuota();
+        finite.setUserId(7L);
+        finite.setQuotaLimit(2);
+        finite.setQuotaUsed(2);
+        finite.setPeriodStart(LocalDate.of(2026, 8, 1));
+        AtomicReference<UsageQuota> stored = new AtomicReference<>(finite);
+        UsageQuotaService service = new UsageQuotaService(repository(stored), null, 2, 300, AUGUST, "real");
+
+        assertThatThrownBy(() -> service.checkQuotaAvailable(7L))
+                .isInstanceOf(UsageQuotaExceededException.class);
+    }
+
     private UsageQuotaRepository repository(AtomicReference<UsageQuota> stored) {
         UsageQuotaRepository repository = mock(UsageQuotaRepository.class);
+        when(repository.findByUserId(any())).thenAnswer(invocation -> Optional.ofNullable(stored.get()));
         when(repository.findByUserIdForUpdate(any())).thenAnswer(invocation -> Optional.ofNullable(stored.get()));
         when(repository.save(any())).thenAnswer(invocation -> {
             UsageQuota quota = invocation.getArgument(0);

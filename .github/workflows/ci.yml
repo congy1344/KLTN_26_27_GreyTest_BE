@@ -1,0 +1,53 @@
+name: GreyTest Backend CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build-and-test:
+    name: Build & Test (Java 17 / Maven)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_DB: greytest
+          POSTGRES_USER: greytest
+          POSTGRES_PASSWORD: greytest_password
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:5433/greytest
+      SPRING_DATASOURCE_USERNAME: greytest
+      SPRING_DATASOURCE_PASSWORD: greytest_password
+      GREYTEST_AUTH_TOKEN_SECRET: test-only-token-secret-at-least-32-bytes
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Grant Execute Permission for Maven Wrapper
+        run: chmod +x ./mvnw || true
+
+      - name: Run Tests
+        run: mvn test
+
+      - name: Package Application JAR
+        run: mvn package -DskipTests

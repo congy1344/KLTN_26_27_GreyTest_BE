@@ -8,6 +8,7 @@ import static org.mockito.Mockito.when;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -37,6 +38,7 @@ import com.greytest.dto.agent.GenerationResponseDtos.UnitTestResponseDto;
 import com.greytest.entity.Project;
 import com.greytest.repository.ProjectRepository;
 import com.greytest.service.UsageQuotaService;
+import com.greytest.service.GenerationJobContext;
 
 import jakarta.validation.Validation;
 import jakarta.validation.Validator;
@@ -48,6 +50,57 @@ class AgentGatewayTest {
     private final PromptManager promptManager = new PromptManager(objectMapper);
     private final GenerationResponseParser parser = new GenerationResponseParser(objectMapper, validator);
     private final MockLlmClient mockLlmClient = new MockLlmClient();
+
+    @Test
+    void stopsWithoutRetryWhenSourceCannotSupportAUnitTest(@TempDir Path tempDir) throws Exception {
+        for (String reason : List.of("MISSING_SOURCE", "UNSUPPORTED_BEHAVIOR")) {
+            GenerationContextBuilder contextBuilder = mock(GenerationContextBuilder.class);
+            when(contextBuilder.buildUnitTestContext(1L)).thenReturn(unitTestContext());
+            LlmClient client = mock(LlmClient.class);
+            String response = objectMapper.writeValueAsString(Map.of("generation_error", Map.of(
+                    "case_id", 40L, "reason", reason,
+                    "details", "TC-001: source does not establish the requested validation or its exception type.")));
+            when(client.complete(org.mockito.ArgumentMatchers.anyString(),
+                    org.mockito.ArgumentMatchers.any(LlmRequestOptions.class))).thenReturn(response);
+            AIAgentService service = new AIAgentService(contextBuilder, promptManager, client, parser,
+                    new AiContextLogService(objectMapper, tempDir.toString()));
+
+            assertThatThrownBy(() -> service.generateUnitTests(1L))
+                    .isInstanceOf(LlmResponseException.class)
+                    .hasMessageContaining("case_id=40").hasMessageContaining(reason)
+                    .hasMessageContaining("TC-001").hasMessageContaining("exception type")
+                    .satisfies(error -> assertThat(((LlmResponseException) error).isRetryable()).isFalse());
+            verify(client, org.mockito.Mockito.times(1)).complete(org.mockito.ArgumentMatchers.anyString(),
+                    org.mockito.ArgumentMatchers.any(LlmRequestOptions.class));
+        }
+    }
+
+    @Test
+    void rejectsIncompleteUnitTestGenerationErrors() throws Exception {
+        for (Map<String, Object> error : List.of(
+                Map.<String, Object>of("case_id", 40L, "reason", "MISSING_SOURCE"),
+                Map.<String, Object>of("case_id", "unknown", "reason", "MISSING_SOURCE", "details", "Missing DTO"),
+                Map.<String, Object>of("case_id", 40L, "reason", "GUESSED", "details", "Invent a fixture"))) {
+            String response = objectMapper.writeValueAsString(Map.of("generation_error", error));
+
+            assertThatThrownBy(() -> parser.parse(response, UnitTestResponseDto.class))
+                    .isInstanceOf(LlmResponseException.class)
+                    .hasMessageContaining("generation_error").hasMessageContaining("schema")
+                    .satisfies(failure -> assertThat(((LlmResponseException) failure).isRetryable()).isFalse());
+        }
+    }
+
+    @Test
+    void rejectsUnitTestsMixedWithADeclaredGenerationError() throws Exception {
+        String response = objectMapper.writeValueAsString(Map.of(
+                "unit_tests", List.of(generatedUnitTest("@org.junit.jupiter.api.Test void testCase() {}")),
+                "generation_error", Map.of("case_id", 40L, "reason", "MISSING_SOURCE", "details", "Missing DTO")));
+
+        assertThatThrownBy(() -> parser.parse(response, UnitTestResponseDto.class))
+                .isInstanceOf(LlmResponseException.class)
+                .hasMessageContaining("generation_error").hasMessageContaining("unit_tests")
+                .satisfies(failure -> assertThat(((LlmResponseException) failure).isRetryable()).isFalse());
+    }
 
     @Test
     void promptAndMockClientRunWithoutApiKey() {
@@ -90,8 +143,46 @@ class AgentGatewayTest {
                 "never call a method or getter on a fixture field before assigning it",
                 "Match test dependency wiring to the production class",
                 "verifyNoInteractions",
+                "Do not mock static helpers, mapping helpers, `Page`, or `Pageable`",
+                "new PageImpl<>(...)",
+                "new BigDecimal(\"10.00\")",
+                "StreamObserver<T>",
+                "Treat project build files and detected dependency metadata as authoritative",
+                "RabbitMQConstants",
+                "AmqpRejectAndDontRequeueException",
+                "@Builder",
+                "create it with the declared builder",
+                "every other argument in that same invocation MUST also be a matcher",
+                "`any(Type.class)` does not match `null`",
+                "executeWithoutResult",
+                "doAnswer",
+                "Mockito.reset",
                 "check technical consistency");
         assertThat(prompt).doesNotContain("Treat production source and existing test source in context as authoritative");
+    }
+
+    @Test
+    void staleApprovedMethodStopsUnitTestGenerationBeforeLlmCall() {
+        UnitTestContextDto base = unitTestContext();
+        ClassContextDto previous = base.classes().get(0);
+        ClassContextDto current = new ClassContextDto(previous.id(), previous.packageName(),
+                previous.className(), previous.qualifiedName(), previous.classType(), previous.filePath(),
+                "package demo; class Service { public void cancel(Long id) {} }",
+                previous.annotations(), previous.methods());
+        UnitTestContextDto stale = new UnitTestContextDto(base.project(), base.analysis(), List.of(current),
+                base.approvedBusinessRules(), base.approvedTestPlans(), base.approvedTestCases(),
+                base.existingApprovedTestCases(), base.previousGeneratedUnitTests(), base.existingTests());
+        GenerationContextBuilder contextBuilder = mock(GenerationContextBuilder.class);
+        LlmClient client = mock(LlmClient.class);
+        when(contextBuilder.buildUnitTestContext(1L, java.util.Set.of(40L))).thenReturn(stale);
+        AIAgentService service = new AIAgentService(contextBuilder, promptManager, client, parser,
+                mock(AiContextLogService.class));
+
+        assertThatThrownBy(() -> service.generateUnitTests(1L, java.util.Set.of(40L)))
+                .isInstanceOf(LlmResponseException.class)
+                .hasMessageContaining("approved Test Case")
+                .hasMessageContaining("findReadyToNotify");
+        org.mockito.Mockito.verifyNoInteractions(client);
     }
 
     @Test
@@ -316,7 +407,14 @@ class AgentGatewayTest {
                 contextBuilder, promptManager, client, parser,
                 new AiContextLogService(objectMapper, tempDir.toString()));
 
-        UnitTestResponseDto response = service.generateUnitTests(1L, java.util.Set.of(40L));
+        List<String> progressLogs = new ArrayList<>();
+        GenerationJobContext.bind(null, progressLogs::add);
+        UnitTestResponseDto response;
+        try {
+            response = service.generateUnitTests(1L, java.util.Set.of(40L));
+        } finally {
+            GenerationJobContext.clear();
+        }
 
         assertThat(response.unitTests()).singleElement().satisfies(test ->
                 assertThat(test.sourceCode()).contains("IllegalArgumentException", "findReadyToNotify(null)")
@@ -327,6 +425,88 @@ class AgentGatewayTest {
         assertThat(prompts.getAllValues().get(1)).contains(
                 "Unit Test semantic correction", "Fix only the reported technical errors",
                 "preserve approved test inputs, preconditions, expected results and business assertions");
+        assertThat(progressLogs).anySatisfy(message -> assertThat(message).contains("Unit Test", "2/2"));
+    }
+
+    @Test
+    void aiAgentRetriesTemporaryProviderFailureForBusinessRules(@TempDir Path tempDir) {
+        GenerationContextBuilder contextBuilder = mock(GenerationContextBuilder.class);
+        when(contextBuilder.buildBusinessRuleGenerationContext(1L)).thenReturn(context());
+        LlmClient client = mock(LlmClient.class);
+        when(client.complete(org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.any(LlmRequestOptions.class)))
+                .thenThrow(new LlmResponseException("Provider HTTP 503", true))
+                .thenReturn("{\"rules\":[]}");
+        AIAgentService service = new AIAgentService(contextBuilder, promptManager, client, parser,
+                new AiContextLogService(objectMapper, tempDir.toString()));
+
+        List<String> progressLogs = new ArrayList<>();
+        GenerationJobContext.bind(null, progressLogs::add);
+        BusinessRuleResponseDto response;
+        try {
+            response = service.generateBusinessRules(1L);
+        } finally {
+            GenerationJobContext.clear();
+        }
+
+        assertThat(response.rules()).isEmpty();
+        verify(client, org.mockito.Mockito.times(2)).complete(
+                org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any(LlmRequestOptions.class));
+        assertThat(progressLogs).isNotEmpty();
+    }
+
+    @Test
+    void aiAgentDoesNotChargeAnotherAttemptBeforeLongProviderCooldown(@TempDir Path tempDir) {
+        GenerationContextBuilder contextBuilder = mock(GenerationContextBuilder.class);
+        when(contextBuilder.buildBusinessRuleGenerationContext(1L)).thenReturn(context());
+        Project project = new Project();
+        project.setId(1L);
+        project.setOwnerUserId(42L);
+        ProjectRepository projects = mock(ProjectRepository.class);
+        when(projects.findById(1L)).thenReturn(java.util.Optional.of(project));
+        UsageQuotaService quota = mock(UsageQuotaService.class);
+        LlmClient client = mock(LlmClient.class);
+        when(client.complete(org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.any(LlmRequestOptions.class)))
+                .thenThrow(new LlmResponseException("Gemini HTTP 429", true, 600_000L));
+        AIAgentService service = new AIAgentService(contextBuilder, promptManager, client, parser,
+                new AiContextLogService(objectMapper, tempDir.toString()), projects, quota, null);
+
+        assertThatThrownBy(() -> service.generateBusinessRules(1L))
+                .isInstanceOf(LlmResponseException.class)
+                .hasMessageContaining("429");
+
+        verify(client, org.mockito.Mockito.times(1)).complete(
+                org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any(LlmRequestOptions.class));
+        verify(quota, org.mockito.Mockito.times(1)).checkQuotaAvailable(42L);
+        verify(quota, org.mockito.Mockito.never()).consumeLlmCall(
+                org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.anyLong(),
+                org.mockito.ArgumentMatchers.anyInt(), org.mockito.ArgumentMatchers.anyMap());
+    }
+
+    @Test
+    void aiAgentRetriesUnitTestWhenSemanticValidatorFindsJavaAssertion(@TempDir Path tempDir) throws Exception {
+        GenerationContextBuilder contextBuilder = mock(GenerationContextBuilder.class);
+        when(contextBuilder.buildUnitTestContext(1L, java.util.Set.of(40L))).thenReturn(unitTestContext());
+        LlmClient client = mock(LlmClient.class);
+        String invalid = objectMapper.writeValueAsString(new UnitTestResponseDto(List.of(
+                generatedUnitTest("@org.junit.jupiter.api.Test public void testCase(){ assert true; }"))));
+        String valid = objectMapper.writeValueAsString(new UnitTestResponseDto(List.of(
+                generatedUnitTest("@org.junit.jupiter.api.Test public void testCase(){ org.junit.jupiter.api.Assertions.assertTrue(true); }"))));
+        when(client.complete(org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.any(LlmRequestOptions.class))).thenReturn(invalid, valid);
+        AIAgentService service = new AIAgentService(
+                contextBuilder, promptManager, client, parser,
+                new AiContextLogService(objectMapper, tempDir.toString()));
+
+        UnitTestResponseDto response = service.generateUnitTests(1L, java.util.Set.of(40L));
+
+        assertThat(response.unitTests()).singleElement()
+                .satisfies(test -> assertThat(test.sourceCode()).contains("assertTrue(true)"));
+        var prompts = org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(client, org.mockito.Mockito.times(2)).complete(
+                prompts.capture(), org.mockito.ArgumentMatchers.any(LlmRequestOptions.class));
+        assertThat(prompts.getAllValues().get(1)).contains("Do not use the Java assert statement");
     }
 
     @Test
@@ -349,6 +529,7 @@ class AgentGatewayTest {
         verify(quota).consumeLlmCall(
                 org.mockito.ArgumentMatchers.eq(42L),
                 org.mockito.ArgumentMatchers.eq(1L),
+                org.mockito.ArgumentMatchers.anyInt(),
                 org.mockito.ArgumentMatchers.argThat(metadata -> "business-rule".equals(metadata.get("prompt"))));
     }
 
@@ -388,7 +569,38 @@ class AgentGatewayTest {
         verify(quota, org.mockito.Mockito.times(1)).consumeLlmCall(
                 org.mockito.ArgumentMatchers.eq(42L),
                 org.mockito.ArgumentMatchers.eq(1L),
+                org.mockito.ArgumentMatchers.anyInt(),
                 org.mockito.ArgumentMatchers.anyMap());
+    }
+
+    @Test
+    void aiAgentEvictsInvalidCachedUnitTestAndCallsGatewayAgain(@TempDir Path tempDir) throws Exception {
+        GenerationContextBuilder contextBuilder = mock(GenerationContextBuilder.class);
+        when(contextBuilder.buildUnitTestContext(1L, java.util.Set.of(40L))).thenReturn(unitTestContext());
+        LlmClient client = mock(LlmClient.class);
+        String invalid = objectMapper.writeValueAsString(new UnitTestResponseDto(List.of(
+                generatedUnitTest("@org.junit.jupiter.api.Test public void testCase(){ assert true; }"))));
+        String valid = objectMapper.writeValueAsString(new UnitTestResponseDto(List.of(
+                generatedUnitTest("@org.junit.jupiter.api.Test public void testCase(){ org.junit.jupiter.api.Assertions.assertTrue(true); }"))));
+        when(client.complete(org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.any(LlmRequestOptions.class))).thenReturn(valid);
+        LlmResponseCache cache = new LlmResponseCache("mock", "", "mock-model", 20);
+        AIAgentService service = new AIAgentService(
+                contextBuilder, promptManager, client, parser,
+                new AiContextLogService(objectMapper, tempDir.toString()),
+                mock(com.greytest.repository.ProjectRepository.class),
+                mock(com.greytest.service.UsageQuotaService.class), cache);
+        String prompt = promptManager.render("unit-test", Map.of("context_json", unitTestContext()))
+                + "\n\n" + service.languageInstruction();
+        cache.put(prompt, invalid);
+
+        UnitTestResponseDto response = service.generateUnitTests(1L, java.util.Set.of(40L));
+
+        assertThat(response.unitTests()).singleElement()
+                .satisfies(test -> assertThat(test.sourceCode()).contains("assertTrue(true)"));
+        verify(client).complete(org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.any(LlmRequestOptions.class));
+        assertThat(cache.get(prompt)).isEmpty();
     }
 
     @Test

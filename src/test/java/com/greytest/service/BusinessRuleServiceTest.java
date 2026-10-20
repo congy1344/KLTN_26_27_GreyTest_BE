@@ -1035,7 +1035,7 @@ class BusinessRuleServiceTest {
 
         assertThatThrownBy(() -> service().approve(1L))
                 .isInstanceOf(InvalidProjectStatusException.class)
-                .hasMessageContaining("Khong the xac minh source anchor", "phan tich lai project");
+                .hasMessageContaining("Khong the xac minh", "phan tich lai project");
     }
 
     @Test

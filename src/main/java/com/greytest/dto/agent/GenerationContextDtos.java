@@ -49,7 +49,14 @@ public final class GenerationContextDtos {
             String filePath,
             String sourceCode,
             List<RelevantAnnotationDto> annotations,
-            List<MethodContextDto> methods) {
+            List<MethodContextDto> methods,
+            @JsonIgnore String validationSourceCode) {
+        public ClassContextDto(Long id, String packageName, String className, String qualifiedName,
+                String classType, String filePath, String sourceCode,
+                List<RelevantAnnotationDto> annotations, List<MethodContextDto> methods) {
+            this(id, packageName, className, qualifiedName, classType, filePath, sourceCode,
+                    annotations, methods, sourceCode);
+        }
     }
 
     public record MethodContextDto(

@@ -279,7 +279,7 @@ public class UnitTestFileService {
                 call %%GRADLE_COMMAND%% --init-script "greytest-jacoco.init.gradle" clean test %1$s jacocoTestReport %%*
                 if errorlevel 1 (
                   echo [GreyTest] ERROR: Gradle project or generated tests could not be compiled or executed.
-                  echo [GreyTest] Luu y: Neu thu muc du an chua tieng Viet co dau (vi du: mau, sua), hay dung junction ASCII hoac doi ten thu muc khong dau.
+                  echo [GreyTest] Luu y: Neu thu muc du an chua tieng Viet co dau [vi du: mau, sua], hay dung junction ASCII hoac doi ten thu muc khong dau.
                   exit /b 1
                 )
 

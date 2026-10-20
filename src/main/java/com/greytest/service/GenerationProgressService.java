@@ -60,7 +60,7 @@ public class GenerationProgressService {
             Long projectId,
             GenerationProgressStage stage,
             List<String> stepLabels,
-            int completedSteps,
+            java.util.Set<Integer> completedStepIndexes,
             String message) {
         cleanupExpired();
         ProgressKey requestedKey = new ProgressKey(projectId, stage);
@@ -73,15 +73,36 @@ public class GenerationProgressService {
                     "Một tác vụ sinh AI đang chạy cho project này. Vui lòng chờ hoàn tất.");
         }
         states.compute(requestedKey, (key, current) -> {
-            ProgressState state = new ProgressState(stage, stepLabels, message, clock.instant());
-            state.completedSteps = Math.min(completedSteps, state.totalSteps);
+            ProgressState state = new ProgressState(
+                    stage, stepLabels, message, clock.instant(), GenerationProgressStatus.RUNNING, false);
+            if (completedStepIndexes != null) {
+                for (int idx : completedStepIndexes) {
+                    if (idx >= 0 && idx < state.stepStatuses.size()) {
+                        state.stepStatuses.set(idx, GenerationProgressStepStatus.COMPLETED);
+                    }
+                }
+                state.completedSteps = (int) state.stepStatuses.stream()
+                        .filter(s -> s == GenerationProgressStepStatus.COMPLETED).count();
+            }
             if (current != null && !current.logs.isEmpty()) {
                 // Giữ lại các log cũ của những batch trước đó để hiển thị liền mạch
                 List<GenerationProgressLogDto> oldLogs = new ArrayList<>(current.logs);
                 state.logs.addAll(0, oldLogs);
+                while (state.logs.size() > MAX_LOGS) state.logs.remove(0);
             }
             return state;
         });
+    }
+
+    public synchronized void resume(
+            Long projectId,
+            GenerationProgressStage stage,
+            List<String> stepLabels,
+            int completedSteps,
+            String message) {
+        java.util.Set<Integer> completedSet = java.util.stream.IntStream.range(0, completedSteps)
+                .boxed().collect(java.util.stream.Collectors.toSet());
+        resume(projectId, stage, stepLabels, completedSet, message);
     }
 
     public synchronized void start(Long projectId, GenerationProgressStage stage, int totalSteps, String message) {
@@ -97,8 +118,24 @@ public class GenerationProgressService {
             throw new GenerationInProgressException(
                     "Một tác vụ sinh AI đang chạy cho project này. Vui lòng chờ hoàn tất.");
         }
-        states.put(new ProgressKey(projectId, stage),
+        ProgressKey key = new ProgressKey(projectId, stage);
+        states.put(key,
                 new ProgressState(stage, List.of("Đang chờ worker xử lý"), message, clock.instant(), GenerationProgressStatus.QUEUED));
+    }
+
+    public void setStepStatus(Long projectId, GenerationProgressStage stage, int stepIndex, GenerationProgressStepStatus status) {
+        ProgressState state = states.get(new ProgressKey(projectId, stage));
+        if (state != null) state.setStepStatus(stepIndex, status, clock.instant());
+    }
+
+    public void advanceStep(Long projectId, GenerationProgressStage stage, int stepIndex, String message) {
+        ProgressState state = states.get(new ProgressKey(projectId, stage));
+        if (state != null) state.advanceStep(stepIndex, message, clock.instant());
+    }
+
+    public void failStep(Long projectId, GenerationProgressStage stage, int stepIndex, String errorMessage) {
+        ProgressState state = states.get(new ProgressKey(projectId, stage));
+        if (state != null) state.failStep(stepIndex, errorMessage, clock.instant());
     }
 
     public void advance(Long projectId, GenerationProgressStage stage, String message) {
@@ -182,14 +219,17 @@ public class GenerationProgressService {
         private final GenerationProgressStage stage;
         private final int totalSteps;
         private final List<String> stepLabels;
+        private final List<GenerationProgressStepStatus> stepStatuses = new ArrayList<>();
+        private final List<String> stepErrors = new ArrayList<>();
         private final List<GenerationProgressLogDto> logs = new ArrayList<>();
+        private final boolean autoPromoteFirstWaitingStep;
         private GenerationProgressStatus status = GenerationProgressStatus.RUNNING;
         private int completedSteps;
         private String failureMessage;
         private Instant updatedAt;
 
         private ProgressState(GenerationProgressStage stage, List<String> stepLabels, String message, Instant now) {
-            this(stage, stepLabels, message, now, GenerationProgressStatus.RUNNING);
+            this(stage, stepLabels, message, now, GenerationProgressStatus.RUNNING, true);
         }
 
         private ProgressState(
@@ -198,27 +238,91 @@ public class GenerationProgressService {
                 String message,
                 Instant now,
                 GenerationProgressStatus initialStatus) {
+            this(stage, customStepLabels, message, now, initialStatus, true);
+        }
+
+        private ProgressState(
+                GenerationProgressStage stage,
+                List<String> customStepLabels,
+                String message,
+                Instant now,
+                GenerationProgressStatus initialStatus,
+                boolean autoPromoteFirstWaitingStep) {
             this.stage = stage;
+            this.autoPromoteFirstWaitingStep = autoPromoteFirstWaitingStep;
             this.stepLabels = initialStatus == GenerationProgressStatus.QUEUED
                     ? List.of("Đang chờ worker xử lý")
                     : (customStepLabels != null && !customStepLabels.isEmpty()
                             ? List.copyOf(customStepLabels)
                             : buildStepLabels(stage, 1));
             this.totalSteps = this.stepLabels.size();
+            for (int i = 0; i < this.totalSteps; i++) {
+                this.stepStatuses.add(GenerationProgressStepStatus.WAITING);
+                this.stepErrors.add(null);
+            }
             this.status = initialStatus;
             this.updatedAt = now;
             addLog(message, now);
         }
 
+        private synchronized void toQueued(String message, Instant now) {
+            this.status = GenerationProgressStatus.QUEUED;
+            this.updatedAt = now;
+            addLog(message, now);
+        }
+
+        private synchronized void setStepStatus(int stepIndex, GenerationProgressStepStatus newStatus, Instant now) {
+            if (status != GenerationProgressStatus.RUNNING && status != GenerationProgressStatus.QUEUED) return;
+            if (stepIndex >= 0 && stepIndex < stepStatuses.size()) {
+                stepStatuses.set(stepIndex, newStatus);
+                if (newStatus == GenerationProgressStepStatus.COMPLETED) {
+                    completedSteps = (int) stepStatuses.stream().filter(s -> s == GenerationProgressStepStatus.COMPLETED).count();
+                }
+                updatedAt = now;
+            }
+        }
+
+        private synchronized void advanceStep(int stepIndex, String message, Instant now) {
+            if (status != GenerationProgressStatus.RUNNING && status != GenerationProgressStatus.QUEUED) return;
+            status = GenerationProgressStatus.RUNNING;
+            if (stepIndex >= 0 && stepIndex < stepStatuses.size()) {
+                stepStatuses.set(stepIndex, GenerationProgressStepStatus.COMPLETED);
+            }
+            completedSteps = (int) stepStatuses.stream().filter(s -> s == GenerationProgressStepStatus.COMPLETED).count();
+            updatedAt = now;
+            addLog(message, now);
+        }
+
+        private synchronized void failStep(int stepIndex, String errorMessage, Instant now) {
+            if (stepIndex >= 0 && stepIndex < stepStatuses.size()) {
+                stepStatuses.set(stepIndex, GenerationProgressStepStatus.FAILED);
+                stepErrors.set(stepIndex, errorMessage);
+            }
+            updatedAt = now;
+        }
+
         private synchronized void advance(String message, Instant now) {
             if (status != GenerationProgressStatus.RUNNING) return;
-            completedSteps = Math.min(completedSteps + 1, totalSteps);
+            int targetIndex = -1;
+            for (int i = 0; i < stepStatuses.size(); i++) {
+                if (stepStatuses.get(i) != GenerationProgressStepStatus.COMPLETED) {
+                    targetIndex = i;
+                    break;
+                }
+            }
+            if (targetIndex >= 0) {
+                stepStatuses.set(targetIndex, GenerationProgressStepStatus.COMPLETED);
+            }
+            completedSteps = (int) stepStatuses.stream().filter(s -> s == GenerationProgressStepStatus.COMPLETED).count();
             updatedAt = now;
             addLog(message, now);
         }
 
         private synchronized void complete(String message, Instant now) {
             completedSteps = totalSteps;
+            for (int i = 0; i < stepStatuses.size(); i++) {
+                stepStatuses.set(i, GenerationProgressStepStatus.COMPLETED);
+            }
             status = GenerationProgressStatus.COMPLETED;
             updatedAt = now;
             addLog(message, now);
@@ -233,6 +337,25 @@ public class GenerationProgressService {
             failureMessage = message == null || message.isBlank()
                     ? "Tác vụ thất bại."
                     : safeMessage(message);
+            boolean markedFailure = false;
+            for (int i = 0; i < stepStatuses.size(); i++) {
+                if (stepStatuses.get(i) == GenerationProgressStepStatus.RUNNING) {
+                    stepStatuses.set(i, GenerationProgressStepStatus.FAILED);
+                    stepErrors.set(i, failureMessage);
+                    markedFailure = true;
+                } else if (stepStatuses.get(i) == GenerationProgressStepStatus.FAILED) {
+                    markedFailure = true;
+                }
+            }
+            if (!markedFailure) {
+                for (int i = 0; i < stepStatuses.size(); i++) {
+                    if (stepStatuses.get(i) != GenerationProgressStepStatus.COMPLETED) {
+                        stepStatuses.set(i, GenerationProgressStepStatus.FAILED);
+                        stepErrors.set(i, failureMessage);
+                        break;
+                    }
+                }
+            }
             updatedAt = now;
             addLog(message, now);
         }
@@ -281,19 +404,24 @@ public class GenerationProgressService {
 
         private List<GenerationProgressStepDto> stepSnapshots() {
             List<GenerationProgressStepDto> snapshots = new ArrayList<>();
+            boolean hasRunning = stepStatuses.stream().anyMatch(s -> s == GenerationProgressStepStatus.RUNNING);
+            int firstWaitingIndex = stepStatuses.indexOf(GenerationProgressStepStatus.WAITING);
+
             for (int index = 0; index < totalSteps; index++) {
-                GenerationProgressStepStatus stepStatus;
-                String errorMessage = null;
-                if (index < completedSteps || status == GenerationProgressStatus.COMPLETED) {
+                GenerationProgressStepStatus stepStatus = index < stepStatuses.size()
+                        ? stepStatuses.get(index)
+                        : GenerationProgressStepStatus.WAITING;
+                String errorMessage = index < stepErrors.size() ? stepErrors.get(index) : null;
+
+                if (status == GenerationProgressStatus.COMPLETED) {
                     stepStatus = GenerationProgressStepStatus.COMPLETED;
-                } else if (status == GenerationProgressStatus.FAILED && index == completedSteps) {
-                    stepStatus = GenerationProgressStepStatus.FAILED;
-                    errorMessage = failureMessage;
-                } else if (status == GenerationProgressStatus.RUNNING && index == completedSteps) {
+                } else if (status == GenerationProgressStatus.RUNNING && autoPromoteFirstWaitingStep
+                        && !hasRunning && index == firstWaitingIndex) {
                     stepStatus = GenerationProgressStepStatus.RUNNING;
-                } else {
-                    stepStatus = GenerationProgressStepStatus.WAITING;
+                } else if (status == GenerationProgressStatus.FAILED && errorMessage != null) {
+                    stepStatus = GenerationProgressStepStatus.FAILED;
                 }
+
                 int stepPercent = stepStatus == GenerationProgressStepStatus.COMPLETED ? 100 : 0;
                 String stepLabel = status == GenerationProgressStatus.FAILED
                         && stepLabels.size() == 1
@@ -325,7 +453,7 @@ public class GenerationProgressService {
         private void addLog(String message, Instant now) {
             if (message == null || message.isBlank()) return;
             String safeMessage = safeMessage(message);
-            if (logs.size() == MAX_LOGS) logs.remove(0);
+            if (logs.size() >= MAX_LOGS) logs.remove(0);
             logs.add(new GenerationProgressLogDto(now, safeMessage));
         }
 

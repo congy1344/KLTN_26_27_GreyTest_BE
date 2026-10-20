@@ -19,6 +19,514 @@ import com.greytest.service.agent.ProjectJavaVersionDetector.TestFramework;
 class GeneratedUnitTestSemanticValidatorTest {
 
     @Test
+    void allowsValidFixtureWhenAnUnselectedOverloadThrowsUnsupportedOperationException() {
+        String source = """
+                class ServiceTest {
+                    Service service;
+                    @org.junit.jupiter.api.Test void testCase() {
+                        Object settings = newSettings(1);
+                        service.send(settings);
+                        org.junit.jupiter.api.Assertions.assertNotNull(settings);
+                    }
+                    private Object newSettings(int index) { return new Object(); }
+                    private Object newSettings(String missing) { throw new UnsupportedOperationException(); }
+                }
+                """;
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(
+                context("send", "public void send(Object settings) {}"), response(source))).isEmpty();
+    }
+
+    @Test
+    void rejectsFixtureHelpersThatUnconditionallyThrowUnsupportedOperationException() {
+        String source = """
+                class ServiceTest {
+                    Service service;
+                    @org.junit.jupiter.api.Test void testCase() {
+                        Object settings = newSettings();
+                        service.send(settings);
+                        org.junit.jupiter.api.Assertions.assertNotNull(settings);
+                    }
+                    private Object newSettings() {
+                        throw new UnsupportedOperationException("Production DTO API is unavailable");
+                    }
+                }
+                """;
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(
+                context("send", "public void send(Object settings) {}"), response(source)))
+                .hasValueSatisfying(message -> assertThat(message).contains("placeholder helper", "newSettings"));
+    }
+
+    @Test
+    void allowsUnsupportedOperationExceptionFromAProductionDependencyStub() {
+        String source = """
+                class ServiceTest {
+                    Service service;
+                    @org.junit.jupiter.api.Test void testCase() {
+                        org.mockito.Mockito.doThrow(new UnsupportedOperationException("dependency failure"))
+                            .when(repository).save();
+                        org.junit.jupiter.api.Assertions.assertThrows(UnsupportedOperationException.class,
+                            () -> service.send());
+                    }
+                }
+                """;
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(
+                context("send", "public void send() { repository.save(); }"), response(source))).isEmpty();
+    }
+
+    @Test
+    void rejectsReflectionAndAssertThrowsUsedAsEnumFixtures() {
+        String method = "public void send(Enum<?> event) {}";
+        var context = contextWithServiceSource("demo.Service", "send", method,
+                "package demo; class Service { " + method + " }");
+        for (String fixture : List.of(
+                "Enum event = org.junit.jupiter.api.Assertions.assertThrows(Exception.class, () -> {});",
+                "Enum<?> event = (Enum<?>) Class.forName(\"demo.Status\").getEnumConstants()[0];",
+                "Enum event; event = (Enum) Class.forName(\"demo.Status\").getField(\"READY\").get(null);",
+                "this.event = (Enum<?>) Class.forName(\"demo.Status\").getEnumConstants()[0];",
+                "service.send((Enum<?>) Class.forName(\"demo.Status\").getEnumConstants()[0]);")) {
+            String source = "class ServiceTest { Service service; Enum<?> event; @org.junit.jupiter.api.Test "
+                    + "void testCase() throws Exception { " + fixture + " } }";
+            assertThat(GeneratedUnitTestSemanticValidator.validate(context, response(source)))
+                    .as(fixture)
+                    .hasValueSatisfying(message -> assertThat(message).contains("Enum", "reflection", "assertThrows"));
+        }
+    }
+
+    @Test
+    void acceptsDeclaredEnumConstantAndNullWithoutRejectingExceptionAssertions() {
+        String method = "public void send(Enum<?> event) {}";
+        var base = contextWithServiceSource("demo.Service", "send", method,
+                "package demo; class Service { " + method + " }");
+        var status = new ClassContextDto(2L, "demo.enums", "Status", "demo.enums.Status", "ENUM",
+                "Status.java", "package demo.enums; enum Status { READY }", List.of(), List.of());
+        var context = new UnitTestContextDto(base.project(), base.analysis(),
+                List.of(base.classes().get(0), status), base.approvedBusinessRules(), base.approvedTestPlans(),
+                base.approvedTestCases(), base.existingApprovedTestCases(), base.previousGeneratedUnitTests(),
+                base.existingTests());
+        String source = "class ServiceTest { Service service; @org.junit.jupiter.api.Test void testCase() { "
+                + "Enum<?> event = demo.enums.Status.READY; service.send(event); "
+                + "org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class, "
+                + "() -> service.send(null)); } }";
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context, response(source))).isEmpty();
+    }
+
+    @Test
+    void acceptsEnumResultReturnedByService() {
+        String method = "public Enum<?> getStatus() { return null; }";
+        var context = contextWithServiceSource("demo.Service", "getStatus", method,
+                "package demo; class Service { " + method + " }");
+        String source = "class ServiceTest { Service service; @org.junit.jupiter.api.Test void testCase() { "
+                + "Enum<?> actual = service.getStatus(); org.junit.jupiter.api.Assertions.assertNull(actual); } }";
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context, response(source))).isEmpty();
+    }
+
+    @Test
+    void rejectsAtStartOfDayOnLocalDateTimeChain() {
+        String invalid = "class ServiceTest { @org.junit.jupiter.api.Test void testCase() { "
+                + "java.time.LocalTime.of(23, 59).atDate(java.time.LocalDate.now())"
+                + ".plusDays(1).atStartOfDay(); } }";
+        String valid = "class ServiceTest { @org.junit.jupiter.api.Test void testCase() { "
+                + "java.time.LocalDate.now().plusDays(1).atStartOfDay(); } }";
+        String convertedToDate = "class ServiceTest { @org.junit.jupiter.api.Test void testCase() { "
+                + "java.time.LocalDateTime.now().toLocalDate().atStartOfDay(); } }";
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(
+                context("testCase", "public void testCase() {}"), response(invalid)))
+                .hasValueSatisfying(message -> assertThat(message).contains("LocalDateTime", "atStartOfDay"));
+        assertThat(GeneratedUnitTestSemanticValidator.validate(
+                context("testCase", "public void testCase() {}"), response(valid))).isEmpty();
+        assertThat(GeneratedUnitTestSemanticValidator.validate(
+                context("testCase", "public void testCase() {}"), response(convertedToDate))).isEmpty();
+    }
+
+    @Test
+    void rejectsAtStartOfDayOnGetterDeclaredAsLocalDateTime() {
+        UnitTestContextDto base = context("testCase", "public void testCase() {}");
+        ClassContextDto appointment = new ClassContextDto(2L, "demo", "Appointment", "demo.Appointment",
+                "ENTITY", "Appointment.java",
+                "package demo; class Appointment { java.time.LocalDateTime cancelledAt; "
+                        + "public java.time.LocalDateTime getCancelledAt() { return cancelledAt; } }",
+                List.of(), List.of());
+        UnitTestContextDto context = new UnitTestContextDto(base.project(), base.analysis(),
+                List.of(base.classes().get(0), appointment), base.approvedBusinessRules(),
+                base.approvedTestPlans(), base.approvedTestCases(), base.existingApprovedTestCases(),
+                base.previousGeneratedUnitTests(), base.existingTests());
+        String generated = "package demo; class ServiceTest { @org.junit.jupiter.api.Test void testCase() { "
+                + "Appointment appointment = null; appointment.getCancelledAt().atStartOfDay(); } }";
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context, response(generated)))
+                .hasValueSatisfying(message -> assertThat(message).contains("LocalDateTime", "atStartOfDay"));
+    }
+
+    @Test
+    void acceptsApprovedNullCancelledTimestampDespiteProductionMutation() {
+        String method = "public Response updateStatus(Status status) { "
+                + "Response result = new Response(); if (status == Status.CANCELLED) "
+                + "result.setCancelledAt(java.time.LocalDateTime.now()); return result; }";
+        String invalid = "class ServiceTest { Service service; "
+                + "@org.junit.jupiter.api.Test void testCase() { "
+                + "Response result = service.updateStatus(Status.CANCELLED); "
+                + "org.junit.jupiter.api.Assertions.assertNull(result.getCancelledAt()); } }";
+        String valid = invalid.replace("assertNull", "assertNotNull");
+        UnitTestContextDto context = contextWithServiceSource("demo.Service", "updateStatus", method,
+                "package demo; class Service { " + method + " }");
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context, response(invalid)))
+                .isEmpty();
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context, response(valid))).isEmpty();
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context,
+                response(invalid.replace("service.updateStatus(Status.CANCELLED)",
+                        "service.updateStatus(Status.SCHEDULED)")))).isEmpty();
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context,
+                response(invalid.replace("result.getCancelledAt()", "original.getCancelledAt()")
+                        .replace("Response result =", "Response original = new Response(); Response result ="))))
+                .isEmpty();
+    }
+
+    @Test
+    void acceptsApprovedRepositoryFixturesWithoutForcingProductionSuccess() {
+        String method = "public Response getById(Long id) { return repository.findById(id)"
+                + ".orElseThrow(() -> new RuntimeException()); }";
+        String source = "@org.junit.jupiter.api.extension.ExtendWith(org.mockito.junit.jupiter.MockitoExtension.class) "
+                + "class ServiceTest { @org.mockito.Mock Repository repository; "
+                + "@org.mockito.InjectMocks Service service; @org.junit.jupiter.api.Test void testCase() { "
+                + "Response result = service.getById(5001L); "
+                + "org.junit.jupiter.api.Assertions.assertNotNull(result); } }";
+        String stubbed = source.replace("Response result =", "org.mockito.Mockito.when(repository.findById(5001L))"
+                + ".thenReturn(java.util.Optional.of(new Response())); Response result =");
+        String emptyStub = stubbed.replace("java.util.Optional.of(new Response())", "java.util.Optional.empty()");
+        String wrongIdStub = stubbed.replace("repository.findById(5001L)", "repository.findById(42L)");
+        String siblingStub = source.replace("@org.junit.jupiter.api.Test void testCase()",
+                "@org.junit.jupiter.api.Test void otherCase() { "
+                + "org.mockito.Mockito.when(repository.findById(5001L))"
+                + ".thenReturn(java.util.Optional.of(new Response())); } "
+                + "@org.junit.jupiter.api.Test void testCase()");
+        String lateStub = source.replace("org.junit.jupiter.api.Assertions.assertNotNull(result);",
+                "org.junit.jupiter.api.Assertions.assertNotNull(result); "
+                + "org.mockito.Mockito.when(repository.findById(5001L))"
+                + ".thenReturn(java.util.Optional.of(new Response()));");
+        String doReturnStubbed = source.replace("Response result =", "org.mockito.Mockito.doReturn("
+                + "java.util.Optional.of(new Response())).when(repository).findById(5001L); Response result =");
+        String localId = stubbed.replace("Response result = service.getById(5001L);",
+                "Long appointmentId = 5001L; Response result = service.getById(appointmentId);");
+        UnitTestContextDto context = contextWithServiceSource("demo.Service", "getById", method,
+                "package demo; class Service { Repository repository; " + method + " }");
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context, response(source)))
+                .isEmpty();
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context, response(emptyStub)))
+                .isEmpty();
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context, response(wrongIdStub)))
+                .isEmpty();
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context, response(siblingStub)))
+                .isEmpty();
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context, response(lateStub)))
+                .isEmpty();
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context, response(stubbed))).isEmpty();
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context, response(doReturnStubbed))).isEmpty();
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context, response(localId))).isEmpty();
+    }
+
+    @Test
+    void allowsSuccessBranchThatReturnsBeforeRepositoryLookup() {
+        String method = "public Response getById(Long id) { if (id == null) return new Response(); "
+                + "return repository.findById(id).orElseThrow(); }";
+        String generated = "@org.junit.jupiter.api.extension.ExtendWith(org.mockito.junit.jupiter.MockitoExtension.class) "
+                + "class ServiceTest { @org.mockito.Mock Repository repository; "
+                + "@org.mockito.InjectMocks Service service; @org.junit.jupiter.api.Test void testCase() { "
+                + "Response result = service.getById(null); "
+                + "org.junit.jupiter.api.Assertions.assertNotNull(result); } }";
+        UnitTestContextDto context = contextWithServiceSource("demo.Service", "getById", method,
+                "package demo; class Service { Repository repository; " + method + " }");
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context, response(generated))).isEmpty();
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context,
+                response(generated.replace("service.getById(null)", "service.getById(5001L)"))))
+                .isEmpty();
+    }
+
+    @Test
+    void allowsRepositoryLookupUsingDtoIdInsteadOfFirstServiceArgument() {
+        String method = "public Doctor update(Long appointmentId, Dto dto) { "
+                + "return doctorRepository.findById(dto.getDoctorId()).orElseThrow(); }";
+        String generated = "@org.junit.jupiter.api.extension.ExtendWith(org.mockito.junit.jupiter.MockitoExtension.class) "
+                + "class ServiceTest { @org.mockito.Mock DoctorRepository doctorRepository; "
+                + "@org.mockito.InjectMocks Service service; @org.junit.jupiter.api.Test void testCase() { "
+                + "Dto dto = new Dto(); dto.setDoctorId(42L); Doctor doctor = new Doctor(); "
+                + "org.mockito.Mockito.when(doctorRepository.findById(42L))"
+                + ".thenReturn(java.util.Optional.of(doctor)); "
+                + "Doctor result = service.update(5001L, dto); "
+                + "org.junit.jupiter.api.Assertions.assertNotNull(result); } }";
+        UnitTestContextDto context = contextWithServiceSource("demo.Service", "update", method,
+                "package demo; class Service { DoctorRepository doctorRepository; " + method + " }");
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context, response(generated))).isEmpty();
+    }
+
+    @Test
+    void acceptsApprovedFixturesWhenSourceChecksOptionalIsEmpty() {
+        String method = "public Response getById(Long id) { java.util.Optional<Response> found = "
+                + "repository.findById(id); if (found.isEmpty()) throw new RuntimeException(); "
+                + "return found.get(); }";
+        String generated = "@org.junit.jupiter.api.extension.ExtendWith(org.mockito.junit.jupiter.MockitoExtension.class) "
+                + "class ServiceTest { @org.mockito.Mock Repository repository; "
+                + "@org.mockito.InjectMocks Service service; @org.junit.jupiter.api.Test void testCase() { "
+                + "Response result = service.getById(5001L); "
+                + "org.junit.jupiter.api.Assertions.assertNotNull(result); } }";
+        UnitTestContextDto context = contextWithServiceSource("demo.Service", "getById", method,
+                "package demo; class Service { Repository repository; " + method + " }");
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context, response(generated)))
+                .isEmpty();
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context,
+                response(generated.replace("Response result =", "org.mockito.Mockito.when(repository.findById(5001L))"
+                        + ".thenReturn(java.util.Optional.of(new Response())); Response result =")))).isEmpty();
+    }
+
+    @Test
+    void preservesApprovedFixturesAfterSeparateAssertThrows() {
+        String method = "public Response getById(Long id) { if (id < 0) "
+                + "throw new IllegalArgumentException(); return repository.findById(id).orElseThrow(); }";
+        String generated = "@org.junit.jupiter.api.extension.ExtendWith(org.mockito.junit.jupiter.MockitoExtension.class) "
+                + "class ServiceTest { @org.mockito.Mock Repository repository; "
+                + "@org.mockito.InjectMocks Service service; @org.junit.jupiter.api.Test void testCase() { "
+                + "org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class, "
+                + "() -> service.getById(-1L)); Response result = service.getById(5001L); "
+                + "org.junit.jupiter.api.Assertions.assertNotNull(result); } }";
+        UnitTestContextDto context = contextWithServiceSource("demo.Service", "getById", method,
+                "package demo; class Service { Repository repository; " + method + " }");
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context, response(generated)))
+                .isEmpty();
+    }
+
+    @Test
+    void allowsOptionalEmptyWhenProductionHasFallbackInsteadOfGuaranteedThrow() {
+        String method = "public Response getById(Long id, boolean strict) { "
+                + "java.util.Optional<Response> found = repository.findById(id); "
+                + "if (found.isEmpty()) { if (strict) throw new RuntimeException(); "
+                + "return new Response(); } return found.get(); }";
+        String generated = "@org.junit.jupiter.api.extension.ExtendWith(org.mockito.junit.jupiter.MockitoExtension.class) "
+                + "class ServiceTest { @org.mockito.Mock Repository repository; "
+                + "@org.mockito.InjectMocks Service service; @org.junit.jupiter.api.Test void testCase() { "
+                + "org.mockito.Mockito.when(repository.findById(5001L))"
+                + ".thenReturn(java.util.Optional.empty()); "
+                + "Response result = service.getById(5001L, false); "
+                + "org.junit.jupiter.api.Assertions.assertNotNull(result); } }";
+        UnitTestContextDto context = contextWithServiceSource("demo.Service", "getById", method,
+                "package demo; class Service { Repository repository; " + method + " }");
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context, response(generated))).isEmpty();
+    }
+
+    @Test
+    void preservesApprovedFixturesAfterNamedExceptionLambda() {
+        String method = "public Response getById(Long id) { if (id == null) "
+                + "throw new IllegalArgumentException(); return repository.findById(id).orElseThrow(); }";
+        String generated = "@org.junit.jupiter.api.extension.ExtendWith(org.mockito.junit.jupiter.MockitoExtension.class) "
+                + "class ServiceTest { @org.mockito.Mock Repository repository; "
+                + "@org.mockito.InjectMocks Service service; @org.junit.jupiter.api.Test void testCase() { "
+                + "org.junit.jupiter.api.function.Executable missing = () -> service.getById(null); "
+                + "org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class, missing); "
+                + "Response result = service.getById(5001L); "
+                + "org.junit.jupiter.api.Assertions.assertNotNull(result); } }";
+        UnitTestContextDto context = contextWithServiceSource("demo.Service", "getById", method,
+                "package demo; class Service { Repository repository; " + method + " }");
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context, response(generated)))
+                .isEmpty();
+    }
+
+    @Test
+    void preservesApprovedFixturesWhenSourceLogsThenThrows() {
+        String method = "public Response getById(Long id) { java.util.Optional<Response> found = "
+                + "repository.findById(id); if (found.isEmpty()) { log.warn(\"Missing\"); "
+                + "throw new RuntimeException(); } return found.get(); }";
+        String generated = "@org.junit.jupiter.api.extension.ExtendWith(org.mockito.junit.jupiter.MockitoExtension.class) "
+                + "class ServiceTest { @org.mockito.Mock Repository repository; "
+                + "@org.mockito.InjectMocks Service service; @org.junit.jupiter.api.Test void testCase() { "
+                + "Response result = service.getById(5001L); "
+                + "org.junit.jupiter.api.Assertions.assertNotNull(result); } }";
+        UnitTestContextDto context = contextWithServiceSource("demo.Service", "getById", method,
+                "package demo; class Service { Logger log; Repository repository; " + method + " }");
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context, response(generated)))
+                .isEmpty();
+    }
+
+    @Test
+    void preservesApprovedFixturesWhenSourceChecksFindByIdDirectly() {
+        String method = "public Response getById(Long id) { "
+                + "if (repository.findById(id).isEmpty()) throw new RuntimeException(); "
+                + "return new Response(); }";
+        String generated = "@org.junit.jupiter.api.extension.ExtendWith(org.mockito.junit.jupiter.MockitoExtension.class) "
+                + "class ServiceTest { @org.mockito.Mock Repository repository; "
+                + "@org.mockito.InjectMocks Service service; @org.junit.jupiter.api.Test void testCase() { "
+                + "Response result = service.getById(5001L); "
+                + "org.junit.jupiter.api.Assertions.assertNotNull(result); } }";
+        UnitTestContextDto context = contextWithServiceSource("demo.Service", "getById", method,
+                "package demo; class Service { Repository repository; " + method + " }");
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context, response(generated)))
+                .isEmpty();
+    }
+
+    @Test
+    void rejectsCallToMethodMissingFromProductionService() {
+        String serviceSource = "package demo; class Service { public void cancel(Long id) {} }";
+        String generatedSource = "class ServiceTest { Service service; "
+                + "@org.junit.jupiter.api.Test void testCase() { service.complete(1L); } }";
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(
+                contextWithServiceSource("demo.Service", "cancel", "public void cancel(Long id) {}", serviceSource),
+                response(generatedSource)))
+                .hasValueSatisfying(message -> assertThat(message).contains("complete", "does not exist"));
+    }
+
+    @Test
+    void rejectsMissingServiceMethodInAnotherTestMethodOfSameFile() {
+        String serviceSource = "package demo; class Service { public void cancel(Long id) {} }";
+        String generatedSource = "class ServiceTest { Service service; "
+                + "@org.junit.jupiter.api.Test void testCase() { service.cancel(1L); } "
+                + "@org.junit.jupiter.api.Test void otherCase() { service.completeAppointment(1L); } }";
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(
+                contextWithServiceSource("demo.Service", "cancel", "public void cancel(Long id) {}", serviceSource),
+                response(generatedSource)))
+                .hasValueSatisfying(message -> assertThat(message).contains("completeAppointment", "does not exist"));
+    }
+
+    @Test
+    void rejectsRepositoryTypeMatcherPassedToSave() {
+        String generatedSource = "class ServiceTest { DoctorRepository doctorRepository; "
+                + "@org.junit.jupiter.api.Test void testCase() { "
+                + "org.mockito.Mockito.verify(doctorRepository, org.mockito.Mockito.never())"
+                + ".save(org.mockito.ArgumentMatchers.any(DoctorRepository.class)); } }";
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(
+                context("testCase", "public void testCase() {}"), response(generatedSource)))
+                .hasValueSatisfying(message -> assertThat(message).contains("save", "DoctorRepository", "entity"));
+    }
+
+    @Test
+    void rejectsPositionalMockitoSettingsStrictness() {
+        String generatedSource = "@org.mockito.junit.jupiter.MockitoSettings(org.mockito.quality.Strictness.STRICT_STUBS) "
+                + "class ServiceTest { @org.junit.jupiter.api.Test void testCase() {} }";
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(
+                context("testCase", "public void testCase() {}"), response(generatedSource)))
+                .hasValueSatisfying(message -> assertThat(message).contains("MockitoSettings", "strictness"));
+    }
+
+    @Test
+    void rejectsEnumValueOfUnknownConstantAndMissingImport() {
+        UnitTestContextDto base = contextWithServiceSource("demo.Service", "send", "public void send() {}",
+                "package demo; import demo.enums.Status; class Service { public void send() {} }");
+        ClassContextDto status = new ClassContextDto(2L, "demo.enums", "Status", "demo.enums.Status", "ENUM",
+                "Status.java", "package demo.enums; enum Status { SCHEDULED, CANCELLED }", List.of(), List.of());
+        UnitTestContextDto ctx = new UnitTestContextDto(base.project(), base.analysis(),
+                List.of(base.classes().get(0), status), base.approvedBusinessRules(), base.approvedTestPlans(),
+                base.approvedTestCases(), base.existingApprovedTestCases(), base.previousGeneratedUnitTests(),
+                base.existingTests());
+        String invalid = "package demo; class ServiceTest { @org.junit.jupiter.api.Test void testCase() { "
+                + "Status status = Status.valueOf(\"CONFIRMED\"); } }";
+        String valid = "package demo; import demo.enums.Status; class ServiceTest { "
+                + "@org.junit.jupiter.api.Test void testCase() { Status status = Status.SCHEDULED; } }";
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(ctx, response(invalid)))
+                .hasValueSatisfying(message -> assertThat(message).contains("CONFIRMED", "demo.enums.Status", "import"));
+        assertThat(GeneratedUnitTestSemanticValidator.validate(ctx, response(valid))).isEmpty();
+    }
+
+    @Test
+    void rejectsMissingEnumImportWhenEnumAppearsOnlyInExpression() {
+        UnitTestContextDto base = contextWithServiceSource("demo.Service", "send", "public void send() {}",
+                "package demo; import demo.enums.Status; class Service { public void send() {} }");
+        ClassContextDto status = new ClassContextDto(2L, "demo.enums", "Status", "demo.enums.Status", "ENUM",
+                "Status.java", "package demo.enums; enum Status { SCHEDULED }", List.of(), List.of());
+        UnitTestContextDto ctx = new UnitTestContextDto(base.project(), base.analysis(),
+                List.of(base.classes().get(0), status), base.approvedBusinessRules(), base.approvedTestPlans(),
+                base.approvedTestCases(), base.existingApprovedTestCases(), base.previousGeneratedUnitTests(),
+                base.existingTests());
+        String generated = "package demo; class ServiceTest { "
+                + "@org.junit.jupiter.api.Test void testCase() { Status.valueOf(\"SCHEDULED\"); } }";
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(ctx, response(generated)))
+                .hasValueSatisfying(message -> assertThat(message).contains("import demo.enums.Status"));
+    }
+
+    @Test
+    void acceptsExplicitImportWhenTwoEnumsShareSimpleName() {
+        UnitTestContextDto base = contextWithServiceSource("demo.Service", "send", "public void send() {}",
+                "package demo; import demo.alpha.Status; class Service { public void send() {} }");
+        ClassContextDto alpha = new ClassContextDto(2L, "demo.alpha", "Status", "demo.alpha.Status", "ENUM",
+                "AlphaStatus.java", "package demo.alpha; enum Status { READY }", List.of(), List.of());
+        ClassContextDto beta = new ClassContextDto(3L, "demo.beta", "Status", "demo.beta.Status", "ENUM",
+                "BetaStatus.java", "package demo.beta; enum Status { WAITING }", List.of(), List.of());
+        UnitTestContextDto ctx = new UnitTestContextDto(base.project(), base.analysis(),
+                List.of(base.classes().get(0), alpha, beta), base.approvedBusinessRules(), base.approvedTestPlans(),
+                base.approvedTestCases(), base.existingApprovedTestCases(), base.previousGeneratedUnitTests(),
+                base.existingTests());
+        String generated = "package demo; import demo.alpha.Status; class ServiceTest { "
+                + "@org.junit.jupiter.api.Test void testCase() { Status.valueOf(\"READY\"); } }";
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(ctx, response(generated))).isEmpty();
+    }
+
+    @Test
+    void rejectsStaleApprovedMethodMissingFromProductionService() {
+        String serviceSource = "package demo; class Service { public void cancel(Long id) {} }";
+        String generatedSource = "class ServiceTest { Service service; "
+                + "@org.junit.jupiter.api.Test void testCase() { service.complete(1L); } }";
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(
+                contextWithServiceSource("demo.Service", "complete", "public void complete(Long id) {}", serviceSource),
+                response(generatedSource)))
+                .hasValueSatisfying(message -> assertThat(message).contains("approved Test Case", "complete"));
+        assertThat(GeneratedUnitTestSemanticValidator.validateContext(
+                contextWithServiceSource("demo.Service", "complete", "public void complete(Long id) {}", serviceSource)))
+                .hasValueSatisfying(message -> assertThat(message).contains("approved Test Case", "complete"));
+    }
+
+    @Test
+    void rejectsWrongQualifiedEnumAndUnknownConstantInTestBody() {
+        UnitTestContextDto base = contextWithServiceSource("demo.Service", "send", "public void send() {}",
+                "package demo; import demo.enums.Status; class Service { public void send() {} }");
+        ClassContextDto status = new ClassContextDto(2L, "demo.enums", "Status", "demo.enums.Status", "ENUM",
+                "Status.java", "package demo.enums; enum Status { SCHEDULED, CANCELLED }", List.of(), List.of());
+        UnitTestContextDto ctx = new UnitTestContextDto(base.project(), base.analysis(),
+                List.of(base.classes().get(0), status), base.approvedBusinessRules(), base.approvedTestPlans(),
+                base.approvedTestCases(), base.existingApprovedTestCases(), base.previousGeneratedUnitTests(),
+                base.existingTests());
+        String wrongFqn = "class ServiceTest { @org.junit.jupiter.api.Test void testCase() { "
+                + "demo.entity.Status status = demo.entity.Status.SCHEDULED; } }";
+        String wrongConstant = "class ServiceTest { @org.junit.jupiter.api.Test void testCase() { "
+                + "demo.enums.Status status = demo.enums.Status.CONFIRMED; } }";
+        String validEnum = "class ServiceTest { @org.junit.jupiter.api.Test void testCase() { "
+                + "demo.enums.Status status = demo.enums.Status.SCHEDULED; } }";
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(ctx, response(wrongFqn)))
+                .hasValueSatisfying(message -> assertThat(message).contains("demo.entity.Status", "demo.enums.Status"));
+        assertThat(GeneratedUnitTestSemanticValidator.validate(ctx, response(wrongConstant)))
+                .hasValueSatisfying(message -> assertThat(message).contains("CONFIRMED", "Status"));
+        assertThat(GeneratedUnitTestSemanticValidator.validate(ctx, response(validEnum))).isEmpty();
+    }
+
+    @Test
+    void rejectsInstantiationOfEnumDeclaredInGeneratedTest() {
+        String generatedSource = "class ServiceTest { private enum Events { CREATED } "
+                + "@org.junit.jupiter.api.Test void testCase() { Enum event = new Events() {}; } }";
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(
+                context("send", "public void send() {}"), response(generatedSource)))
+                .hasValueSatisfying(message -> assertThat(message).contains("Events", "enum"));
+    }
+
+    @Test
     void rejectsMockedEnumAndJavaMailContentByteArrayCast() {
         String generatedSource = """
                 import javax.mail.*;
@@ -91,6 +599,750 @@ class GeneratedUnitTestSemanticValidatorTest {
                 context("send", "public void send() {}"), response("testCase", generatedSource)))
                 .hasValueSatisfying(message -> assertThat(message)
                         .contains("verifyNoInteractions", "verifyZeroInteractions"));
+    }
+
+    @Test
+    void rejectsGuessedProductionImportPackages() {
+        String serviceSource = """
+                package eshop.inventoryservice.service;
+                import eshop.constants.RabbitMQConstants;
+                import org.springframework.amqp.AmqpRejectAndDontRequeueException;
+                class Service { public void send() {} }
+                """;
+        String generatedSource = """
+                import eshop.inventoryservice.rabbitmq.constants.RabbitMQConstants;
+                import org.springframework.amqp.rabbit.listener.exception.AmqpRejectAndDontRequeueException;
+                class ServiceTest {
+                    @org.junit.jupiter.api.Test
+                    void testCase() {}
+                }
+                """;
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(
+                contextWithServiceSource("eshop.inventoryservice.service.Service", "send",
+                        "public void send() {}", serviceSource),
+                response(generatedSource)))
+                .hasValueSatisfying(message -> assertThat(message)
+                        .contains("RabbitMQConstants", "AmqpRejectAndDontRequeueException", "exact import"));
+
+        String wildcardSource = """
+                import eshop.inventoryservice.rabbitmq.constants.*;
+                class ServiceTest {
+                    @org.junit.jupiter.api.Test
+                    void testCase() {}
+                }
+                """;
+        assertThat(GeneratedUnitTestSemanticValidator.validate(
+                contextWithServiceSource("eshop.inventoryservice.service.Service", "send",
+                        "public void send() {}", serviceSource), response(wildcardSource)))
+                .hasValueSatisfying(message -> assertThat(message).contains("wildcard", "exact"));
+
+        String unknownSource = """
+                import eshop.inventoryservice.rabbitmq.constants.UnknownConstant;
+                class ServiceTest {
+                    @org.junit.jupiter.api.Test
+                    void testCase() {}
+                }
+                """;
+        assertThat(GeneratedUnitTestSemanticValidator.validate(
+                contextWithServiceSource("eshop.inventoryservice.service.Service", "send",
+                        "public void send() {}", serviceSource), response(unknownSource)))
+                .hasValueSatisfying(message -> assertThat(message).contains("Unknown project import"));
+    }
+
+    @Test
+    void rejectsMixedMockitoMatchersInOneInvocation() {
+        String generatedSource = """
+                class ServiceTest {
+                    @org.junit.jupiter.api.Test
+                    void testCase() {
+                        org.mockito.Mockito.when(repository.find("raw", org.mockito.ArgumentMatchers.any()))
+                                .thenReturn(null);
+                        org.mockito.Mockito.verify(repository).save(org.mockito.ArgumentMatchers.any(), "raw");
+                    }
+                }
+                """;
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(
+                context("send", "public void send() {}"), response(generatedSource)))
+                .hasValueSatisfying(message -> assertThat(message)
+                        .contains("all arguments must use Mockito matchers"));
+    }
+
+    @Test
+    void rejectsMixedMatchersInDoReturnWhenAndIgnoresApplicationMethodsWithMatcherNames() {
+        String invalidSource = """
+                import static org.mockito.Mockito.*;
+                class ServiceTest {
+                    @org.junit.jupiter.api.Test
+                    void testCase() {
+                        doReturn(null).when(repository).find(org.mockito.ArgumentMatchers.any(), "raw");
+                    }
+                }
+                """;
+        assertThat(GeneratedUnitTestSemanticValidator.validate(
+                context("send", "public void send() {}"), response(invalidSource)))
+                .hasValueSatisfying(message -> assertThat(message)
+                        .contains("all arguments must use Mockito matchers"));
+
+        String validSource = """
+                class ServiceTest {
+                    @org.junit.jupiter.api.Test
+                    void testCase() {
+                        org.mockito.Mockito.verify(repository).find(criteria.contains("x"), "raw");
+                    }
+                }
+                """;
+        assertThat(GeneratedUnitTestSemanticValidator.validate(
+                context("send", "public void send() {}"), response(validSource))).isEmpty();
+    }
+
+    @Test
+    void rejectsTransactionTemplateMockThatNeverExecutesCallback() {
+        String serviceSource = """
+                package demo;
+                class Service {
+                    private final TransactionTemplate transactions;
+                    Service(TransactionTemplate transactions) { this.transactions = transactions; }
+                    public void send() { transactions.executeWithoutResult(status -> {}); }
+                }
+                """;
+        String generatedSource = """
+                import org.mockito.InjectMocks;
+                import org.mockito.Mock;
+                import org.mockito.junit.jupiter.MockitoExtension;
+                import org.junit.jupiter.api.extension.ExtendWith;
+                @ExtendWith(MockitoExtension.class)
+                class ServiceTest {
+                    @Mock TransactionTemplate transactions;
+                    @InjectMocks Service service;
+                    @org.junit.jupiter.api.Test
+                    void testCase() {
+                        org.mockito.Mockito.doNothing().when(transactions)
+                                .executeWithoutResult(org.mockito.ArgumentMatchers.any());
+                        service.send();
+                    }
+                }
+                """;
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(
+                contextWithServiceSource("demo.Service", "send",
+                        "public void send() { transactions.executeWithoutResult(status -> {}); }", serviceSource),
+                response(generatedSource)))
+                .hasValueSatisfying(message -> assertThat(message)
+                        .contains("doAnswer", "executeWithoutResult", "Consumer"));
+    }
+
+    @Test
+    void acceptsUnstubbedTransactionTemplateForAValidPreTransactionBranch() {
+        String serviceSource = """
+                package demo;
+                class Service {
+                    private final TransactionTemplate transactions;
+                    Service(TransactionTemplate transactions) { this.transactions = transactions; }
+                    public void send(boolean invalid) {
+                        if (invalid) return;
+                        transactions.executeWithoutResult(status -> {});
+                    }
+                }
+                """;
+        String generatedSource = """
+                import org.mockito.InjectMocks;
+                import org.mockito.Mock;
+                import org.mockito.junit.jupiter.MockitoExtension;
+                import org.junit.jupiter.api.extension.ExtendWith;
+                @ExtendWith(MockitoExtension.class)
+                class ServiceTest {
+                    @Mock TransactionTemplate transactions;
+                    @InjectMocks Service service;
+                    @org.junit.jupiter.api.Test
+                    void testCase() { service.send(true); }
+                }
+                """;
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(
+                contextWithServiceSource("demo.Service", "send",
+                        "public void send(boolean invalid) { if (invalid) return; transactions.executeWithoutResult(status -> {}); }",
+                        serviceSource),
+                response(generatedSource))).isEmpty();
+    }
+
+    @Test
+    void rejectsUnstubbedTransactionWhenNestedGuardDoesNotPreventEntry() {
+        String serviceSource = """
+                package demo;
+                class Service {
+                    private final TransactionTemplate transactions;
+                    Service(TransactionTemplate transactions) { this.transactions = transactions; }
+                    public void send(boolean enabled, boolean invalid) {
+                        if (enabled) {
+                            if (invalid) return;
+                        }
+                        transactions.executeWithoutResult(status -> {});
+                    }
+                }
+                """;
+        String generatedSource = """
+                import org.mockito.InjectMocks;
+                import org.mockito.Mock;
+                import org.mockito.junit.jupiter.MockitoExtension;
+                import org.junit.jupiter.api.extension.ExtendWith;
+                @ExtendWith(MockitoExtension.class)
+                class ServiceTest {
+                    @Mock TransactionTemplate transactions;
+                    @InjectMocks Service service;
+                    @org.junit.jupiter.api.Test
+                    void testCase() { service.send(false, true); }
+                }
+                """;
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(
+                contextWithServiceSource("demo.Service", "send",
+                        "public void send(boolean enabled, boolean invalid) { if (enabled) { if (invalid) return; } transactions.executeWithoutResult(status -> {}); }",
+                        serviceSource),
+                response(generatedSource)))
+                .hasValueSatisfying(message -> assertThat(message).contains("doAnswer", "callback"));
+    }
+
+    @Test
+    void acceptsUnstubbedTransactionWhenElseBranchReturnsBeforeIt() {
+        String serviceSource = """
+                package demo;
+                class Service {
+                    private final TransactionTemplate transactions;
+                    Service(TransactionTemplate transactions) { this.transactions = transactions; }
+                    public void send(boolean skip) {
+                        if (skip) {
+                            int marker = 1;
+                        } else {
+                            return;
+                        }
+                        transactions.executeWithoutResult(status -> {});
+                    }
+                }
+                """;
+        String generatedSource = """
+                import org.mockito.InjectMocks;
+                import org.mockito.Mock;
+                import org.mockito.junit.jupiter.MockitoExtension;
+                import org.junit.jupiter.api.extension.ExtendWith;
+                @ExtendWith(MockitoExtension.class)
+                class ServiceTest {
+                    @Mock TransactionTemplate transactions;
+                    @InjectMocks Service service;
+                    @org.junit.jupiter.api.Test
+                    void testCase() { service.send(false); }
+                }
+                """;
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(
+                contextWithServiceSource("demo.Service", "send",
+                        "public void send(boolean skip) { if (skip) { int marker = 1; } else { return; } transactions.executeWithoutResult(status -> {}); }",
+                        serviceSource),
+                response(generatedSource))).isEmpty();
+    }
+
+    @Test
+    void acceptsApprovedExceptionContractThroughSutHelper() {
+        String serviceSource = """
+                package demo;
+                class Service {
+                    public void findReadyToNotify(String value) {
+                        switch (value) {
+                            case "READY" -> { }
+                            default -> { }
+                        }
+                    }
+                }
+                """;
+        String generatedSource = """
+                import org.mockito.InjectMocks;
+                import org.junit.jupiter.api.extension.ExtendWith;
+                import org.mockito.junit.jupiter.MockitoExtension;
+                @ExtendWith(MockitoExtension.class)
+                class ServiceTest {
+                    @InjectMocks Service service;
+                    Service sut() { return service; }
+                    @org.junit.jupiter.api.Test
+                    void testCase() {
+                        org.junit.jupiter.api.Assertions.assertThrows(
+                                IllegalArgumentException.class,
+                                () -> sut().findReadyToNotify(null));
+                    }
+                }
+                """;
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(
+                contextWithServiceSource("demo.Service", "findReadyToNotify",
+                        "public void findReadyToNotify(String value) { switch (value) { case \"READY\" -> { } default -> { } } }",
+                        serviceSource),
+                response(generatedSource)))
+                .isEmpty();
+    }
+
+    @Test
+    void acceptsUnstubbedTransactionWhenNullableGuardReturnsBeforeIt() {
+        String serviceSource = """
+                package demo;
+                class Service {
+                    private final TransactionTemplate transactions;
+                    Service(TransactionTemplate transactions) { this.transactions = transactions; }
+                    public void send(Boolean invalid) {
+                        if (invalid == null || invalid) return;
+                        transactions.executeWithoutResult(status -> {});
+                    }
+                }
+                """;
+        String generatedSource = """
+                import org.mockito.InjectMocks;
+                import org.mockito.Mock;
+                import org.mockito.junit.jupiter.MockitoExtension;
+                import org.junit.jupiter.api.extension.ExtendWith;
+                @ExtendWith(MockitoExtension.class)
+                class ServiceTest {
+                    @Mock TransactionTemplate transactions;
+                    @InjectMocks Service service;
+                    @org.junit.jupiter.api.Test
+                    void testCase() { service.send(null); }
+                }
+                """;
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(
+                contextWithServiceSource("demo.Service", "send",
+                        "public void send(Boolean invalid) { if (invalid == null || invalid) return; transactions.executeWithoutResult(status -> {}); }",
+                        serviceSource),
+                response(generatedSource))).isEmpty();
+    }
+
+    @Test
+    void rejectsTransactionTemplateWithoutCallbackWhenTestEntersTransaction() {
+        String serviceSource = """
+                package demo;
+                class Service {
+                    private final TransactionTemplate transactions;
+                    Service(TransactionTemplate transactions) { this.transactions = transactions; }
+                    public void send() { transactions.executeWithoutResult(status -> {}); }
+                }
+                """;
+        String generatedSource = """
+                import org.mockito.InjectMocks;
+                import org.mockito.Mock;
+                import org.mockito.junit.jupiter.MockitoExtension;
+                import org.junit.jupiter.api.extension.ExtendWith;
+                @ExtendWith(MockitoExtension.class)
+                class ServiceTest {
+                    @Mock TransactionTemplate transactions;
+                    @InjectMocks Service service;
+                    @org.junit.jupiter.api.Test
+                    void testCase() { service.send(); }
+                }
+                """;
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(
+                contextWithServiceSource("demo.Service", "send",
+                        "public void send() { transactions.executeWithoutResult(status -> {}); }", serviceSource),
+                response(generatedSource)))
+                .hasValueSatisfying(message -> assertThat(message).contains("doAnswer", "callback"));
+    }
+
+    @Test
+    void rejectsTransactionExecuteStubThatDoesNotInvokeTransactionCallback() {
+        String serviceSource = """
+                package demo;
+                class Service {
+                    private final TransactionTemplate transactions;
+                    Service(TransactionTemplate transactions) { this.transactions = transactions; }
+                    public void send() { transactions.execute(status -> null); }
+                }
+                """;
+        String generatedSource = """
+                import org.mockito.InjectMocks;
+                import org.mockito.Mock;
+                import org.mockito.junit.jupiter.MockitoExtension;
+                import org.junit.jupiter.api.extension.ExtendWith;
+                @ExtendWith(MockitoExtension.class)
+                class ServiceTest {
+                    @Mock TransactionTemplate transactions;
+                    @InjectMocks Service service;
+                    @org.junit.jupiter.api.Test
+                    void testCase() {
+                        org.mockito.Mockito.doReturn(null).when(transactions)
+                                .execute(org.mockito.ArgumentMatchers.any());
+                        service.send();
+                    }
+                }
+                """;
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(
+                contextWithServiceSource("demo.Service", "send",
+                        "public void send() { transactions.execute(status -> null); }", serviceSource),
+                response(generatedSource)))
+                .hasValueSatisfying(message -> assertThat(message).contains("doInTransaction", "doAnswer"));
+    }
+
+    @Test
+    void rejectsTransactionCallbackPassedAsDataInsteadOfBeingInvoked() {
+        String serviceSource = """
+                package demo;
+                class Service {
+                    private final TransactionTemplate transactions;
+                    Service(TransactionTemplate transactions) { this.transactions = transactions; }
+                    public void send() { transactions.executeWithoutResult(status -> {}); }
+                }
+                """;
+        String generatedSource = """
+                import org.mockito.InjectMocks;
+                import org.mockito.Mock;
+                import org.mockito.junit.jupiter.MockitoExtension;
+                import org.junit.jupiter.api.extension.ExtendWith;
+                @ExtendWith(MockitoExtension.class)
+                class ServiceTest {
+                    @Mock TransactionTemplate transactions;
+                    @InjectMocks Service service;
+                    @org.junit.jupiter.api.Test
+                    void testCase() {
+                        org.mockito.Mockito.doAnswer(invocation -> {
+                            java.util.function.Function factory = value ->
+                                    org.mockito.Mockito.mock(java.util.function.Consumer.class);
+                            ((java.util.function.Consumer) factory.apply(invocation.getArgument(0))).accept(null);
+                            return null;
+                        }).when(transactions).executeWithoutResult(org.mockito.ArgumentMatchers.any());
+                        service.send();
+                    }
+                }
+                """;
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(
+                contextWithServiceSource("demo.Service", "send",
+                        "public void send() { transactions.executeWithoutResult(status -> {}); }", serviceSource),
+                response(generatedSource)))
+                .hasValueSatisfying(message -> assertThat(message).contains("doAnswer", "callback"));
+    }
+
+    @Test
+    void rejectsTransactionAnswerAttachedToTheWrongMethod() {
+        String serviceSource = """
+                package demo;
+                class Service {
+                    private final TransactionTemplate transactions;
+                    Service(TransactionTemplate transactions) { this.transactions = transactions; }
+                    public void send() { transactions.executeWithoutResult(status -> {}); }
+                }
+                """;
+        String generatedSource = """
+                import org.mockito.InjectMocks;
+                import org.mockito.Mock;
+                import org.mockito.junit.jupiter.MockitoExtension;
+                import org.junit.jupiter.api.extension.ExtendWith;
+                @ExtendWith(MockitoExtension.class)
+                class ServiceTest {
+                    @Mock TransactionTemplate transactions;
+                    @InjectMocks Service service;
+                    @org.junit.jupiter.api.Test
+                    void testCase() {
+                        org.mockito.Mockito.doAnswer(invocation -> {
+                            ((java.util.function.Consumer) invocation.getArgument(0)).accept(null);
+                            return null;
+                        }).when(transactions).execute(org.mockito.ArgumentMatchers.any());
+                    }
+                }
+                """;
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(
+                contextWithServiceSource("demo.Service", "send",
+                        "public void send() { transactions.executeWithoutResult(status -> {}); }", serviceSource),
+                response(generatedSource)))
+                .hasValueSatisfying(message -> assertThat(message)
+                        .contains("executeWithoutResult", "callback"));
+    }
+
+    @Test
+    void rejectsTransactionStubWithoutCallbackEvenWhenAnotherTransactionMockIsCorrect() {
+        String serviceSource = """
+                package demo;
+                class Service {
+                    private final TransactionTemplate transactions;
+                    Service(TransactionTemplate transactions) { this.transactions = transactions; }
+                    public void send() { transactions.executeWithoutResult(status -> {}); }
+                }
+                """;
+        String generatedSource = """
+                import org.mockito.InjectMocks;
+                import org.mockito.Mock;
+                import org.mockito.junit.jupiter.MockitoExtension;
+                import org.junit.jupiter.api.extension.ExtendWith;
+                @ExtendWith(MockitoExtension.class)
+                class ServiceTest {
+                    @Mock TransactionTemplate transactions;
+                    @Mock TransactionTemplate otherTransactions;
+                    @InjectMocks Service service;
+                    @org.junit.jupiter.api.Test
+                    void testCase() {
+                        org.mockito.Mockito.doNothing().when(transactions)
+                                .executeWithoutResult(org.mockito.ArgumentMatchers.any());
+                        org.mockito.Mockito.doAnswer(invocation -> {
+                            ((java.util.function.Consumer) invocation.getArgument(0)).accept(null);
+                            return null;
+                        }).when(otherTransactions)
+                                .executeWithoutResult(org.mockito.ArgumentMatchers.any());
+                    }
+                }
+                """;
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(
+                contextWithServiceSource("demo.Service", "send",
+                        "public void send() { transactions.executeWithoutResult(status -> {}); }", serviceSource),
+                response(generatedSource)))
+                .hasValueSatisfying(message -> assertThat(message).contains("doAnswer", "callback"));
+    }
+
+    @Test
+    void acceptsShortAndQualifiedTransactionTemplateClassMocksWithCallback() {
+        String serviceSource = """
+                package demo;
+                class Service {
+                    private final TransactionTemplate transactions;
+                    Service(TransactionTemplate transactions) { this.transactions = transactions; }
+                    public void send() { transactions.executeWithoutResult(status -> {}); }
+                }
+                """;
+        String common = """
+                import org.mockito.junit.jupiter.MockitoExtension;
+                import org.junit.jupiter.api.extension.ExtendWith;
+                @ExtendWith(MockitoExtension.class)
+                class ServiceTest {
+                    @org.junit.jupiter.api.Test
+                    void testCase() {
+                        %s
+                        org.mockito.Mockito.doAnswer(invocation -> {
+                            ((java.util.function.Consumer) invocation.getArgument(0)).accept(null);
+                            return null;
+                        }).when(transactions).executeWithoutResult(org.mockito.ArgumentMatchers.any());
+                    }
+                }
+                """;
+        String shortType = "org.springframework.transaction.support.TransactionTemplate transactions = "
+                + "org.mockito.Mockito.mock(TransactionTemplate.class);";
+        String qualifiedType = "org.springframework.transaction.support.TransactionTemplate transactions = "
+                + "org.mockito.Mockito.mock(org.springframework.transaction.support.TransactionTemplate.class);";
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(
+                contextWithServiceSource("demo.Service", "send", "public void send() {}", serviceSource),
+                response(String.format("import org.springframework.transaction.support.TransactionTemplate;\n" + common,
+                        shortType)))).isEmpty();
+        assertThat(GeneratedUnitTestSemanticValidator.validate(
+                contextWithServiceSource("demo.Service", "send", "public void send() {}", serviceSource),
+                response(String.format(common, qualifiedType)))).isEmpty();
+    }
+
+    @Test
+    void acceptsTransactionExecuteCallback() {
+        String serviceSource = """
+                package demo;
+                class Service {
+                    private final TransactionTemplate transactions;
+                    Service(TransactionTemplate transactions) { this.transactions = transactions; }
+                    public void send() { transactions.execute(status -> null); }
+                }
+                """;
+        String generatedSource = """
+                import org.mockito.InjectMocks;
+                import org.mockito.Mock;
+                import org.mockito.junit.jupiter.MockitoExtension;
+                import org.junit.jupiter.api.extension.ExtendWith;
+                @ExtendWith(MockitoExtension.class)
+                class ServiceTest {
+                    @Mock TransactionTemplate transactions;
+                    @InjectMocks Service service;
+                    @org.junit.jupiter.api.Test
+                    void testCase() {
+                        org.mockito.Mockito.doAnswer(invocation -> {
+                            ((org.springframework.transaction.support.TransactionCallback) invocation.getArgument(0))
+                                    .doInTransaction(null);
+                            return null;
+                        }).when(transactions).execute(org.mockito.ArgumentMatchers.any());
+                        service.send();
+                    }
+                }
+                """;
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(
+                contextWithServiceSource("demo.Service", "send",
+                        "public void send() { transactions.execute(status -> null); }", serviceSource),
+                response(generatedSource))).isEmpty();
+    }
+
+    @Test
+    void reportsUnexpectedCaseIdWithoutCrashingOnProjectImportValidation() {
+        String generatedSource = """
+                import demo.UnknownFixture;
+                class ServiceTest {
+                    @org.junit.jupiter.api.Test
+                    void testCase() {}
+                }
+                """;
+        UnitTestResponseDto unknownCaseResponse = new UnitTestResponseDto(List.of(new GeneratedUnitTestDto(
+                999L, "ServiceTest", "testCase", "demo", "NEW_TEST", generatedSource)));
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(
+                contextWithServiceSource("demo.Service", "send", "public void send() {}",
+                        "package demo; class Service { public void send() {} }"),
+                unknownCaseResponse))
+                .hasValueSatisfying(message -> assertThat(message)
+                        .contains("unexpected case IDs", "Unknown project import"));
+    }
+
+    @Test
+    void rejectsAmbiguousSimpleNameImportInsteadOfUsingLastDeclaration() {
+        String serviceSource = """
+                package demo.service;
+                import demo.alpha.Status;
+                class Service { public void send() {} }
+                """;
+        UnitTestContextDto base = contextWithServiceSource(
+                "demo.service.Service", "send", "public void send() {}", serviceSource);
+        ClassContextDto alphaStatus = new ClassContextDto(
+                2L, "demo.alpha", "Status", "demo.alpha.Status", "ENUM", "Status.java",
+                "enum Status { READY }", List.of(), List.of());
+        ClassContextDto betaStatus = new ClassContextDto(
+                3L, "demo.beta", "Status", "demo.beta.Status", "ENUM", "Status.java",
+                "enum Status { READY }", List.of(), List.of());
+        UnitTestContextDto withDuplicateNames = new UnitTestContextDto(
+                base.project(), base.analysis(), List.of(base.classes().get(0), alphaStatus, betaStatus),
+                base.approvedBusinessRules(), base.approvedTestPlans(), base.approvedTestCases(),
+                base.existingApprovedTestCases(), base.previousGeneratedUnitTests(), base.existingTests());
+        String generatedSource = """
+                import demo.beta.Status;
+                class ServiceTest {
+                    @org.junit.jupiter.api.Test
+                    void testCase() {}
+                }
+                """;
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(
+                withDuplicateNames, response(generatedSource)))
+                .hasValueSatisfying(message -> assertThat(message).contains("ambiguous", "exact import"));
+    }
+
+    @Test
+    void rejectsProjectWildcardImportWithoutMicroservicePackage() {
+        String serviceSource = """
+                package demo;
+                class Service { public void send() {} }
+                """;
+        String generatedSource = """
+                import demo.*;
+                class ServiceTest {
+                    @org.junit.jupiter.api.Test
+                    void testCase() {}
+                }
+                """;
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(
+                contextWithServiceSource("demo.Service", "send", "public void send() {}", serviceSource),
+                response(generatedSource)))
+                .hasValueSatisfying(message -> assertThat(message).contains("wildcard"));
+    }
+
+    @Test
+    void rejectsNearPrefixImportWhenProductionUsesAnotherType() {
+        String serviceSource = """
+                package demo.service;
+                import demo.alpha.TypeExtra;
+                class Service { public void send() {} }
+                """;
+        String generatedSource = """
+                import demo.alpha.Type;
+                class ServiceTest {
+                    @org.junit.jupiter.api.Test
+                    void testCase() {}
+                }
+                """;
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(
+                contextWithServiceSource("demo.service.Service", "send", "public void send() {}", serviceSource),
+                response(generatedSource)))
+                .hasValueSatisfying(message -> assertThat(message).contains("Unknown project import"));
+    }
+
+    @Test
+    void acceptsSpringDataFixtureImportsFromProductionDependency() {
+        String serviceSource = """
+                package demo.service;
+                import org.springframework.data.domain.Page;
+                class Service { public void send() {} }
+                """;
+        String generatedSource = """
+                import org.springframework.data.domain.PageImpl;
+                import org.springframework.data.domain.PageRequest;
+                class ServiceTest {
+                    @org.junit.jupiter.api.Test
+                    void testCase() {}
+                }
+                """;
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(
+                contextWithServiceSource("demo.service.Service", "send", "public void send() {}", serviceSource),
+                response(generatedSource))).isEmpty();
+    }
+
+    @Test
+    void acceptsLibraryImportWhenProductionUsesItsFqnDespiteProjectNameCollision() {
+        String serviceSource = """
+                package demo.service;
+                class Service {
+                    public org.springframework.data.domain.PageImpl send() {
+                        return new org.springframework.data.domain.PageImpl(java.util.List.of());
+                    }
+                }
+                """;
+        UnitTestContextDto base = contextWithServiceSource(
+                "demo.service.Service", "send", "public void send() {}", serviceSource);
+        ClassContextDto projectPageImpl = new ClassContextDto(
+                2L, "demo", "PageImpl", "demo.PageImpl", "CLASS", "PageImpl.java",
+                "package demo; class PageImpl {}", List.of(), List.of());
+        UnitTestContextDto collisionContext = new UnitTestContextDto(
+                base.project(), base.analysis(), List.of(base.classes().get(0), projectPageImpl),
+                base.approvedBusinessRules(), base.approvedTestPlans(), base.approvedTestCases(),
+                base.existingApprovedTestCases(), base.previousGeneratedUnitTests(), base.existingTests());
+        String generatedSource = """
+                import org.springframework.data.domain.PageImpl;
+                class ServiceTest {
+                    @org.junit.jupiter.api.Test
+                    void testCase() {}
+                }
+                """;
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(collisionContext, response(generatedSource))).isEmpty();
+    }
+
+    @Test
+    void rejectsGuessedProjectStaticImportButAcceptsExactProductionStaticImport() {
+        String serviceSource = """
+                package demo.service;
+                import static demo.Constants.VALUE;
+                class Service { public void send() {} }
+                """;
+        String wrongImport = """
+                import static demo.Constants.OTHER;
+                class ServiceTest {
+                    @org.junit.jupiter.api.Test
+                    void testCase() {}
+                }
+                """;
+        String exactImport = """
+                import static demo.Constants.VALUE;
+                class ServiceTest {
+                    @org.junit.jupiter.api.Test
+                    void testCase() {}
+                }
+                """;
+        UnitTestContextDto ctx = contextWithServiceSource(
+                "demo.service.Service", "send", "public void send() {}", serviceSource);
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(ctx, response(wrongImport)))
+                .hasValueSatisfying(message -> assertThat(message).contains("static import"));
+        assertThat(GeneratedUnitTestSemanticValidator.validate(ctx, response(exactImport))).isEmpty();
     }
 
     @Test
@@ -1084,6 +2336,127 @@ class GeneratedUnitTestSemanticValidatorTest {
         assertThat(GeneratedUnitTestSemanticValidator.validate(
                 context("testCase", "public void testCase() {}"), response(lenientSession)))
                 .hasValueSatisfying(message -> assertThat(message).contains("strict stubbing"));
+    }
+
+    @Test
+    void rejectsMissingAndDuplicateApprovedTestCases() {
+        UnitTestContextDto base = context("testCase", "public void testCase() {}");
+        TestCaseContextItemDto secondCase = new TestCaseContextItemDto(
+                41L, 30L, "TC-002", "EXCEPTION", "case 2", "setup", java.util.Map.of(),
+                "throws", "HIGH", "BR-001 -> TP-001", "APPROVED", false);
+        UnitTestContextDto twoCases = new UnitTestContextDto(
+                base.project(), base.analysis(), base.classes(), base.approvedBusinessRules(),
+                base.approvedTestPlans(), List.of(base.approvedTestCases().get(0), secondCase),
+                base.existingApprovedTestCases(), base.previousGeneratedUnitTests(), base.existingTests());
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(
+                twoCases, response("testCase", "class ServiceTest { @org.junit.jupiter.api.Test void testCase() {} }")))
+                .hasValueSatisfying(message -> assertThat(message)
+                        .contains("exactly one generated test", "missing case IDs", "41"));
+
+        UnitTestResponseDto duplicate = new UnitTestResponseDto(List.of(
+                new GeneratedUnitTestDto(40L, "ServiceTest", "testCase", "demo", "NEW_TEST",
+                        "class ServiceTest { @org.junit.jupiter.api.Test void testCase() {} }"),
+                new GeneratedUnitTestDto(40L, "ServiceTest", "testCase2", "demo", "NEW_TEST",
+                        "class ServiceTest { @org.junit.jupiter.api.Test void testCase2() {} }")));
+        assertThat(GeneratedUnitTestSemanticValidator.validate(base, duplicate))
+                .hasValueSatisfying(message -> assertThat(message).contains("duplicate case IDs", "40"));
+
+        UnitTestResponseDto nullItem = new UnitTestResponseDto(java.util.Arrays.asList(
+                new GeneratedUnitTestDto(40L, "ServiceTest", "testCase", "demo", "NEW_TEST",
+                        "class ServiceTest { @org.junit.jupiter.api.Test void testCase() {} }"),
+                null));
+        assertThat(GeneratedUnitTestSemanticValidator.validate(twoCases, nullItem))
+                .hasValueSatisfying(message -> assertThat(message)
+                        .contains("null items", "missing case IDs"));
+    }
+
+    @Test
+    void rejectsJavaAssertionsAndUnsupportedIntegrationTestInfrastructure() {
+        String generatedSource = """
+                import org.springframework.boot.test.context.SpringBootTest;
+                import org.mockito.MockedStatic;
+                @SpringBootTest
+                class ServiceTest {
+                    @org.junit.jupiter.api.Test
+                    void testCase() {
+                        assert true;
+                        org.mockito.Mockito.mockStatic(System.class);
+                        org.mockito.Mockito.mock(org.springframework.data.domain.Page.class);
+                    }
+                }
+                """;
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(
+                context("testCase", "public void testCase() {}"), response(generatedSource)))
+                .hasValueSatisfying(message -> assertThat(message)
+                        .contains("Java assert", "@SpringBootTest", "static mocking", "Page/Pageable"));
+    }
+
+    @Test
+    void rejectsPageMocksWithExtraArgumentsAndMockFields() {
+        String generatedSource = """
+                import org.junit.jupiter.api.Test;
+                import org.mockito.Mock;
+                import org.springframework.data.domain.Page;
+                class ServiceTest {
+                    @Mock Page<Object> page;
+                    @Test
+                    void testCase() {
+                        org.mockito.Mockito.mock(Page.class, org.mockito.Answers.RETURNS_DEEP_STUBS);
+                    }
+                }
+                """;
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(
+                context("testCase", "public void testCase() {}"), response(generatedSource)))
+                .hasValueSatisfying(message -> assertThat(message).contains("Page/Pageable"));
+    }
+
+    @Test
+    void rejectsPageableMockDeclaredOnTestMethodParameter() {
+        String generatedSource = """
+                class ServiceTest {
+                    @org.junit.jupiter.api.Test
+                    void testCase(@org.mockito.Mock org.springframework.data.domain.Pageable pageable) {}
+                }
+                """;
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(
+                context("testCase", "public void testCase() {}"), response(generatedSource)))
+                .hasValueSatisfying(message -> assertThat(message).contains("Page/Pageable"));
+    }
+
+    @Test
+    void ignoresForbiddenInfrastructureNamesInsideCommentsAndStringFixtures() {
+        String generatedSource = """
+                class ServiceTest {
+                    @org.junit.jupiter.api.Test
+                    void testCase() {
+                        // @SpringBootTest and mockStatic( are forbidden in generated code, not comments.
+                        String fixture = "@SpringBootTest mockStatic(";
+                    }
+                }
+                """;
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(
+                context("testCase", "public void testCase() {}"), response(generatedSource))).isEmpty();
+    }
+
+    @Test
+    void doesNotRejectApplicationMethodsThatOnlyShareMockitoNames() {
+        String generatedSource = """
+                class ServiceTest {
+                    @org.junit.jupiter.api.Test
+                    void testCase() {
+                        service.mockStatic();
+                        String fixture = "MockedStatic";
+                    }
+                }
+                """;
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(
+                context("testCase", "public void testCase() {}"), response(generatedSource))).isEmpty();
     }
 
     private UnitTestContextDto context(String methodName, String methodSource) {

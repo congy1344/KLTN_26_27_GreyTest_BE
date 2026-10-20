@@ -15,6 +15,8 @@ import com.github.javaparser.ast.body.MethodDeclaration;
 import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration;
 import com.github.javaparser.ast.body.TypeDeclaration;
 import com.github.javaparser.ast.Node;
+import com.github.javaparser.ast.CompilationUnit;
+import com.github.javaparser.ast.NodeList;
 import com.github.javaparser.ast.type.ClassOrInterfaceType;
 import com.greytest.dto.AnalysisResultDto;
 import com.greytest.entity.ControllerServiceRelation;
@@ -157,7 +159,8 @@ public class AnalysisService {
                 javaClass.setQualifiedName(qualifiedName);
                 javaClass.setFilePath(pf.relativePath());
                 javaClass.setClassType(classType);
-                javaClass.setSourceCode(typeDecl.toString());
+                // Giữ package/imports để AI và bộ kiểm tra phân biệt chính xác các type trùng tên.
+                javaClass.setSourceCode(classSource(pf.compilationUnit(), typeDecl));
                 javaClass = classRepository.save(javaClass);
                 saveAnnotations(projectId, javaClass.getId(), null, AnnotationTargetType.CLASS,
                         parserHelper.extractRelevantAnnotations(typeDecl));
@@ -488,6 +491,17 @@ public class AnalysisService {
         }
 
         return RepositoryTypeResolver.uniqueId(serviceContractNameToIds.get(packageName + "." + normalizedType));
+    }
+
+    private String classSource(CompilationUnit source, TypeDeclaration<?> type) {
+        TypeDeclaration<?> owner = type;
+        while (owner.getParentNode().orElse(null) instanceof TypeDeclaration<?> enclosing) {
+            owner = enclosing;
+        }
+        // Giữ lớp bao ngoài cho nested type, loại các top-level type khác để không lẫn dependency.
+        CompilationUnit isolated = source.clone();
+        isolated.setTypes(new NodeList<>(owner.clone()));
+        return isolated.toString();
     }
 
     private String qualifiedTypeName(String packageName, TypeDeclaration<?> typeDecl) {

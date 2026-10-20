@@ -105,6 +105,26 @@ class AnalysisServiceTest {
     }
 
     @Test
+    void preservesPackageAndImportsForUnitTestGeneration(@TempDir Path sourceDir) throws IOException {
+        writeSources(sourceDir);
+        Path serviceFile = sourceDir.resolve("service/UserService.java");
+        Files.writeString(serviceFile, Files.readString(serviceFile)
+                + "\nclass OtherService { String repository; }\n");
+
+        var result = buildService(project(sourceDir)).analyze(1L);
+
+        assertThat(result.classes()).anySatisfy(javaClass -> {
+            assertThat(javaClass.qualifiedName()).isEqualTo("demo.service.UserService");
+            var source = new com.github.javaparser.JavaParser().parse(javaClass.sourceCode()).getResult().orElseThrow();
+            assertThat(source.getPackageDeclaration()).hasValueSatisfying(declaration ->
+                    assertThat(declaration.getNameAsString()).isEqualTo("demo.service"));
+            assertThat(source.getImports()).extracting(declaration -> declaration.getNameAsString())
+                    .contains("demo.b.UserStore", "org.springframework.stereotype.Service");
+            assertThat(source.getTypes()).extracting(type -> type.getNameAsString()).containsExactly("UserService");
+        });
+    }
+
+    @Test
     void reAnalyzeSauKhiCoPipelineXoaBusinessRuleVaCoverage(@TempDir Path sourceDir) throws IOException {
         // Re-analyze khi pipeline đã đi xa: phải reset về đầu — xóa data phân tích cũ,
         // xóa BR (cascade Plan/Case/Unit Test) và lịch sử coverage

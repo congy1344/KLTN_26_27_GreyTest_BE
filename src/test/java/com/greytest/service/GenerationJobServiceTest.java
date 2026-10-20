@@ -153,8 +153,31 @@ class GenerationJobServiceTest {
         var snapshot = progress.get(1L, GenerationProgressStage.UNIT_TEST);
         assertThat(snapshot.status()).isEqualTo(GenerationProgressStatus.FAILED);
         assertThat(snapshot.steps().get(0).errorMessage())
-                .contains("Gemini đang giới hạn")
+                .contains("Hệ thống AI đang giới hạn")
+                .doesNotContain("Gemini")
                 .doesNotContain("raw-json");
+    }
+
+    @Test
+    void preservesDetailedFailureWhenQuotaIsDetectedAfterArtifactServiceReportsIt() {
+        ManualExecutor executor = new ManualExecutor();
+        GenerationProgressService progress = new GenerationProgressService();
+        GenerationJobService jobs = new GenerationJobService(executor, progress);
+        jobs.submit(1L, GenerationProgressStage.UNIT_TEST, () -> {
+            progress.start(1L, GenerationProgressStage.UNIT_TEST, 2, "Đang sinh Unit Test.");
+            progress.fail(1L, GenerationProgressStage.UNIT_TEST,
+                    "Dừng ở batch 2. Các Unit Test đã sinh trước đó được lưu an toàn.");
+            throw new com.greytest.exception.UsageQuotaExceededException("Hết quota");
+        });
+
+        executor.runNext();
+
+        var snapshot = progress.get(1L, GenerationProgressStage.UNIT_TEST);
+        assertThat(snapshot.steps().get(0).errorMessage())
+                .contains("Dừng ở batch 2")
+                .doesNotContain("nâng cấp lên gói PRO");
+        assertThat(snapshot.logs().get(snapshot.logs().size() - 1).message())
+                .contains("Dừng ở batch 2");
     }
 
     @Test
@@ -198,6 +221,40 @@ class GenerationJobServiceTest {
 
         // Lock đã được giải phóng, mutation chạy được
         assertThat(jobs.executeMutation(1L, () -> "mutation")).isEqualTo("mutation");
+    }
+
+    @Test
+    void rejectsJobUpfrontWhenQuotaExceeded() {
+        ManualExecutor executor = new ManualExecutor();
+        GenerationProgressService progress = new GenerationProgressService();
+        UsageQuotaService quotaService = mock(UsageQuotaService.class);
+        org.mockito.Mockito.doThrow(new com.greytest.exception.UsageQuotaExceededException("Hết quota"))
+                .when(quotaService).checkQuotaAvailable(99L);
+        GenerationJobService jobs = new GenerationJobService(executor, progress, quotaService);
+
+        assertThatThrownBy(() -> jobs.submit(1L, 99L, GenerationProgressStage.BUSINESS_RULE, () -> {}))
+                .isInstanceOf(com.greytest.exception.UsageQuotaExceededException.class)
+                .hasMessageContaining("Hết quota");
+    }
+
+    @Test
+    void recordsQuotaExhaustionAndUpgradeMessageWhenBackgroundFailsWithQuota() {
+        ManualExecutor executor = new ManualExecutor();
+        GenerationProgressService progress = new GenerationProgressService();
+        GenerationJobService jobs = new GenerationJobService(executor, progress);
+
+        jobs.submit(1L, GenerationProgressStage.BUSINESS_RULE, () -> {
+            progress.start(1L, GenerationProgressStage.BUSINESS_RULE, 2, "Đang sinh.");
+            throw new com.greytest.exception.UsageQuotaExceededException("Hết quota");
+        });
+
+        executor.runNext();
+
+        var snapshot = progress.get(1L, GenerationProgressStage.BUSINESS_RULE);
+        assertThat(snapshot.status()).isEqualTo(GenerationProgressStatus.FAILED);
+        assertThat(snapshot.logs().get(snapshot.logs().size() - 1).message())
+                .contains("hết quota LLM")
+                .contains("nâng cấp lên gói PRO");
     }
 
     private static final class ManualExecutor implements Executor {

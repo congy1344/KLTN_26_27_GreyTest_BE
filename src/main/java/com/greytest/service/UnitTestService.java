@@ -21,6 +21,7 @@ import com.greytest.entity.enums.ProjectStatus;
 import com.greytest.entity.enums.ReviewStatus;
 import com.greytest.exception.InvalidProjectStatusException;
 import com.greytest.exception.ProjectNotFoundException;
+import com.greytest.exception.UsageQuotaExceededException;
 import com.greytest.repository.ProjectRepository;
 import com.greytest.repository.TestCaseRepository;
 import com.greytest.repository.TestPlanRepository;
@@ -70,6 +71,11 @@ public class UnitTestService {
         if(resume){
             target = approved.stream().filter(c -> units.findByTestCaseId(c.getId()) == null).toList();
             if(target.isEmpty()){
+                transactions.executeWithoutResult(status -> {
+                    Project currentProject = lockedProject(projectId);
+                    currentProject.setStatus(ProjectStatus.TEST_GENERATED);
+                    projects.save(currentProject);
+                });
                 generationProgress.completeAfterCommit(projectId, GenerationProgressStage.UNIT_TEST,
                         "Tất cả " + approved.size() + " Test Case đã có Unit Test đầy đủ.");
                 return list(projectId, scope != null ? scope.servicePath() : null);
@@ -82,13 +88,29 @@ public class UnitTestService {
             batchesToRun = batchIndexes.stream()
                     .map(index -> allBatches.get(index).stream().filter(testCase -> targetIds.contains(testCase.getId())).toList())
                     .toList();
-            int completedBatchCount = batchIndexes.get(0);
+
+            // Xác định chính xác các batch đã có sẵn trong CSDL
+            Set<Integer> completedBatchIndices = new LinkedHashSet<>();
+            for (int i = 0; i < allBatches.size(); i++) {
+                List<TestCase> batch = allBatches.get(i);
+                boolean allInDb = batch.stream().allMatch(tc -> units.findByTestCaseId(tc.getId()) != null);
+                if (allInDb) {
+                    completedBatchIndices.add(i);
+                }
+            }
+
             List<String> stepLabels = progressLabels(allBatches);
-            String message = "Tiếp tục sinh Unit Test từ batch " + (completedBatchCount + 1) + "/" + allBatches.size() + ".";
-            if (completedBatchCount > 0) {
-                generationProgress.resume(projectId, GenerationProgressStage.UNIT_TEST, stepLabels, completedBatchCount, message);
-            } else {
-                generationProgress.start(projectId, GenerationProgressStage.UNIT_TEST, stepLabels, message);
+            String batchDetailList = batchIndexes.stream()
+                    .map(idx -> "batch " + (idx + 1) + "/" + allBatches.size())
+                    .collect(java.util.stream.Collectors.joining(", "));
+            String message = "Tiếp tục sinh Unit Test cho " + batchesToRun.size() + " batch còn thiếu (" + batchDetailList + ").";
+
+            // Giữ snapshot cũ cả khi chưa có batch nào hoàn tất trọn vẹn; batch hiện tại có thể mới lưu một phần.
+            generationProgress.resume(projectId, GenerationProgressStage.UNIT_TEST, stepLabels, completedBatchIndices, message);
+            for (int compIdx : completedBatchIndices) {
+                generationProgress.log(projectId, GenerationProgressStage.UNIT_TEST,
+                        "Batch " + (compIdx + 1) + "/" + allBatches.size() + ": Đã có sẵn trong CSDL ("
+                                + formatTestCaseBatchSummary(allBatches.get(compIdx)) + ").");
             }
         } else {
             deleteOldUnitTests(approved);
@@ -133,13 +155,16 @@ public class UnitTestService {
             if (generationProgress.isPaused(projectId, GenerationProgressStage.UNIT_TEST)) {
                 return list(projectId, scope != null ? scope.servicePath() : null);
             }
-            int failedBatch=LlmBatchExecutor.failedBatch(exception,0);
+            boolean isQuota = isUsageQuotaExceeded(exception);
+            int failedBatch = LlmBatchExecutor.failedBatch(exception, 0);
             int originalBatch = failedBatch > 0 && failedBatch <= batchIndexes.size()
                     ? batchIndexes.get(failedBatch - 1) + 1
                     : failedBatch;
+            String detailMsg = isQuota
+                    ? " Bạn đã sử dụng hết quota LLM trong tháng này. Vui lòng nâng cấp lên gói PRO để tiếp tục sinh."
+                    : " Sinh Unit Test thất bại; các batch đã sinh trước đó đã được lưu an toàn. Bạn có thể nhấn 'Tiếp tục sinh' để chạy tiếp.";
             generationProgress.fail(projectId, GenerationProgressStage.UNIT_TEST,
-                    (originalBatch>0?"Dừng ở batch " + originalBatch + ". ":"")
-                            + "Sinh Unit Test thất bại; các batch đã sinh trước đó đã được lưu an toàn. Bạn có thể nhấn 'Tiếp tục sinh' để chạy tiếp.");
+                    (originalBatch > 0 ? "Dừng ở batch " + originalBatch + ". " : "") + detailMsg);
             throw LlmBatchExecutor.originalFailure(exception);
         }
     }
@@ -167,12 +192,26 @@ public class UnitTestService {
                 "Hoàn tất: đã lưu " + (saved == null ? 0 : saved.size()) + " Unit Test bổ sung.");
         return saved;
         } catch(RuntimeException exception){
-            int failedBatch=LlmBatchExecutor.failedBatch(exception,0);
+            boolean isQuota = isUsageQuotaExceeded(exception);
+            int failedBatch = LlmBatchExecutor.failedBatch(exception, 0);
+            String detailMsg = isQuota
+                    ? " Bạn đã sử dụng hết quota LLM trong tháng này. Vui lòng nâng cấp lên gói PRO để tiếp tục sinh."
+                    : " Sinh Unit Test bổ sung thất bại; xem thông báo lỗi để biết chi tiết.";
             generationProgress.fail(projectId, GenerationProgressStage.UNIT_TEST,
-                    (failedBatch>0?"Dừng ở batch " + failedBatch + ". ":"")
-                            + "Sinh Unit Test bổ sung thất bại; xem thông báo lỗi để biết chi tiết.");
+                    (failedBatch > 0 ? "Dừng ở batch " + failedBatch + ". " : "") + detailMsg);
             throw LlmBatchExecutor.originalFailure(exception);
         }
+    }
+
+    private boolean isUsageQuotaExceeded(Throwable exception) {
+        Throwable current = exception;
+        while (current != null) {
+            if (current instanceof UsageQuotaExceededException) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
     }
     private List<GeneratedUnitTestDto> generateBatches(Long projectId,List<TestCase> target){
         List<List<TestCase>> batches = caseBatches(target);
@@ -195,6 +234,7 @@ public class UnitTestService {
             int currentIndex = batches.indexOf(ids);
             int batchIdx = batchIndexes.get(currentIndex);
             String summary = currentIndex < batchCaseLists.size() ? formatTestCaseBatchSummary(batchCaseLists.get(currentIndex)) : "";
+            generationProgress.setStepStatus(projectId, GenerationProgressStage.UNIT_TEST, batchIdx, com.greytest.dto.GenerationProgressStepStatus.RUNNING);
             generationProgress.log(projectId, GenerationProgressStage.UNIT_TEST,
                     "Đang gọi AI sinh mã Unit Test cho batch " + (batchIdx + 1) + "/" + totalBatches + " (" + summary + ")...");
             return generateBatchWithRecovery(projectId,ids,batchIdx + 1,totalBatches,
@@ -208,13 +248,19 @@ public class UnitTestService {
             });
             int batchIdx = completedBatch <= batchIndexes.size() ? batchIndexes.get(completedBatch - 1) : -1;
             String summary = completedBatch <= batchCaseLists.size() ? formatTestCaseBatchSummary(batchCaseLists.get(completedBatch - 1)) : "";
-            generationProgress.advance(projectId, GenerationProgressStage.UNIT_TEST,
-                    "Batch " + (batchIdx + 1) + "/" + totalBatches + ": đã kiểm tra & lưu "
-                            + valid.size() + " Unit Test hợp lệ (" + summary + ").");
+            if (batchIdx >= 0) {
+                generationProgress.advanceStep(projectId, GenerationProgressStage.UNIT_TEST, batchIdx,
+                        "Batch " + (batchIdx + 1) + "/" + totalBatches + ": đã kiểm tra & lưu "
+                                + valid.size() + " Unit Test hợp lệ (" + summary + ").");
+            } else {
+                generationProgress.advance(projectId, GenerationProgressStage.UNIT_TEST,
+                        "Batch: đã kiểm tra & lưu " + valid.size() + " Unit Test hợp lệ (" + summary + ").");
+            }
         });
         for(List<GeneratedUnitTestDto> valid:generatedBatches){
             generated.addAll(valid);
         }
+        generationProgress.setStepStatus(projectId, GenerationProgressStage.UNIT_TEST, totalBatches, com.greytest.dto.GenerationProgressStepStatus.RUNNING);
         generationProgress.log(projectId, GenerationProgressStage.UNIT_TEST,
                 "Đang chuẩn hóa tên phương thức và lưu trữ file test...");
         return uniqueMethodNames(generated,Set.of());

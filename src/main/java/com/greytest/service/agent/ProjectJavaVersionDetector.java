@@ -57,20 +57,26 @@ public class ProjectJavaVersionDetector {
     /** Phát hiện Java version theo module chứa source; batch xung đột version sẽ trả empty. */
     public Optional<JavaVersionInfo> detect(Long projectId, List<String> sourcePaths) {
         Optional<Path> root = projectRoot(projectId);
-        if (root.isEmpty() || sourcePaths == null || sourcePaths.isEmpty()) return detect(projectId);
-        List<Path> allBuildFiles = buildFiles(root.get());
+        return root.isEmpty() ? Optional.empty() : detectSnapshot(root.get(), sourcePaths);
+    }
+
+    /** Đọc Java version từ đúng snapshot đang sinh test, không thay đổi project storage. */
+    public Optional<JavaVersionInfo> detectSnapshot(Path snapshot, List<String> sourcePaths) {
+        Path root = snapshot.toAbsolutePath().normalize();
+        List<Path> allBuildFiles = buildFiles(root);
+        if (sourcePaths == null || sourcePaths.isEmpty()) return detectJavaVersion(root, allBuildFiles);
         List<JavaVersionInfo> detected = new ArrayList<>();
         for (String sourcePath : sourcePaths) {
             if (sourcePath == null || sourcePath.isBlank()) continue;
-            Path source = root.get().resolve(sourcePath).normalize();
-            if (!source.startsWith(root.get())) continue;
+            Path source = root.resolve(sourcePath).normalize();
+            if (!source.startsWith(root)) continue;
             List<Path> ancestors = allBuildFiles.stream()
                     .filter(buildFile -> source.startsWith(buildFile.getParent()))
                     .sorted(Comparator.comparingInt(Path::getNameCount).reversed())
                     .toList();
-            detectJavaVersion(root.get(), ancestors).ifPresent(detected::add);
+            detectJavaVersion(root, ancestors).ifPresent(detected::add);
         }
-        if (detected.isEmpty()) return detect(projectId);
+        if (detected.isEmpty()) return detectJavaVersion(root, allBuildFiles);
         String version = detected.get(0).version();
         return detected.stream().allMatch(info -> info.version().equals(version))
                 ? Optional.of(detected.get(0)) : Optional.empty();
@@ -99,22 +105,26 @@ public class ProjectJavaVersionDetector {
      */
     public Optional<TestFrameworkInfo> detectTestFramework(Long projectId, List<String> sourcePaths) {
         Optional<Path> root = projectRoot(projectId);
-        if (root.isEmpty() || sourcePaths == null || sourcePaths.isEmpty()) {
-            return detectTestFramework(projectId);
-        }
-        List<Path> allBuildFiles = buildFiles(root.get());
+        return root.isEmpty() ? Optional.empty() : detectSnapshotTestFramework(root.get(), sourcePaths);
+    }
+
+    /** Đọc JUnit từ build của snapshot ứng viên, không dùng build baseline. */
+    public Optional<TestFrameworkInfo> detectSnapshotTestFramework(Path snapshot, List<String> sourcePaths) {
+        Path root = snapshot.toAbsolutePath().normalize();
+        List<Path> allBuildFiles = buildFiles(root);
+        if (sourcePaths == null || sourcePaths.isEmpty()) return detectTestFramework(root, allBuildFiles);
         List<TestFrameworkInfo> detected = new ArrayList<>();
         for (String sourcePath : sourcePaths) {
             if (sourcePath == null || sourcePath.isBlank()) continue;
-            Path source = root.get().resolve(sourcePath).normalize();
-            if (!source.startsWith(root.get())) continue;
+            Path source = root.resolve(sourcePath).normalize();
+            if (!source.startsWith(root)) continue;
             List<Path> ancestors = allBuildFiles.stream()
                     .filter(buildFile -> source.startsWith(buildFile.getParent()))
                     .sorted(Comparator.comparingInt(Path::getNameCount).reversed())
                     .toList();
-            detectTestFramework(root.get(), ancestors).ifPresent(detected::add);
+            detectTestFramework(root, ancestors).ifPresent(detected::add);
         }
-        if (detected.isEmpty()) return detectTestFramework(projectId);
+        if (detected.isEmpty()) return detectTestFramework(root, allBuildFiles);
         TestFramework framework = detected.get(0).framework();
         return detected.stream().allMatch(info -> info.framework() == framework)
                 ? Optional.of(detected.get(0)) : Optional.empty();

@@ -121,6 +121,38 @@ class SourceUpdateServiceTest {
     }
 
     @Test
+    void candidateSourceLookupKeepsExistingRecordsAndArtifacts(@org.junit.jupiter.api.io.TempDir Path snapshot) {
+        SourceUpdate update = new SourceUpdate();
+        update.setProjectId(10L);
+        update.setCandidateRevisionId(300L);
+        SourceRevision revision = new SourceRevision();
+        revision.setProjectId(10L);
+        revision.setStoragePath(snapshot.toString());
+        when(sourceRevisionRepository.findById(300L)).thenReturn(Optional.of(revision));
+
+        assertThat(service.getCandidateSourcePath(update)).isEqualTo(snapshot);
+
+        verify(sourceRevisionRepository, never()).save(any());
+        org.mockito.Mockito.verifyNoInteractions(projectRepository, sourceUpdateRepository, sourceUpdateItemRepository,
+                javaClassRepository, javaMethodRepository, businessRuleRepository, testPlanRepository,
+                testCaseRepository, unitTestRepository, storageService);
+    }
+
+    @Test
+    void candidateSourceLookupRejectsRevisionFromAnotherProject() {
+        SourceUpdate update = new SourceUpdate();
+        update.setProjectId(10L);
+        update.setCandidateRevisionId(300L);
+        SourceRevision revision = new SourceRevision();
+        revision.setProjectId(99L);
+        revision.setStoragePath("another-project");
+        when(sourceRevisionRepository.findById(300L)).thenReturn(Optional.of(revision));
+
+        assertThatThrownBy(() -> service.getCandidateSourcePath(update))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("project");
+    }
+
+    @Test
     void createsZipUpdateDraftSuccessfully() {
         AuthUser user = user(1L);
         Project project = project(10L, user.getId());

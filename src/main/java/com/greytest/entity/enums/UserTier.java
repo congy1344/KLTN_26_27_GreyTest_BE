@@ -5,5 +5,6 @@ package com.greytest.entity.enums;
  */
 public enum UserTier {
     FREE,
+    PLUS,
     PRO
 }

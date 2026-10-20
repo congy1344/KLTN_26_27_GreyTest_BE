@@ -31,6 +31,7 @@ public class GenerationJobService {
     private final GenerationProgressService progressService;
     private final ProjectRepository projectRepository;
     private final UserActivityService activityService;
+    private final UsageQuotaService quotaService;
     private static final Object MANUAL_MUTATION = new Object();
     private final ConcurrentMap<Long, Object> activeProjects = new ConcurrentHashMap<>();
 
@@ -39,15 +40,29 @@ public class GenerationJobService {
             @Qualifier("generationExecutor") Executor executor,
             GenerationProgressService progressService,
             ProjectRepository projectRepository,
-            UserActivityService activityService) {
+            UserActivityService activityService,
+            @Autowired(required = false) UsageQuotaService quotaService) {
         this.executor = executor;
         this.progressService = progressService;
         this.projectRepository = projectRepository;
         this.activityService = activityService;
+        this.quotaService = quotaService;
     }
 
     GenerationJobService(Executor executor, GenerationProgressService progressService) {
-        this(executor, progressService, null, null);
+        this(executor, progressService, null, null, null);
+    }
+
+    GenerationJobService(
+            Executor executor,
+            GenerationProgressService progressService,
+            ProjectRepository projectRepository,
+            UserActivityService activityService) {
+        this(executor, progressService, projectRepository, activityService, null);
+    }
+
+    GenerationJobService(Executor executor, GenerationProgressService progressService, UsageQuotaService quotaService) {
+        this(executor, progressService, null, null, quotaService);
     }
 
     public GenerationJobAcceptedDto submit(Long projectId, GenerationProgressStage stage, Runnable task) {
@@ -58,6 +73,11 @@ public class GenerationJobService {
 
     public GenerationJobAcceptedDto submit(
             Long projectId, Long actorUserId, GenerationProgressStage stage, Runnable task) {
+        // Kiểm tra hạn mức quota của người dùng trước khi xếp hàng tác vụ
+        if (actorUserId != null && quotaService != null) {
+            quotaService.checkQuotaAvailable(actorUserId);
+        }
+
         Object activeWork = activeProjects.putIfAbsent(projectId, stage);
         if (activeWork != null) {
             throw new GenerationInProgressException(
@@ -152,7 +172,12 @@ public class GenerationJobService {
         } catch (RuntimeException exception) {
             log.warn("Background AI generation failed for project {} stage {}: {}",
                     projectId, stage, exception.getMessage());
-            progressService.failIfActive(projectId, stage, userMessage(exception));
+            if (isUsageQuotaExceeded(exception)) {
+                progressService.failIfActive(projectId, stage,
+                        "Bạn đã sử dụng hết quota LLM trong tháng này. Vui lòng nâng cấp lên gói PRO để tiếp tục.");
+            } else {
+                progressService.failIfActive(projectId, stage, userMessage(exception));
+            }
         } finally {
             GenerationJobContext.clear();
             LocaleContextHolder.setLocale(previousLocale);
@@ -160,11 +185,22 @@ public class GenerationJobService {
         }
     }
 
+    private boolean isUsageQuotaExceeded(Throwable exception) {
+        Throwable current = exception;
+        while (current != null) {
+            if (current instanceof UsageQuotaExceededException) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
+    }
+
     private String userMessage(RuntimeException exception) {
         Throwable current = exception;
         while (current != null) {
             if (current instanceof UsageQuotaExceededException) {
-                return "Bạn đã sử dụng hết quota LLM trong tháng này. Vui lòng liên hệ admin để điều chỉnh quota.";
+                return "Bạn đã sử dụng hết quota LLM trong tháng này. Vui lòng nâng cấp lên gói PRO để tiếp tục.";
             }
             if (current instanceof LlmResponseException) {
                 String message = current.getMessage() == null ? "" : current.getMessage().toLowerCase(Locale.ROOT);
@@ -173,7 +209,7 @@ public class GenerationJobService {
                     return current.getMessage();
                 }
                 if (message.contains("429") || message.contains("quota") || message.contains("too_many_requests")) {
-                    return "Gemini đang giới hạn lượt gọi. Hệ thống đã tự chờ và thử lại nhưng quota vẫn chưa khả dụng. Vui lòng thử lại sau ít phút.";
+                    return "Hệ thống AI đang giới hạn lượt gọi. Hệ thống đã tự chờ và thử lại nhưng quota vẫn chưa khả dụng. Vui lòng thử lại sau ít phút.";
                 }
                 return "Dịch vụ AI tạm thời chưa phản hồi ổn định. Vui lòng thử lại sau ít phút.";
             }

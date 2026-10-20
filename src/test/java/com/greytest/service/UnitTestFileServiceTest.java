@@ -312,7 +312,9 @@ class UnitTestFileServiceTest {
         assertThat(entries.get("run-greytest-coverage.cmd"))
                 .contains("--init-script", "--tests \"com.example.UserServiceTest\"")
                 .contains("clean test --tests \"com.example.UserServiceTest\" jacocoTestReport")
-                .contains("GREYTEST_JUNCTION_RUN", "New-Item -ItemType Junction");
+                .contains("GREYTEST_JUNCTION_RUN", "New-Item -ItemType Junction")
+                .contains("co dau [vi du: mau, sua], hay dung junction ASCII")
+                .doesNotContain("co dau (vi du: mau, sua)");
         assertThat(entries.get("run-greytest-coverage.sh"))
                 .contains("jacoco-maven-plugin:0.8.15:prepare-agent")
                 .contains("-Djacoco.propertyName=greytestJacocoArgLine")
@@ -368,6 +370,35 @@ class UnitTestFileServiceTest {
 
         assertThat(process.waitFor()).isEqualTo(1);
         assertThat(output).doesNotContain("was unexpected at this time");
+    }
+
+    @Test
+    void windowsScriptReportsGradleFailureWithoutBatchParserError(
+            @org.junit.jupiter.api.io.TempDir Path module) throws Exception {
+        Assumptions.assumeTrue(System.getProperty("os.name").toLowerCase().contains("win"));
+        var file = new com.greytest.dto.UnitTestFileDto(
+                "src/test/java/UserServiceTest.java", "UserServiceTest", "", 1,
+                List.of("TC-001"), "class UserServiceTest {}");
+        Files.createDirectories(module.resolve("src/test/java"));
+        Files.writeString(module.resolve("src/test/java/UserServiceTest.java"), file.sourceCode());
+        Files.writeString(module.resolve("build.gradle"), "");
+        Files.writeString(module.resolve("gradlew.bat"), "@echo off\r\nexit /b 1\r\n");
+        Path script = module.resolve("run-greytest-coverage.cmd");
+        Files.writeString(script, zipEntries(service.createCoverageArchive(List.of(file)))
+                .get("run-greytest-coverage.cmd"));
+        ProcessBuilder builder = new ProcessBuilder("cmd.exe", "/d", "/c", script.toString())
+                .redirectErrorStream(true);
+        builder.environment().put("GREYTEST_JUNCTION_RUN", "1");
+        Process process = builder.start();
+        try {
+            assertThat(process.waitFor(15, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+            String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+            assertThat(process.exitValue()).isEqualTo(1);
+            assertThat(output).contains("Gradle project or generated tests", "co dau [vi du: mau, sua]")
+                    .doesNotContain("was unexpected at this time");
+        } finally {
+            process.destroyForcibly();
+        }
     }
 
     @Test

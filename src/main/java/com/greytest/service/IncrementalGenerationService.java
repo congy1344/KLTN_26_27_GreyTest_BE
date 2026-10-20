@@ -1,11 +1,16 @@
 package com.greytest.service;
 
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
+
+import com.github.javaparser.JavaParser;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
@@ -16,6 +21,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.greytest.dto.GenerationProgressStage;
 import com.greytest.dto.SourceUpdateDto;
 import com.greytest.dto.agent.GenerationResponseDtos.BusinessRuleResponseDto;
+import com.greytest.dto.agent.GenerationResponseDtos.GeneratedBusinessRuleDto;
 import com.greytest.dto.agent.GenerationResponseDtos.TestCaseResponseDto;
 import com.greytest.dto.agent.GenerationResponseDtos.GeneratedTestCaseDto;
 import com.greytest.dto.agent.GenerationResponseDtos.TestPlanResponseDto;
@@ -56,6 +62,7 @@ import com.greytest.repository.BusinessRuleRepository;
 import com.greytest.repository.TestCaseRepository;
 import com.greytest.repository.TestPlanRepository;
 import com.greytest.service.agent.AIAgentService;
+import com.greytest.service.agent.GenerationContextBuilder;
 
 import lombok.extern.slf4j.Slf4j;
 
@@ -130,8 +137,9 @@ public class IncrementalGenerationService {
     /**
      * Sinh tăng dần theo từng stage (BUSINESS_RULE, TEST_PLAN, TEST_CASE, UNIT_TEST)
      * chỉ tập trung vào các mục bị ảnh hưởng được phát hiện trong impactSummary.
+     * KHÔNG bọc @Transactional ở đây để tránh giữ kết nối DB và deadlock khóa dòng
+     * trong lúc chờ phản hồi từ các cuộc gọi mạng AI Agent (LLM).
      */
-    @Transactional
     public SourceUpdateDto generateIncrementalStage(
             Long projectId,
             Long updateId,
@@ -142,7 +150,8 @@ public class IncrementalGenerationService {
                 .orElseThrow(() -> new ProjectNotFoundException(projectId));
         sourceUpdateService.checkProjectAccess(project, user);
 
-        SourceUpdate update = sourceUpdateRepository.findByIdAndProjectIdForUpdate(updateId, projectId)
+        SourceUpdate update = sourceUpdateRepository.findByIdAndProjectId(updateId, projectId)
+                .or(() -> sourceUpdateRepository.findByIdAndProjectIdForUpdate(updateId, projectId))
                 .orElseThrow(() -> new IllegalArgumentException("Không tìm thấy bản cập nhật " + updateId));
 
         if (update.getStatus() != SourceUpdateStatus.ANALYZED
@@ -156,35 +165,51 @@ public class IncrementalGenerationService {
 
         ImpactSummaryDto impact = parseImpactSummary(update.getImpactSummary());
 
-        switch (stage) {
-            case BUSINESS_RULE -> generateIncrementalBusinessRules(projectId, updateId, impact);
-            case TEST_PLAN -> generateIncrementalTestPlans(projectId, updateId, impact);
-            case TEST_CASE -> generateIncrementalTestCases(projectId, updateId, impact);
-            case UNIT_TEST -> generateIncrementalUnitTests(projectId, updateId, impact);
-        }
+        try {
+            switch (stage) {
+                case BUSINESS_RULE -> generateIncrementalBusinessRules(projectId, updateId, impact);
+                case TEST_PLAN -> generateIncrementalTestPlans(projectId, updateId, impact);
+                case TEST_CASE -> generateIncrementalTestCases(projectId, updateId, impact);
+                case UNIT_TEST -> generateIncrementalUnitTests(projectId, update, impact);
+            }
 
-        update.setStatus(SourceUpdateStatus.READY_TO_APPLY);
-        update = sourceUpdateRepository.save(update);
+            update.setStatus(SourceUpdateStatus.READY_TO_APPLY);
+            update = sourceUpdateRepository.save(update);
+        } catch (Exception ex) {
+            log.error("Lỗi khi sinh tăng dần stage {}: {}", stage, ex.getMessage(), ex);
+            List<SourceUpdateItem> items = sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId);
+            update.setStatus(items.isEmpty() ? SourceUpdateStatus.ANALYZED : SourceUpdateStatus.READY_TO_APPLY);
+            sourceUpdateRepository.save(update);
+            throw ex;
+        }
 
         List<SourceUpdateItem> items = sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId);
         return sourceUpdateMapper.toUpdateDto(update, items);
     }
 
     private void generateIncrementalBusinessRules(Long projectId, Long updateId, ImpactSummaryDto impact) {
-        Set<Long> targetMethodIds = resolveTargetMethodIds(projectId, impact);
+        List<Set<Long>> batches = resolveTargetMethodBatches(projectId, impact);
 
-        if (targetMethodIds.isEmpty()) {
+        if (batches.isEmpty()) {
             log.info("Không có target method nào cần sinh lại BR cho project {}", projectId);
             return;
         }
 
-        log.info("Gọi AI Agent sinh Business Rules cho {} methodIds: {}", targetMethodIds.size(), targetMethodIds);
-        BusinessRuleResponseDto response = aiAgentService.generateBusinessRules(projectId, targetMethodIds);
+        List<GeneratedBusinessRuleDto> generatedRules = new ArrayList<>();
+        for (Set<Long> methodIds : batches) {
+            log.info("Gọi AI Agent sinh Business Rules cho batch {} methodIds: {}", methodIds.size(), methodIds);
+            BusinessRuleResponseDto response = aiAgentService.generateBusinessRules(projectId, methodIds);
+            if (response != null && response.rules() != null) {
+                generatedRules.addAll(response.rules());
+            }
+        }
 
-        if (response != null && response.rules() != null) {
+        if (!generatedRules.isEmpty()) {
             int nextBrNumber = nextBusinessRuleNumber(projectId);
-            for (var br : response.rules()) {
-                if (br == null || !targetMethodIds.contains(br.methodId())) continue;
+            log.info("Generated business rules: {}", generatedRules);
+            log.info("Next business rule number: {}", nextBrNumber);
+            for (var br : generatedRules) {
+                if (br == null || !batches.stream().anyMatch(ids -> ids.contains(br.methodId()))) continue;
                 SourceUpdateItem item = new SourceUpdateItem();
                 item.setSourceUpdateId(updateId);
                 item.setTargetType(SourceUpdateTargetType.BUSINESS_RULE);
@@ -194,7 +219,7 @@ public class IncrementalGenerationService {
                         : List.of();
                 BusinessRule existing = methodRules.stream()
                         .filter(rule -> br.branchId() != null && Objects.equals(sourceBranchId(rule.getReviewNote()), decisionId(br.branchId())))
-                        .findFirst().orElse(methodRules.size() == 1 && response.rules().stream()
+                        .findFirst().orElse(methodRules.size() == 1 && generatedRules.stream()
                                 .filter(candidate -> candidate != null && Objects.equals(candidate.methodId(), br.methodId())).count() == 1
                                 && (br.branchId() == null || sourceBranchId(methodRules.get(0).getReviewNote()) == null)
                                 ? methodRules.get(0) : null);
@@ -401,7 +426,8 @@ public class IncrementalGenerationService {
         }
     }
 
-    private void generateIncrementalUnitTests(Long projectId, Long updateId, ImpactSummaryDto impact) {
+    private void generateIncrementalUnitTests(Long projectId, SourceUpdate update, ImpactSummaryDto impact) {
+        Long updateId = update.getId();
         Set<Long> removedCaseIds = sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId).stream()
                 .filter(i -> i.getTargetType() == SourceUpdateTargetType.TEST_CASE && i.getAction() == SourceUpdateAction.REMOVE)
                 .map(SourceUpdateItem::getTargetId)
@@ -424,7 +450,8 @@ public class IncrementalGenerationService {
         }
 
         log.info("Gọi AI Agent sinh Unit Tests cho {} caseIds: {}", caseIds.size(), caseIds);
-        UnitTestResponseDto response = aiAgentService.generateUnitTests(projectId, caseIds, impact.changedMethods());
+        UnitTestResponseDto response = aiAgentService.generateSnapshotUnitTests(
+                projectId, caseIds, sourceUpdateService.getCandidateSourcePath(update));
 
         if (response != null && response.unitTests() != null) {
             for (var ut : response.unitTests()) {
@@ -530,8 +557,8 @@ public class IncrementalGenerationService {
                 .max().orElse(0) + 1;
     }
 
-    private Set<Long> resolveTargetMethodIds(Long projectId, ImpactSummaryDto impact) {
-        Set<Long> methodIds = new HashSet<>();
+    private List<Set<Long>> resolveTargetMethodBatches(Long projectId, ImpactSummaryDto impact) {
+        Map<Long, Set<Long>> methodIdsByClass = new LinkedHashMap<>();
         List<JavaClass> classes = javaClassRepository.findByProjectId(projectId);
 
         for (MethodDiffItem changed : impact.changedMethods()) {
@@ -555,7 +582,7 @@ public class IncrementalGenerationService {
                             break;
                         }
                     }
-                    if (matchedMethod == null) {
+                    if (matchedMethod == null && changed.diffType() != MethodDiffType.ADDED) {
                         List<JavaMethod> nameMatches = methods.stream()
                                 .filter(m -> Objects.equals(m.getMethodName(), changed.methodName()))
                                 .toList();
@@ -574,8 +601,12 @@ public class IncrementalGenerationService {
                     matchedMethod.setSourceCode(changed.afterSource());
                     matchedMethod = javaMethodRepository.save(matchedMethod);
                 }
-                methodIds.add(matchedMethod.getId());
+                methodIdsByClass.computeIfAbsent(matchedClass.getId(), ignored -> new LinkedHashSet<>())
+                        .add(matchedMethod.getId());
             } else if (changed.diffType() == MethodDiffType.ADDED) {
+                var parsedMethod = new JavaParser().parseMethodDeclaration(changed.afterSource()).getResult()
+                        .orElseThrow(() -> new IllegalArgumentException(
+                                "Cannot parse added method: " + changed.methodKey()));
                 // Method mới thêm: tạo JavaClass (nếu chưa có) và JavaMethod để có methodId hợp lệ cho AI
                 if (matchedClass == null) {
                     matchedClass = new JavaClass();
@@ -592,16 +623,32 @@ public class IncrementalGenerationService {
                 JavaMethod newMethod = new JavaMethod();
                 newMethod.setClassId(matchedClass.getId());
                 newMethod.setMethodName(changed.methodName());
-                newMethod.setReturnType("void");
-                newMethod.setVisibility(Visibility.PUBLIC);
+                newMethod.setReturnType(parsedMethod.getTypeAsString());
+                newMethod.setParameters(parsedMethod.getParameters().stream()
+                        .map(parameter -> new MethodParam(parameter.getNameAsString(), parameter.getTypeAsString()))
+                        .toList());
+                newMethod.setThrowsList(parsedMethod.getThrownExceptions().stream().map(Object::toString).toList());
+                newMethod.setVisibility(parsedMethod.isPublic() ? Visibility.PUBLIC
+                        : parsedMethod.isProtected() ? Visibility.PROTECTED
+                        : parsedMethod.isPrivate() ? Visibility.PRIVATE : Visibility.PACKAGE_PRIVATE);
                 newMethod.setSourceCode(changed.afterSource() != null ? changed.afterSource() : "");
                 newMethod.setLineStart(1);
                 newMethod.setLineEnd(10);
                 newMethod = javaMethodRepository.save(newMethod);
-                methodIds.add(newMethod.getId());
+                methodIdsByClass.computeIfAbsent(matchedClass.getId(), ignored -> new LinkedHashSet<>())
+                        .add(newMethod.getId());
             }
         }
-        return methodIds;
+        // Context BR chỉ nhận một Service class, tối đa ba method mỗi lượt như luồng sinh BR thông thường.
+        List<Set<Long>> batches = new ArrayList<>();
+        for (Set<Long> classMethodIds : methodIdsByClass.values()) {
+            List<Long> methodIds = classMethodIds.stream().sorted().toList();
+            for (int start = 0; start < methodIds.size(); start += GenerationContextBuilder.MAX_GENERATION_METHODS) {
+                batches.add(new LinkedHashSet<>(methodIds.subList(start,
+                        Math.min(start + GenerationContextBuilder.MAX_GENERATION_METHODS, methodIds.size()))));
+            }
+        }
+        return batches;
     }
 
     private String extractPackageName(String qualifiedName) {

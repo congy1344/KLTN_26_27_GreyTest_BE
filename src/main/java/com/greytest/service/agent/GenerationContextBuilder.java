@@ -9,10 +9,14 @@ import java.util.Set;
 import java.util.stream.Stream;
 
 import com.github.javaparser.JavaParser;
+import com.github.javaparser.ParserConfiguration;
 import com.github.javaparser.ast.CompilationUnit;
 import com.github.javaparser.ast.body.FieldDeclaration;
 import com.github.javaparser.ast.body.MethodDeclaration;
 import com.github.javaparser.ast.expr.MethodCallExpr;
+import com.github.javaparser.ast.expr.NameExpr;
+import com.github.javaparser.ast.type.ClassOrInterfaceType;
+import com.github.javaparser.printer.lexicalpreservation.LexicalPreservingPrinter;
 
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -76,7 +80,7 @@ public class GenerationContextBuilder {
     public static final int MAX_UNIT_TEST_CASES = 8;
     public static final int MAX_UNIT_TEST_RETRY_CASES = 2;
     private static final int MAX_UNIT_TEST_REFERENCES = 10;
-    // ponytail: chi dua declaration lien quan truc tiep vao prompt; tang gioi han len 25 de khong thieu DTO/Entity/Repo/Client.
+    // Giữ prompt có giới hạn nhưng phải báo thiếu context thay vì âm thầm bỏ dependency.
     private static final int MAX_UNIT_TEST_SUPPORTING_CLASSES = 25;
     private static final int MAX_GENERATION_RELATIONS = 40;
     private static final int MAX_GENERATION_DEPENDENCIES = 40;
@@ -495,6 +499,10 @@ public class GenerationContextBuilder {
     @Transactional(readOnly = true)
     public UnitTestContextDto buildUnitTestContext(Long projectId, Set<Long> targetCaseIds) {
         AnalysisResultDto analysis = analysisService.getAnalysisResult(projectId);
+        return buildUnitTestContext(projectId, targetCaseIds, analysis);
+    }
+
+    private UnitTestContextDto buildUnitTestContext(Long projectId, Set<Long> targetCaseIds, AnalysisResultDto analysis) {
         List<TestCaseContextItemDto> allCases = approvedTestCases(projectId);
         boolean fullGeneration = targetCaseIds == null || targetCaseIds.isEmpty();
         List<TestCaseContextItemDto> targetCases = allCases.stream()
@@ -539,6 +547,21 @@ public class GenerationContextBuilder {
                 relevantExistingTests(projectId, targetMethodIds, targetClassIds, true));
     }
 
+    /** Context Unit Test từ snapshot source của bản cập nhật. */
+    @Transactional(readOnly = true)
+    public UnitTestContextDto buildSnapshotUnitTestContext(Long projectId, Set<Long> targetCaseIds, java.nio.file.Path snapshot) {
+        AnalysisResultDto analysis = SnapshotAnalysisLoader.load(analysisService.getAnalysisResult(projectId), snapshot);
+        UnitTestContextDto context = buildUnitTestContext(projectId, targetCaseIds, analysis);
+        Set<Long> requiredIds = context.approvedBusinessRules().stream().map(BusinessRuleContextDto::methodId)
+                .filter(java.util.Objects::nonNull).collect(java.util.stream.Collectors.toSet());
+        Set<Long> availableIds = context.classes().stream().flatMap(c -> c.methods().stream()).map(MethodContextDto::id)
+                .collect(java.util.stream.Collectors.toSet());
+        if (!availableIds.containsAll(requiredIds)) {
+            throw new LlmResponseException("Candidate snapshot does not contain every target method linked to the selected Test Cases.");
+        }
+        return context;
+    }
+
     /** Context Unit Test cho source update, ghi de source cua method vua thay doi. */
     @Transactional(readOnly = true)
     public UnitTestContextDto buildUnitTestContext(
@@ -575,16 +598,8 @@ public class GenerationContextBuilder {
 
     private List<ClassContextDto> replaceChangedMethodSources(
             List<ClassContextDto> classes, List<MethodDiffItem> changedMethods) {
-        return classes.stream().map(javaClass -> new ClassContextDto(
-                javaClass.id(),
-                javaClass.packageName(),
-                javaClass.className(),
-                javaClass.qualifiedName(),
-                javaClass.classType(),
-                javaClass.filePath(),
-                replaceChangedClassSource(javaClass, changedMethods),
-                javaClass.annotations(),
-                javaClass.methods().stream().map(method -> {
+        return classes.stream().map(javaClass -> {
+            List<MethodContextDto> methods = javaClass.methods().stream().map(method -> {
                     MethodDiffItem changed = changedMethods.stream()
                             .filter(diff -> java.util.Objects.equals(diff.methodKey(), methodKey(method)))
                             .findFirst()
@@ -609,18 +624,43 @@ public class GenerationContextBuilder {
                             method.annotations(),
                             method.endpoints(),
                             method.branches());
-                }).filter(java.util.Objects::nonNull).toList()))
+                }).filter(java.util.Objects::nonNull).toList();
+            String validationSource = replaceChangedClassSource(
+                    javaClass.validationSourceCode(), javaClass.qualifiedName(), changedMethods);
+            if (validationSource == null && !methods.isEmpty()) {
+                throw new LlmResponseException("Cannot verify current source of " + javaClass.qualifiedName()
+                        + " after source update. Reanalyze the project before generating Unit Tests.");
+            }
+            return new ClassContextDto(javaClass.id(), javaClass.packageName(), javaClass.className(),
+                    javaClass.qualifiedName(), javaClass.classType(), javaClass.filePath(),
+                    validationSource, javaClass.annotations(), methods, validationSource);
+        })
                 .toList();
     }
 
     private String replaceChangedClassSource(
-            ClassContextDto javaClass, List<MethodDiffItem> changedMethods) {
-        String source = javaClass.sourceCode();
+            String originalSource, String qualifiedName, List<MethodDiffItem> changedMethods) {
+        String source = originalSource;
         for (MethodDiffItem changed : changedMethods) {
-            if (!java.util.Objects.equals(javaClass.qualifiedName(), changed.qualifiedClassName())) continue;
-            if (changed.beforeSource() == null || changed.afterSource() == null) return null;
+            if (!java.util.Objects.equals(qualifiedName, changed.qualifiedClassName())) continue;
+            if (changed.beforeSource() == null) {
+                if (source == null || changed.afterSource() == null) return null;
+                if (source.contains(changed.afterSource())) continue;
+                var parsedClass = new JavaParser().parse(source).getResult();
+                var parsedMethod = new JavaParser().parseMethodDeclaration(changed.afterSource()).getResult();
+                if (parsedClass.isEmpty() || parsedMethod.isEmpty()) return null;
+                var targetClass = parsedClass.get().getTypes().stream()
+                        .filter(type -> type.getFullyQualifiedName().filter(qualifiedName::equals).isPresent())
+                        .findFirst();
+                if (targetClass.isEmpty()) return null;
+                LexicalPreservingPrinter.setup(parsedClass.get());
+                targetClass.get().addMember(parsedMethod.get());
+                source = LexicalPreservingPrinter.print(parsedClass.get());
+                continue;
+            }
             if (source == null || !source.contains(changed.beforeSource())) return null;
-            source = source.replace(changed.beforeSource(), changed.afterSource());
+            source = source.replace(changed.beforeSource(),
+                    changed.afterSource() == null ? "" : changed.afterSource());
         }
         return source;
     }
@@ -632,69 +672,92 @@ public class GenerationContextBuilder {
     }
 
     private List<ClassContextDto> unitTestClasses(AnalysisResultDto analysis, Set<Long> targetMethodIds) {
-        List<ClassContextDto> targetClasses = classes(analysis, targetMethodIds, true);
-        Set<String> targetNames = targetClasses.stream()
-                .map(ClassContextDto::qualifiedName)
+        List<ClassContextDto> result = new ArrayList<>(classes(analysis, targetMethodIds, true));
+        int targetCount = result.size();
+        Set<String> included = result.stream().map(ClassContextDto::qualifiedName)
                 .collect(java.util.stream.Collectors.toSet());
-        List<JavaClassDto> supportingClasses = analysis.classes().stream()
+        List<JavaClassDto> candidates = analysis.classes().stream()
                 .filter(javaClass -> javaClass.sourceCode() != null && !javaClass.sourceCode().isBlank())
-                .filter(javaClass -> !targetNames.contains(javaClass.qualifiedName()))
-                .filter(javaClass -> isUnitTestSupportingClass(javaClass, targetClasses))
-                .sorted(Comparator.comparingInt((JavaClassDto javaClass) ->
-                                isDirectlyImported(javaClass, targetClasses) ? 0 : 1)
-                        .thenComparing(JavaClassDto::filePath, Comparator.nullsLast(String::compareTo))
+                .sorted(Comparator.comparing(JavaClassDto::filePath, Comparator.nullsLast(String::compareTo))
                         .thenComparing(JavaClassDto::qualifiedName))
-                .limit(MAX_UNIT_TEST_SUPPORTING_CLASSES)
                 .toList();
-        return Stream.concat(
-                        targetClasses.stream(),
-                        supportingClasses.stream().map(javaClass -> classContext(javaClass, Set.of(), true)))
-                .toList();
-    }
-
-    private boolean isUnitTestSupportingClass(JavaClassDto javaClass, List<ClassContextDto> targetClasses) {
-        return targetClasses.stream().anyMatch(target ->
-                (javaClass.packageName() != null && javaClass.packageName().equals(target.packageName()))
-                        || isDirectlyImported(javaClass, target)
-                        || isReferencedBySimpleName(javaClass, target));
-    }
-
-    private boolean isReferencedBySimpleName(JavaClassDto javaClass, ClassContextDto targetClass) {
-        if (targetClass.sourceCode() == null || javaClass.className() == null || javaClass.className().isBlank()) {
-            return false;
+        // Duyệt tiếp DTO/repository vừa tìm được để không thiếu kiểu generic, enum và lớp cha của chúng.
+        for (int index = 0; index < result.size(); index++) {
+            ClassContextDto owner = result.get(index);
+            CompilationUnit source = owner.sourceCode() == null ? null : new JavaParser(new ParserConfiguration()
+                    .setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_21))
+                    .parse(owner.sourceCode()).getResult().orElse(null);
+            Set<String> references = sourceTypeReferences(source);
+            for (JavaClassDto candidate : candidates) {
+                if (included.contains(candidate.qualifiedName())
+                        || !isUnitTestDependency(candidate, owner, source, references, candidates)) continue;
+                if (result.size() - targetCount >= MAX_UNIT_TEST_SUPPORTING_CLASSES) {
+                    throw new LlmResponseException("Unit Test context requires more than "
+                            + MAX_UNIT_TEST_SUPPORTING_CLASSES + " supporting production classes; "
+                            + "cannot omit required types. Generate a smaller group of Test Cases.");
+                }
+                included.add(candidate.qualifiedName());
+                result.add(classContext(candidate, Set.of(), true));
+            }
         }
-        return javaClass.qualifiedName() != null
-                && targetClass.packageName() != null
-                && commonBasePackage(targetClass.packageName(), javaClass.packageName())
-                && targetClass.sourceCode().contains(javaClass.className());
+        return List.copyOf(result);
+    }
+
+    private Set<String> sourceTypeReferences(CompilationUnit source) {
+        if (source == null) return Set.of();
+        Set<String> references = new java.util.HashSet<>();
+        source.findAll(ClassOrInterfaceType.class)
+                .forEach(type -> references.add(type.getNameWithScope()));
+        source.findAll(NameExpr.class).stream()
+                .filter(name -> name.getParentNode().map(parent -> parent instanceof MethodCallExpr
+                        || parent instanceof com.github.javaparser.ast.expr.FieldAccessExpr).orElse(false))
+                .forEach(name -> references.add(name.getNameAsString()));
+        return references;
+    }
+
+    private boolean isUnitTestDependency(JavaClassDto candidate, ClassContextDto owner,
+            CompilationUnit source, Set<String> references, List<JavaClassDto> candidates) {
+        if (references.contains(candidate.qualifiedName())) return true;
+        if (source != null) {
+            var explicitImport = source.getImports().stream().filter(value -> !value.isStatic() && !value.isAsterisk())
+                    .filter(value -> value.getName().getIdentifier().equals(candidate.className())).findFirst();
+            if (explicitImport.isPresent()) {
+                return explicitImport.get().getNameAsString().equals(candidate.qualifiedName());
+            }
+        }
+        if (!references.contains(candidate.className())) return false;
+        boolean samePackageTypeExists = candidates.stream()
+                .anyMatch(other -> java.util.Objects.equals(other.className(), candidate.className())
+                        && java.util.Objects.equals(other.packageName(), owner.packageName()));
+        if (samePackageTypeExists) return java.util.Objects.equals(owner.packageName(), candidate.packageName());
+        List<JavaClassDto> wildcardMatches = source == null ? List.of() : candidates.stream()
+                .filter(other -> java.util.Objects.equals(other.className(), candidate.className()))
+                .filter(other -> source.getImports().stream().anyMatch(value -> !value.isStatic() && value.isAsterisk()
+                        && value.getNameAsString().equals(other.packageName()))).toList();
+        if (wildcardMatches.size() == 1) {
+            return java.util.Objects.equals(wildcardMatches.get(0).qualifiedName(), candidate.qualifiedName());
+        }
+        // Source phân tích có thể chỉ chứa khai báo class, thiếu imports: chỉ suy ra tên khi không mơ hồ.
+        if (!commonBasePackage(owner.packageName(), candidate.packageName())) return false;
+        long matchingTypes = candidates.stream()
+                .filter(other -> java.util.Objects.equals(other.className(), candidate.className()))
+                .filter(other -> commonBasePackage(owner.packageName(), other.packageName())).count();
+        if (matchingTypes > 1 || wildcardMatches.size() > 1) {
+            throw new LlmResponseException("Cannot resolve referenced production type '" + candidate.className()
+                    + "' in " + owner.qualifiedName() + "; reanalyze the project to provide package and imports.");
+        }
+        return matchingTypes == 1;
     }
 
     private boolean commonBasePackage(String pkg1, String pkg2) {
         if (pkg1 == null || pkg2 == null) return false;
+        if (pkg1.equals(pkg2) || pkg1.startsWith(pkg2 + ".") || pkg2.startsWith(pkg1 + ".")) return true;
         String[] parts1 = pkg1.split("\\.");
         String[] parts2 = pkg2.split("\\.");
         if (parts1.length >= 2 && parts2.length >= 2) {
             return parts1[0].equals(parts2[0]) && parts1[1].equals(parts2[1]);
         }
         return false;
-    }
-
-    private boolean isDirectlyImported(JavaClassDto javaClass, List<ClassContextDto> targetClasses) {
-        return targetClasses.stream().anyMatch(target -> isDirectlyImported(javaClass, target));
-    }
-
-    private boolean isDirectlyImported(JavaClassDto javaClass, ClassContextDto targetClass) {
-        return targetClass.sourceCode() != null
-                && isImported(targetClass.sourceCode(), javaClass.qualifiedName());
-    }
-
-    private boolean isImported(String source, String qualifiedName) {
-        if (qualifiedName == null || qualifiedName.isBlank()) return false;
-        int lastDot = qualifiedName.lastIndexOf('.');
-        if (lastDot < 0) return false;
-        String packageName = qualifiedName.substring(0, lastDot);
-        return source.contains("import " + qualifiedName + ";")
-                || source.contains("import " + packageName + ".*;");
     }
 
     private List<GeneratedUnitTestContextDto> generatedUnitTests(List<TestCaseContextItemDto> testCases) {
@@ -759,9 +822,10 @@ public class GenerationContextBuilder {
                 javaClass.qualifiedName(),
                 javaClass.classType(),
                 javaClass.filePath(),
-                includeClassSource ? trimmed(javaClass.sourceCode()) : null,
+                includeClassSource ? javaClass.sourceCode() : null,
                 javaClass.annotations(),
-                methods);
+                methods,
+                includeClassSource ? javaClass.sourceCode() : null);
     }
 
     private MethodContextDto methodContext(JavaClassDto javaClass, JavaMethodDto method) {

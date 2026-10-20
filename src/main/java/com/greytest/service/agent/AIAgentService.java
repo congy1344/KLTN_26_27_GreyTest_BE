@@ -11,6 +11,11 @@ import org.springframework.context.i18n.LocaleContextHolder;
 import org.springframework.stereotype.Service;
 
 import com.greytest.dto.CoverageGapDto;
+import com.greytest.dto.agent.GenerationContextDtos.BusinessRuleGenerationContextDto;
+import com.greytest.dto.agent.GenerationContextDtos.BusinessRuleReviewContextDto;
+import com.greytest.dto.agent.GenerationContextDtos.CoverageRefinementContextDto;
+import com.greytest.dto.agent.GenerationContextDtos.TestCaseContextDto;
+import com.greytest.dto.agent.GenerationContextDtos.TestPlanContextDto;
 import com.greytest.dto.agent.GenerationContextDtos.UnitTestContextDto;
 import com.greytest.dto.agent.GenerationResponseDtos.BusinessRuleResponseDto;
 import com.greytest.dto.agent.GenerationResponseDtos.BusinessRuleReviewResponseDto;
@@ -35,6 +40,7 @@ public class AIAgentService {
     private static final int MALFORMED_JSON_MAX_ATTEMPTS = 3;
     private static final int EXHAUSTED_POOL_MAX_ATTEMPTS = 3;
     private static final long EXHAUSTED_POOL_DELAY_MILLIS = 30_000L;
+    private static final long MAX_RETRY_DELAY_MILLIS = 60_000L;
     private static final String UNIT_TEST_SEMANTIC_ERROR = "Unit Test semantic validation failed: ";
 
     private final GenerationContextBuilder contextBuilder;
@@ -193,6 +199,12 @@ public class AIAgentService {
         return call("unit-test", projectId, contextBuilder.buildUnitTestContext(projectId, caseIds), UnitTestResponseDto.class, null);
     }
 
+    /** Sinh Unit Test với source đầy đủ từ snapshot ứng viên, giữ nguyên ID các artifact. */
+    public UnitTestResponseDto generateSnapshotUnitTests(Long projectId, Set<Long> caseIds, java.nio.file.Path snapshot) {
+        return call("unit-test", projectId, contextBuilder.buildSnapshotUnitTestContext(projectId, caseIds, snapshot),
+                UnitTestResponseDto.class, null, snapshot);
+    }
+
     public UnitTestResponseDto generateUnitTests(
             Long projectId, Set<Long> caseIds, List<MethodDiffItem> changedMethods) {
         return call("unit-test", projectId,
@@ -213,8 +225,17 @@ public class AIAgentService {
     }
 
     private <T> T call(String promptName, Long projectId, Object context, Class<T> responseType, String correction) {
+        return call(promptName, projectId, context, responseType, correction, null);
+    }
+
+    private <T> T call(String promptName, Long projectId, Object context, Class<T> responseType, String correction,
+            java.nio.file.Path snapshot) {
+        if ("unit-test".equals(promptName) && context instanceof UnitTestContextDto unitTestContext) {
+            GeneratedUnitTestSemanticValidator.validateContext(unitTestContext)
+                    .ifPresent(problem -> { throw new LlmResponseException(problem); });
+        }
         String prompt = promptManager.render(promptName, Map.of("context_json", context));
-        prompt += javaVersionInstruction(promptName, projectId, context);
+        prompt += javaVersionInstruction(promptName, projectId, context, snapshot);
         if (correction != null && !correction.isBlank()) {
             String correctionGuidance = "test-plan".equals(promptName)
                     ? "Regenerate the full plans array and fix ALL mapping errors listed above. "
@@ -234,7 +255,7 @@ public class AIAgentService {
             if (cachedResponse.isPresent()) {
                 try {
                     T parsed = responseParser.parse(cachedResponse.get(), responseType);
-                    validateSemanticOutput(promptName, projectId, context, parsed);
+                    validateSemanticOutput(promptName, projectId, context, parsed, snapshot);
                     GenerationJobContext.log("Da tai su dung ket qua AI da sinh truoc do (100%).");
                     return parsed;
                 } catch (LlmResponseException exception) {
@@ -244,34 +265,44 @@ public class AIAgentService {
             }
         }
 
+        Long userId = GenerationJobContext.actorUserId();
+        if (userId == null && projectId != null && projectRepository != null) {
+            userId = projectRepository.findById(projectId)
+                    .map(project -> project.getOwnerUserId())
+                    .orElse(null);
+        }
+        if (userId != null && quotaService != null) {
+            quotaService.checkQuotaAvailable(userId);
+        }
+
         String attemptPrompt = prompt;
         for (int attempt = 1; attempt <= EXHAUSTED_POOL_MAX_ATTEMPTS; attempt++) {
             try {
-                Long userId = GenerationJobContext.actorUserId();
-                if (userId == null && projectId != null && projectRepository != null) {
-                    userId = projectRepository.findById(projectId)
-                            .map(project -> project.getOwnerUserId())
-                            .orElse(null);
-                }
-                if (userId != null && quotaService != null) {
-                    quotaService.consumeLlmCall(userId, projectId,
-                            Map.of("prompt", promptName, "attempt", attempt));
-                }
-
                 String response = llmClient.complete(attemptPrompt, stageTokenLimits.optionsFor(promptName));
                 contextLogService.writeResponse(promptName, attempt, response);
                 T parsed = responseParser.parse(response, responseType);
-                validateSemanticOutput(promptName, projectId, context, parsed);
+                validateSemanticOutput(promptName, projectId, context, parsed, snapshot);
+
+                // Chỉ tính và trừ quota khi đã hoàn tất xử lý và validate thành công
+                int units = calculateUnits(context);
+                if (userId != null && quotaService != null) {
+                    quotaService.consumeLlmCall(userId, projectId, units,
+                            Map.of("prompt", promptName, "attempt", attempt, "units", units));
+                }
+
                 if (responseCache != null) {
                     responseCache.putAfterSuccessfulTransaction(prompt, response);
                 }
                 return parsed;
             } catch (LlmResponseException exception) {
                 log.warn("LLM response invalid for {} attempt {}: {}", promptName, attempt, exception.getMessage());
-                if (!exception.isRetryable() || attempt >= maxAttemptsFor(exception)) {
+                if (!exception.isRetryable() || exception.getRetryAfterMillis() > MAX_RETRY_DELAY_MILLIS
+                        || attempt >= maxAttemptsFor(exception)) {
                     throw exception;
                 }
                 if (isUnitTestSemanticError(exception)) {
+                    GenerationJobContext.log("Unit Test chua dat kiem tra noi dung. Dang thu lai lan "
+                            + (attempt + 1) + "/" + maxAttemptsFor(exception) + ".");
                     attemptPrompt = prompt + "\n\n# Unit Test semantic correction\n"
                             + exception.getMessage().substring(UNIT_TEST_SEMANTIC_ERROR.length())
                             + "\nRegenerate the complete unit_tests array. Fix only the reported technical errors; "
@@ -288,7 +319,8 @@ public class AIAgentService {
         throw new LlmResponseException("Khong the parse LLM response.");
     }
 
-    private <T> void validateSemanticOutput(String promptName, Long projectId, Object context, T parsed) {
+    private <T> void validateSemanticOutput(String promptName, Long projectId, Object context, T parsed,
+            java.nio.file.Path snapshot) {
         if (!"unit-test".equals(promptName)
                 || !(context instanceof UnitTestContextDto unitTestContext)
                 || !(parsed instanceof UnitTestResponseDto unitTestResponse)) return;
@@ -296,7 +328,8 @@ public class AIAgentService {
                 .map(com.greytest.dto.agent.GenerationContextDtos.ClassContextDto::filePath)
                 .toList();
         ProjectJavaVersionDetector.TestFramework framework = javaVersionDetector == null
-                ? null : javaVersionDetector.detectTestFramework(projectId, sourcePaths)
+                ? null : (snapshot == null ? javaVersionDetector.detectTestFramework(projectId, sourcePaths)
+                        : javaVersionDetector.detectSnapshotTestFramework(snapshot, sourcePaths))
                         .map(ProjectJavaVersionDetector.TestFrameworkInfo::framework).orElse(null);
         GeneratedUnitTestSemanticValidator.validate(unitTestContext, unitTestResponse, framework)
                 .ifPresent(problem -> {
@@ -327,11 +360,11 @@ public class AIAgentService {
     }
 
     static long retryDelayMillis(int attempt, LlmResponseException exception, long jitter) {
-        long exponentialDelay = Math.min(1_000L << Math.max(attempt - 1, 0), 60_000L);
+        long exponentialDelay = Math.min(1_000L << Math.max(attempt - 1, 0), MAX_RETRY_DELAY_MILLIS);
         long minimumDelay = isSharedPoolExhausted(exception)
                 ? EXHAUSTED_POOL_DELAY_MILLIS : exponentialDelay;
         long baseDelay = Math.max(Math.max(exception.getRetryAfterMillis(), exponentialDelay), minimumDelay);
-        long cappedBaseDelay = Math.min(baseDelay, 60_000L - jitter);
+        long cappedBaseDelay = Math.min(baseDelay, MAX_RETRY_DELAY_MILLIS - jitter);
         return cappedBaseDelay + jitter;
     }
 
@@ -351,7 +384,7 @@ public class AIAgentService {
         return exception.getMessage() != null && exception.getMessage().startsWith(UNIT_TEST_SEMANTIC_ERROR);
     }
 
-    private String javaVersionInstruction(String promptName, Long projectId, Object context) {
+    private String javaVersionInstruction(String promptName, Long projectId, Object context, java.nio.file.Path snapshot) {
         if (!"unit-test".equals(promptName) || javaVersionDetector == null) return "";
         StringBuilder instruction = new StringBuilder();
         List<String> sourcePaths = context instanceof UnitTestContextDto unitTestContext
@@ -360,7 +393,8 @@ public class AIAgentService {
                         .toList()
                 : List.of();
         try {
-            instruction.append(javaVersionDetector.detect(projectId, sourcePaths)
+            instruction.append((snapshot == null ? javaVersionDetector.detect(projectId, sourcePaths)
+                    : javaVersionDetector.detectSnapshot(snapshot, sourcePaths))
                     .map(info -> "\n\n# Java compatibility detected\nBuild file `" + info.buildFile()
                             + "` declares Java " + info.version() + ". Use only syntax and APIs available in Java "
                             + info.version() + ".")
@@ -370,7 +404,8 @@ public class AIAgentService {
             instruction.append("\n\n# Java compatibility detected\nJava version detection failed. Use Java 8-compatible syntax and APIs.");
         }
         try {
-            javaVersionDetector.detectTestFramework(projectId, sourcePaths).ifPresent(info -> {
+            (snapshot == null ? javaVersionDetector.detectTestFramework(projectId, sourcePaths)
+                    : javaVersionDetector.detectSnapshotTestFramework(snapshot, sourcePaths)).ifPresent(info -> {
                 instruction.append("\n\n# Test framework detected\nBuild file `")
                         .append(info.buildFile()).append("` requires ");
                 if (info.framework() == ProjectJavaVersionDetector.TestFramework.JUNIT4) {
@@ -398,5 +433,42 @@ public class AIAgentService {
                 + "Khong tron cau tieng Anh vao description. "
                 + "Giu nguyen cac thuat ngu IT pho bien bang tieng Anh (vi du: API, endpoint, controller, service, repository, method, class, source code, Test Plan, Test Case, Unit Test, mock, assertion, branch, coverage); khong dich guong ep. "
                 + "Khong dich JSON key, enum value, identifier, code va file path.";
+    }
+
+    int calculateUnits(Object context) {
+        if (context instanceof UnitTestContextDto unitTestContext) {
+            int count = unitTestContext.approvedTestCases() != null
+                    ? unitTestContext.approvedTestCases().size() : 0;
+            return Math.max((count + 1) / 2, 1);
+        }
+        if (context instanceof TestCaseContextDto testCaseContext) {
+            int count = testCaseContext.approvedTestPlans() != null
+                    ? testCaseContext.approvedTestPlans().size() : 0;
+            return Math.max((count + 1) / 2, 1);
+        }
+        if (context instanceof TestPlanContextDto testPlanContext) {
+            int count = testPlanContext.approvedBusinessRules() != null
+                    ? testPlanContext.approvedBusinessRules().size() : 0;
+            return Math.max((count + 1) / 2, 1);
+        }
+        if (context instanceof BusinessRuleGenerationContextDto ruleContext) {
+            int count = ruleContext.classes() != null
+                    ? ruleContext.classes().stream()
+                            .mapToInt(c -> c.methods() != null ? c.methods().size() : 0)
+                            .sum()
+                    : 0;
+            return Math.max((count + 2) / 3, 1);
+        }
+        if (context instanceof BusinessRuleReviewContextDto reviewContext) {
+            int count = reviewContext.businessRules() != null
+                    ? reviewContext.businessRules().size() : 0;
+            return Math.max((count + 1) / 2, 1);
+        }
+        if (context instanceof CoverageRefinementContextDto refinementContext) {
+            int count = refinementContext.coverageGaps() != null
+                    ? refinementContext.coverageGaps().size() : 0;
+            return Math.max((count + 1) / 2, 1);
+        }
+        return 1;
     }
 }
