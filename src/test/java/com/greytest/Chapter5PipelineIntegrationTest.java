@@ -50,8 +50,9 @@ import com.greytest.service.agent.LlmResponseException;
 /** Kiểm thử HTTP → service → PostgreSQL/storage thật; chỉ thay ranh giới provider LLM. */
 @SpringBootTest(properties = {
         "spring.config.import=", "llm.provider=mock", "llm.usage.enabled=false",
-        "spring.datasource.url=jdbc:postgresql://127.0.0.1:55439/chapter5_integration",
-        "spring.datasource.username=chapter5_test", "spring.datasource.password=",
+        "spring.datasource.url=${SPRING_DATASOURCE_URL:jdbc:postgresql://127.0.0.1:55439/chapter5_integration}",
+        "spring.datasource.username=${SPRING_DATASOURCE_USERNAME:chapter5_test}",
+        "spring.datasource.password=${SPRING_DATASOURCE_PASSWORD:}",
         "greytest.auth.token-secret=chapter5-integration-test-secret-at-least-32-bytes"})
 @AutoConfigureMockMvc(print = org.springframework.boot.test.autoconfigure.web.servlet.MockMvcPrint.NONE)
 @Import(Chapter5PipelineIntegrationTest.ProviderConfig.class)
