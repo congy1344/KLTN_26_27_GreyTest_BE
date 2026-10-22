@@ -1,0 +1,9 @@
+# Tách profile để deploy không đổi hành vi dev hiện có.
+greytest:
+  llm-cache:
+    max-entries: ${GREYTEST_LLM_CACHE_MAX_ENTRIES:100}
+  llm-batch:
+    concurrency: ${GREYTEST_LLM_BATCH_CONCURRENCY:1}
+  ai-context-log-path: ${GREYTEST_AI_CONTEXT_LOG_PATH:/app/log}
+  ai-context-log-enabled: false
+  ai-context-log-console-enabled: false

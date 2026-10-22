@@ -1,0 +1,122 @@
+# File độc lập: không merge với docker-compose.yml của môi trường dev.
+name: greytest-aws
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: greytest
+      POSTGRES_USER: greytest
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the external env file}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      # TCP tránh nhầm server tạm dùng socket trong lần init DB đầu tiên.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U greytest -d greytest"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    mem_limit: 256m
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  backend:
+    image: greytest-backend:${RELEASE_TAG:?Set RELEASE_TAG for this release}
+    build:
+      context: .
+      dockerfile: Dockerfile.aws
+    restart: unless-stopped
+    environment:
+      SPRING_PROFILES_ACTIVE: aws
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/greytest
+      SPRING_DATASOURCE_USERNAME: greytest
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the external env file}
+      GREYTEST_AUTH_TOKEN_SECRET: ${GREYTEST_AUTH_TOKEN_SECRET:?Set a random JWT secret of at least 32 bytes}
+      GREYTEST_STORAGE_PATH: /app/storage
+      GREYTEST_AI_CONTEXT_LOG_PATH: /app/log
+      GREYTEST_AI_CONTEXT_LOG_ENABLED: "false"
+      GREYTEST_AI_CONTEXT_LOG_CONSOLE_ENABLED: "false"
+      GREYTEST_LLM_BATCH_CONCURRENCY: ${GREYTEST_LLM_BATCH_CONCURRENCY:-1}
+      GREYTEST_LLM_CACHE_MAX_ENTRIES: ${GREYTEST_LLM_CACHE_MAX_ENTRIES:-100}
+      GREYTEST_DEFAULT_MONTHLY_LLM_QUOTA: ${GREYTEST_DEFAULT_MONTHLY_LLM_QUOTA:-100}
+      GREYTEST_PLUS_WEEKLY_LLM_QUOTA: ${GREYTEST_PLUS_WEEKLY_LLM_QUOTA:-200}
+      GREYTEST_PRO_MONTHLY_LLM_QUOTA: ${GREYTEST_PRO_MONTHLY_LLM_QUOTA:-300}
+      LLM_PROVIDER: ${LLM_PROVIDER:-mock}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_API_KEY1: ${LLM_API_KEY1:-}
+      LLM_API_KEY2: ${LLM_API_KEY2:-}
+      LLM_API_KEY3: ${LLM_API_KEY3:-}
+      LLM_API_KEY4: ${LLM_API_KEY4:-}
+      LLM_API_KEY5: ${LLM_API_KEY5:-}
+      LLM_API_KEY6: ${LLM_API_KEY6:-}
+      LLM_API_KEY7: ${LLM_API_KEY7:-}
+      LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
+      LLM_OPENAI_URL: ${LLM_OPENAI_URL:-https://api.vietapi.tech/v1/chat/completions}
+      LLM_GOOGLE_URL: ${LLM_GOOGLE_URL:-https://generativelanguage.googleapis.com/v1beta/interactions}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-300}
+      LLM_MAX_TOKENS_BUSINESS_RULE: ${LLM_MAX_TOKENS_BUSINESS_RULE:-4096}
+      LLM_MAX_TOKENS_BUSINESS_RULE_REVIEW: ${LLM_MAX_TOKENS_BUSINESS_RULE_REVIEW:-4096}
+      LLM_MAX_TOKENS_TEST_PLAN: ${LLM_MAX_TOKENS_TEST_PLAN:-6144}
+      LLM_MAX_TOKENS_TEST_CASE: ${LLM_MAX_TOKENS_TEST_CASE:-8192}
+      LLM_MAX_TOKENS_UNIT_TEST: ${LLM_MAX_TOKENS_UNIT_TEST:-12288}
+      LLM_MAX_TOKENS_COVERAGE_REFINEMENT: ${LLM_MAX_TOKENS_COVERAGE_REFINEMENT:-6144}
+      LLM_USAGE_ENABLED: "false"
+      LLM_USAGE_OUTPUT_DIR: /app/log/llm-usage
+      JAVA_TOOL_OPTIONS: ${JAVA_TOOL_OPTIONS:--Xms128m -Xmx768m -XX:+ExitOnOutOfMemoryError}
+    volumes:
+      - backend_storage:/app/storage
+      - backend_logs:/app/log
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "--max-time", "5", "http://127.0.0.1:8080/api/ping"]
+      interval: 15s
+      timeout: 6s
+      retries: 12
+      start_period: 90s
+    # Cấu hình thử cho 2 GiB; phải đo upload/analysis/AI trước khi chốt máy.
+    mem_limit: 1152m
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  web:
+    image: greytest-frontend:${RELEASE_TAG:?Set RELEASE_TAG for this release}
+    build:
+      context: ../frontend
+    restart: unless-stopped
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:?Set the public hostname; use :80 only for a local smoke test}
+    ports:
+      - "${WEB_BIND_ADDRESS:-0.0.0.0}:${WEB_HTTP_PORT:-80}:80"
+      - "${WEB_BIND_ADDRESS:-0.0.0.0}:${WEB_HTTPS_PORT:-443}:443"
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      backend:
+        condition: service_healthy
+    mem_limit: 128m
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+# Project name giữ ổn định khi update; -p greytest-restore tạo volume riêng để thử khôi phục.
+# Không chạy down -v hoặc volume prune trong cập nhật thông thường.
+volumes:
+  postgres_data:
+  backend_storage:
+  backend_logs:
+  caddy_data:
+  caddy_config:

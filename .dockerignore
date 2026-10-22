@@ -1,0 +1,12 @@
+.git
+.codegraph
+.env
+.env.*
+!.env.example
+!.env.aws.example
+target
+storage
+log
+logs
+*.log
+outputs
