@@ -117,6 +117,13 @@ public class JavaParserHelper {
         return sourceScanner.scanProject(projectDir);
     }
 
+    /** Parse method theo cùng grammar Java 8-21 với source project. */
+    public MethodDeclaration parseMethodDeclaration(String sourceCode) {
+        var result = JavaParserFactory.parseMethodDeclaration(sourceCode);
+        if (!result.isSuccessful()) throw new IllegalArgumentException("Source method không hợp lệ");
+        return result.getResult().orElseThrow(() -> new IllegalArgumentException("Source method trống"));
+    }
+
     /** Đếm existing test files mà không parse lại production source. */
     public int countExistingTestFiles(Path projectDir) {
         return sourceScanner.countExistingTestFiles(projectDir);
@@ -397,7 +404,7 @@ public class JavaParserHelper {
                 .isPresent();
     }
 
-    private String methodKey(MethodDeclaration method) {
+    public String methodKey(MethodDeclaration method) {
         String parameterTypes = method.getParameters().stream()
                 .map(Parameter::getTypeAsString)
                 .reduce((left, right) -> left + "," + right)

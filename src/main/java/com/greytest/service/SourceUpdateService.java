@@ -41,6 +41,11 @@ import com.greytest.service.storage.SourceRevisionStorageService.SnapshotResult;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.github.javaparser.ast.NodeList;
+import com.github.javaparser.ast.CompilationUnit;
+import com.github.javaparser.ast.body.MethodDeclaration;
+import com.github.javaparser.ast.body.TypeDeclaration;
+import com.greytest.service.analysis.JavaParserHelper;
 import com.greytest.dto.agent.GenerationResponseDtos.GeneratedBusinessRuleDto;
 import com.greytest.dto.agent.GenerationResponseDtos.GeneratedTestCaseDto;
 import com.greytest.dto.agent.GenerationResponseDtos.GeneratedTestPlanDto;
@@ -51,6 +56,7 @@ import com.greytest.dto.diff.MethodDiffType;
 import com.greytest.entity.BusinessRule;
 import com.greytest.entity.JavaClass;
 import com.greytest.entity.JavaMethod;
+import com.greytest.entity.MethodParam;
 import com.greytest.entity.TestCase;
 import com.greytest.entity.TestPlan;
 import com.greytest.entity.UnitTest;
@@ -570,6 +576,7 @@ public class SourceUpdateService {
                 applyMethodUpdate(projectId, item);
             }
         }
+        refreshUpdatedClassSources(projectId, candidate, items);
 
         for (SourceUpdateItem item : items) {
             if (item.getReviewStatus() == SourceUpdateReviewStatus.REJECTED || item.getAction() == SourceUpdateAction.REMOVE) {
@@ -826,14 +833,95 @@ public class SourceUpdateService {
                 .map(ruleId -> ruleIdMap.getOrDefault(ruleId, ruleId)).anyMatch(changedRuleIds::contains);
     }
 
+    /** Đồng bộ source cấp lớp từ cùng revision với method, giữ nguyên ID và các artifact đã liên kết. */
+    private void refreshUpdatedClassSources(Long projectId, SourceRevision candidate, List<SourceUpdateItem> items) {
+        List<SourceUpdateItem> methodItems = items.stream()
+                .filter(item -> item.getTargetType() == SourceUpdateTargetType.METHOD).toList();
+        Set<String> updatedClasses = methodItems.stream()
+                .filter(item -> item.getAction() == SourceUpdateAction.UPDATE
+                        && (item.getReviewStatus() == SourceUpdateReviewStatus.ACCEPTED
+                                || item.getReviewStatus() == SourceUpdateReviewStatus.MODIFIED))
+                .map(SourceUpdateItem::getTargetKey)
+                .filter(key -> key != null && key.contains("#"))
+                .map(key -> key.substring(0, key.indexOf('#')))
+                .collect(Collectors.toSet());
+        if (updatedClasses.isEmpty()) return;
+        Path snapshot = Path.of(candidate.getStoragePath()).toAbsolutePath().normalize();
+        JavaParserHelper parser = new JavaParserHelper();
+        var productionFiles = parser.scanProject(snapshot).productionFiles();
+        for (JavaClass javaClass : javaClassRepository.findByProjectId(projectId)) {
+            if (!updatedClasses.contains(javaClass.getQualifiedName())) continue;
+            var candidates = productionFiles.stream().filter(file -> parser.findTypes(file.compilationUnit()).stream()
+                    .anyMatch(type -> type.getFullyQualifiedName().filter(javaClass.getQualifiedName()::equals).isPresent()))
+                    .toList();
+            var samePath = candidates.stream().filter(file -> Objects.equals(file.relativePath(),
+                    javaClass.getFilePath() == null ? null : javaClass.getFilePath().replace('\\', '/'))).toList();
+            // Ưu tiên module cũ; chỉ theo file đã di chuyển khi qualified name xác định duy nhất.
+            var matches = samePath.isEmpty() ? candidates : samePath;
+            if (matches.size() != 1) {
+                throw new IllegalStateException("Không xác định duy nhất source cập nhật của " + javaClass.getQualifiedName());
+            }
+            var file = matches.get(0);
+            var classUnit = file.compilationUnit().clone();
+            TypeDeclaration<?> type = parser.findTypes(classUnit).stream()
+                    .filter(candidateType -> candidateType.getFullyQualifiedName()
+                            .filter(javaClass.getQualifiedName()::equals).isPresent()).findFirst().orElseThrow();
+            while (type.getParentNode().orElse(null) instanceof TypeDeclaration<?> enclosing) type = enclosing;
+            classUnit.setTypes(new NodeList<>(type));
+            overlayReviewedMethodSources(classUnit, methodItems, parser);
+            javaClass.setSourceCode(classUnit.toString());
+            javaClass.setFilePath(file.relativePath());
+            javaClassRepository.save(javaClass);
+        }
+    }
+
+    /** Giữ source đã duyệt; mục bị từ chối phải dùng baseline thay vì body trong candidate. */
+    private void overlayReviewedMethodSources(CompilationUnit classUnit, List<SourceUpdateItem> updates,
+            JavaParserHelper parser) {
+        for (SourceUpdateItem item : updates) {
+            String[] key = item.getTargetKey().split("#", 2);
+            var target = parser.findTypes(classUnit).stream()
+                    .filter(type -> type.getFullyQualifiedName().filter(key[0]::equals).isPresent())
+                    .findFirst();
+            if (target.isEmpty()) continue;
+            try {
+                var matches = target.get().getMethods().stream()
+                        .filter(method -> key[1].equals(parser.methodKey(method))).toList();
+                if (matches.size() > 1) throw new IllegalArgumentException("Không xác định duy nhất method cập nhật");
+                boolean rejected = item.getReviewStatus() == SourceUpdateReviewStatus.REJECTED;
+                String source = rejected || item.getAction() == SourceUpdateAction.KEEP ? item.getBeforeData()
+                        : item.getAction() == SourceUpdateAction.REMOVE ? null : item.getAfterData();
+                if (source == null) {
+                    matches.forEach(MethodDeclaration::remove);
+                    continue;
+                }
+                MethodDeclaration approved = parser.parseMethodDeclaration(source);
+                if (!key[1].equals(parser.methodKey(approved))) {
+                    throw new IllegalArgumentException("Signature method đã duyệt không khớp target key");
+                }
+                if (matches.isEmpty()) {
+                    if (item.getAction() == SourceUpdateAction.UPDATE) {
+                        throw new IllegalArgumentException("Không xác định duy nhất method cập nhật");
+                    }
+                    target.get().addMember(approved);
+                } else {
+                    matches.get(0).replace(approved);
+                }
+            } catch (RuntimeException exception) {
+                throw new IllegalStateException("Không thể đồng bộ source method " + item.getTargetKey(), exception);
+            }
+        }
+    }
+
     private void applyMethodUpdate(Long projectId, SourceUpdateItem item) {
+        if (item.getReviewStatus() != SourceUpdateReviewStatus.ACCEPTED
+                && item.getReviewStatus() != SourceUpdateReviewStatus.MODIFIED) return;
         String targetKey = item.getTargetKey();
         if (targetKey == null || !targetKey.contains("#")) return;
 
         String[] parts = targetKey.split("#", 2);
         String qualifiedClassName = parts[0];
         String signature = parts[1];
-        String methodName = signature.contains("(") ? signature.substring(0, signature.indexOf("(")) : signature;
 
         List<JavaClass> classes = javaClassRepository.findByProjectId(projectId);
         JavaClass targetClass = classes.stream()
@@ -852,7 +940,7 @@ public class SourceUpdateService {
             if (targetClass != null) {
                 List<JavaMethod> methods = javaMethodRepository.findByClassId(targetClass.getId());
                 for (JavaMethod m : methods) {
-                    if (Objects.equals(m.getMethodName(), methodName)) {
+                    if (matchesMethodSignature(m, signature)) {
                         javaMethodRepository.delete(m);
                     }
                 }
@@ -861,8 +949,8 @@ public class SourceUpdateService {
             if (targetClass != null && item.getAfterData() != null) {
                 List<JavaMethod> methods = javaMethodRepository.findByClassId(targetClass.getId());
                 for (JavaMethod m : methods) {
-                    if (Objects.equals(m.getMethodName(), methodName)) {
-                        m.setSourceCode(item.getAfterData());
+                    if (matchesMethodSignature(m, signature)) {
+                        applyReviewedMethodSource(m, item, signature);
                         javaMethodRepository.save(m);
                     }
                 }
@@ -893,26 +981,50 @@ public class SourceUpdateService {
             }
             JavaClass finalClass = targetClass;
             boolean exists = javaMethodRepository.findByClassId(targetClass.getId()).stream()
-                    .anyMatch(m -> Objects.equals(m.getMethodName(), methodName));
+                    .anyMatch(m -> matchesMethodSignature(m, signature));
             if (!exists) {
                 JavaMethod newMethod = new JavaMethod();
                 newMethod.setClassId(finalClass.getId());
-                newMethod.setMethodName(methodName);
-                newMethod.setReturnType("void");
-                newMethod.setVisibility(Visibility.PUBLIC);
-                newMethod.setSourceCode(item.getAfterData() != null ? item.getAfterData() : "");
+                applyReviewedMethodSource(newMethod, item, signature);
                 newMethod.setLineStart(1);
-                newMethod.setLineEnd(10);
+                newMethod.setLineEnd(Math.max(1, (int) item.getAfterData().lines().count()));
                 javaMethodRepository.save(newMethod);
             } else if (item.getAfterData() != null) {
                 javaMethodRepository.findByClassId(targetClass.getId()).stream()
-                        .filter(m -> Objects.equals(m.getMethodName(), methodName))
+                        .filter(m -> matchesMethodSignature(m, signature))
                         .findFirst()
                         .ifPresent(m -> {
-                            m.setSourceCode(item.getAfterData());
+                            applyReviewedMethodSource(m, item, signature);
                             javaMethodRepository.save(m);
                         });
             }
+        }
+    }
+
+    private boolean matchesMethodSignature(JavaMethod method, String signature) {
+        String parameterTypes = method.getParameters() == null ? "" : method.getParameters().stream()
+                .map(parameter -> parameter.type()).collect(Collectors.joining(","));
+        return signature.equals(method.getMethodName() + "(" + parameterTypes + ")");
+    }
+
+    /** Metadata và source phải cùng phản ánh method đã được người dùng duyệt. */
+    private void applyReviewedMethodSource(JavaMethod method, SourceUpdateItem item, String signature) {
+        try {
+            JavaParserHelper parser = new JavaParserHelper();
+            MethodDeclaration declaration = parser.parseMethodDeclaration(item.getAfterData());
+            if (!signature.equals(parser.methodKey(declaration))) {
+                throw new IllegalArgumentException("Signature method đã duyệt không khớp target key");
+            }
+            method.setMethodName(declaration.getNameAsString());
+            method.setReturnType(declaration.getTypeAsString());
+            method.setParameters(declaration.getParameters().stream()
+                    .map(parameter -> new MethodParam(parameter.getNameAsString(), parameter.getTypeAsString())).toList());
+            method.setThrowsList(declaration.getThrownExceptions().stream().map(Object::toString).toList());
+            method.setVisibility(declaration.isPublic() ? Visibility.PUBLIC : declaration.isProtected()
+                    ? Visibility.PROTECTED : declaration.isPrivate() ? Visibility.PRIVATE : Visibility.PACKAGE_PRIVATE);
+            method.setSourceCode(item.getAfterData());
+        } catch (RuntimeException exception) {
+            throw new IllegalStateException("Không thể đồng bộ source method " + item.getTargetKey(), exception);
         }
     }
 

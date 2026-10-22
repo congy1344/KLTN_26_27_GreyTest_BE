@@ -28,6 +28,7 @@ import com.greytest.dto.SourceUpdateItemPatchRequest;
 import com.greytest.entity.AuthUser;
 import com.greytest.entity.JavaClass;
 import com.greytest.entity.JavaMethod;
+import com.greytest.entity.MethodParam;
 import com.greytest.entity.Project;
 import com.greytest.entity.SourceRevision;
 import com.greytest.entity.SourceUpdate;
@@ -683,8 +684,9 @@ class SourceUpdateServiceTest {
         assertThat(update.getStatus()).isNotEqualTo(SourceUpdateStatus.APPLIED);
     }
 
-    @Test
-    void appliesMethodDiffsSuccessfully() {
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void appliesMethodDiffsSuccessfully(boolean moved, @org.junit.jupiter.api.io.TempDir Path snapshot) throws Exception {
         AuthUser user = user(1L);
         Project p = project(10L, 1L);
         when(projectRepository.findById(10L)).thenReturn(Optional.of(p));
@@ -698,7 +700,7 @@ class SourceUpdateServiceTest {
 
         SourceRevision candidate = new SourceRevision();
         candidate.setId(102L);
-        candidate.setStoragePath("/tmp/candidate");
+        candidate.setStoragePath(snapshot.toString());
         when(sourceRevisionRepository.findById(102L)).thenReturn(Optional.of(candidate));
 
         JavaClass serviceClass = new JavaClass();
@@ -706,7 +708,18 @@ class SourceUpdateServiceTest {
         serviceClass.setClassName("OrderService");
         serviceClass.setQualifiedName("com.example.OrderService");
         serviceClass.setClassType(ClassType.SERVICE);
-        when(javaClassRepository.findByProjectId(10L)).thenReturn(List.of(serviceClass));
+        serviceClass.setFilePath("src/main/java/com/example/OrderService.java");
+        serviceClass.setSourceCode("package com.example; class OrderService { int calculateDiscount() { return 0; } }");
+        String candidatePath = moved ? "module/src/main/java/com/example/OrderService.java" : serviceClass.getFilePath();
+        Path source = snapshot.resolve(candidatePath);
+        java.nio.file.Files.createDirectories(source.getParent());
+        java.nio.file.Files.writeString(source,
+                "package com.example; class OrderService { int calculateDiscount() { return 10; } void newMethod() {} }");
+        JavaClass unrelatedClass = new JavaClass();
+        unrelatedClass.setId(51L);
+        unrelatedClass.setQualifiedName("com.example.ShippingService");
+        unrelatedClass.setSourceCode("class ShippingService { int fee() { return 5; } }");
+        when(javaClassRepository.findByProjectId(10L)).thenReturn(List.of(serviceClass, unrelatedClass));
 
         JavaMethod existingMethod = new JavaMethod();
         existingMethod.setId(301L);
@@ -760,7 +773,207 @@ class SourceUpdateServiceTest {
         verify(javaMethodRepository).delete(deletedMethod);
         verify(javaMethodRepository).save(argThat(m -> "newMethod".equals(m.getMethodName())
                 && "void newMethod() {}".equals(m.getSourceCode())));
+        assertThat(serviceClass.getSourceCode()).contains("return 10;", "void newMethod()")
+                .doesNotContain("return 0;", "oldMethod");
+        assertThat(serviceClass.getId()).isEqualTo(50L);
+        assertThat(serviceClass.getFilePath()).isEqualTo(candidatePath);
+        verify(javaClassRepository).save(serviceClass);
+        verify(javaClassRepository, never()).save(unrelatedClass);
+        assertThat(unrelatedClass.getSourceCode()).isEqualTo("class ShippingService { int fee() { return 5; } }");
     }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.EnumSource(value = SourceUpdateReviewStatus.class,
+            names = {"ACCEPTED", "MODIFIED", "REJECTED"})
+    void keepsClassAndMethodSourcesConsistentWithReviewedPayload(SourceUpdateReviewStatus decision,
+            @org.junit.jupiter.api.io.TempDir Path snapshot) throws Exception {
+        MethodSourceFixture fixture = methodSourceFixture(snapshot, decision,
+                "int calculateDiscount() { return 20; }");
+
+        service.applyUpdate(10L, 200L, user(1L));
+
+        assertThat(fixture.overload().getSourceCode()).contains("return 30;");
+        verify(javaMethodRepository, never()).save(fixture.overload());
+        if (decision == SourceUpdateReviewStatus.REJECTED) {
+            assertThat(fixture.method().getSourceCode()).contains("return 0;");
+            assertThat(fixture.javaClass().getSourceCode()).contains("return 0;").doesNotContain("return 20;");
+            verify(javaMethodRepository, never()).save(any());
+            verify(javaClassRepository, never()).save(any());
+        } else {
+            assertThat(fixture.method().getSourceCode()).contains("return 20;");
+            assertThat(fixture.javaClass().getSourceCode()).contains("return 20;", "return 30;", "return 40;",
+                    "package com.example;", "import java.util.List;", "class Outer", "class Nested", "List.of(\"keep\")")
+                    .doesNotContain("return 10;");
+            verify(javaMethodRepository).save(fixture.method());
+            verify(javaClassRepository).save(fixture.javaClass());
+        }
+        assertThat(fixture.update().getStatus()).isEqualTo(SourceUpdateStatus.APPLIED);
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {
+            "int calculateDiscount() { return ; broken }", "int calculateDiscount(String value) { return 20; }"})
+    void rejectsInvalidOrMismatchedReviewedMethodBeforeMarkingApplied(String afterData,
+            @org.junit.jupiter.api.io.TempDir Path snapshot) throws Exception {
+        MethodSourceFixture fixture = methodSourceFixture(snapshot, SourceUpdateReviewStatus.MODIFIED, afterData);
+
+        assertThatThrownBy(() -> service.applyUpdate(10L, 200L, user(1L)))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("đồng bộ source method");
+
+        assertThat(fixture.update().getStatus()).isNotEqualTo(SourceUpdateStatus.APPLIED);
+        verify(javaClassRepository, never()).save(any());
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.EnumSource(value = SourceUpdateAction.class, names = {"UPDATE", "KEEP"})
+    void keepsRejectedMethodSourceWhenAnotherMethodInSameClassIsAccepted(
+            SourceUpdateAction action, @org.junit.jupiter.api.io.TempDir Path snapshot) throws Exception {
+        MethodSourceFixture fixture = methodSourceFixture(snapshot, SourceUpdateReviewStatus.ACCEPTED,
+                "int calculateDiscount() { return 20; }");
+        JavaMethod rejectedMethod = new JavaMethod();
+        rejectedMethod.setClassId(50L);
+        rejectedMethod.setMethodName("shippingFee");
+        rejectedMethod.setSourceCode("int shippingFee() { return 5; }");
+        when(javaMethodRepository.findByClassId(50L)).thenReturn(List.of(fixture.method(), fixture.overload(), rejectedMethod));
+        SourceUpdateItem rejected = new SourceUpdateItem();
+        rejected.setTargetType(SourceUpdateTargetType.METHOD);
+        rejected.setTargetKey("com.example.Outer.OrderService#shippingFee()");
+        rejected.setAction(action);
+        rejected.setReviewStatus(action == SourceUpdateAction.KEEP
+                ? SourceUpdateReviewStatus.ACCEPTED : SourceUpdateReviewStatus.REJECTED);
+        rejected.setBeforeData(rejectedMethod.getSourceCode());
+        rejected.setAfterData("int shippingFee() { return 50; }");
+        when(sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(200L))
+                .thenReturn(List.of(fixture.item(), rejected));
+
+        service.applyUpdate(10L, 200L, user(1L));
+
+        assertThat(fixture.javaClass().getSourceCode()).contains("return 20;", "return 5;")
+                .doesNotContain("return 10;", "return 50;");
+        assertThat(fixture.method().getSourceCode()).contains("return 20;");
+        assertThat(rejectedMethod.getSourceCode()).contains("return 5;");
+        verify(javaMethodRepository, never()).save(rejectedMethod);
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({
+            "CREATE, REJECTED", "CREATE, ACCEPTED", "CREATE, MODIFIED", "REMOVE, REJECTED", "REMOVE, ACCEPTED"})
+    void appliesMixedMethodActionDecisionsToClassAndMetadata(SourceUpdateAction action,
+            SourceUpdateReviewStatus decision, @org.junit.jupiter.api.io.TempDir Path snapshot) throws Exception {
+        MethodSourceFixture fixture = methodSourceFixture(snapshot, SourceUpdateReviewStatus.ACCEPTED,
+                "int calculateDiscount() { return 20; }");
+        Path source = snapshot.resolve(fixture.javaClass().getFilePath());
+        String candidate = java.nio.file.Files.readString(source);
+        String addedSource = "int adjustment(int value) { return 70; }\n"
+                + (action == SourceUpdateAction.CREATE ? "int adjustment(String value) { return 81; }\n" : "");
+        java.nio.file.Files.writeString(source, candidate.replace("List<String> sentinel()", addedSource + "List<String> sentinel()"));
+        JavaMethod overload = new JavaMethod();
+        overload.setClassId(50L);
+        overload.setMethodName("adjustment");
+        overload.setParameters(List.of(new MethodParam("value", "int")));
+        overload.setSourceCode("int adjustment(int value) { return 70; }");
+        JavaMethod existing = new JavaMethod();
+        existing.setClassId(50L);
+        existing.setMethodName("adjustment");
+        existing.setParameters(List.of(new MethodParam("value", "String")));
+        existing.setSourceCode("int adjustment(String value) { return 5; }");
+        when(javaMethodRepository.findByClassId(50L)).thenReturn(action == SourceUpdateAction.CREATE
+                ? List.of(fixture.method(), fixture.overload(), overload)
+                : List.of(fixture.method(), fixture.overload(), overload, existing));
+        SourceUpdateItem item = new SourceUpdateItem();
+        item.setTargetType(SourceUpdateTargetType.METHOD);
+        item.setTargetKey("com.example.Outer.OrderService#adjustment(String)");
+        item.setAction(action);
+        item.setReviewStatus(decision);
+        item.setBeforeData(action == SourceUpdateAction.REMOVE ? existing.getSourceCode() : null);
+        item.setAfterData("int adjustment(String value) { return 60; }");
+        when(sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(200L))
+                .thenReturn(List.of(fixture.item(), item));
+
+        service.applyUpdate(10L, 200L, user(1L));
+
+        String classSource = fixture.javaClass().getSourceCode();
+        assertThat(classSource).contains("return 20;", "return 70;").doesNotContain("return 81;");
+        verify(javaMethodRepository, never()).delete(overload);
+        verify(javaMethodRepository, never()).save(overload);
+        if (action == SourceUpdateAction.CREATE && decision != SourceUpdateReviewStatus.REJECTED) {
+            assertThat(classSource).contains("int adjustment(String value)", "return 60;");
+            verify(javaMethodRepository).save(argThat(method -> "adjustment".equals(method.getMethodName())
+                    && "int".equals(method.getReturnType())
+                    && List.of(new MethodParam("value", "String")).equals(method.getParameters())
+                    && method.getSourceCode().contains("return 60;")));
+        } else if (action == SourceUpdateAction.REMOVE && decision == SourceUpdateReviewStatus.REJECTED) {
+            assertThat(classSource).contains("int adjustment(String value)", "return 5;");
+            verify(javaMethodRepository, never()).delete(existing);
+        } else {
+            assertThat(classSource).doesNotContain("int adjustment(String value)");
+            if (action == SourceUpdateAction.REMOVE) verify(javaMethodRepository).delete(existing);
+            else verify(javaMethodRepository, never()).save(argThat(method -> "adjustment".equals(method.getMethodName())));
+        }
+    }
+
+    private MethodSourceFixture methodSourceFixture(Path snapshot, SourceUpdateReviewStatus decision,
+            String afterData) throws Exception {
+        when(projectRepository.findById(10L)).thenReturn(Optional.of(project(10L, 1L)));
+        SourceUpdate update = new SourceUpdate();
+        update.setId(200L);
+        update.setProjectId(10L);
+        update.setCandidateRevisionId(102L);
+        update.setStatus(SourceUpdateStatus.READY_TO_APPLY);
+        when(sourceUpdateRepository.findByIdAndProjectId(200L, 10L)).thenReturn(Optional.of(update));
+        SourceRevision candidate = new SourceRevision();
+        candidate.setId(102L);
+        candidate.setStoragePath(snapshot.toString());
+        when(sourceRevisionRepository.findById(102L)).thenReturn(Optional.of(candidate));
+        String candidateSource = """
+                package com.example;
+                import java.util.List;
+                class Outer {
+                    static class OrderService {
+                        int calculateDiscount() { return 10; }
+                        int calculateDiscount(String value) { return 30; }
+                        int shippingFee() { return 50; }
+                        List<String> sentinel() { return List.of("keep"); }
+                        class Nested { int calculateDiscount() { return 40; } }
+                    }
+                }
+                """;
+        Path source = snapshot.resolve("src/main/java/com/example/Outer.java");
+        java.nio.file.Files.createDirectories(source.getParent());
+        java.nio.file.Files.writeString(source, candidateSource);
+        JavaClass javaClass = new JavaClass();
+        javaClass.setId(50L);
+        javaClass.setQualifiedName("com.example.Outer.OrderService");
+        javaClass.setClassType(ClassType.SERVICE);
+        javaClass.setFilePath("src/main/java/com/example/Outer.java");
+        javaClass.setSourceCode(candidateSource.replace("return 10;", "return 0;").replace("return 50;", "return 5;"));
+        JavaMethod method = new JavaMethod();
+        method.setId(301L);
+        method.setClassId(50L);
+        method.setMethodName("calculateDiscount");
+        method.setSourceCode("int calculateDiscount() { return 0; }");
+        JavaMethod overload = new JavaMethod();
+        overload.setId(302L);
+        overload.setClassId(50L);
+        overload.setMethodName("calculateDiscount");
+        overload.setParameters(List.of(new MethodParam("value", "String")));
+        overload.setSourceCode("int calculateDiscount(String value) { return 30; }");
+        if (decision != SourceUpdateReviewStatus.REJECTED) {
+            when(javaClassRepository.findByProjectId(10L)).thenReturn(List.of(javaClass));
+            when(javaMethodRepository.findByClassId(50L)).thenReturn(List.of(method, overload));
+        }
+        SourceUpdateItem item = new SourceUpdateItem();
+        item.setTargetType(SourceUpdateTargetType.METHOD);
+        item.setTargetKey("com.example.Outer.OrderService#calculateDiscount()");
+        item.setAction(SourceUpdateAction.UPDATE);
+        item.setReviewStatus(decision);
+        item.setAfterData(afterData);
+        when(sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(200L)).thenReturn(List.of(item));
+        return new MethodSourceFixture(update, javaClass, method, overload, item);
+    }
+
+    private record MethodSourceFixture(SourceUpdate update, JavaClass javaClass, JavaMethod method,
+            JavaMethod overload, SourceUpdateItem item) {}
 
     private AuthUser user(Long id) {
         AuthUser u = new AuthUser();
