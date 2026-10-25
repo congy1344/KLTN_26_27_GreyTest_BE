@@ -174,6 +174,32 @@ public class GenerationProgressService {
         });
     }
 
+    /** Chỉ công bố kết quả một phần khi dữ liệu hợp lệ đã commit thành công. */
+    public void partialAfterCommit(Long projectId, GenerationProgressStage stage, String message) {
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            partial(projectId, stage, message);
+            return;
+        }
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                partial(projectId, stage, message);
+            }
+
+            @Override
+            public void afterCompletion(int status) {
+                if (status != STATUS_COMMITTED) {
+                    fail(projectId, stage, "Không thể lưu kết quả. Tác vụ đã được hoàn tác.");
+                }
+            }
+        });
+    }
+
+    private void partial(Long projectId, GenerationProgressStage stage, String message) {
+        ProgressState state = states.get(new ProgressKey(projectId, stage));
+        if (state != null) state.partial(message, clock.instant());
+    }
+
     public void fail(Long projectId, GenerationProgressStage stage, String message) {
         ProgressState state = states.get(new ProgressKey(projectId, stage));
         if (state != null) state.fail(message, clock.instant());
@@ -332,6 +358,20 @@ public class GenerationProgressService {
             if (isActive()) complete(message, now);
         }
 
+        private synchronized void partial(String message, Instant now) {
+            status = GenerationProgressStatus.PARTIAL;
+            failureMessage = safeMessage(message);
+            // Bước chưa đủ kết quả phải dừng ở trạng thái lỗi để UI không giữ spinner vô hạn.
+            for (int i = 0; i < stepStatuses.size(); i++) {
+                if (stepStatuses.get(i) != GenerationProgressStepStatus.COMPLETED) {
+                    stepStatuses.set(i, GenerationProgressStepStatus.FAILED);
+                    stepErrors.set(i, failureMessage);
+                }
+            }
+            updatedAt = now;
+            addLog(message, now);
+        }
+
         private synchronized void fail(String message, Instant now) {
             status = GenerationProgressStatus.FAILED;
             failureMessage = message == null || message.isBlank()
@@ -391,6 +431,7 @@ public class GenerationProgressService {
 
         private synchronized boolean isTerminalBefore(Instant threshold) {
             return (status == GenerationProgressStatus.COMPLETED
+                    || status == GenerationProgressStatus.PARTIAL
                     || status == GenerationProgressStatus.FAILED
                     || status == GenerationProgressStatus.PAUSED)
                     && updatedAt.isBefore(threshold);
@@ -398,6 +439,7 @@ public class GenerationProgressService {
 
         private synchronized GenerationProgressDto snapshot() {
             int percent = totalSteps == 0 ? 0 : completedSteps * 100 / totalSteps;
+            if (status == GenerationProgressStatus.PARTIAL) percent = Math.min(percent, 99);
             return new GenerationProgressDto(
                     stage, status, percent, completedSteps, totalSteps, stepSnapshots(), List.copyOf(logs));
         }

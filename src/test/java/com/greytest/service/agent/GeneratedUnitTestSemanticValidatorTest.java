@@ -15,8 +15,200 @@ import com.greytest.dto.agent.GenerationContextDtos.UnitTestContextDto;
 import com.greytest.dto.agent.GenerationResponseDtos.GeneratedUnitTestDto;
 import com.greytest.dto.agent.GenerationResponseDtos.UnitTestResponseDto;
 import com.greytest.service.agent.ProjectJavaVersionDetector.TestFramework;
+import com.greytest.service.agent.ProjectJavaVersionDetector.MockitoVersionInfo;
 
 class GeneratedUnitTestSemanticValidatorTest {
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {
+            "org.mockito.Mockito.verify(repository, org.mockito.Mockito.never()).findByName(null);",
+            "org.mockito.Mockito.verify(repository, org.mockito.Mockito.times(0)).findByName(null);",
+            "org.mockito.Mockito.verifyNoInteractions(repository);",
+            "org.mockito.Mockito.verifyNoMoreInteractions(repository);"})
+    void zeroInteractionVerificationMustStillRunAfterTheExpectedThrow(String verification) {
+        String source = exceptionFlowTest("", false)
+                .replace("org.mockito.Mockito.when(repository.findByName(\"alice\")).thenReturn(null); ", "")
+                .replace("() -> service.check(\"alice\")", "() -> { service.check(null); " + verification + " }");
+        assertThat(GeneratedUnitTestSemanticValidator.validate(exceptionFlowContext(false), response(source),
+                TestFramework.JUNIT5, new MockitoVersionInfo("5.11.0", "fixture")))
+                .hasValueSatisfying(message -> assertThat(message).contains("Verification", "after", "exception"));
+    }
+
+    @Test
+    void approvedNoDatabaseAccessContractCanExposeAFaultySourceLookup() {
+        var base = exceptionFlowContext(false);
+        var original = base.approvedTestCases().get(0);
+        var approved = new TestCaseContextItemDto(original.id(), original.testPlanId(), original.caseCode(),
+                original.testType(), "Reject null without database access", "Null name", original.testData(),
+                "Throw IllegalArgumentException and never query the repository", original.priority(),
+                original.traceSource(), "APPROVED", false);
+        var context = new UnitTestContextDto(base.project(), base.analysis(), base.classes(),
+                base.approvedBusinessRules(), base.approvedTestPlans(), List.of(approved),
+                base.existingApprovedTestCases(), base.previousGeneratedUnitTests(), base.existingTests());
+        String test = exceptionFlowTest("org.mockito.Mockito.verifyNoInteractions(repository, notifier);", false)
+                .replace("org.mockito.Mockito.when(repository.findByName(\"alice\")).thenReturn(null); ", "")
+                .replace("service.check(\"alice\")", "service.check(null)");
+        var version = new MockitoVersionInfo("5.11.0", "fixture");
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context, response(test), TestFramework.JUNIT5, version)).isEmpty();
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context,
+                response("import org.mockito.junit.jupiter.Strictness; " + test), TestFramework.JUNIT5, version))
+                .hasValueSatisfying(message -> assertThat(message).contains("Strictness"));
+    }
+
+    @Test
+    void preservesAnApprovedFailingOracleWhileStillRejectingInvalidMockitoImports() {
+        var base = contextWithServiceSource("demo.Service", "value", "public int value() { return 8; }",
+                "package demo; public class Service { public int value() { return 8; } }");
+        var original = base.approvedTestCases().get(0);
+        var approved = new TestCaseContextItemDto(original.id(), original.testPlanId(), original.caseCode(),
+                original.testType(), "Approved value is ten", original.preconditions(), original.testData(),
+                "Return 10", original.priority(), original.traceSource(), "APPROVED", false);
+        var context = new UnitTestContextDto(base.project(), base.analysis(), base.classes(),
+                base.approvedBusinessRules(), base.approvedTestPlans(), List.of(approved),
+                base.existingApprovedTestCases(), base.previousGeneratedUnitTests(), base.existingTests());
+        String test = "package demo; class ServiceTest { @org.junit.jupiter.api.Test void testCase() { "
+                + "Service service = new Service(); org.junit.jupiter.api.Assertions.assertEquals(10, service.value()); } }";
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context, response(test), TestFramework.JUNIT5)).isEmpty();
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context,
+                response(test.replace("package demo;", "package demo; import org.mockito.junit.jupiter.Strictness;")),
+                TestFramework.JUNIT5)).hasValueSatisfying(message -> assertThat(message).contains("Strictness"));
+    }
+
+    @Test
+    void rejectsWrongLombokConstructorArityFromSupportingSource() {
+        var base = contextWithServiceSource("demo.Service", "send", "public void send() {}",
+                "package demo; class Service { public void send() {} }");
+        var profile = new ClassContextDto(2L, "demo", "CustomerProfile", "demo.CustomerProfile", "CLASS",
+                "CustomerProfile.java", """
+                package demo;
+                @lombok.NoArgsConstructor @lombok.AllArgsConstructor
+                class CustomerProfile {
+                    private String id; private String name; private String bio;
+                    private String image; private boolean following;
+                }
+                """, List.of(), List.of());
+        var ctx = withSupportingClass(base, profile);
+        String test = "package demo; class ServiceTest { @org.junit.jupiter.api.Test void testCase() { "
+                + "new CustomerProfile(\"id\", \"name\", \"bio\", \"image\"); } }";
+        assertThat(GeneratedUnitTestSemanticValidator.validate(ctx, response(test)))
+                .hasValueSatisfying(message -> assertThat(message).contains("CustomerProfile", "constructor", "4"));
+        assertThat(GeneratedUnitTestSemanticValidator.validate(ctx,
+                response(test.replace("\"image\");", "\"image\", false);")))).isEmpty();
+        assertThat(GeneratedUnitTestSemanticValidator.validate(ctx,
+                response(test.replace("\"id\", \"name\", \"bio\", \"image\"", "")))).isEmpty();
+    }
+
+    @Test
+    void rejectsIncompatibleConcreteGenericArgumentsAndReturnAssignments() {
+        String method = "public void browse(Cursor<java.time.Instant> page) {}";
+        var base = contextWithServiceSource("demo.Service", "browse", method,
+                "package demo; class Service { " + method
+                        + " public java.util.List<String> list() { return null; } }");
+        var cursor = new ClassContextDto(2L, "demo", "Cursor", "demo.Cursor", "CLASS", "Cursor.java",
+                "package demo; class Cursor<T> {}", List.of(), List.of());
+        var ctx = withSupportingClass(base, cursor);
+        String argumentTest = "package demo; class ServiceTest { Service service; "
+                + "@org.junit.jupiter.api.Test void testCase() { Cursor<Object> page = new Cursor<>(); "
+                + "service.browse(page); } }";
+        assertThat(GeneratedUnitTestSemanticValidator.validate(ctx, response(argumentTest)))
+                .hasValueSatisfying(message -> assertThat(message).contains("generic", "browse", "Object", "Instant"));
+        assertThat(GeneratedUnitTestSemanticValidator.validate(ctx,
+                response(argumentTest.replace("Cursor<Object>", "Cursor<java.time.Instant>")))).isEmpty();
+        String returnTest = "package demo; class ServiceTest { Service service; "
+                + "@org.junit.jupiter.api.Test void testCase() { java.util.List<Object> items = service.list(); } }";
+        assertThat(GeneratedUnitTestSemanticValidator.validate(ctx, response(returnTest)))
+                .hasValueSatisfying(message -> assertThat(message).contains("generic", "list", "Object", "String"));
+        assertThat(GeneratedUnitTestSemanticValidator.validate(ctx,
+                response(returnTest.replace("List<Object>", "List<String>")))).isEmpty();
+    }
+
+    @Test
+    void allowsVarargsAndDoesNotGuessMissingOrAmbiguousDeclarations() {
+        var base = contextWithServiceSource("demo.Service", "send", "public void send() {}",
+                "package demo; class Service { public void send() {} }");
+        var values = new ClassContextDto(2L, "demo", "Values", "demo.Values", "CLASS", "Values.java",
+                "package demo; class Values { Values(String... names) {} }", List.of(), List.of());
+        var ctx = withSupportingClass(base, values);
+        assertThat(GeneratedUnitTestSemanticValidator.validate(ctx, response("""
+                package demo; class ServiceTest { @org.junit.jupiter.api.Test void testCase() {
+                    new Values(); new Values("a", "b"); new UnknownType("a", "b");
+                } }
+                """))).isEmpty();
+    }
+
+    private UnitTestContextDto withSupportingClass(UnitTestContextDto base, ClassContextDto supporting) {
+        return new UnitTestContextDto(base.project(), base.analysis(), List.of(base.classes().get(0), supporting),
+                base.approvedBusinessRules(), base.approvedTestPlans(), base.approvedTestCases(),
+                base.existingApprovedTestCases(), base.previousGeneratedUnitTests(), base.existingTests());
+    }
+
+    @Test
+    void allowsUnsupportedOverloadsInsteadOfGuessingAConcreteGenericMismatch() {
+        String method = "public void browse(java.util.List<String> page) {}";
+        for (String declaration : List.of(
+                "class Service { " + method + " public void browse(Object... items) {} }",
+                "class Service implements Parent { " + method + " }")) {
+            var ctx = contextWithServiceSource("demo.Service", "browse", method, "package demo; " + declaration);
+            assertThat(GeneratedUnitTestSemanticValidator.validate(ctx, response("""
+                    package demo; class ServiceTest { Service service;
+                        @org.junit.jupiter.api.Test void testCase() {
+                            java.util.List<Integer> page = new java.util.ArrayList<>();
+                            service.browse(page);
+                        }
+                    }
+                    """))).isEmpty();
+        }
+    }
+
+    @Test
+    void ignoresLocalsOutsideTheReferenceScopeAndLombokImplicitFinalDefaults() {
+        String method = "public void browse(Cursor<java.time.Instant> page) {}";
+        var base = contextWithServiceSource("demo.Service", "browse", method, "package demo; class Service { " + method + " }");
+        var cursor = new ClassContextDto(2L, "demo", "Cursor", "demo.Cursor", "CLASS", "Cursor.java",
+                "package demo; class Cursor<T> {}", List.of(), List.of());
+        assertThat(GeneratedUnitTestSemanticValidator.validate(withSupportingClass(base, cursor), response("""
+                package demo; class ServiceTest { Service service; Cursor<java.time.Instant> page;
+                    @org.junit.jupiter.api.Test void testCase() {
+                        service.browse(page);
+                        { Cursor<Object> page = null; }
+                    }
+                }
+                """))).isEmpty();
+        var immutable = new ClassContextDto(3L, "demo", "Immutable", "demo.Immutable", "CLASS", "Immutable.java",
+                "package demo; @lombok.Value class Immutable { String id; String label = \"fixed\"; }", List.of(), List.of());
+        assertThat(GeneratedUnitTestSemanticValidator.validate(withSupportingClass(base, immutable), response("""
+                package demo; class ServiceTest { @org.junit.jupiter.api.Test void testCase() {
+                    new Immutable("id");
+                } }
+                """))).isEmpty();
+    }
+
+    @Test
+    void doesNotResolveUnsupportedLoopScopesOrLombokTolerateConstructorsAsCertain() {
+        String method = "public void browse(Cursor<java.time.Instant> page) {}";
+        var base = contextWithServiceSource("demo.Service", "browse", method, "package demo; class Service { " + method + " }");
+        var cursor = new ClassContextDto(2L, "demo", "Cursor", "demo.Cursor", "CLASS", "Cursor.java",
+                "package demo; class Cursor<T> {}", List.of(), List.of());
+        for (String body : List.of(
+                "for (Cursor<Object> page = null; page != null;) {} service.browse(page);",
+                "java.util.function.Consumer<Cursor<java.time.Instant>> consumer = page -> service.browse(page);")) {
+            String fieldType = body.startsWith("for") ? "java.time.Instant" : "Object";
+            assertThat(GeneratedUnitTestSemanticValidator.validate(withSupportingClass(base, cursor), response(
+                    "package demo; class ServiceTest { Service service; Cursor<" + fieldType + "> page; "
+                            + "@org.junit.jupiter.api.Test void testCase() { " + body + " } }")))
+                    .isEmpty();
+        }
+        var tolerated = new ClassContextDto(3L, "demo", "Tolerated", "demo.Tolerated", "CLASS", "Tolerated.java",
+                "package demo; @lombok.Data class Tolerated { final String id; "
+                        + "@lombok.experimental.Tolerate Tolerated() { id = \"default\"; } }", List.of(), List.of());
+        assertThat(GeneratedUnitTestSemanticValidator.validate(withSupportingClass(base, tolerated), response("""
+                package demo; class ServiceTest { @org.junit.jupiter.api.Test void testCase() {
+                    new Tolerated("id");
+                } }
+                """))).isEmpty();
+    }
 
     @Test
     void allowsValidFixtureWhenAnUnselectedOverloadThrowsUnsupportedOperationException() {
@@ -601,6 +793,33 @@ class GeneratedUnitTestSemanticValidatorTest {
                         .contains("verifyNoInteractions", "verifyZeroInteractions"));
     }
 
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({
+            "2,verifyZeroInteractions,true", "2,verifyNoInteractions,false", "2,verifyNoMoreInteractions,true",
+            "3,verifyZeroInteractions,true", "3,verifyNoInteractions,true",
+            "4,verifyZeroInteractions,false", "4,verifyNoInteractions,true",
+            "5,verifyZeroInteractions,false", "5,verifyNoInteractions,true",
+            "0,verifyNoMoreInteractions,true", "0,verifyNoInteractions,false", "0,verifyZeroInteractions,false"})
+    void validatesInteractionApiAgainstTargetMockitoMajor(int major, String api, boolean accepted) {
+        String source = "import static org.mockito.Mockito." + api + "; class ServiceTest { "
+                + "@org.junit.Test public void testCase() { Object dependency = org.mockito.Mockito.mock(Object.class); " + api + "(dependency); } }";
+
+        var result = GeneratedUnitTestSemanticValidator.validate(context("send", "public void send() {}"),
+                response("testCase", source), TestFramework.JUNIT4, major == 0 ? null : new MockitoVersionInfo(major + ".1.0", "fixture"));
+
+        if (accepted) assertThat(result).isEmpty();
+        else assertThat(result).hasValueSatisfying(message -> assertThat(message).contains(api, "verifyNoMoreInteractions"));
+    }
+
+    @Test
+    void rejectsUnsupportedMockitoStaticImportEvenWhenUnused() {
+        String source = "import static org.mockito.Mockito.verifyNoInteractions; class ServiceTest { "
+                + "@org.junit.Test public void testCase() { org.junit.Assert.assertTrue(true); } }";
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context("send", "public void send() {}"),
+                response("testCase", source), TestFramework.JUNIT4, new MockitoVersionInfo("2.15.0", "fixture")))
+                .hasValueSatisfying(message -> assertThat(message).contains("verifyNoInteractions"));
+    }
+
     @Test
     void rejectsGuessedProductionImportPackages() {
         String serviceSource = """
@@ -623,7 +842,7 @@ class GeneratedUnitTestSemanticValidatorTest {
                         "public void send() {}", serviceSource),
                 response(generatedSource)))
                 .hasValueSatisfying(message -> assertThat(message)
-                        .contains("RabbitMQConstants", "AmqpRejectAndDontRequeueException", "exact import"));
+                        .contains("RabbitMQConstants", "exact FQN"));
 
         String wildcardSource = """
                 import eshop.inventoryservice.rabbitmq.constants.*;
@@ -1316,6 +1535,93 @@ class GeneratedUnitTestSemanticValidatorTest {
         assertThat(GeneratedUnitTestSemanticValidator.validate(collisionContext, response(generatedSource))).isEmpty();
     }
 
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({
+            "org.slf4j.Logger,ch.qos.logback.classic.Logger",
+            "java.util.Date,java.sql.Date",
+            "java.util.List,java.awt.List"})
+    void libraryImportsWithSameSimpleNameAreNotProjectDeclarations(String productionImport, String fixtureImport) {
+        String serviceSource = "package demo; import " + productionImport + "; class Service { public void send() {} }";
+        String source = "import " + fixtureImport + "; class ServiceTest { @org.junit.jupiter.api.Test void testCase() {} }";
+        assertThat(GeneratedUnitTestSemanticValidator.validate(
+                contextWithServiceSource("demo.Service", "send", "public void send() {}", serviceSource), response(source))).isEmpty();
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"catch", "expected", "assertThrowsExactly", "assertThrows"})
+    void missingLookupExceptionDoesNotRequirePresentOptional(String style) {
+        String production = "public Object load(String id) { return repository.findById(id).orElseThrow(() -> new IllegalArgumentException(id)); }";
+        String assertion = switch (style) {
+            case "catch" -> "try { service.load(\"missing\"); org.junit.Assert.fail(\"Expected exception\"); } "
+                    + "catch (IllegalArgumentException exception) { org.junit.Assert.assertEquals(\"missing\", exception.getMessage()); } "
+                    + "org.mockito.Mockito.verify(repository).findById(\"missing\");";
+            case "expected" -> "try { service.load(\"missing\"); } finally { org.mockito.Mockito.verify(repository).findById(\"missing\"); }";
+            default -> "org.junit.jupiter.api.Assertions." + style + "(IllegalArgumentException.class, () -> service.load(\"missing\")); "
+                    + "org.mockito.Mockito.verify(repository).findById(\"missing\");";
+        };
+        boolean junit4 = style.equals("catch") || style.equals("expected");
+        String annotation = style.equals("expected") ? "@org.junit.Test(expected=IllegalArgumentException.class)"
+                : junit4 ? "@org.junit.Test" : "@org.junit.jupiter.api.Test";
+        String source = (junit4 ? "@org.junit.runner.RunWith(org.mockito.junit.MockitoJUnitRunner.class) "
+                : "@org.junit.jupiter.api.extension.ExtendWith(org.mockito.junit.jupiter.MockitoExtension.class) ")
+                + "class ServiceTest { @org.mockito.Mock Repository repository; @org.mockito.InjectMocks Service service; "
+                + annotation + " public void testCase() { org.mockito.Mockito.when(repository.findById(\"missing\"))"
+                + ".thenReturn(java.util.Optional.empty()); " + assertion + " } }";
+        assertThat(GeneratedUnitTestSemanticValidator.validate(contextWithServiceSource("demo.Service", "load", production,
+                "package demo; class Service { Repository repository; " + production + " }"), response(source))).isEmpty();
+    }
+
+    @Test
+    void approvedSuccessAssertionIsNotReplacedBySourceDerivedRepositoryFixtures() {
+        String production = "public Object load(String id) { return repository.findById(id).orElseThrow(() -> new IllegalArgumentException(id)); }";
+        String source = "@org.junit.runner.RunWith(org.mockito.junit.MockitoJUnitRunner.class) "
+                + "class ServiceTest { @org.mockito.Mock Repository repository; @org.mockito.InjectMocks Service service; "
+                + "@org.junit.Test public void testCase() { try { Object result = service.load(\"present\"); org.junit.Assert.assertNotNull(result); } "
+                + "catch (Exception exception) { org.junit.Assert.fail(\"Unexpected exception\"); } } }";
+        assertThat(GeneratedUnitTestSemanticValidator.validate(contextWithServiceSource("demo.Service", "load", production,
+                "package demo; class Service { Repository repository; " + production + " }"), response(source)))
+                .isEmpty();
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void approvedFixtureSequenceIsNotRewrittenToManufactureSourceSuccess(boolean expectedAnnotation) {
+        String production = "public Object load(String id) { return repository.findById(id).orElseThrow(() -> new IllegalArgumentException(id)); }";
+        String verify = "org.mockito.Mockito.verify(repository).findById(\"present\"); org.mockito.Mockito.verify(repository).findById(\"missing\");";
+        String body = expectedAnnotation
+                ? "try { service.load(\"present\"); service.load(\"missing\"); } finally { " + verify + " }"
+                : "try { service.load(\"present\"); service.load(\"missing\"); org.junit.Assert.fail(\"Expected exception\"); } "
+                        + "catch (IllegalArgumentException exception) { org.junit.Assert.assertEquals(\"missing\", exception.getMessage()); } " + verify;
+        String source = "@org.junit.runner.RunWith(org.mockito.junit.MockitoJUnitRunner.class) class ServiceTest { "
+                + "@org.mockito.Mock Repository repository; @org.mockito.InjectMocks Service service; "
+                + (expectedAnnotation ? "@org.junit.Test(expected=IllegalArgumentException.class)" : "@org.junit.Test")
+                + " public void testCase() { org.mockito.Mockito.when(repository.findById(\"missing\")).thenReturn(java.util.Optional.empty()); " + body + " } }";
+        var context = contextWithServiceSource("demo.Service", "load", production, "package demo; class Service { Repository repository; " + production + " }");
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context, response(source)))
+                .isEmpty();
+        String corrected = source.replace("try { service.load(\"present\")", "org.mockito.Mockito.when(repository.findById(\"present\"))"
+                + ".thenReturn(java.util.Optional.of(new Object())); try { service.load(\"present\")");
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context, response(corrected))).isEmpty();
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.EnumSource(value = TestFramework.class)
+    void detectsUnboundAssertionButAllowsImportedQualifiedOrDeclaredAssertions(TestFramework framework) {
+        String owner = framework == TestFramework.JUNIT4 ? "org.junit.Assert" : "org.junit.jupiter.api.Assertions";
+        String annotation = framework == TestFramework.JUNIT4 ? "@org.junit.Test" : "@org.junit.jupiter.api.Test";
+        String source = "class ServiceTest { " + annotation + " public void testCase() { assertTrue(true); } }";
+        var context = contextWithServiceSource("demo.Service", "send", "public void send() {}", "package demo; class Service { public void send() {} }");
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context, response(source), framework))
+                .hasValueSatisfying(message -> assertThat(message).contains("assertTrue", "static import"));
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context, response("import static " + owner + ".assertTrue; " + source), framework)).isEmpty();
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context, response("import static " + owner + ".*; " + source), framework)).isEmpty();
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context, response(source.replace("assertTrue(true)", owner + ".assertTrue(true)")), framework)).isEmpty();
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context,
+                response(source.replace("class ServiceTest {", "class ServiceTest { void assertTrue(boolean value) {}")), framework)).isEmpty();
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context,
+                response(source.replace("class ServiceTest {", "class ServiceTest extends ExistingAssertions {")), framework)).isEmpty();
+    }
+
     @Test
     void rejectsGuessedProjectStaticImportButAcceptsExactProductionStaticImport() {
         String serviceSource = """
@@ -1554,7 +1860,7 @@ class GeneratedUnitTestSemanticValidatorTest {
                 """;
 
         assertThat(GeneratedUnitTestSemanticValidator.validate(
-                context("send", "public void send() {}"), response(generatedSource))).isEmpty();
+                context("send", "public void send() {}"), response(generatedSource), null, new MockitoVersionInfo("5.11.0", "fixture"))).isEmpty();
     }
 
     @Test
@@ -1571,7 +1877,7 @@ class GeneratedUnitTestSemanticValidatorTest {
                 """;
 
         assertThat(GeneratedUnitTestSemanticValidator.validate(
-                context("send", "public void send() {}"), response(generatedSource))).isEmpty();
+                context("send", "public void send() {}"), response(generatedSource), null, new MockitoVersionInfo("5.11.0", "fixture"))).isEmpty();
     }
 
     @Test
@@ -1591,7 +1897,7 @@ class GeneratedUnitTestSemanticValidatorTest {
                 """;
 
         assertThat(GeneratedUnitTestSemanticValidator.validate(
-                context("send", "public void send() {}"), response(generatedSource))).isEmpty();
+                context("send", "public void send() {}"), response(generatedSource), null, new MockitoVersionInfo("5.11.0", "fixture"))).isEmpty();
     }
 
     @Test
@@ -1608,7 +1914,7 @@ class GeneratedUnitTestSemanticValidatorTest {
                 """;
 
         assertThat(GeneratedUnitTestSemanticValidator.validate(
-                context("send", "public void send() {}"), response(generatedSource))).isEmpty();
+                context("send", "public void send() {}"), response(generatedSource), null, new MockitoVersionInfo("5.11.0", "fixture"))).isEmpty();
     }
 
     @Test
@@ -1628,7 +1934,7 @@ class GeneratedUnitTestSemanticValidatorTest {
                 """;
 
         assertThat(GeneratedUnitTestSemanticValidator.validate(
-                context("send", "public void send() {}"), response(generatedSource))).isEmpty();
+                context("send", "public void send() {}"), response(generatedSource), null, new MockitoVersionInfo("5.11.0", "fixture"))).isEmpty();
     }
 
     @Test
@@ -1645,7 +1951,7 @@ class GeneratedUnitTestSemanticValidatorTest {
                 """;
 
         assertThat(GeneratedUnitTestSemanticValidator.validate(
-                context("send", "public void send() {}"), response(generatedSource))).isEmpty();
+                context("send", "public void send() {}"), response(generatedSource), null, new MockitoVersionInfo("5.11.0", "fixture"))).isEmpty();
     }
 
     @Test
@@ -2475,6 +2781,235 @@ class GeneratedUnitTestSemanticValidatorTest {
                 "throws", "HIGH", "BR-001 -> TP-001", "APPROVED", false);
         return new UnitTestContextDto(null, null, List.of(javaClass), List.of(rule), List.of(plan),
                 List.of(testCase), List.of(), List.of(), List.of());
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({"2.15.0,verifyZeroInteractions", "5.11.0,verifyNoInteractions", "5.11.0,verifyNoMoreInteractions"})
+    void approvedZeroInteractionsCanExposeAFaultyLookupBeforeValidation(String version, String api) {
+        String source = exceptionFlowTest("org.mockito.Mockito." + api + "(repository);", false);
+        assertThat(GeneratedUnitTestSemanticValidator.validate(exceptionFlowContext(false), response(source), TestFramework.JUNIT5,
+                new MockitoVersionInfo(version, "fixture")))
+                .isEmpty();
+    }
+
+    @Test
+    void doesNotInventAdditionalPositiveVerificationFromSource() {
+        assertThat(GeneratedUnitTestSemanticValidator.validate(exceptionFlowContext(false),
+                response(exceptionFlowTest("org.mockito.Mockito.verify(repository, org.mockito.Mockito.never()).save(org.mockito.ArgumentMatchers.any());", false)),
+                TestFramework.JUNIT5, new MockitoVersionInfo("5.11.0", "fixture")))
+                .isEmpty();
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void acceptsLookupVerificationAndOnlyUnreachedDependenciesHaveZeroInteractions(boolean junit4) {
+        String verification = "org.mockito.Mockito.verify(repository).findByName(\"alice\"); "
+                + "org.mockito.Mockito.verify(repository, org.mockito.Mockito.never()).save(org.mockito.ArgumentMatchers.any()); "
+                + "org.mockito.Mockito." + (junit4 ? "verifyZeroInteractions" : "verifyNoInteractions") + "(notifier);";
+        assertThat(GeneratedUnitTestSemanticValidator.validate(exceptionFlowContext(false), response(exceptionFlowTest(verification, junit4)),
+                junit4 ? TestFramework.JUNIT4 : TestFramework.JUNIT5, new MockitoVersionInfo(junit4 ? "2.15.0" : "5.11.0", "fixture"))).isEmpty();
+    }
+
+    @Test
+    void preservesApprovedLookupArgumentWhenSourceUsesAnother() {
+        assertThat(GeneratedUnitTestSemanticValidator.validate(exceptionFlowContext(false),
+                response(exceptionFlowTest("org.mockito.Mockito.verify(repository).findByName(\"bob\");", false))))
+                .isEmpty();
+    }
+
+    @Test
+    void preservesApprovedZeroCountVerificationDespiteASourceLookup() {
+        assertThat(GeneratedUnitTestSemanticValidator.validate(exceptionFlowContext(false),
+                response(exceptionFlowTest("org.mockito.Mockito.verify(repository, org.mockito.Mockito.never()).findByName(\"alice\");", false))))
+                .isEmpty();
+    }
+
+    @Test
+    void verificationInsideThrowingLambdaAfterActIsNotReachable() {
+        String source = exceptionFlowTest("", false).replace("() -> service.check(\"alice\")",
+                "() -> { service.check(\"alice\"); org.mockito.Mockito.verify(repository).findByName(\"alice\"); }");
+        assertThat(GeneratedUnitTestSemanticValidator.validate(exceptionFlowContext(false), response(source)))
+                .hasValueSatisfying(message -> assertThat(message).contains("findByName", "after"));
+    }
+
+    @Test
+    void junit4ExpectedAnnotationCannotVerifyLookupAfterThrownException() {
+        String source = exceptionFlowTest("", true)
+                .replace("@org.junit.Test public void testCase()", "@org.junit.Test(expected=IllegalArgumentException.class) public void testCase()")
+                .replace("try { service.check(\"alice\"); org.junit.Assert.fail(\"Expected exception\"); } catch (IllegalArgumentException expected) {}",
+                        "service.check(\"alice\"); org.mockito.Mockito.verify(repository).findByName(\"alice\");");
+        assertThat(GeneratedUnitTestSemanticValidator.validate(exceptionFlowContext(false), response(source)))
+                .hasValueSatisfying(message -> assertThat(message).contains("after", "findByName"));
+    }
+
+    @Test
+    void acceptsZeroInteractionsWhenValidationThrowsBeforeLookup() {
+        String source = exceptionFlowTest("org.mockito.Mockito.verifyNoInteractions(repository, notifier);", false)
+                .replace("service.check(\"alice\")", "service.check(null)")
+                .replace("org.mockito.Mockito.when(repository.findByName(\"alice\")).thenReturn(null); ", "");
+        assertThat(GeneratedUnitTestSemanticValidator.validate(exceptionFlowContext(true), response(source), TestFramework.JUNIT5,
+                new MockitoVersionInfo("5.11.0", "fixture"))).isEmpty();
+    }
+
+    @Test
+    void preservesApprovedInteractionContractWhenAnEarlierGuardPasses() {
+        assertThat(GeneratedUnitTestSemanticValidator.validate(exceptionFlowContext(true),
+                response(exceptionFlowTest("", false))))
+                .isEmpty();
+    }
+
+    @Test
+    void approvedExceptionDoesNotRequireAdditionalLookupVerification() {
+        UnitTestContextDto context = contextWithServiceSource("demo.Service", "check",
+                "public Object check(String name) { return repository.findById(name).orElseThrow(() -> new IllegalArgumentException()); }",
+                "package demo; class Service { Repository repository; Object check(String name) { return repository.findById(name).orElseThrow(() -> new IllegalArgumentException()); } }");
+        String source = exceptionFlowTest("", false).replace("findByName", "findById").replace(".thenReturn(null)", ".thenReturn(java.util.Optional.empty())");
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context, response(source)))
+                .isEmpty();
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource(delimiter = '|', value = {
+            "for (int i = 0; i < 0; i++) { repository.findByName(name); } throw new IllegalArgumentException();|IllegalArgumentException",
+            "Object value = false ? repository.findByName(name) : null; throw new IllegalArgumentException();|IllegalArgumentException",
+            "int[] values = null; int value = values[0]; return repository.findByName(name);|NullPointerException",
+            "int divisor = 0; int value = 1 / divisor; return repository.findByName(name);|ArithmeticException",
+            "if (name != \"disabled\") throw new IllegalArgumentException(); return repository.findByName(name);|IllegalArgumentException",
+            "{ if (name != null) throw new IllegalArgumentException(); repository.findByName(name); } return null;|IllegalArgumentException",
+            "switch (name) { case \"alice\": throw new IllegalArgumentException(); default: repository.findByName(name); } return null;|IllegalArgumentException"})
+    void doesNotInventLookupBeforeExceptionInUnprovenControlFlow(String body, String exception) {
+        String method = "public Object check(String name) { " + body + " }";
+        var context = contextWithServiceSource("demo.Service", "check", method,
+                "package demo; class Service { Repository repository; " + method + " }");
+        String source = exceptionFlowTest("org.mockito.Mockito.verifyNoInteractions(repository, notifier);", false)
+                .replace("org.mockito.Mockito.when(repository.findByName(\"alice\")).thenReturn(null); ", "")
+                .replace("assertThrows(IllegalArgumentException.class", "assertThrows(" + exception + ".class");
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context, response(source), TestFramework.JUNIT5,
+                new MockitoVersionInfo("5.11.0", "fixture"))).isEmpty();
+    }
+
+    @Test
+    void approvedVerificationExpressionIsNotReplacedBySourceArguments() {
+        String source = exceptionFlowTest("org.mockito.Mockito.verify(repository).findByName(\"bob\");", false)
+                .replace("org.junit.jupiter.api.Assertions.assertThrows", "String name = new String(\"alice\"); org.junit.jupiter.api.Assertions.assertThrows")
+                .replace("service.check(\"alice\")", "service.check(name)");
+        assertThat(GeneratedUnitTestSemanticValidator.validate(exceptionFlowContext(false), response(source)))
+                .isEmpty();
+        assertThat(GeneratedUnitTestSemanticValidator.validate(exceptionFlowContext(false),
+                response(source.replace("findByName(\"bob\")", "findByName(name)")))).isEmpty();
+    }
+
+    @Test
+    void verificationInJUnit4TryAfterActIsUnreachable() {
+        String source = exceptionFlowTest("", true).replace("service.check(\"alice\"); org.junit.Assert.fail",
+                "service.check(\"alice\"); org.mockito.Mockito.verify(repository).findByName(\"alice\"); org.junit.Assert.fail");
+        assertThat(GeneratedUnitTestSemanticValidator.validate(exceptionFlowContext(false), response(source)))
+                .hasValueSatisfying(message -> assertThat(message).contains("findByName", "after"));
+        String valid = exceptionFlowTest("", true).replace("catch (IllegalArgumentException expected) {}",
+                "catch (IllegalArgumentException expected) { org.mockito.Mockito.verify(repository).findByName(\"alice\"); }");
+        assertThat(GeneratedUnitTestSemanticValidator.validate(exceptionFlowContext(false), response(valid))).isEmpty();
+    }
+
+    @Test
+    void expectedAnnotationMayVerifyLookupInFinally() {
+        String source = exceptionFlowTest("", true)
+                .replace("@org.junit.Test public void testCase()", "@org.junit.Test(expected=IllegalArgumentException.class) public void testCase()")
+                .replace("try { service.check(\"alice\"); org.junit.Assert.fail(\"Expected exception\"); } catch (IllegalArgumentException expected) {}",
+                        "try { service.check(\"alice\"); } finally { org.mockito.Mockito.verify(repository).findByName(\"alice\"); }");
+        assertThat(GeneratedUnitTestSemanticValidator.validate(exceptionFlowContext(false), response(source))).isEmpty();
+    }
+
+    @Test
+    void allowsZeroInteractionsBeforeActThenPositiveLookupVerification() {
+        String source = exceptionFlowTest("org.mockito.Mockito.verify(repository).findByName(\"alice\");", false)
+                .replace("org.junit.jupiter.api.Assertions.assertThrows",
+                        "org.mockito.Mockito.verifyNoInteractions(repository); org.junit.jupiter.api.Assertions.assertThrows");
+        assertThat(GeneratedUnitTestSemanticValidator.validate(exceptionFlowContext(false), response(source), TestFramework.JUNIT5,
+                new MockitoVersionInfo("5.11.0", "fixture"))).isEmpty();
+    }
+
+    @Test
+    void preservesApprovedNoLookupContractForNullableAndNonNullInputs() {
+        String method = "public Object check(Long id) { return repository.findById(id); }";
+        var context = contextWithServiceSource("demo.Service", "check", method,
+                "package demo; class Service { Repository repository; " + method + " } interface Repository { Object findById(long id); }");
+        String source = exceptionFlowTest("org.mockito.Mockito.verifyNoInteractions(repository, notifier);", false)
+                .replace("org.mockito.Mockito.when(repository.findByName(\"alice\")).thenReturn(null); ", "")
+                .replace("service.check(\"alice\")", "service.check(null)")
+                .replace("assertThrows(IllegalArgumentException.class", "assertThrows(NullPointerException.class");
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context, response(source), TestFramework.JUNIT5,
+                new MockitoVersionInfo("5.11.0", "fixture"))).isEmpty();
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context, response(source.replace("service.check(null)", "service.check(1L)")),
+                TestFramework.JUNIT5, new MockitoVersionInfo("5.11.0", "fixture")))
+                .isEmpty();
+    }
+
+    @Test
+    void accountSaveChangesKeepsApprovedInteractionContractsDespiteSourceLookup() {
+        // Luồng lấy từ AccountServiceImpl.saveChanges trong snapshot source người dùng cung cấp.
+        String production = "public void saveChanges(String name, Account update) { "
+                + "Account account = repository.findByName(name); Assert.notNull(account, \"can't find account with name \" + name); "
+                + "account.setIncomes(update.getIncomes()); account.setExpenses(update.getExpenses()); account.setSaving(update.getSaving()); "
+                + "account.setNote(update.getNote()); account.setLastSeen(new Date()); repository.save(account); "
+                + "log.debug(\"account {} changes has been saved\", name); statisticsClient.updateStatistics(name, account); }";
+        var context = contextWithServiceSource("com.piggymetrics.account.service.AccountServiceImpl", "saveChanges", production,
+                "package com.piggymetrics.account.service; import org.springframework.util.Assert; import java.util.Date; "
+                        + "import com.piggymetrics.account.domain.Account; import com.piggymetrics.account.repository.AccountRepository; "
+                        + "import com.piggymetrics.account.client.StatisticsServiceClient; class AccountServiceImpl { "
+                        + "AccountRepository repository; StatisticsServiceClient statisticsClient; " + production + " }");
+        String source = """
+                package com.piggymetrics.account.service;
+                import com.piggymetrics.account.domain.Account;
+                import com.piggymetrics.account.repository.AccountRepository;
+                import com.piggymetrics.account.client.StatisticsServiceClient;
+                @org.junit.runner.RunWith(org.mockito.junit.MockitoJUnitRunner.class)
+                public class AccountServiceImplTest {
+                    @org.mockito.Mock AccountRepository repository;
+                    @org.mockito.Mock StatisticsServiceClient statisticsClient;
+                    @org.mockito.InjectMocks AccountServiceImpl service;
+                    @org.junit.Test public void testCase() {
+                        org.mockito.Mockito.when(repository.findByName("missing")).thenReturn(null);
+                        try { service.saveChanges("missing", null); org.junit.Assert.fail("Expected exception"); }
+                        catch (IllegalArgumentException exception) {
+                            org.junit.Assert.assertEquals("can't find account with name missing", exception.getMessage());
+                        }
+                        org.mockito.Mockito.verify(repository).findByName("missing");
+                        org.mockito.Mockito.verify(repository, org.mockito.Mockito.never()).save(org.mockito.ArgumentMatchers.any(Account.class));
+                        org.mockito.Mockito.verifyZeroInteractions(statisticsClient);
+                    }
+                }
+                """;
+        var validResponse = new UnitTestResponseDto(List.of(new GeneratedUnitTestDto(
+                40L, "AccountServiceImplTest", "testCase", "com.piggymetrics.account.service", "NEW_TEST", source)));
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context, validResponse, TestFramework.JUNIT4,
+                new MockitoVersionInfo("2.15.0", "fixture"))).isEmpty();
+        String invalid = source.replace("org.mockito.Mockito.verify(repository).findByName(\"missing\");",
+                "org.mockito.Mockito.verifyZeroInteractions(repository);");
+        var invalidResponse = new UnitTestResponseDto(List.of(new GeneratedUnitTestDto(
+                40L, "AccountServiceImplTest", "testCase", "com.piggymetrics.account.service", "NEW_TEST", invalid)));
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context, invalidResponse, TestFramework.JUNIT4,
+                new MockitoVersionInfo("2.15.0", "fixture")))
+                .isEmpty();
+    }
+
+    private UnitTestContextDto exceptionFlowContext(boolean earlyGuard) {
+        String method = "public Object check(String name) { " + (earlyGuard ? "if (name == null) throw new IllegalArgumentException(); " : "")
+                + "Object value = repository.findByName(name); if (value == null) throw new IllegalArgumentException(); "
+                + "repository.save(value); notifier.send(value); return value; }";
+        return contextWithServiceSource("demo.Service", "check", method,
+                "package demo; class Service { Repository repository; Client notifier; " + method + " }");
+    }
+
+    private String exceptionFlowTest(String verification, boolean junit4) {
+        return (junit4 ? "@org.junit.runner.RunWith(org.mockito.junit.MockitoJUnitRunner.class) "
+                : "@org.junit.jupiter.api.extension.ExtendWith(org.mockito.junit.jupiter.MockitoExtension.class) ")
+                + "class ServiceTest { @org.mockito.Mock Repository repository; @org.mockito.Mock Client notifier; "
+                + "@org.mockito.InjectMocks Service service; "
+                + (junit4 ? "@org.junit.Test public void testCase() { " : "@org.junit.jupiter.api.Test void testCase() { ")
+                + "org.mockito.Mockito.when(repository.findByName(\"alice\")).thenReturn(null); "
+                + (junit4 ? "try { service.check(\"alice\"); org.junit.Assert.fail(\"Expected exception\"); } catch (IllegalArgumentException expected) {} "
+                        : "org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class, () -> service.check(\"alice\")); ")
+                + verification + " } }";
     }
 
     private UnitTestContextDto contextWithServiceSource(

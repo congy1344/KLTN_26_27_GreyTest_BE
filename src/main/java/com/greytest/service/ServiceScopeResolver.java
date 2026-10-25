@@ -43,12 +43,12 @@ public class ServiceScopeResolver {
         List<ServiceScope> scopes = listScopes(projectId);
         if (scopes.isEmpty()) {
             throw new IllegalArgumentException(
-                    "Project chua co module production nao. Hay phan tich project truoc.");
+                    "Project chưa có module production nào. Hãy phân tích project trước.");
         }
         if (requestedServicePath == null || requestedServicePath.isBlank()) {
             if (scopes.size() == 1) return scopes.get(0);
             throw new IllegalArgumentException(
-                    "Project co nhieu module; can truyen query param servicePath. Gia tri hop le: "
+                    "Project có nhiều module; cần truyền query param servicePath. Giá trị hợp lệ: "
                             + scopes.stream().map(ServiceScope::servicePath).toList());
         }
         String normalized = normalizeServicePath(requestedServicePath);
@@ -57,7 +57,7 @@ public class ServiceScopeResolver {
                 .findFirst()
                 .or(() -> scopes.stream().filter(s -> s.servicePath().equalsIgnoreCase(normalized)).findFirst())
                 .orElseThrow(() -> new IllegalArgumentException(
-                        "servicePath khong thuoc project: " + normalized + ". Gia tri hop le: "
+                        "servicePath không thuộc project: " + normalized + ". Giá trị hợp lệ: "
                                 + scopes.stream().map(ServiceScope::servicePath).toList()));
     }
 
@@ -117,7 +117,7 @@ public class ServiceScopeResolver {
         if (normalized.isBlank()) return ".";
         if (normalized.startsWith("/") || normalized.contains(":")
                 || java.util.Arrays.asList(normalized.split("/")).contains("..")) {
-            throw new IllegalArgumentException("servicePath khong hop le: " + servicePath);
+            throw new IllegalArgumentException("servicePath không hợp lệ: " + servicePath);
         }
         return normalized;
     }

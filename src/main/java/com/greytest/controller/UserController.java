@@ -40,4 +40,11 @@ public class UserController {
         AuthUser user = authService.currentUser(authorization);
         return userService.currentQuota(user);
     }
+
+    /** Hủy gói nâng cấp của tài khoản đang đăng nhập và chuyển về Free ngay. */
+    @PostMapping("/cancel-subscription")
+    public UserQuotaResponse cancelSubscription(@RequestHeader("Authorization") String authorization) {
+        AuthUser user = authService.currentUser(authorization);
+        return userService.cancelSubscription(user);
+    }
 }

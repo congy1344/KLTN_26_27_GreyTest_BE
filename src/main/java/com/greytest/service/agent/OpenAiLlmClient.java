@@ -120,7 +120,7 @@ public class OpenAiLlmClient implements LlmClient {
     @Override
     public String complete(String prompt, LlmRequestOptions options) {
         if (apiKey == null || apiKey.isBlank()) {
-            throw new LlmResponseException("LLM_API_KEY chua duoc cau hinh.");
+            throw new LlmResponseException("LLM_API_KEY chưa được cấu hình.");
         }
         HttpRequest request = HttpRequest.newBuilder(endpoint)
                 .timeout(timeout)
@@ -134,7 +134,7 @@ public class OpenAiLlmClient implements LlmClient {
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
             if (response.statusCode() < 200 || response.statusCode() >= 300) {
                 int status = response.statusCode();
-                throw new LlmResponseException("OpenAI API loi HTTP "
+                throw new LlmResponseException("OpenAI API lỗi HTTP "
                         + status + ": " + snippet(response.body()), status == 429 || status >= 500);
             }
             JsonNode root = responseRoot(response.body());
@@ -151,7 +151,7 @@ public class OpenAiLlmClient implements LlmClient {
                         Duration.ofNanos(System.nanoTime() - startedAt).toMillis());
             }
         } catch (IOException exception) {
-            throw new LlmResponseException("Khong goi duoc OpenAI API: " + exception.getMessage(), exception, true);
+            throw new LlmResponseException("Không gọi được OpenAI API: " + exception.getMessage(), exception, true);
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
             throw new LlmResponseException("Bi gian doan khi goi OpenAI API.", exception);
@@ -172,7 +172,7 @@ public class OpenAiLlmClient implements LlmClient {
         try {
             return objectMapper.writeValueAsString(root);
         } catch (JsonProcessingException exception) {
-            throw new LlmResponseException("Khong tao duoc request OpenAI.", exception);
+            throw new LlmResponseException("Không tạo được request OpenAI.", exception);
         }
     }
 
@@ -180,7 +180,7 @@ public class OpenAiLlmClient implements LlmClient {
         try {
             return objectMapper.readTree(responseBody);
         } catch (JsonProcessingException exception) {
-            throw new LlmResponseException("OpenAI response khong phai JSON hop le.", exception);
+            throw new LlmResponseException("OpenAI response không phải JSON hợp lệ.", exception, true);
         }
     }
 
@@ -190,9 +190,9 @@ public class OpenAiLlmClient implements LlmClient {
             String outputText = root.path("choices").path(0).path("message").path("content").asText("");
             if (outputText.isBlank()) outputText = root.path("output_text").asText("");
             if (!outputText.isBlank()) return outputText;
-            throw new LlmResponseException("OpenAI response khong co text output.");
+            throw new LlmResponseException("OpenAI response không có text output.", true);
         } catch (JsonProcessingException exception) {
-            throw new LlmResponseException("OpenAI response khong phai JSON hop le.", exception);
+            throw new LlmResponseException("OpenAI response không phải JSON hợp lệ.", exception, true);
         }
     }
 

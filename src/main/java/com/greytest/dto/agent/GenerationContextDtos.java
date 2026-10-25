@@ -148,6 +148,8 @@ public final class GenerationContextDtos {
             String calleeServiceSourceCode) {
     }
 
+    public record ResourceEvidenceDto(String kind, String filePath, String content) {}
+
     public record BusinessRuleGenerationContextDto(
             ProjectContextDto project,
             AnalysisSummaryDto analysis,
@@ -155,7 +157,16 @@ public final class GenerationContextDtos {
             List<ServiceRelationDto> serviceRepositoryRelations,
             List<ControllerServiceRelationDto> controllerServiceRelations,
             List<DependencyCallContextDto> dependencyCalls,
-            List<ExistingTestContextDto> existingTests) {
+            List<ExistingTestContextDto> existingTests,
+            List<ResourceEvidenceDto> supportingResources,
+            List<String> contextWarnings) {
+        public BusinessRuleGenerationContextDto(ProjectContextDto project, AnalysisSummaryDto analysis,
+                List<ClassContextDto> classes, List<ServiceRelationDto> serviceRepositoryRelations,
+                List<ControllerServiceRelationDto> controllerServiceRelations, List<DependencyCallContextDto> dependencyCalls,
+                List<ExistingTestContextDto> existingTests) {
+            this(project, analysis, classes, serviceRepositoryRelations, controllerServiceRelations,
+                    dependencyCalls, existingTests, List.of(), List.of());
+        }
     }
 
     public record BusinessRuleReviewContextDto(
@@ -174,7 +185,14 @@ public final class GenerationContextDtos {
             AnalysisSummaryDto analysis,
             List<ClassContextDto> classes,
             List<BusinessRuleContextDto> approvedBusinessRules,
-            List<ExistingTestContextDto> existingTests) {
+            List<ExistingTestContextDto> existingTests,
+            List<ResourceEvidenceDto> supportingResources,
+            List<String> contextWarnings) {
+        public TestPlanContextDto(ProjectContextDto project, AnalysisSummaryDto analysis,
+                List<ClassContextDto> classes, List<BusinessRuleContextDto> approvedBusinessRules,
+                List<ExistingTestContextDto> existingTests) {
+            this(project, analysis, classes, approvedBusinessRules, existingTests, List.of(), List.of());
+        }
     }
 
     public record TestCaseContextDto(
@@ -183,7 +201,14 @@ public final class GenerationContextDtos {
             List<ClassContextDto> classes,
             List<BusinessRuleContextDto> approvedBusinessRules,
             List<TestPlanContextItemDto> approvedTestPlans,
-            List<ExistingTestContextDto> existingTests) {
+            List<ExistingTestContextDto> existingTests,
+            List<ResourceEvidenceDto> supportingResources,
+            List<String> contextWarnings) {
+        public TestCaseContextDto(ProjectContextDto project, AnalysisSummaryDto analysis,
+                List<ClassContextDto> classes, List<BusinessRuleContextDto> approvedBusinessRules,
+                List<TestPlanContextItemDto> approvedTestPlans, List<ExistingTestContextDto> existingTests) {
+            this(project, analysis, classes, approvedBusinessRules, approvedTestPlans, existingTests, List.of(), List.of());
+        }
     }
 
     public record UnitTestContextDto(
@@ -195,7 +220,17 @@ public final class GenerationContextDtos {
             List<TestCaseContextItemDto> approvedTestCases,
             List<TestCaseContextItemDto> existingApprovedTestCases,
             List<GeneratedUnitTestContextDto> previousGeneratedUnitTests,
-            List<ExistingTestContextDto> existingTests) {
+            List<ExistingTestContextDto> existingTests,
+            List<ResourceEvidenceDto> supportingResources,
+            List<String> contextWarnings) {
+        public UnitTestContextDto(ProjectContextDto project, AnalysisSummaryDto analysis,
+                List<ClassContextDto> classes, List<BusinessRuleContextDto> approvedBusinessRules,
+                List<TestPlanContextItemDto> approvedTestPlans, List<TestCaseContextItemDto> approvedTestCases,
+                List<TestCaseContextItemDto> existingApprovedTestCases,
+                List<GeneratedUnitTestContextDto> previousGeneratedUnitTests, List<ExistingTestContextDto> existingTests) {
+            this(project, analysis, classes, approvedBusinessRules, approvedTestPlans, approvedTestCases,
+                    existingApprovedTestCases, previousGeneratedUnitTests, existingTests, List.of(), List.of());
+        }
     }
 
     public record CoverageRefinementContextDto(

@@ -343,7 +343,7 @@ class TestPlanServiceTest {
 
         assertThatThrownBy(() -> service().generate(1L))
                 .isInstanceOf(LlmResponseException.class)
-                .hasMessageContaining("nam ngoai method");
+                .hasMessageContaining("nằm ngoài method");
         verify(testPlanRepository, never()).deleteAll(any());
     }
 
@@ -434,7 +434,7 @@ class TestPlanServiceTest {
 
         assertThatThrownBy(() -> service().generate(1L))
                 .isInstanceOf(InvalidProjectStatusException.class)
-                .hasMessageContaining("it nhat mot Business Rule");
+                .hasMessageContaining("ít nhất một Business Rule");
     }
 
     private TestPlanService service() {

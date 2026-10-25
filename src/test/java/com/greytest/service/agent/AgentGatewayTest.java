@@ -39,6 +39,7 @@ import com.greytest.entity.Project;
 import com.greytest.repository.ProjectRepository;
 import com.greytest.service.UsageQuotaService;
 import com.greytest.service.GenerationJobContext;
+import com.greytest.service.LlmBatchExecutor;
 
 import jakarta.validation.Validation;
 import jakarta.validation.Validator;
@@ -50,6 +51,228 @@ class AgentGatewayTest {
     private final PromptManager promptManager = new PromptManager(objectMapper);
     private final GenerationResponseParser parser = new GenerationResponseParser(objectMapper, validator);
     private final MockLlmClient mockLlmClient = new MockLlmClient();
+
+    @Test
+    void doesNotRestartExhaustedUnitTestCorrectionsAtBatchLevel(@TempDir Path root) throws Exception {
+        var contexts = mock(GenerationContextBuilder.class);
+        when(contexts.buildUnitTestContext(1L, java.util.Set.of(40L))).thenReturn(unitTestContext());
+        var client = mock(LlmClient.class);
+        String invalid = objectMapper.writeValueAsString(new UnitTestResponseDto(List.of(
+                generatedUnitTest("@org.junit.Test(expected=IllegalArgumentException.class) "
+                        + "public void testCase(){ service.findReadyToNotify(null); }"))))
+                .replace("package demo;", "package demo; import org.mockito.junit.jupiter.Strictness;");
+        when(client.complete(org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.any(LlmRequestOptions.class))).thenReturn(invalid);
+        var agent = new AIAgentService(contexts, promptManager, client, parser,
+                new AiContextLogService(objectMapper, root.toString(), false, false));
+        var executor = new LlmBatchExecutor(1, 2, 0);
+
+        RuntimeException failure = org.assertj.core.api.Assertions.catchThrowableOfType(
+                () -> executor.map(List.of(40L), id -> agent.generateUnitTests(1L, java.util.Set.of(id))),
+                RuntimeException.class);
+
+        assertThat(failure).isInstanceOf(LlmBatchExecutor.BatchExecutionException.class);
+        assertThat(LlmBatchExecutor.originalFailure(failure))
+                .isInstanceOf(LlmResponseException.class)
+                .hasMessageContaining("Unit Test semantic validation failed:");
+        var prompts = org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(client, org.mockito.Mockito.times(2)).complete(prompts.capture(),
+                org.mockito.ArgumentMatchers.any(LlmRequestOptions.class));
+        assertThat(prompts.getAllValues().get(1)).contains("# Unit Test semantic correction", "org.mockito.quality.Strictness");
+    }
+
+    @Test
+    void doesNotRestartExhaustedMalformedJsonCorrectionsAtBatchLevel(@TempDir Path root) {
+        var contexts = mock(GenerationContextBuilder.class);
+        when(contexts.buildBusinessRuleGenerationContext(1L)).thenReturn(context());
+        var client = mock(LlmClient.class);
+        when(client.complete(org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.any(LlmRequestOptions.class))).thenReturn("{");
+        var agent = new AIAgentService(contexts, promptManager, client, parser,
+                new AiContextLogService(objectMapper, root.toString(), false, false));
+        var executor = new LlmBatchExecutor(1, 2, 0);
+
+        RuntimeException failure = org.assertj.core.api.Assertions.catchThrowableOfType(
+                () -> executor.map(List.of(1L), agent::generateBusinessRules), RuntimeException.class);
+
+        assertThat(failure).isInstanceOf(LlmBatchExecutor.BatchExecutionException.class);
+        assertThat(LlmBatchExecutor.originalFailure(failure))
+                .isInstanceOf(LlmResponseException.class).hasMessageContaining("không phải JSON hợp lệ");
+        var prompts = org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(client, org.mockito.Mockito.times(3)).complete(prompts.capture(),
+                org.mockito.ArgumentMatchers.any(LlmRequestOptions.class));
+        assertThat(prompts.getAllValues().subList(1, 3))
+                .allSatisfy(prompt -> assertThat(prompt).contains("# JSON correction"));
+    }
+
+    @Test
+    void batchStillRecoversWhenProviderRemainsTemporarilyUnavailableAfterAgentRetry(@TempDir Path root) {
+        var contexts = mock(GenerationContextBuilder.class);
+        when(contexts.buildBusinessRuleGenerationContext(1L)).thenReturn(context());
+        var client = mock(LlmClient.class);
+        when(client.complete(org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.any(LlmRequestOptions.class)))
+                .thenThrow(new LlmResponseException("Provider HTTP 503", true))
+                .thenThrow(new LlmResponseException("Provider HTTP 503", true))
+                .thenReturn("{\"rules\":[]}");
+        var agent = new AIAgentService(contexts, promptManager, client, parser,
+                new AiContextLogService(objectMapper, root.toString(), false, false));
+        var executor = new LlmBatchExecutor(1, 2, 0);
+
+        var outputs = executor.map(List.of(1L), agent::generateBusinessRules);
+
+        assertThat(outputs).singleElement().satisfies(response -> assertThat(response.rules()).isEmpty());
+        verify(client, org.mockito.Mockito.times(3)).complete(org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.any(LlmRequestOptions.class));
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"Provider HTTP 504", "EOF reached while reading"})
+    void capsTransportRetriesAtThreeCallsAcrossAgentAndBatch(String message, @TempDir Path root) {
+        var contexts = mock(GenerationContextBuilder.class);
+        when(contexts.buildBusinessRuleGenerationContext(1L)).thenReturn(context());
+        var client = mock(LlmClient.class);
+        when(client.complete(org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.any(LlmRequestOptions.class)))
+                .thenThrow(new LlmResponseException(message, true));
+        var agent = new AIAgentService(contexts, promptManager, client, parser,
+                new AiContextLogService(objectMapper, root.toString(), false, false));
+        var executor = new LlmBatchExecutor(1, 2, 0);
+        assertThatThrownBy(() -> executor.map(List.of(1L), agent::generateBusinessRules))
+                .isInstanceOf(LlmBatchExecutor.BatchExecutionException.class);
+        verify(client, org.mockito.Mockito.times(3)).complete(org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.any(LlmRequestOptions.class));
+    }
+
+    @Test
+    void businessRuleCorrectionsShareBudgetAndEachBatchGetsItsOwnBudget(@TempDir Path root) {
+        var contexts = mock(GenerationContextBuilder.class);
+        when(contexts.buildBusinessRuleGenerationContext(1L)).thenReturn(context());
+        var client = mock(LlmClient.class);
+        when(client.complete(org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.any(LlmRequestOptions.class))).thenReturn("{\"rules\":[]}");
+        var agent = new AIAgentService(contexts, promptManager, client, parser,
+                new AiContextLogService(objectMapper, root.toString(), false, false));
+        var executor = new LlmBatchExecutor(1, 2, 0);
+        for (int batch = 0; batch < 2; batch++) {
+            assertThatThrownBy(() -> executor.map(List.of(1L), id -> {
+                for (int correction = 0; correction < 4; correction++) agent.generateBusinessRules(id);
+                return id;
+            })).isInstanceOf(LlmBatchExecutor.BatchExecutionException.class);
+        }
+        verify(client, org.mockito.Mockito.times(6)).complete(org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.any(LlmRequestOptions.class));
+    }
+
+    @Test
+    void cachedTestsReceiveCurrentCapturedFingerprintInsteadOfCachedMetadata(@TempDir Path root) throws Exception {
+        var base = unitTestContext();
+        String original = "package demo; class Service { " + base.classes().get(0).methods().get(0).sourceCode() + " }\n";
+        String current = original + "// Comment changed after the cached generation\n";
+        String relative = "src/main/java/demo/Service.java";
+        Path source = root.resolve(relative);
+        Files.createDirectories(source.getParent());
+        Files.writeString(source, current);
+        var javaClass = new ClassContextDto(1L, "demo", "Service", "demo.Service", "SERVICE", relative,
+                original, List.of(), base.classes().get(0).methods());
+        var context = new UnitTestContextDto(base.project(), base.analysis(), List.of(javaClass),
+                base.approvedBusinessRules(), base.approvedTestPlans(), base.approvedTestCases(), List.of(), List.of(), List.of());
+        var contexts = mock(GenerationContextBuilder.class);
+        when(contexts.buildUnitTestContext(1L, java.util.Set.of(40L))).thenReturn(context);
+        var project = new Project();
+        project.setStoragePath(root.toString());
+        var projects = mock(ProjectRepository.class);
+        when(projects.findById(1L)).thenReturn(java.util.Optional.of(project));
+        var cache = new LlmResponseCache("mock", "", "mock-model", 20);
+        var client = mock(LlmClient.class);
+        var agent = new AIAgentService(contexts, promptManager, client, parser,
+                new AiContextLogService(objectMapper, root.resolve("logs").toString()), projects, null, cache);
+        var generated = generatedUnitTest("@org.junit.Test(expected=NullPointerException.class) "
+                + "public void testCase(){ service.findReadyToNotify(null); }");
+        String oldHash = GenerationSourceFingerprint.hash(original);
+        String oldMetadata = "// GREYTEST_SOURCE_V1 " + oldHash + " "
+                + java.util.Base64.getEncoder().encodeToString(relative.getBytes(java.nio.charset.StandardCharsets.UTF_8)) + "\n";
+        var cached = new GeneratedUnitTestDto(generated.caseId(), generated.testClassName(), generated.testMethodName(),
+                generated.packageName(), generated.generationType(), oldMetadata + generated.sourceCode());
+        cache.put(promptManager.render("unit-test", Map.of("context_json", context)) + "\n\n" + agent.languageInstruction(),
+                objectMapper.writeValueAsString(new UnitTestResponseDto(List.of(cached))));
+
+        var result = agent.generateUnitTests(1L, java.util.Set.of(40L));
+
+        assertThat(result.unitTests().get(0).sourceCode())
+                .startsWith("// GREYTEST_SOURCE_V1 " + GenerationSourceFingerprint.hash(current))
+                .doesNotContain(oldHash);
+        org.mockito.Mockito.verifyNoInteractions(client);
+    }
+
+    @Test
+    void retriesPrimitiveNullAssertionWithoutChangingTheApprovedExpectedResult(@TempDir Path root) throws Exception {
+        var base = unitTestContext();
+        String serviceSource = "package demo; class Service { Receipt send(Receipt value) { return value; } }";
+        var method = new MethodContextDto(10L, "demo.Service", "send", "Receipt", List.of(), List.of(), "public",
+                "Receipt send(Receipt value) { return value; }", 1, 1, List.of(), List.of(), List.of());
+        var service = new ClassContextDto(1L, "demo", "Service", "demo.Service", "SERVICE", "Service.java",
+                serviceSource, List.of(), List.of(method));
+        var receipt = new ClassContextDto(2L, "demo", "Receipt", "demo.Receipt", "OTHER", "Receipt.java",
+                "package demo; class Receipt { int getCount() { return 0; } }", List.of(), List.of());
+        var approved = new TestCaseContextItemDto(40L, 30L, "TC-001", "HAPPY_PATH", "Returns receipt", "Valid receipt",
+                Map.of(), "Returned receipt has count 0", "HIGH", "BR-001 -> TP-001", "APPROVED", false);
+        var context = new UnitTestContextDto(base.project(), base.analysis(), List.of(service, receipt),
+                base.approvedBusinessRules(), base.approvedTestPlans(), List.of(approved), List.of(), List.of(), List.of());
+        var contexts = mock(GenerationContextBuilder.class);
+        when(contexts.buildUnitTestContext(1L)).thenReturn(context);
+        String invalid = "package demo; class ServiceTest { Service service = new Service(); "
+                + "@org.junit.jupiter.api.Test void testCase() { Receipt result = service.send(new Receipt()); "
+                + "org.junit.jupiter.api.Assertions.assertNull(result.getCount()); } }";
+        String valid = invalid.replace("assertNull(result.getCount())", "assertEquals(0, result.getCount())");
+        var expected = new UnitTestResponseDto(List.of(new GeneratedUnitTestDto(40L, "ServiceTest", "testCase", "demo", "NEW_TEST", valid)));
+        var client = mock(LlmClient.class);
+        when(client.complete(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any(LlmRequestOptions.class)))
+                .thenReturn(objectMapper.writeValueAsString(new UnitTestResponseDto(List.of(
+                        new GeneratedUnitTestDto(40L, "ServiceTest", "testCase", "demo", "NEW_TEST", invalid)))),
+                        objectMapper.writeValueAsString(expected));
+        var agent = new AIAgentService(contexts, promptManager, client, parser, new AiContextLogService(objectMapper, root.toString()));
+
+        assertThat(agent.generateUnitTests(1L)).isEqualTo(expected);
+        var prompts = org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(client, org.mockito.Mockito.times(2)).complete(prompts.capture(), org.mockito.ArgumentMatchers.any(LlmRequestOptions.class));
+        assertThat(prompts.getAllValues().get(1)).contains("Source value contract", "primitive type int", approved.expectedResult());
+    }
+
+    @Test
+    void retriesWrongProductionConstructorBeforeReturningGeneratedTests(@TempDir Path root) throws Exception {
+        var base = unitTestContext();
+        var method = new MethodContextDto(10L, "demo.Service", "send", "Receipt", List.of(), List.of(),
+                "public", "public Receipt send(Receipt value) { return value; }", 1, 2, List.of(), List.of(), List.of());
+        var serviceSource = new ClassContextDto(1L, "demo", "Service", "demo.Service", "SERVICE", "Service.java",
+                "package demo; class Service { public Receipt send(Receipt value) { return value; } }", List.of(), List.of(method));
+        var receiptSource = new ClassContextDto(2L, "demo", "Receipt", "demo.Receipt", "CLASS", "Receipt.java",
+                "package demo; @lombok.AllArgsConstructor class Receipt { String id; boolean active; }", List.of(), List.of());
+        var approved = new TestCaseContextItemDto(40L, 30L, "TC-001", "HAPPY_PATH", "Returns receipt", "Valid receipt",
+                Map.of("id", "receipt-1"), "Returns the same receipt", "HIGH", "BR-001 -> TP-001", "APPROVED", false);
+        var context = new UnitTestContextDto(base.project(), base.analysis(), List.of(serviceSource, receiptSource),
+                base.approvedBusinessRules(), base.approvedTestPlans(), List.of(approved), List.of(), List.of(), List.of());
+        var contexts = mock(GenerationContextBuilder.class);
+        when(contexts.buildUnitTestContext(1L, java.util.Set.of(40L))).thenReturn(context);
+        String invalid = "package demo; class ServiceTest { Service service = new Service(); "
+                + "@org.junit.jupiter.api.Test void testCase() { Receipt receipt = new Receipt(\"receipt-1\"); "
+                + "org.junit.jupiter.api.Assertions.assertSame(receipt, service.send(receipt)); } }";
+        String valid = invalid.replace("new Receipt(\"receipt-1\")", "new Receipt(\"receipt-1\", true)");
+        var expected = new UnitTestResponseDto(List.of(new GeneratedUnitTestDto(40L, "ServiceTest", "testCase", "demo", "NEW_TEST", valid)));
+        var client = mock(LlmClient.class);
+        when(client.complete(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any(LlmRequestOptions.class)))
+                .thenReturn(objectMapper.writeValueAsString(new UnitTestResponseDto(List.of(
+                        new GeneratedUnitTestDto(40L, "ServiceTest", "testCase", "demo", "NEW_TEST", invalid)))),
+                        objectMapper.writeValueAsString(expected));
+        var agent = new AIAgentService(contexts, promptManager, client, parser,
+                new AiContextLogService(objectMapper, root.toString()));
+
+        assertThat(agent.generateUnitTests(1L, java.util.Set.of(40L))).isEqualTo(expected);
+        var prompts = org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(client, org.mockito.Mockito.times(2)).complete(prompts.capture(), org.mockito.ArgumentMatchers.any(LlmRequestOptions.class));
+        assertThat(prompts.getAllValues().get(1)).contains("Source constructor contract", "Receipt", "1 arguments",
+                "preserve approved test inputs, preconditions, expected results and business assertions", approved.expectedResult());
+    }
 
     @Test
     void stopsWithoutRetryWhenSourceCannotSupportAUnitTest(@TempDir Path tempDir) throws Exception {
@@ -112,7 +335,6 @@ class AgentGatewayTest {
 
         assertThat(prompt).contains(
                 "# Prompt: business-rule",
-                "\"project\" : \"demo\"",
                 "Do not target a fixed number of rules per method",
                 "exactly one rule for every unique control-flow decision id",
                 "deterministic source anchors",
@@ -618,7 +840,9 @@ class AgentGatewayTest {
             assertThat(service.languageInstruction()).contains("in English", "JSON keys", "file paths");
 
             LocaleContextHolder.setLocale(Locale.forLanguageTag("vi"));
-            assertThat(service.languageInstruction()).contains("tieng Viet", "API", "Unit Test", "khong dich guong ep");
+            assertThat(service.languageInstruction()).contains("# Output language", "tiếng Việt có dấu",
+                    "không viết tiếng Việt không dấu", "API", "Unit Test", "không dịch gượng ép",
+                    "Giữ nguyên test data", "chuỗi literal", "exception message trích từ source");
         } finally {
             LocaleContextHolder.resetLocaleContext();
         }
@@ -672,7 +896,7 @@ class AgentGatewayTest {
 
         assertThatThrownBy(() -> parser.parse(invalidJson, BusinessRuleResponseDto.class))
                 .isInstanceOf(LlmResponseException.class)
-                .hasMessageContaining("LLM response khong dung schema");
+                .hasMessageContaining("LLM response không đúng schema");
     }
 
     @Test
@@ -690,7 +914,7 @@ class AgentGatewayTest {
                 });
         assertThatThrownBy(() -> parser.parse(json.replace("SOURCE_MISMATCH", "UNSUPPORTED"),
                 BusinessRuleReviewResponseDto.class))
-                .isInstanceOf(LlmResponseException.class).hasMessageContaining("LLM response khong dung schema");
+                .isInstanceOf(LlmResponseException.class).hasMessageContaining("LLM response không đúng schema");
     }
 
     @Test
@@ -790,6 +1014,79 @@ class AgentGatewayTest {
                 List.of(),
                 List.of(),
                 List.of());
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({"2.15.0,verifyZeroInteractions", "3.0.0,verifyZeroInteractions", "3.0.1,verifyNoInteractions", "3.9.0,verifyNoInteractions", "5.11.0,verifyNoInteractions"})
+    void unitTestGenerationUsesMockitoVersionFromTargetBuild(String version, String api, @TempDir Path root) throws Exception {
+        Files.writeString(root.resolve("pom.xml"), "<project><properties><mockito.version>" + version
+                + "</mockito.version></properties><dependencies><dependency><groupId>junit</groupId><artifactId>junit</artifactId></dependency></dependencies></project>");
+        ProjectRepository projects = mock(ProjectRepository.class);
+        com.greytest.entity.Project project = new com.greytest.entity.Project(); project.setStoragePath(root.toString());
+        when(projects.findById(1L)).thenReturn(java.util.Optional.of(project));
+        var contexts = mock(GenerationContextBuilder.class);
+        when(contexts.buildUnitTestContext(1L, java.util.Set.of(40L))).thenReturn(unitTestContext());
+        var client = mock(LlmClient.class);
+        var expected = new UnitTestResponseDto(List.of(generatedUnitTest("@org.junit.Test(expected=NullPointerException.class) public void testCase() { "
+                + "Object dependency = org.mockito.Mockito.mock(Object.class); org.mockito.Mockito." + api + "(dependency); service.findReadyToNotify(null); }")));
+        String validJson = objectMapper.writeValueAsString(expected);
+        when(client.complete(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any(LlmRequestOptions.class)))
+                .thenReturn(api.equals("verifyZeroInteractions") ? validJson.replace("verifyZeroInteractions", "verifyNoInteractions") : validJson, validJson);
+        var agent = new AIAgentService(contexts, promptManager, client, parser, new AiContextLogService(objectMapper, root.resolve("logs").toString()),
+                new ProjectJavaVersionDetector(projects));
+
+        assertThat(agent.generateUnitTests(1L, java.util.Set.of(40L))).isEqualTo(expected);
+        var prompts = org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(client, org.mockito.Mockito.times(api.equals("verifyZeroInteractions") ? 2 : 1))
+                .complete(prompts.capture(), org.mockito.ArgumentMatchers.any(LlmRequestOptions.class));
+        assertThat(prompts.getValue()).contains("Mockito compatibility detected", version);
+        assertThat(prompts.getValue()).contains("Build dependency evidence", "pom.xml", "<mockito.version>", "<artifactId>junit</artifactId>");
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({"2.15.0,verifyZeroInteractions", "5.11.0,verifyNoInteractions"})
+    void preservesApprovedNegativeExceptionInteractionsWithoutRetry(String version, String api, @TempDir Path root) throws Exception {
+        boolean junit4 = version.startsWith("2.");
+        Files.writeString(root.resolve("pom.xml"), "<project><properties><mockito.version>" + version
+                + "</mockito.version></properties><dependencies><dependency><groupId>"
+                + (junit4 ? "junit</groupId><artifactId>junit" : "org.junit.jupiter</groupId><artifactId>junit-jupiter")
+                + "</artifactId></dependency></dependencies></project>");
+        var projects = mock(ProjectRepository.class);
+        var project = new com.greytest.entity.Project(); project.setStoragePath(root.toString());
+        when(projects.findById(1L)).thenReturn(java.util.Optional.of(project));
+        var base = unitTestContext();
+        String production = "public Object check(String name) { Object value = repository.findByName(name); "
+                + "if (value == null) throw new IllegalArgumentException(); repository.save(value); notifier.send(value); return value; }";
+        var method = new MethodContextDto(10L, "demo.Service", "check", "Object", List.of(), List.of(), "public",
+                production, 1, 2, List.of(), List.of(), List.of());
+        var javaClass = new ClassContextDto(1L, "demo", "Service", "demo.Service", "SERVICE", "src/main/java/demo/Service.java",
+                "package demo; class Service { Repository repository; Client notifier; " + production + " }", List.of(), List.of(method));
+        var approvedCase = new TestCaseContextItemDto(40L, 30L, "TC-001", "EXCEPTION", "Reject null name without database access", "Null name",
+                java.util.Collections.singletonMap("name", null), "IllegalArgumentException; no repository access or notification",
+                "HIGH", "BR-001 -> TP-001", "APPROVED", false);
+        var context = new UnitTestContextDto(base.project(), base.analysis(), List.of(javaClass), base.approvedBusinessRules(),
+                base.approvedTestPlans(), List.of(approvedCase), List.of(), List.of(), List.of());
+        var contexts = mock(GenerationContextBuilder.class);
+        when(contexts.buildUnitTestContext(1L, java.util.Set.of(40L))).thenReturn(context);
+        String source = "package demo; " + (junit4 ? "@org.junit.runner.RunWith(org.mockito.junit.MockitoJUnitRunner.class) "
+                : "@org.junit.jupiter.api.extension.ExtendWith(org.mockito.junit.jupiter.MockitoExtension.class) ")
+                + "class ServiceTest { @org.mockito.Mock Repository repository; @org.mockito.Mock Client notifier; @org.mockito.InjectMocks Service service; "
+                + (junit4 ? "@org.junit.Test public void testCase() { " : "@org.junit.jupiter.api.Test void testCase() { ")
+                + (junit4 ? "try { service.check(null); org.junit.Assert.fail(\"Expected exception\"); } catch (IllegalArgumentException expected) {} "
+                        : "org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class, () -> service.check(null)); ")
+                + "org.mockito.Mockito." + api + "(repository, notifier); } }";
+        var expected = new UnitTestResponseDto(List.of(new GeneratedUnitTestDto(40L, "ServiceTest", "testCase", "demo", "NEW_TEST", source)));
+        var client = mock(LlmClient.class);
+        when(client.complete(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any(LlmRequestOptions.class)))
+                .thenReturn(objectMapper.writeValueAsString(expected));
+        var agent = new AIAgentService(contexts, promptManager, client, parser,
+                new AiContextLogService(objectMapper, root.resolve("logs").toString()), new ProjectJavaVersionDetector(projects));
+
+        assertThat(agent.generateUnitTests(1L, java.util.Set.of(40L))).isEqualTo(expected);
+        var prompts = org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(client).complete(prompts.capture(), org.mockito.ArgumentMatchers.any(LlmRequestOptions.class));
+        assertThat(prompts.getValue()).contains("EXCEPTION FLOW VERIFICATION", approvedCase.description(), approvedCase.expectedResult())
+                .doesNotContain("# Unit Test semantic correction");
     }
 
     private UnitTestContextDto unitTestContext() {

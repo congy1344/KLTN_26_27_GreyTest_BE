@@ -49,11 +49,13 @@ import com.greytest.dto.agent.GenerationContextDtos.TestPlanContextItemDto;
 import com.greytest.dto.agent.GenerationContextDtos.UnitTestContextDto;
 import com.greytest.exception.InvalidProjectStatusException;
 import com.greytest.entity.BusinessRule;
+import com.greytest.entity.Project;
 import com.greytest.entity.TestCase;
 import com.greytest.entity.TestPlan;
 import com.greytest.entity.TestPlanCoveredRule;
 import com.greytest.entity.enums.ReviewStatus;
 import com.greytest.repository.BusinessRuleRepository;
+import com.greytest.repository.ProjectRepository;
 import com.greytest.repository.TestCaseRepository;
 import com.greytest.repository.TestPlanCoveredRuleRepository;
 import com.greytest.repository.TestPlanRepository;
@@ -61,12 +63,32 @@ import com.greytest.repository.UnitTestRepository;
 import com.greytest.service.analysis.AnalysisManifestService;
 import com.greytest.service.analysis.AnalysisService;
 import com.greytest.service.analysis.ExistingTestService;
+import com.greytest.service.ServiceScopeResolver;
+import com.greytest.service.GenerationJobContext;
 
 /**
  * Gom context grey-box theo schema on dinh truoc khi dua sang prompt/LLM.
  */
 @Service
 public class GenerationContextBuilder {
+    private static final ThreadLocal<Map<Object,Object>> INPUT_SNAPSHOT=new ThreadLocal<>();
+    private record InputReadKey(String type,Long projectId,boolean source) { }
+
+    /** Chụp upstream bất biến trong một batch; scope lồng nhau luôn đọc mới trước commit. */
+    public static <T> T withInputSnapshot(java.util.function.Supplier<T> action) {
+        var previous=INPUT_SNAPSHOT.get(); INPUT_SNAPSHOT.set(new java.util.HashMap<>());
+        try { return action.get(); }
+        finally { if(previous==null) INPUT_SNAPSHOT.remove(); else INPUT_SNAPSHOT.set(previous); }
+    }
+
+    @SuppressWarnings("unchecked")
+    public static <T> T inputSnapshot(Object key,java.util.function.Supplier<T> read) {
+        var snapshot=INPUT_SNAPSHOT.get();
+        if(snapshot==null) return read.get();
+        if(snapshot.containsKey(key)) return (T)snapshot.get(key);
+        // Loader có thể đọc thêm key upstream trên cùng thread; computeIfAbsent không hỗ trợ sửa map lồng nhau.
+        T value=read.get(); snapshot.put(key,value); return value;
+    }
 
     private static final String SERVICE_CLASS_TYPE = "SERVICE";
     // ponytail: cap theo method de prompt khong phinh vo han; thay bang token-aware chunking khi can LLM that.
@@ -96,6 +118,22 @@ public class GenerationContextBuilder {
     private final TestPlanCoveredRuleRepository testPlanCoveredRuleRepository;
     private final TestCaseRepository testCaseRepository;
     private final UnitTestRepository unitTestRepository;
+    private final ProjectRepository projectRepository;
+    private PersistentSourceAnalysisService persistentAnalysis;
+    private com.greytest.repository.SourceUpdateRepository sourceUpdates;
+    private com.greytest.repository.SourceUpdateItemRepository sourceUpdateItems;
+    private com.fasterxml.jackson.databind.ObjectMapper objectMapper;
+
+    @org.springframework.beans.factory.annotation.Autowired
+    void configureIncrementalInputs(PersistentSourceAnalysisService persistentAnalysis,
+            com.greytest.repository.SourceUpdateRepository sourceUpdates,
+            com.greytest.repository.SourceUpdateItemRepository sourceUpdateItems,
+            com.fasterxml.jackson.databind.ObjectMapper objectMapper) {
+        this.persistentAnalysis = persistentAnalysis;
+        this.sourceUpdates = sourceUpdates;
+        this.sourceUpdateItems = sourceUpdateItems;
+        this.objectMapper = objectMapper;
+    }
 
     public GenerationContextBuilder(
             AnalysisService analysisService,
@@ -105,7 +143,8 @@ public class GenerationContextBuilder {
             TestPlanRepository testPlanRepository,
             TestPlanCoveredRuleRepository testPlanCoveredRuleRepository,
             TestCaseRepository testCaseRepository,
-            UnitTestRepository unitTestRepository) {
+            UnitTestRepository unitTestRepository,
+            ProjectRepository projectRepository) {
         this.analysisService = analysisService;
         this.existingTestService = existingTestService;
         this.businessRuleRepository = businessRuleRepository;
@@ -113,12 +152,13 @@ public class GenerationContextBuilder {
         this.testPlanCoveredRuleRepository = testPlanCoveredRuleRepository;
         this.testCaseRepository = testCaseRepository;
         this.unitTestRepository = unitTestRepository;
+        this.projectRepository = projectRepository;
     }
 
     /** Context cho AI tu sinh Business Rule tu cac service method. */
     @Transactional(readOnly = true)
     public BusinessRuleGenerationContextDto buildBusinessRuleGenerationContext(Long projectId) {
-        AnalysisResultDto analysis = analysisService.getAnalysisResult(projectId);
+        AnalysisResultDto analysis = storedAnalysis(projectId);
         Set<Long> uncoveredMethodIds = serviceMethodIds(analysis);
         uncoveredMethodIds.removeAll(methodIds(businessRules(projectId)));
         Set<Long> firstServiceBatch = analysis.classes().stream()
@@ -142,12 +182,24 @@ public class GenerationContextBuilder {
     @Transactional(readOnly = true)
     public BusinessRuleGenerationContextDto buildBusinessRuleGenerationContext(
             Long projectId, Set<Long> targetMethodIds) {
-        AnalysisResultDto analysis = analysisService.getAnalysisResult(projectId);
+        AnalysisResultDto analysis = storedAnalysis(projectId);
         return buildBusinessRuleGenerationContext(analysis, targetMethodIds);
+    }
+
+    /** BR của draft dùng candidate source và resource, không sửa source active trước Apply. */
+    @Transactional(readOnly = true)
+    public BusinessRuleGenerationContextDto buildSnapshotBusinessRuleGenerationContext(
+            Long projectId, Set<Long> targetMethodIds, java.nio.file.Path snapshot) {
+        return buildBusinessRuleGenerationContext(sourceAnalysis(projectId, snapshot, true), targetMethodIds, snapshot);
     }
 
     private BusinessRuleGenerationContextDto buildBusinessRuleGenerationContext(
             AnalysisResultDto analysis, Set<Long> targetMethodIds) {
+        return buildBusinessRuleGenerationContext(analysis, targetMethodIds, activeSourceRoot(analysis.projectId()));
+    }
+
+    private BusinessRuleGenerationContextDto buildBusinessRuleGenerationContext(
+            AnalysisResultDto analysis, Set<Long> targetMethodIds, java.nio.file.Path sourceRoot) {
         Set<Long> requestedIds = targetMethodIds == null ? Set.of() : Set.copyOf(targetMethodIds);
         List<JavaClassDto> targetServices = analysis.classes().stream()
                 .filter(javaClass -> SERVICE_CLASS_TYPE.equals(javaClass.classType()))
@@ -160,17 +212,22 @@ public class GenerationContextBuilder {
                 .collect(java.util.stream.Collectors.toSet());
         if (!validIds.equals(requestedIds) || targetServices.size() > 1) {
             throw new IllegalArgumentException(
-                    "Business Rule context chi duoc chua method hop le cua dung mot Service.");
+                    "Business Rule context chỉ được chứa method hợp lệ của đúng một Service.");
         }
         List<DependencyCallContextDto> dependencyCalls = dependencyCalls(analysis, targetServices, requestedIds);
+        List<ClassContextDto> sourceClasses = sourceContextClasses(analysis, requestedIds, true);
+        var resources = BusinessRuleResourceCollector.collect(sourceRoot, sourceClasses);
+        Set<Long> targetClassIds = targetServices.stream().map(JavaClassDto::id).collect(java.util.stream.Collectors.toSet());
         return new BusinessRuleGenerationContextDto(
                 project(analysis),
                 summary(analysis.projectId(), analysis),
-                classes(analysis, requestedIds),
+                sourceClasses,
                 relevantServiceRelations(analysis, targetServices, dependencyCalls),
                 relevantControllerServiceRelations(analysis, targetServices, requestedIds),
                 dependencyCalls,
-                List.of());
+                relevantExistingTests(analysis.projectId(), requestedIds, targetClassIds, true),
+                resources.resources(),
+                resources.warnings());
     }
 
     private List<ServiceRelationDto> relevantServiceRelations(
@@ -370,7 +427,7 @@ public class GenerationContextBuilder {
 
     @Transactional(readOnly = true)
     public BusinessRuleReviewContextDto buildBusinessRuleReviewContext(Long projectId, Set<Long> targetRuleIds) {
-        AnalysisResultDto analysis = analysisService.getAnalysisResult(projectId);
+        AnalysisResultDto analysis = storedAnalysis(projectId);
         List<BusinessRuleContextDto> allRules = businessRules(projectId).stream()
                 .filter(rule -> targetRuleIds == null || targetRuleIds.isEmpty() || targetRuleIds.contains(rule.id()))
                 .toList();
@@ -386,7 +443,7 @@ public class GenerationContextBuilder {
         return new BusinessRuleReviewContextDto(
                 project(analysis),
                 summary(projectId, analysis),
-                classes(analysis, dirtyMethodIds),
+                sourceContextClasses(analysis, dirtyMethodIds),
                 serviceRelations(analysis),
                 controllerServiceRelations(analysis),
                 dirtyRules,
@@ -403,17 +460,29 @@ public class GenerationContextBuilder {
     /** Context cho mot batch Business Rule da approve de tranh LLM tra JSON bi cat. */
     @Transactional(readOnly = true)
     public TestPlanContextDto buildTestPlanContext(Long projectId, Set<Long> targetRuleIds) {
-        AnalysisResultDto analysis = analysisService.getAnalysisResult(projectId);
+        return buildTestPlanContext(projectId, targetRuleIds, activeGenerationAnalysis(projectId), activeSourceRoot(projectId));
+    }
+
+    @Transactional(readOnly = true)
+    public TestPlanContextDto buildSnapshotTestPlanContext(Long projectId, Set<Long> targetRuleIds, java.nio.file.Path snapshot) {
+        return buildTestPlanContext(projectId, targetRuleIds, sourceAnalysis(projectId, snapshot, true), snapshot);
+    }
+
+    private TestPlanContextDto buildTestPlanContext(Long projectId, Set<Long> targetRuleIds,
+            AnalysisResultDto analysis, java.nio.file.Path sourceRoot) {
         List<BusinessRuleContextDto> approvedRules = approvedBusinessRules(projectId).stream()
                 .filter(rule -> targetRuleIds == null || targetRuleIds.isEmpty() || targetRuleIds.contains(rule.id()))
                 .toList();
         requireRequestedIds(targetRuleIds, approvedRules.stream().map(BusinessRuleContextDto::id).collect(java.util.stream.Collectors.toSet()), "Business Rule");
+        List<ClassContextDto> sourceClasses = sourceContextClasses(analysis, methodIds(approvedRules));
+        var resources = BusinessRuleResourceCollector.collect(sourceRoot, sourceClasses);
         return new TestPlanContextDto(
                 project(analysis),
                 summary(projectId, analysis),
-                classes(analysis, methodIds(approvedRules)),
+                sourceClasses,
                 approvedRules,
-                existingTests(projectId, false));
+                existingTests(projectId, false),
+                resources.resources(), resources.warnings());
     }
 
     /** Context cho sinh Test Case tu Test Plan da approve. */
@@ -425,7 +494,16 @@ public class GenerationContextBuilder {
     /** Context cho mot batch Test Plan de payload khong tang theo kich thuoc project. */
     @Transactional(readOnly = true)
     public TestCaseContextDto buildTestCaseContext(Long projectId, Set<Long> targetPlanIds) {
-        AnalysisResultDto analysis = analysisService.getAnalysisResult(projectId);
+        return buildTestCaseContext(projectId, targetPlanIds, activeGenerationAnalysis(projectId), activeSourceRoot(projectId));
+    }
+
+    @Transactional(readOnly = true)
+    public TestCaseContextDto buildSnapshotTestCaseContext(Long projectId, Set<Long> targetPlanIds, java.nio.file.Path snapshot) {
+        return buildTestCaseContext(projectId, targetPlanIds, sourceAnalysis(projectId, snapshot, true), snapshot);
+    }
+
+    private TestCaseContextDto buildTestCaseContext(Long projectId, Set<Long> targetPlanIds,
+            AnalysisResultDto analysis, java.nio.file.Path sourceRoot) {
         List<TestPlanContextItemDto> targetPlans = approvedTestPlans(projectId).stream()
                 .filter(plan -> targetPlanIds == null || targetPlanIds.isEmpty() || targetPlanIds.contains(plan.id()))
                 .toList();
@@ -445,13 +523,50 @@ public class GenerationContextBuilder {
                         .anyMatch(method -> targetMethodIds.contains(method.id())))
                 .map(JavaClassDto::id)
                 .collect(java.util.stream.Collectors.toSet());
+        List<ClassContextDto> sourceClasses = sourceContextClasses(analysis, targetMethodIds);
+        var resources = BusinessRuleResourceCollector.collect(sourceRoot, sourceClasses);
         return new TestCaseContextDto(
                 project(analysis),
                 summary(projectId, analysis),
-                classes(analysis, targetMethodIds),
+                sourceClasses,
                 approvedRules,
                 targetPlans,
-                relevantExistingTests(projectId, targetMethodIds, targetClassIds));
+                relevantExistingTests(projectId, targetMethodIds, targetClassIds),
+                resources.resources(), resources.warnings());
+    }
+
+    private record StoredAnalysisKey(Long projectId) { }
+    private record SourceAnalysisKey(Long projectId, java.nio.file.Path root, String digest, boolean strict) { }
+    private record SourceDigestKey(java.nio.file.Path root) { }
+    private record ParsedSourceAnalysisKey(Long projectId, java.nio.file.Path root, String digest, boolean strict) { }
+
+    private AnalysisResultDto storedAnalysis(Long projectId) {
+        return GenerationJobContext.memoize(new StoredAnalysisKey(projectId),
+                () -> analysisService.getAnalysisResult(projectId));
+    }
+
+    private AnalysisResultDto sourceAnalysis(Long projectId, java.nio.file.Path root, boolean strict) {
+        AnalysisResultDto stored = storedAnalysis(projectId);
+        java.nio.file.Path normalized = root.toAbsolutePath().normalize();
+        String digest = inputSnapshot(new SourceDigestKey(normalized),()->PersistentSourceAnalysisService.contentDigest(normalized));
+        var parsed = GenerationJobContext.memoize(new ParsedSourceAnalysisKey(projectId, normalized, digest, strict),
+                () -> persistentAnalysis == null ? SnapshotAnalysisLoader.parse(normalized, strict)
+                        : persistentAnalysis.load(projectId, normalized, strict, digest));
+        return GenerationJobContext.memoize(new SourceAnalysisKey(projectId, normalized, digest, strict),
+                () -> SnapshotAnalysisLoader.remap(stored, parsed));
+    }
+
+    private AnalysisResultDto activeGenerationAnalysis(Long projectId) {
+        AnalysisResultDto analysis = storedAnalysis(projectId);
+        return projectRepository.findById(projectId).map(Project::getStoragePath)
+                .filter(path -> !path.isBlank())
+                .map(path -> sourceAnalysis(projectId, java.nio.file.Path.of(path), false))
+                .orElse(analysis);
+    }
+
+    private java.nio.file.Path activeSourceRoot(Long projectId) {
+        return projectRepository.findById(projectId).map(Project::getStoragePath)
+                .filter(path -> !path.isBlank()).map(java.nio.file.Path::of).orElse(null);
     }
 
     /** Context cho sinh/cai thien Unit Test, gom existing tests rieng de khong tinh vao production counters. */
@@ -464,7 +579,7 @@ public class GenerationContextBuilder {
     @Transactional(readOnly = true)
     public CoverageRefinementContextDto buildCoverageRefinementContext(
             Long projectId, int round, List<CoverageGapDto> gaps) {
-        AnalysisResultDto analysis = analysisService.getAnalysisResult(projectId);
+        AnalysisResultDto analysis = storedAnalysis(projectId);
         Set<Long> gapMethodIds = gaps.stream()
                 .map(CoverageGapDto::methodId)
                 .filter(java.util.Objects::nonNull)
@@ -498,11 +613,18 @@ public class GenerationContextBuilder {
     /** Unit Test vong bo sung chi nhan cac Test Case vua sinh. */
     @Transactional(readOnly = true)
     public UnitTestContextDto buildUnitTestContext(Long projectId, Set<Long> targetCaseIds) {
-        AnalysisResultDto analysis = analysisService.getAnalysisResult(projectId);
-        return buildUnitTestContext(projectId, targetCaseIds, analysis);
+        AnalysisResultDto analysis = storedAnalysis(projectId);
+        java.nio.file.Path sourceRoot = activeSourceRoot(projectId);
+        // Analysis cũ có thể thiếu imports; đọc snapshot trong bộ nhớ để giữ nguyên ID và artifact đã duyệt.
+        if (sourceRoot != null) {
+            return buildVerifiedUnitTestContext(projectId, targetCaseIds,
+                    sourceAnalysis(projectId, sourceRoot, false), sourceRoot);
+        }
+        return buildUnitTestContext(projectId, targetCaseIds, analysis, null);
     }
 
-    private UnitTestContextDto buildUnitTestContext(Long projectId, Set<Long> targetCaseIds, AnalysisResultDto analysis) {
+    private UnitTestContextDto buildUnitTestContext(Long projectId, Set<Long> targetCaseIds,
+            AnalysisResultDto analysis, java.nio.file.Path sourceRoot) {
         List<TestCaseContextItemDto> allCases = approvedTestCases(projectId);
         boolean fullGeneration = targetCaseIds == null || targetCaseIds.isEmpty();
         List<TestCaseContextItemDto> targetCases = allCases.stream()
@@ -535,29 +657,37 @@ public class GenerationContextBuilder {
                         .anyMatch(method -> targetMethodIds.contains(method.id())))
                 .map(JavaClassDto::id)
                 .collect(java.util.stream.Collectors.toSet());
+        List<ClassContextDto> sourceClasses = sourceContextClasses(analysis, targetMethodIds);
+        var resources = BusinessRuleResourceCollector.collect(sourceRoot, sourceClasses);
         return new UnitTestContextDto(
                 project(analysis),
                 summary(projectId, analysis),
-                unitTestClasses(analysis, targetMethodIds),
+                sourceClasses,
                 targetRules,
                 targetPlans,
                 targetCases,
                 previousCases,
                 generatedUnitTests(previousCases).stream().limit(MAX_UNIT_TEST_REFERENCES).toList(),
-                relevantExistingTests(projectId, targetMethodIds, targetClassIds, true));
+                relevantExistingTests(projectId, targetMethodIds, targetClassIds, true),
+                resources.resources(), resources.warnings());
     }
 
     /** Context Unit Test từ snapshot source của bản cập nhật. */
     @Transactional(readOnly = true)
     public UnitTestContextDto buildSnapshotUnitTestContext(Long projectId, Set<Long> targetCaseIds, java.nio.file.Path snapshot) {
-        AnalysisResultDto analysis = SnapshotAnalysisLoader.load(analysisService.getAnalysisResult(projectId), snapshot);
-        UnitTestContextDto context = buildUnitTestContext(projectId, targetCaseIds, analysis);
+        return buildVerifiedUnitTestContext(projectId, targetCaseIds,
+                sourceAnalysis(projectId, snapshot, true), snapshot);
+    }
+
+    private UnitTestContextDto buildVerifiedUnitTestContext(Long projectId, Set<Long> targetCaseIds,
+            AnalysisResultDto analysis, java.nio.file.Path sourceRoot) {
+        UnitTestContextDto context = buildUnitTestContext(projectId, targetCaseIds, analysis, sourceRoot);
         Set<Long> requiredIds = context.approvedBusinessRules().stream().map(BusinessRuleContextDto::methodId)
                 .filter(java.util.Objects::nonNull).collect(java.util.stream.Collectors.toSet());
         Set<Long> availableIds = context.classes().stream().flatMap(c -> c.methods().stream()).map(MethodContextDto::id)
                 .collect(java.util.stream.Collectors.toSet());
         if (!availableIds.containsAll(requiredIds)) {
-            throw new LlmResponseException("Candidate snapshot does not contain every target method linked to the selected Test Cases.");
+            throw new LlmResponseException("Source snapshot does not contain every target method linked to the selected Test Cases.");
         }
         return context;
     }
@@ -577,7 +707,8 @@ public class GenerationContextBuilder {
                 context.approvedTestCases(),
                 context.existingApprovedTestCases(),
                 context.previousGeneratedUnitTests(),
-                context.existingTests());
+                context.existingTests(),
+                context.supportingResources(), context.contextWarnings());
     }
 
     /** Không dùng artifact chưa duyệt hoặc thiếu cha đã duyệt làm oracle. */
@@ -671,16 +802,28 @@ public class GenerationContextBuilder {
         return method.classQualifiedName() + "#" + method.methodName() + "(" + parameterTypes + ")";
     }
 
-    private List<ClassContextDto> unitTestClasses(AnalysisResultDto analysis, Set<Long> targetMethodIds) {
+    /** Các bước sinh dùng cùng khai báo kiểu và helper để không truyền kỳ vọng sai xuống Unit Test. */
+    private List<ClassContextDto> sourceContextClasses(AnalysisResultDto analysis, Set<Long> targetMethodIds) {
+        return sourceContextClasses(analysis, targetMethodIds, false);
+    }
+
+    private List<ClassContextDto> sourceContextClasses(
+            AnalysisResultDto analysis, Set<Long> targetMethodIds, boolean includeImplementations) {
         List<ClassContextDto> result = new ArrayList<>(classes(analysis, targetMethodIds, true));
+        Set<String> targetModules = result.stream().map(type -> ServiceScopeResolver.modulePath(type.filePath()))
+                .collect(java.util.stream.Collectors.toSet());
         int targetCount = result.size();
         Set<String> included = result.stream().map(ClassContextDto::qualifiedName)
                 .collect(java.util.stream.Collectors.toSet());
+        Map<String, String> includedPaths = result.stream().collect(java.util.stream.Collectors.toMap(
+                ClassContextDto::qualifiedName, type -> type.filePath() == null ? "" : type.filePath()));
         List<JavaClassDto> candidates = analysis.classes().stream()
                 .filter(javaClass -> javaClass.sourceCode() != null && !javaClass.sourceCode().isBlank())
                 .sorted(Comparator.comparing(JavaClassDto::filePath, Comparator.nullsLast(String::compareTo))
                         .thenComparing(JavaClassDto::qualifiedName))
                 .toList();
+        List<JavaClassDto> implementationCandidates = includeImplementations ? candidates.stream()
+                .filter(type -> targetModules.contains(ServiceScopeResolver.modulePath(type.filePath()))).toList() : List.of();
         // Duyệt tiếp DTO/repository vừa tìm được để không thiếu kiểu generic, enum và lớp cha của chúng.
         for (int index = 0; index < result.size(); index++) {
             ClassContextDto owner = result.get(index);
@@ -688,19 +831,105 @@ public class GenerationContextBuilder {
                     .setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_21))
                     .parse(owner.sourceCode()).getResult().orElse(null);
             Set<String> references = sourceTypeReferences(source);
+            ensureReferencedSourcesParsed(analysis, owner, source, references);
             for (JavaClassDto candidate : candidates) {
-                if (included.contains(candidate.qualifiedName())
-                        || !isUnitTestDependency(candidate, owner, source, references, candidates)) continue;
+                boolean dependency = isUnitTestDependency(candidate, owner, source, references, candidates);
+                boolean implementation = includeImplementations && implementationCandidates.contains(candidate)
+                        && implementsSourceType(candidate, owner, source, candidates);
+                if (!dependency && !implementation) continue;
+                if (!preferredDeclaration(candidate, owner, dependency ? candidates : implementationCandidates)) continue;
+                if (included.contains(candidate.qualifiedName())) {
+                    String path = candidate.filePath() == null ? "" : candidate.filePath();
+                    if (!path.equals(includedPaths.get(candidate.qualifiedName()))) {
+                        throw new LlmResponseException("Conflicting source modules for referenced type " + candidate.qualifiedName());
+                    }
+                    continue;
+                }
                 if (result.size() - targetCount >= MAX_UNIT_TEST_SUPPORTING_CLASSES) {
-                    throw new LlmResponseException("Unit Test context requires more than "
+                    throw new LlmResponseException("Generation context requires more than "
                             + MAX_UNIT_TEST_SUPPORTING_CLASSES + " supporting production classes; "
                             + "cannot omit required types. Generate a smaller group of Test Cases.");
                 }
                 included.add(candidate.qualifiedName());
+                includedPaths.put(candidate.qualifiedName(), candidate.filePath() == null ? "" : candidate.filePath());
                 result.add(classContext(candidate, Set.of(), true));
             }
         }
         return List.copyOf(result);
+    }
+
+    private boolean preferredDeclaration(JavaClassDto candidate, ClassContextDto owner, List<JavaClassDto> candidates) {
+        var matching = candidates.stream().filter(type -> type.qualifiedName().equals(candidate.qualifiedName())).toList();
+        String module = ServiceScopeResolver.modulePath(owner.filePath());
+        var local = matching.stream().filter(type -> ServiceScopeResolver.modulePath(type.filePath()).equals(module)).toList();
+        if (local.size() == 1) return java.util.Objects.equals(local.get(0).filePath(), candidate.filePath());
+        if (matching.size() == 1) return true;
+        throw new LlmResponseException("Ambiguous production modules for referenced type " + candidate.qualifiedName());
+    }
+
+    private boolean implementsSourceType(JavaClassDto candidate, ClassContextDto owner,
+            CompilationUnit ownerSource, List<JavaClassDto> candidates) {
+        if (ownerSource == null || ownerSource.findAll(com.github.javaparser.ast.body.ClassOrInterfaceDeclaration.class).stream()
+                .noneMatch(type -> type.getFullyQualifiedName().filter(owner.qualifiedName()::equals).isPresent()
+                        && (type.isInterface() || type.isAbstract()))) return false;
+        var parsed = new JavaParser(new ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_21))
+                .parse(candidate.sourceCode()).getResult();
+        if (parsed.isEmpty()) return false;
+        var source = parsed.get();
+        return source.findAll(com.github.javaparser.ast.body.ClassOrInterfaceDeclaration.class).stream()
+                .filter(type -> type.getFullyQualifiedName().filter(candidate.qualifiedName()::equals).isPresent())
+                .flatMap(type -> Stream.concat(type.getImplementedTypes().stream(), type.getExtendedTypes().stream()))
+                .anyMatch(parent -> {
+                    String name = parent.getNameWithScope();
+                    if (name.equals(owner.qualifiedName())) return true;
+                    if (!name.equals(owner.className()) || source.findAll(com.github.javaparser.ast.type.TypeParameter.class).stream()
+                            .anyMatch(parameter -> parameter.getNameAsString().equals(name))) return false;
+                    var imports = source.getImports().stream().filter(value -> !value.isStatic() && !value.isAsterisk())
+                            .map(value -> value.getNameAsString()).filter(value -> value.endsWith("." + name)).toList();
+                    if (!imports.isEmpty()) return imports.size() == 1 && imports.get(0).equals(owner.qualifiedName());
+                    if (java.util.Objects.equals(candidate.packageName(), owner.packageName())) return true;
+                    if (candidates.stream().anyMatch(type -> name.equals(type.className())
+                            && java.util.Objects.equals(candidate.packageName(), type.packageName()))) return false;
+                    var wildcard = candidates.stream().filter(type -> name.equals(type.className()))
+                            .filter(type -> source.getImports().stream().anyMatch(value -> !value.isStatic() && value.isAsterisk()
+                                    && value.getNameAsString().equals(type.packageName())))
+                            .map(JavaClassDto::qualifiedName).distinct().toList();
+                    return wildcard.size() == 1 && wildcard.get(0).equals(owner.qualifiedName());
+                });
+    }
+
+    private void ensureReferencedSourcesParsed(AnalysisResultDto analysis, ClassContextDto owner,
+            CompilationUnit source, Set<String> references) {
+        if (source == null || analysis.failedParseFilePaths().isEmpty()) return;
+        Set<String> requiredTypes = source.getImports().stream().filter(i -> !i.isStatic() && !i.isAsterisk())
+                .map(i -> i.getNameAsString()).collect(java.util.stream.Collectors.toSet());
+        references.stream().filter(name -> name.contains(".")).forEach(requiredTypes::add);
+        for (String name : references) {
+            if (name.contains(".") || requiredTypes.stream().anyMatch(type -> type.endsWith("." + name))) continue;
+            String samePackage = owner.packageName() == null || owner.packageName().isBlank()
+                    ? name : owner.packageName() + "." + name;
+            requiredTypes.add(samePackage);
+            if (analysis.classes().stream().noneMatch(c -> samePackage.equals(c.qualifiedName()))) {
+                source.getImports().stream().filter(i -> !i.isStatic() && i.isAsterisk())
+                        .map(i -> i.getNameAsString() + "." + name).forEach(requiredTypes::add);
+            }
+        }
+        // Chỉ bỏ qua file lỗi ở phần không liên quan; không được thiếu source của dependency đang dùng.
+        for (String failed : analysis.failedParseFilePaths()) {
+            String path = "/" + failed.replace('\\', '/');
+            String sourceRoot = "/src/main/java/";
+            int rootIndex = path.lastIndexOf(sourceRoot);
+            String declaringType = rootIndex < 0 || !path.endsWith(".java") ? null
+                    : path.substring(rootIndex + sourceRoot.length(), path.length() - 5).replace('/', '.');
+            if (requiredTypes.stream().filter(type -> analysis.classes().stream()
+                    .noneMatch(c -> type.equals(c.qualifiedName()) && c.sourceCode() != null
+                            && !ServiceScopeResolver.modulePath(failed).equals(ServiceScopeResolver.modulePath(owner.filePath()))
+                            && ServiceScopeResolver.modulePath(c.filePath()).equals(ServiceScopeResolver.modulePath(owner.filePath()))))
+                    .anyMatch(type -> path.endsWith("/" + type.replace('.', '/') + ".java")
+                            || declaringType != null && type.startsWith(declaringType + "."))) {
+                throw new LlmResponseException("Cannot parse referenced production source " + failed + " required by " + owner.qualifiedName());
+            }
+        }
     }
 
     private Set<String> sourceTypeReferences(CompilationUnit source) {
@@ -730,18 +959,20 @@ public class GenerationContextBuilder {
                 .anyMatch(other -> java.util.Objects.equals(other.className(), candidate.className())
                         && java.util.Objects.equals(other.packageName(), owner.packageName()));
         if (samePackageTypeExists) return java.util.Objects.equals(owner.packageName(), candidate.packageName());
-        List<JavaClassDto> wildcardMatches = source == null ? List.of() : candidates.stream()
+        List<String> wildcardMatches = source == null ? List.of() : candidates.stream()
                 .filter(other -> java.util.Objects.equals(other.className(), candidate.className()))
                 .filter(other -> source.getImports().stream().anyMatch(value -> !value.isStatic() && value.isAsterisk()
-                        && value.getNameAsString().equals(other.packageName()))).toList();
+                        && value.getNameAsString().equals(other.packageName())))
+                .map(JavaClassDto::qualifiedName).distinct().toList();
         if (wildcardMatches.size() == 1) {
-            return java.util.Objects.equals(wildcardMatches.get(0).qualifiedName(), candidate.qualifiedName());
+            return java.util.Objects.equals(wildcardMatches.get(0), candidate.qualifiedName());
         }
         // Source phân tích có thể chỉ chứa khai báo class, thiếu imports: chỉ suy ra tên khi không mơ hồ.
         if (!commonBasePackage(owner.packageName(), candidate.packageName())) return false;
         long matchingTypes = candidates.stream()
                 .filter(other -> java.util.Objects.equals(other.className(), candidate.className()))
-                .filter(other -> commonBasePackage(owner.packageName(), other.packageName())).count();
+                .filter(other -> commonBasePackage(owner.packageName(), other.packageName()))
+                .map(JavaClassDto::qualifiedName).distinct().count();
         if (matchingTypes > 1 || wildcardMatches.size() > 1) {
             throw new LlmResponseException("Cannot resolve referenced production type '" + candidate.className()
                     + "' in " + owner.qualifiedName() + "; reanalyze the project to provide package and imports.");
@@ -848,19 +1079,29 @@ public class GenerationContextBuilder {
     }
 
     private List<BusinessRuleContextDto> businessRules(Long projectId) {
-        return businessRuleRepository.findByProjectId(projectId).stream()
+        return inputSnapshot(new InputReadKey("rules",projectId,false),()->loadBusinessRules(projectId));
+    }
+
+    private List<BusinessRuleContextDto> loadBusinessRules(Long projectId) {
+        Map<Long, BusinessRuleContextDto> rules = businessRuleRepository.findByProjectId(projectId).stream()
                 .map(this::ruleContext)
+                .collect(java.util.stream.Collectors.toMap(BusinessRuleContextDto::id, rule -> rule));
+        overlay(projectId, com.greytest.entity.enums.SourceUpdateTargetType.BUSINESS_RULE, rules, (old, item) -> {
+            var value = readDraft(item, com.greytest.dto.agent.GenerationResponseDtos.GeneratedBusinessRuleDto.class);
+            if (!java.util.Objects.equals(old.methodId(), value.methodId())) throw new IllegalArgumentException("Draft rule changed its source method");
+            return new BusinessRuleContextDto(old.id(), old.methodId(), old.ruleCode(), value.description(),
+                    old.reviewNote(), old.source(), old.status(), old.isModified(), value.branchId());
+        });
+        return rules.values().stream()
                 .sorted(Comparator.comparingInt((BusinessRuleContextDto rule) -> ruleNumber(rule.ruleCode()))
                         .thenComparing(BusinessRuleContextDto::ruleCode))
                 .toList();
     }
 
     private List<BusinessRuleContextDto> approvedBusinessRules(Long projectId) {
-        return businessRuleRepository.findByProjectId(projectId).stream()
-                .filter(rule -> rule.getStatus() == ReviewStatus.APPROVED)
-                .map(this::ruleContext)
-                .sorted(Comparator.comparingInt((BusinessRuleContextDto rule) -> ruleNumber(rule.ruleCode()))
-                        .thenComparing(BusinessRuleContextDto::ruleCode))
+        return businessRules(projectId).stream()
+                .filter(rule -> ReviewStatus.APPROVED.name().equals(rule.status())
+                        || GenerationJobContext.sourceUpdateId() != null && ReviewStatus.PENDING_REVIEW.name().equals(rule.status()))
                 .toList();
     }
 
@@ -886,6 +1127,10 @@ public class GenerationContextBuilder {
     }
 
     private List<ExistingTestContextDto> existingTests(Long projectId, boolean includeSource) {
+        return inputSnapshot(new InputReadKey("existingTests",projectId,includeSource),()->loadExistingTests(projectId,includeSource));
+    }
+
+    private List<ExistingTestContextDto> loadExistingTests(Long projectId,boolean includeSource) {
         return existingTestService.list(projectId).stream()
                 .map(test -> existingTestContext(test, includeSource))
                 .sorted(Comparator.comparing(ExistingTestContextDto::filePath))
@@ -925,14 +1170,32 @@ public class GenerationContextBuilder {
     }
 
     private List<TestPlanContextItemDto> approvedTestPlans(Long projectId) {
+        return inputSnapshot(new InputReadKey("plans",projectId,false),()->loadApprovedTestPlans(projectId));
+    }
+
+    private List<TestPlanContextItemDto> loadApprovedTestPlans(Long projectId) {
         List<TestPlan> plans = testPlanRepository.findByProjectId(projectId).stream()
-                .filter(plan -> plan.getStatus() == ReviewStatus.APPROVED)
+                .filter(plan -> plan.getStatus() == ReviewStatus.APPROVED
+                        || GenerationJobContext.sourceUpdateId() != null && plan.getStatus() == ReviewStatus.PENDING_REVIEW)
                 .sorted(Comparator.comparing(TestPlan::getPlanCode))
                 .toList();
         Map<Long, List<Long>> coveredRuleIds = coveredRuleIdsByPlan(plans);
-        return plans.stream()
+        Map<Long, TestPlanContextItemDto> contexts = plans.stream()
                 .map(plan -> testPlanContext(plan, coveredRuleIds.getOrDefault(plan.getId(), List.of(plan.getBusinessRuleId()))))
-                .toList();
+                .collect(java.util.stream.Collectors.toMap(TestPlanContextItemDto::id, plan -> plan));
+        overlay(projectId, com.greytest.entity.enums.SourceUpdateTargetType.TEST_PLAN, contexts, (old, item) -> {
+            var value = readDraft(item, com.greytest.dto.agent.GenerationResponseDtos.GeneratedTestPlanDto.class);
+            if (!java.util.Objects.equals(old.businessRuleId(), value.ruleId())) throw new IllegalArgumentException("Draft plan changed its parent rule");
+            var effectiveRules = businessRules(projectId);
+            var covered = value.coveredRuleIds() == null ? List.of(value.ruleId()) : value.coveredRuleIds();
+            if (covered.stream().anyMatch(id -> effectiveRules.stream().noneMatch(rule -> java.util.Objects.equals(rule.id(), id)
+                    && java.util.Objects.equals(rule.methodId(), value.methodId())))) {
+                throw new IllegalArgumentException("Draft plan references an unrelated business rule");
+            }
+            return new TestPlanContextItemDto(old.id(), old.businessRuleId(), covered, old.planCode(), value.title(), value.description(),
+                    value.testType(), old.status(), old.isModified());
+        });
+        return contexts.values().stream().sorted(Comparator.comparing(TestPlanContextItemDto::planCode)).toList();
     }
 
     private TestPlanContextItemDto testPlanContext(TestPlan plan, List<Long> coveredRuleIds) {
@@ -956,18 +1219,65 @@ public class GenerationContextBuilder {
     }
 
     private List<TestCaseContextItemDto> approvedTestCases(Long projectId) {
-        return approvedTestPlans(projectId).stream()
+        return inputSnapshot(new InputReadKey("cases",projectId,false),()->loadApprovedTestCases(projectId));
+    }
+
+    private List<TestCaseContextItemDto> loadApprovedTestCases(Long projectId) {
+        Map<Long, TestCaseContextItemDto> contexts = approvedTestPlans(projectId).stream()
                 .flatMap(plan -> testCaseRepository.findByTestPlanId(plan.id()).stream())
-                .filter(testCase -> testCase.getStatus() == ReviewStatus.APPROVED)
+                .filter(testCase -> testCase.getStatus() == ReviewStatus.APPROVED
+                        || GenerationJobContext.sourceUpdateId() != null && testCase.getStatus() == ReviewStatus.PENDING_REVIEW)
                 .map(this::testCaseContext)
-                .sorted(Comparator.comparing(TestCaseContextItemDto::caseCode))
-                .toList();
+                .collect(java.util.stream.Collectors.toMap(TestCaseContextItemDto::id, testCase -> testCase));
+        overlay(projectId, com.greytest.entity.enums.SourceUpdateTargetType.TEST_CASE, contexts, (old, item) -> {
+            var value = readDraft(item, com.greytest.dto.agent.GenerationResponseDtos.GeneratedTestCaseDto.class);
+            if (!java.util.Objects.equals(old.testPlanId(), value.planId())) throw new IllegalArgumentException("Draft case changed its parent plan");
+            return new TestCaseContextItemDto(old.id(), old.testPlanId(), old.caseCode(), value.testType(), value.description(),
+                    value.preconditions(), value.testData(), value.expectedResult(), value.priority(), value.traceSource(), old.status(), old.isModified());
+        });
+        return contexts.values().stream().sorted(Comparator.comparing(TestCaseContextItemDto::caseCode)).toList();
+    }
+
+    /** Đọc proposal mỗi lần để stage sau nhìn thấy nội dung người dùng vừa sửa trong đúng draft. */
+    private <T> void overlay(Long projectId, com.greytest.entity.enums.SourceUpdateTargetType type,
+            Map<Long, T> contexts, java.util.function.BiFunction<T, com.greytest.entity.SourceUpdateItem, T> apply) {
+        Long updateId = GenerationJobContext.sourceUpdateId();
+        if (updateId == null || sourceUpdates == null || sourceUpdateItems == null) return;
+        sourceUpdates.findByIdAndProjectId(updateId, projectId)
+                .orElseThrow(() -> new IllegalArgumentException("Draft does not belong to selected project"));
+        for (var item : sourceUpdateItems.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId)) {
+            if (item.getTargetType() != type) continue;
+            if (item.getTargetId() == null) throw new IllegalArgumentException("Draft artifact has no logical ID");
+            boolean rejected = item.getReviewStatus() == com.greytest.entity.enums.SourceUpdateReviewStatus.REJECTED
+                    || item.getAction()==com.greytest.entity.enums.SourceUpdateAction.KEEP;
+            if (rejected) {
+                if (item.getAction() == com.greytest.entity.enums.SourceUpdateAction.CREATE) contexts.remove(item.getTargetId());
+                continue;
+            }
+            T previous = contexts.get(item.getTargetId());
+            if (previous == null) {
+                // Artifact con của một parent đã REMOVE không tham gia context downstream.
+                if (type == com.greytest.entity.enums.SourceUpdateTargetType.TEST_CASE) continue;
+                throw new IllegalArgumentException("Draft artifact is outside the selected project");
+            }
+            if (item.getAction() == com.greytest.entity.enums.SourceUpdateAction.REMOVE) contexts.remove(item.getTargetId());
+            else contexts.put(item.getTargetId(), apply.apply(previous, item));
+        }
+    }
+
+    private <T> T readDraft(com.greytest.entity.SourceUpdateItem item, Class<T> type) {
+        try {
+            return objectMapper.readValue(item.getAfterData(), type);
+        } catch (Exception exception) {
+            throw new IllegalArgumentException("Invalid draft artifact " + item.getId(), exception);
+        }
     }
 
     private List<TestCaseContextItemDto> approvedTestCases(List<TestPlanContextItemDto> plans) {
         return plans.stream()
                 .flatMap(plan -> testCaseRepository.findByTestPlanId(plan.id()).stream())
-                .filter(testCase -> testCase.getStatus() == ReviewStatus.APPROVED)
+                .filter(testCase -> testCase.getStatus() == ReviewStatus.APPROVED
+                        || GenerationJobContext.sourceUpdateId() != null && testCase.getStatus() == ReviewStatus.PENDING_REVIEW)
                 .map(this::testCaseContext)
                 .sorted(Comparator.comparing(TestCaseContextItemDto::caseCode))
                 .toList();

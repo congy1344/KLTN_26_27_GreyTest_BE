@@ -39,6 +39,44 @@ class UsageQuotaServiceTest {
     private static final Clock AUGUST = Clock.fixed(Instant.parse("2026-08-21T00:00:00Z"), ZoneOffset.UTC);
 
     @Test
+    void downgradeKeepsUsageAfterReloadAndUsesCalendarMonth() {
+        UsageQuota paid = new UsageQuota();
+        paid.setUserId(7L);
+        paid.setQuotaLimit(300);
+        paid.setQuotaUsed(120);
+        paid.setPeriodStart(LocalDate.of(2026, 8, 20));
+        AtomicReference<UsageQuota> stored = new AtomicReference<>(paid);
+        UsageQuotaService service = new UsageQuotaService(repository(stored), 100, AUGUST);
+
+        UsageQuota result = service.downgradeToFree(7L);
+
+        assertThat(result.getQuotaLimit()).isEqualTo(100);
+        assertThat(result.getQuotaUsed()).isEqualTo(120);
+        assertThat(result.getPeriodStart()).isEqualTo(LocalDate.of(2026, 8, 1));
+        assertThat(service.current(7L).getQuotaUsed()).isEqualTo(120);
+        assertThatThrownBy(() -> service.consumeLlmCall(7L))
+                .isInstanceOf(UsageQuotaExceededException.class);
+    }
+
+    @Test
+    void downgradeOfPlusKeepsRemainingUsageAndStillResetsNextMonth() {
+        UsageQuota paid = new UsageQuota();
+        paid.setUserId(7L);
+        paid.setQuotaLimit(200);
+        paid.setQuotaUsed(25);
+        paid.setPeriodStart(LocalDate.of(2026, 8, 20));
+        AtomicReference<UsageQuota> stored = new AtomicReference<>(paid);
+        UsageQuotaRepository repository = repository(stored);
+        UsageQuotaService service = new UsageQuotaService(repository, 100, AUGUST);
+
+        service.downgradeToFree(7L);
+        assertThat(service.consumeLlmCall(7L).getQuotaUsed()).isEqualTo(26);
+
+        Clock september = Clock.fixed(Instant.parse("2026-09-01T00:00:00Z"), ZoneOffset.UTC);
+        assertThat(new UsageQuotaService(repository, 100, september).current(7L).getQuotaUsed()).isZero();
+    }
+
+    @Test
     void createsDefaultMonthlyQuotaAndCountsEachLlmCall() {
         AtomicReference<UsageQuota> stored = new AtomicReference<>();
         UsageQuotaRepository repository = repository(stored);

@@ -15,6 +15,16 @@ import com.greytest.dto.diff.MethodDiffType;
 import com.greytest.service.analysis.JavaParserHelper;
 
 class SourceDiffServiceTest {
+    @Test
+    void scansCandidateExactlyOnce(@TempDir Path tempDir) throws IOException {
+        Path base = Files.createDirectory(tempDir.resolve("base"));
+        Path candidate = Files.createDirectory(tempDir.resolve("candidate"));
+        Files.writeString(base.resolve("Service.java"), "class Service { int value() { return 1; } }");
+        Files.writeString(candidate.resolve("Service.java"), "class Service { int value() { return 2; } }");
+        JavaParserHelper parser = org.mockito.Mockito.spy(new JavaParserHelper());
+        assertThat(new SourceDiffService(parser).compareSnapshots(base, candidate)).hasSize(1);
+        org.mockito.Mockito.verify(parser, org.mockito.Mockito.times(1)).scanProject(candidate);
+    }
 
     private final SourceDiffService diffService = new SourceDiffService(new JavaParserHelper());
 

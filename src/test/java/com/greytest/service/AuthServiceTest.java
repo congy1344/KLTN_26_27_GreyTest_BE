@@ -49,7 +49,7 @@ class AuthServiceTest {
         assertThatThrownBy(() -> new AuthService(repository, TOKEN_SECRET)
                 .adminLogin(new LoginRequest("user@greytest.dev", "correct-password")))
                 .isInstanceOf(AuthException.class)
-                .hasMessageContaining("quyen quan tri");
+                .hasMessageContaining("quyền quản trị");
     }
 
     @Test
@@ -61,7 +61,7 @@ class AuthServiceTest {
         assertThatThrownBy(() -> new AuthService(repository, TOKEN_SECRET)
                 .login(new LoginRequest("admin@greytest.dev", "correct-password")))
                 .isInstanceOf(AuthException.class)
-                .hasMessageContaining("cong dang nhap Admin");
+                .hasMessageContaining("cổng đăng nhập Admin");
     }
 
     @Test

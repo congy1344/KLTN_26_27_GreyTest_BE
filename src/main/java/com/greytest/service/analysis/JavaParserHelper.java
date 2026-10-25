@@ -202,7 +202,7 @@ public class JavaParserHelper {
             return sourceWithoutCommentsPreservingLines(md);
         } catch (Exception exception) {
             throw new SourceAnalysisException(
-                    "Khong the doc source gốc cua method de anh xa dong nguon chinh xac.", exception);
+                    "Không thể đọc source gốc của method để ánh xạ dòng nguồn chính xác.", exception);
         }
     }
 

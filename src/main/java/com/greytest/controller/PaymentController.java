@@ -5,6 +5,7 @@ import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
 
 import org.springframework.http.ResponseEntity;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -58,7 +59,7 @@ public class PaymentController {
 
     /**
      * Tạo đường dẫn thanh toán trực tuyến qua VNPay.
-     * Giá thử nghiệm theo yêu cầu: Gói PLUS = 1.000 VNĐ, Gói PRO = 2.000 VNĐ.
+     * Giá thử nghiệm: Gói PLUS = 10.000 VNĐ, Gói PRO = 20.000 VNĐ.
      */
     @PostMapping("/create-vnpay-url")
     public ResponseEntity<PaymentUrlResponse> createPaymentUrl(
@@ -73,11 +74,11 @@ public class PaymentController {
             return ResponseEntity.badRequest().build();
         }
 
-        // Đặt giá 1.000 - 2.000 VNĐ cho môi trường thử nghiệm đồ án
-        long amount = (targetTier == UserTier.PLUS) ? 1_000L : 2_000L;
+        // Giá thử nghiệm phải đạt hạn mức thanh toán tối thiểu của VNPay.
+        long amount = (targetTier == UserTier.PLUS) ? 10_000L : 20_000L;
 
         String orderId = "GT_" + System.currentTimeMillis() + "_" + ThreadLocalRandom.current().nextInt(1000, 9999);
-        String orderInfo = "GreyTest - Nang cap goi " + targetTier.name() + " (" + user.getEmail() + ")";
+        String orderInfo = "GreyTest - Nang cap goi " + targetTier.name() + " - " + orderId;
 
         PaymentTransaction transaction = new PaymentTransaction();
         transaction.setUserId(user.getId());
@@ -92,7 +93,15 @@ public class PaymentController {
             ipAddress = servletRequest.getRemoteAddr();
         }
 
-        String paymentUrl = vnpayService.createPaymentUrl(orderId, amount, orderInfo, ipAddress);
+        String returnUrl = null;
+        String origin = servletRequest.getHeader("Origin");
+        if (origin != null && !origin.isBlank()) {
+            returnUrl = origin.trim() + "/payment/vnpay-return";
+        }
+
+        String paymentUrl = (returnUrl != null)
+                ? vnpayService.createPaymentUrl(orderId, amount, orderInfo, ipAddress, returnUrl)
+                : vnpayService.createPaymentUrl(orderId, amount, orderInfo, ipAddress);
 
         return ResponseEntity.ok(new PaymentUrlResponse(paymentUrl, orderId, amount));
     }
@@ -101,6 +110,7 @@ public class PaymentController {
      * Tiếp nhận callback khi người dùng hoàn tất giao dịch trên VNPay.
      */
     @GetMapping("/vnpay-callback")
+    @Transactional
     public ResponseEntity<PaymentCallbackResponse> handleVnpayCallback(
             @RequestParam Map<String, String> params) {
 
@@ -134,6 +144,15 @@ public class PaymentController {
                     0L,
                     transactionNo
             ));
+        }
+
+        // Callback cũ chỉ trả biên nhận, không kích hoạt lại gói người dùng đã hủy.
+        if (transaction.getStatus() == PaymentStatus.SUCCESS) {
+            return ResponseEntity.ok(new PaymentCallbackResponse(
+                    PaymentStatus.SUCCESS,
+                    "Giao dịch đã được xử lý thành công",
+                    transaction.getOrderId(), transaction.getTier(), transaction.getAmount(),
+                    transaction.getVnpTransactionNo()));
         }
 
         transaction.setVnpTxnRef(orderId);

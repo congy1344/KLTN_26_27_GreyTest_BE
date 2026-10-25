@@ -63,9 +63,9 @@ public class AiContextLogService {
                 log.info("AI context payload for {}:\n{}", promptName, contextJson);
             }
         } catch (JsonProcessingException exception) {
-            log.warn("Khong serialize duoc AI context cho {}", promptName, exception);
+            log.warn("Không serialize được AI context cho {}", promptName, exception);
         } catch (IOException exception) {
-            log.warn("Khong ghi duoc AI context log cho {}", promptName, exception);
+            log.warn("Không ghi được AI context log cho {}", promptName, exception);
         }
     }
 
@@ -78,7 +78,7 @@ public class AiContextLogService {
             Files.writeString(file, response == null ? "" : response, StandardCharsets.UTF_8);
             log.info("AI response saved to {} ({} bytes)", file.toAbsolutePath(), Files.size(file));
         } catch (IOException exception) {
-            log.warn("Khong ghi duoc AI response log cho {}", promptName, exception);
+            log.warn("Không ghi được AI response log cho {}", promptName, exception);
         }
     }
 

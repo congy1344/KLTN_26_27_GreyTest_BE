@@ -68,7 +68,7 @@ public class ExistingTestService {
                 existingTestRepository.save(existingTest);
                 saved++;
             } catch (Exception exception) {
-                log.warn("Bo qua existing test khong parse duoc {}: {}", testFile, firstLine(exception.getMessage()));
+                log.warn("Bỏ qua existing test không parse được {}: {}", testFile, firstLine(exception.getMessage()));
             }
         }
         log.info("Stored {} existing test context files for project {}", saved, projectId);
@@ -155,7 +155,7 @@ public class ExistingTestService {
                     .sorted(Comparator.comparing(Path::toString))
                     .toList();
         } catch (IOException exception) {
-            throw new SourceAnalysisException("Khong doc duoc existing tests trong: " + projectDir, exception);
+            throw new SourceAnalysisException("Không đọc được existing tests trong: " + projectDir, exception);
         }
     }
 

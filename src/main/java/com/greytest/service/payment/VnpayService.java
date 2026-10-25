@@ -35,7 +35,7 @@ public class VnpayService {
             @Value("${vnpay.tmn-code:CGXZLS0Z}") String tmnCode,
             @Value("${vnpay.hash-secret:XNBCJFAKAZQSGTARRLGCHVZWCIOIGSHN}") String hashSecret,
             @Value("${vnpay.pay-url:https://sandbox.vnpayment.vn/paymentv2/vpcpay.html}") String payUrl,
-            @Value("${vnpay.return-url:http://localhost:5173/payment/vnpay-return}") String returnUrl) {
+            @Value("${vnpay.return-url:http://localhost:3000/payment/vnpay-return}") String returnUrl) {
         this.tmnCode = tmnCode.trim();
         this.hashSecret = hashSecret.trim();
         this.payUrl = payUrl.trim();
@@ -52,13 +52,27 @@ public class VnpayService {
      * @return link điều hướng người dùng tới cổng VNPay
      */
     public String createPaymentUrl(String orderId, long amount, String orderInfo, String ipAddress) {
+        return createPaymentUrl(orderId, amount, orderInfo, ipAddress, null);
+    }
+
+    /**
+     * Tạo URL thanh toán VNPay có gắn chữ ký HMAC-SHA512 với return URL tùy biến.
+     */
+    public String createPaymentUrl(String orderId, long amount, String orderInfo, String ipAddress, String customReturnUrl) {
         String clientIp = (ipAddress == null || ipAddress.isBlank() || "0:0:0:0:0:0:0:1".equals(ipAddress))
                 ? "127.0.0.1" : ipAddress;
+
+        String effectiveReturnUrl = (customReturnUrl != null && !customReturnUrl.isBlank())
+                ? customReturnUrl.trim() : this.returnUrl;
 
         ZonedDateTime now = ZonedDateTime.now(ZoneId.of("Asia/Ho_Chi_Minh"));
         DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyyMMddHHmmss");
         String vnpCreateDate = formatter.format(now);
         String vnpExpireDate = formatter.format(now.plusMinutes(15));
+
+        // VNPay vnp_OrderInfo chỉ chấp nhận chữ cái không dấu, số, khoảng trắng và gạch nối '-', loại bỏ ký tự đặc biệt
+        String sanitizedOrderInfo = (orderInfo == null) ? ""
+                : orderInfo.replaceAll("[^a-zA-Z0-9 _-]", " ").trim().replaceAll("\\s+", " ");
 
         Map<String, String> vnpParams = new HashMap<>();
         vnpParams.put("vnp_Version", "2.1.0");
@@ -68,10 +82,10 @@ public class VnpayService {
         vnpParams.put("vnp_Amount", String.valueOf(amount * 100));
         vnpParams.put("vnp_CurrCode", "VND");
         vnpParams.put("vnp_TxnRef", orderId);
-        vnpParams.put("vnp_OrderInfo", orderInfo);
+        vnpParams.put("vnp_OrderInfo", sanitizedOrderInfo);
         vnpParams.put("vnp_OrderType", "other");
         vnpParams.put("vnp_Locale", "vn");
-        vnpParams.put("vnp_ReturnUrl", returnUrl);
+        vnpParams.put("vnp_ReturnUrl", effectiveReturnUrl);
         vnpParams.put("vnp_IpAddr", clientIp);
         vnpParams.put("vnp_CreateDate", vnpCreateDate);
         vnpParams.put("vnp_ExpireDate", vnpExpireDate);
@@ -82,20 +96,18 @@ public class VnpayService {
         StringBuilder hashData = new StringBuilder();
         StringBuilder query = new StringBuilder();
 
-        for (int i = 0; i < fieldNames.size(); i++) {
-            String fieldName = fieldNames.get(i);
+        for (String fieldName : fieldNames) {
             String fieldValue = vnpParams.get(fieldName);
             if (fieldValue != null && !fieldValue.isBlank()) {
+                if (!hashData.isEmpty()) {
+                    hashData.append('&');
+                    query.append('&');
+                }
                 // Build hash data
                 hashData.append(fieldName).append('=').append(URLEncoder.encode(fieldValue, StandardCharsets.US_ASCII));
                 // Build query
                 query.append(URLEncoder.encode(fieldName, StandardCharsets.US_ASCII)).append('=')
                         .append(URLEncoder.encode(fieldValue, StandardCharsets.US_ASCII));
-
-                if (i < fieldNames.size() - 1) {
-                    hashData.append('&');
-                    query.append('&');
-                }
             }
         }
 
@@ -127,14 +139,13 @@ public class VnpayService {
         Collections.sort(fieldNames);
 
         StringBuilder hashData = new StringBuilder();
-        for (int i = 0; i < fieldNames.size(); i++) {
-            String fieldName = fieldNames.get(i);
+        for (String fieldName : fieldNames) {
             String fieldValue = fields.get(fieldName);
             if (fieldValue != null && !fieldValue.isBlank()) {
-                hashData.append(fieldName).append('=').append(URLEncoder.encode(fieldValue, StandardCharsets.US_ASCII));
-                if (i < fieldNames.size() - 1) {
+                if (!hashData.isEmpty()) {
                     hashData.append('&');
                 }
+                hashData.append(fieldName).append('=').append(URLEncoder.encode(fieldValue, StandardCharsets.US_ASCII));
             }
         }
 

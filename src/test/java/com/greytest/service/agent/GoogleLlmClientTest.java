@@ -178,6 +178,27 @@ class GoogleLlmClientTest {
     }
 
     @Test
+    void marksMalformedHttp200ResponseAsRetryable() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
+        server.createContext("/", exchange -> {
+            byte[] bytes = "{malformed".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+        server.start();
+        try {
+            GoogleLlmClient client = client("test-key",
+                    URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/v1beta/interactions"));
+            assertThatThrownBy(() -> client.complete("Prompt text"))
+                    .isInstanceOf(LlmResponseException.class)
+                    .satisfies(error -> assertThat(((LlmResponseException) error).isRetryable()).isTrue());
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
     void switchesToFallbackKeyWhenPrimaryQuotaIsExhausted() throws Exception {
         HttpServer server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
         List<String> apiKeys = new CopyOnWriteArrayList<>();
@@ -294,7 +315,7 @@ class GoogleLlmClientTest {
 
             assertThatThrownBy(() -> client.complete("third prompt"))
                     .isInstanceOf(LlmResponseException.class)
-                    .hasMessageContaining("thoi gian cho quota");
+                    .hasMessageContaining("thời gian chờ quota");
             assertThat(requestCount).hasValue(2);
         } finally {
             server.stop(0);
@@ -395,7 +416,7 @@ class GoogleLlmClientTest {
 
             assertThatThrownBy(() -> client.complete("Prompt text"))
                     .isInstanceOf(LlmResponseException.class)
-                    .hasMessageContaining("Khong goi duoc");
+                    .hasMessageContaining("Không gọi được");
             assertThat(apiKeys).containsOnly("primary-key");
         } finally {
             server.stop(0);

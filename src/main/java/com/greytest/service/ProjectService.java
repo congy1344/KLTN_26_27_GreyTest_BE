@@ -170,13 +170,13 @@ public class ProjectService {
             return;
         }
         if (!user.getId().equals(project.getOwnerUserId())) {
-            throw new AuthException("FORBIDDEN", "Khong co quyen truy cap project nay", HttpStatus.FORBIDDEN);
+            throw new AuthException("FORBIDDEN", "Không có quyền truy cập project này", HttpStatus.FORBIDDEN);
         }
     }
 
     private void requireOwner(AuthUser owner) {
         if (owner == null) {
-            throw new AuthException("AUTH_ERROR", "Can dang nhap de tao project", HttpStatus.UNAUTHORIZED);
+            throw new AuthException("AUTH_ERROR", "Cần đăng nhập để tạo project", HttpStatus.UNAUTHORIZED);
         }
     }
 

@@ -1,0 +1,463 @@
+{
+    "origin":  "Project 808; context 20261022-062734-180-10-unit-test.log; response 20261022-062745-418-11-unit-test-response-1.log; selected cases 2467 and 2473, unchanged source and generated test bodies",
+    "context":  {
+                    "project":  {
+                                    "id":  808,
+                                    "name":  "spring-boot-realworld-example-app-master",
+                                    "status":  "TEST_GENERATED"
+                                },
+                    "analysis":  {
+                                     "totalClasses":  96,
+                                     "totalMethods":  214,
+                                     "totalEndpoints":  19,
+                                     "totalRelations":  1,
+                                     "totalControllerServiceRelations":  20,
+                                     "existingTestFiles":  23,
+                                     "totalProductionFiles":  93,
+                                     "parsedProductionFiles":  93,
+                                     "failedParseFiles":  0,
+                                     "failedParseFilePaths":  [
+
+                                                              ]
+                                 },
+                    "classes":  [
+                                    {
+                                        "id":  7981,
+                                        "packageName":  "io.spring.application",
+                                        "className":  "ArticleQueryService",
+                                        "qualifiedName":  "io.spring.application.ArticleQueryService",
+                                        "classType":  "SERVICE",
+                                        "filePath":  "spring-boot-realworld-example-app-master/src/main/java/io/spring/application/ArticleQueryService.java",
+                                        "sourceCode":  "package io.spring.application;\n\nimport static java.util.stream.Collectors.toList;\nimport io.spring.application.data.ArticleData;\nimport io.spring.application.data.ArticleDataList;\nimport io.spring.application.data.ArticleFavoriteCount;\nimport io.spring.core.user.User;\nimport io.spring.infrastructure.mybatis.readservice.ArticleFavoritesReadService;\nimport io.spring.infrastructure.mybatis.readservice.ArticleReadService;\nimport io.spring.infrastructure.mybatis.readservice.UserRelationshipQueryService;\nimport java.util.ArrayList;\nimport java.util.Collections;\nimport java.util.HashMap;\nimport java.util.List;\nimport java.util.Map;\nimport java.util.Optional;\nimport java.util.Set;\nimport lombok.AllArgsConstructor;\nimport org.joda.time.DateTime;\nimport org.springframework.stereotype.Service;\n\n@Service\n@AllArgsConstructor\npublic class ArticleQueryService {\n\n    private ArticleReadService articleReadService;\n\n    private UserRelationshipQueryService userRelationshipQueryService;\n\n    private ArticleFavoritesReadService articleFavoritesReadService;\n\n    public Optional\u003cArticleData\u003e findById(String id, User user) {\n        ArticleData articleData = articleReadService.findById(id);\n        if (articleData == null) {\n            return Optional.empty();\n        } else {\n            if (user != null) {\n                fillExtraInfo(id, user, articleData);\n            }\n            return Optional.of(articleData);\n        }\n    }\n\n    public Optional\u003cArticleData\u003e findBySlug(String slug, User user) {\n        ArticleData articleData = articleReadService.findBySlug(slug);\n        if (articleData == null) {\n            return Optional.empty();\n        } else {\n            if (user != null) {\n                fillExtraInfo(articleData.getId(), user, articleData);\n            }\n            return Optional.of(articleData);\n        }\n    }\n\n    public CursorPager\u003cArticleData\u003e findRecentArticlesWithCursor(String tag, String author, String favoritedBy, CursorPageParameter\u003cDateTime\u003e page, User currentUser) {\n        List\u003cString\u003e articleIds = articleReadService.findArticlesWithCursor(tag, author, favoritedBy, page);\n        if (articleIds.size() == 0) {\n            return new CursorPager\u003c\u003e(new ArrayList\u003c\u003e(), page.getDirection(), false);\n        } else {\n            boolean hasExtra = articleIds.size() \u003e page.getLimit();\n            if (hasExtra) {\n                articleIds.remove(page.getLimit());\n            }\n            if (!page.isNext()) {\n                Collections.reverse(articleIds);\n            }\n            List\u003cArticleData\u003e articles = articleReadService.findArticles(articleIds);\n            fillExtraInfo(articles, currentUser);\n            return new CursorPager\u003c\u003e(articles, page.getDirection(), hasExtra);\n        }\n    }\n\n    public CursorPager\u003cArticleData\u003e findUserFeedWithCursor(User user, CursorPageParameter\u003cDateTime\u003e page) {\n        List\u003cString\u003e followdUsers = userRelationshipQueryService.followedUsers(user.getId());\n        if (followdUsers.size() == 0) {\n            return new CursorPager\u003c\u003e(new ArrayList\u003c\u003e(), page.getDirection(), false);\n        } else {\n            List\u003cArticleData\u003e articles = articleReadService.findArticlesOfAuthorsWithCursor(followdUsers, page);\n            boolean hasExtra = articles.size() \u003e page.getLimit();\n            if (hasExtra) {\n                articles.remove(page.getLimit());\n            }\n            if (!page.isNext()) {\n                Collections.reverse(articles);\n            }\n            fillExtraInfo(articles, user);\n            return new CursorPager\u003c\u003e(articles, page.getDirection(), hasExtra);\n        }\n    }\n\n    public ArticleDataList findRecentArticles(String tag, String author, String favoritedBy, Page page, User currentUser) {\n        List\u003cString\u003e articleIds = articleReadService.queryArticles(tag, author, favoritedBy, page);\n        int articleCount = articleReadService.countArticle(tag, author, favoritedBy);\n        if (articleIds.size() == 0) {\n            return new ArticleDataList(new ArrayList\u003c\u003e(), articleCount);\n        } else {\n            List\u003cArticleData\u003e articles = articleReadService.findArticles(articleIds);\n            fillExtraInfo(articles, currentUser);\n            return new ArticleDataList(articles, articleCount);\n        }\n    }\n\n    public ArticleDataList findUserFeed(User user, Page page) {\n        List\u003cString\u003e followdUsers = userRelationshipQueryService.followedUsers(user.getId());\n        if (followdUsers.size() == 0) {\n            return new ArticleDataList(new ArrayList\u003c\u003e(), 0);\n        } else {\n            List\u003cArticleData\u003e articles = articleReadService.findArticlesOfAuthors(followdUsers, page);\n            fillExtraInfo(articles, user);\n            int count = articleReadService.countFeedSize(followdUsers);\n            return new ArticleDataList(articles, count);\n        }\n    }\n\n    private void fillExtraInfo(List\u003cArticleData\u003e articles, User currentUser) {\n        setFavoriteCount(articles);\n        if (currentUser != null) {\n            setIsFavorite(articles, currentUser);\n            setIsFollowingAuthor(articles, currentUser);\n        }\n    }\n\n    private void setIsFollowingAuthor(List\u003cArticleData\u003e articles, User currentUser) {\n        Set\u003cString\u003e followingAuthors = userRelationshipQueryService.followingAuthors(currentUser.getId(), articles.stream().map(articleData1 -\u003e articleData1.getProfileData().getId()).collect(toList()));\n        articles.forEach(articleData -\u003e {\n            if (followingAuthors.contains(articleData.getProfileData().getId())) {\n                articleData.getProfileData().setFollowing(true);\n            }\n        });\n    }\n\n    private void setFavoriteCount(List\u003cArticleData\u003e articles) {\n        List\u003cArticleFavoriteCount\u003e favoritesCounts = articleFavoritesReadService.articlesFavoriteCount(articles.stream().map(ArticleData::getId).collect(toList()));\n        Map\u003cString, Integer\u003e countMap = new HashMap\u003c\u003e();\n        favoritesCounts.forEach(item -\u003e {\n            countMap.put(item.getId(), item.getCount());\n        });\n        articles.forEach(articleData -\u003e articleData.setFavoritesCount(countMap.get(articleData.getId())));\n    }\n\n    private void setIsFavorite(List\u003cArticleData\u003e articles, User currentUser) {\n        Set\u003cString\u003e favoritedArticles = articleFavoritesReadService.userFavorites(articles.stream().map(articleData -\u003e articleData.getId()).collect(toList()), currentUser);\n        articles.forEach(articleData -\u003e {\n            if (favoritedArticles.contains(articleData.getId())) {\n                articleData.setFavorited(true);\n            }\n        });\n    }\n\n    private void fillExtraInfo(String id, User user, ArticleData articleData) {\n        articleData.setFavorited(articleFavoritesReadService.isUserFavorite(user.getId(), id));\n        articleData.setFavoritesCount(articleFavoritesReadService.articleFavoriteCount(id));\n        articleData.getProfileData().setFollowing(userRelationshipQueryService.isUserFollowing(user.getId(), articleData.getProfileData().getId()));\n    }\n}\n",
+                                        "annotations":  [
+                                                            {
+                                                                "id":  9830,
+                                                                "targetType":  "CLASS",
+                                                                "category":  "COMPONENT",
+                                                                "annotationName":  "Service",
+                                                                "attributes":  "@Service"
+                                                            }
+                                                        ],
+                                        "methods":  [
+                                                        {
+                                                            "id":  16756,
+                                                            "classQualifiedName":  "io.spring.application.ArticleQueryService",
+                                                            "methodName":  "findById",
+                                                            "returnType":  "Optional\u003cArticleData\u003e",
+                                                            "parameters":  [
+                                                                               {
+                                                                                   "name":  "id",
+                                                                                   "type":  "String"
+                                                                               },
+                                                                               {
+                                                                                   "name":  "user",
+                                                                                   "type":  "User"
+                                                                               }
+                                                                           ],
+                                                            "throwsList":  [
+
+                                                                           ],
+                                                            "visibility":  "PUBLIC",
+                                                            "sourceCode":  "public Optional\u003cArticleData\u003e findById(String id, User user) {\n    ArticleData articleData = articleReadService.findById(id);\n    if (articleData == null) {\n      return Optional.empty();\n    } else {\n      if (user != null) {\n        fillExtraInfo(id, user, articleData);\n      }\n      return Optional.of(articleData);\n    }\n  }",
+                                                            "lineStart":  30,
+                                                            "lineEnd":  40,
+                                                            "annotations":  [
+
+                                                                            ],
+                                                            "endpoints":  [
+
+                                                                          ],
+                                                            "branches":  [
+                                                                             {
+                                                                                 "branchId":  "STMT-1",
+                                                                                 "kind":  "STATEMENT",
+                                                                                 "outcome":  "EXECUTABLE",
+                                                                                 "condition":  "executable statement",
+                                                                                 "lineStart":  31,
+                                                                                 "lineEnd":  31
+                                                                             },
+                                                                             {
+                                                                                 "branchId":  "IF-1-TRUE",
+                                                                                 "kind":  "IF",
+                                                                                 "outcome":  "TRUE",
+                                                                                 "condition":  "articleData == null",
+                                                                                 "lineStart":  33,
+                                                                                 "lineEnd":  33
+                                                                             },
+                                                                             {
+                                                                                 "branchId":  "IF-1-FALSE",
+                                                                                 "kind":  "IF",
+                                                                                 "outcome":  "FALSE",
+                                                                                 "condition":  "articleData == null",
+                                                                                 "lineStart":  35,
+                                                                                 "lineEnd":  38
+                                                                             },
+                                                                             {
+                                                                                 "branchId":  "IF-2-TRUE",
+                                                                                 "kind":  "IF",
+                                                                                 "outcome":  "TRUE",
+                                                                                 "condition":  "user != null",
+                                                                                 "lineStart":  36,
+                                                                                 "lineEnd":  36
+                                                                             },
+                                                                             {
+                                                                                 "branchId":  "IF-2-FALSE",
+                                                                                 "kind":  "IF",
+                                                                                 "outcome":  "FALSE",
+                                                                                 "condition":  "user != null",
+                                                                                 "lineStart":  35,
+                                                                                 "lineEnd":  35
+                                                                             }
+                                                                         ]
+                                                        }
+                                                    ]
+                                    },
+                                    {
+                                        "id":  7976,
+                                        "packageName":  "io.spring.application",
+                                        "className":  "CommentQueryService",
+                                        "qualifiedName":  "io.spring.application.CommentQueryService",
+                                        "classType":  "SERVICE",
+                                        "filePath":  "spring-boot-realworld-example-app-master/src/main/java/io/spring/application/CommentQueryService.java",
+                                        "sourceCode":  "package io.spring.application;\n\nimport io.spring.application.data.CommentData;\nimport io.spring.core.user.User;\nimport io.spring.infrastructure.mybatis.readservice.CommentReadService;\nimport io.spring.infrastructure.mybatis.readservice.UserRelationshipQueryService;\nimport java.util.ArrayList;\nimport java.util.Collections;\nimport java.util.List;\nimport java.util.Optional;\nimport java.util.Set;\nimport java.util.stream.Collectors;\nimport lombok.AllArgsConstructor;\nimport org.joda.time.DateTime;\nimport org.springframework.stereotype.Service;\n\n@Service\n@AllArgsConstructor\npublic class CommentQueryService {\n\n    private CommentReadService commentReadService;\n\n    private UserRelationshipQueryService userRelationshipQueryService;\n\n    public Optional\u003cCommentData\u003e findById(String id, User user) {\n        CommentData commentData = commentReadService.findById(id);\n        if (commentData == null) {\n            return Optional.empty();\n        } else {\n            commentData.getProfileData().setFollowing(userRelationshipQueryService.isUserFollowing(user.getId(), commentData.getProfileData().getId()));\n        }\n        return Optional.ofNullable(commentData);\n    }\n\n    public List\u003cCommentData\u003e findByArticleId(String articleId, User user) {\n        List\u003cCommentData\u003e comments = commentReadService.findByArticleId(articleId);\n        if (comments.size() \u003e 0 \u0026\u0026 user != null) {\n            Set\u003cString\u003e followingAuthors = userRelationshipQueryService.followingAuthors(user.getId(), comments.stream().map(commentData -\u003e commentData.getProfileData().getId()).collect(Collectors.toList()));\n            comments.forEach(commentData -\u003e {\n                if (followingAuthors.contains(commentData.getProfileData().getId())) {\n                    commentData.getProfileData().setFollowing(true);\n                }\n            });\n        }\n        return comments;\n    }\n\n    public CursorPager\u003cCommentData\u003e findByArticleIdWithCursor(String articleId, User user, CursorPageParameter\u003cDateTime\u003e page) {\n        List\u003cCommentData\u003e comments = commentReadService.findByArticleIdWithCursor(articleId, page);\n        if (comments.isEmpty()) {\n            return new CursorPager\u003c\u003e(new ArrayList\u003c\u003e(), page.getDirection(), false);\n        }\n        if (user != null) {\n            Set\u003cString\u003e followingAuthors = userRelationshipQueryService.followingAuthors(user.getId(), comments.stream().map(commentData -\u003e commentData.getProfileData().getId()).collect(Collectors.toList()));\n            comments.forEach(commentData -\u003e {\n                if (followingAuthors.contains(commentData.getProfileData().getId())) {\n                    commentData.getProfileData().setFollowing(true);\n                }\n            });\n        }\n        boolean hasExtra = comments.size() \u003e page.getLimit();\n        if (hasExtra) {\n            comments.remove(page.getLimit());\n        }\n        if (!page.isNext()) {\n            Collections.reverse(comments);\n        }\n        return new CursorPager\u003c\u003e(comments, page.getDirection(), hasExtra);\n    }\n}\n",
+                                        "annotations":  [
+                                                            {
+                                                                "id":  9828,
+                                                                "targetType":  "CLASS",
+                                                                "category":  "COMPONENT",
+                                                                "annotationName":  "Service",
+                                                                "attributes":  "@Service"
+                                                            }
+                                                        ],
+                                        "methods":  [
+                                                        {
+                                                            "id":  16746,
+                                                            "classQualifiedName":  "io.spring.application.CommentQueryService",
+                                                            "methodName":  "findById",
+                                                            "returnType":  "Optional\u003cCommentData\u003e",
+                                                            "parameters":  [
+                                                                               {
+                                                                                   "name":  "id",
+                                                                                   "type":  "String"
+                                                                               },
+                                                                               {
+                                                                                   "name":  "user",
+                                                                                   "type":  "User"
+                                                                               }
+                                                                           ],
+                                                            "throwsList":  [
+
+                                                                           ],
+                                                            "visibility":  "PUBLIC",
+                                                            "sourceCode":  "public Optional\u003cCommentData\u003e findById(String id, User user) {\n    CommentData commentData = commentReadService.findById(id);\n    if (commentData == null) {\n      return Optional.empty();\n    } else {\n      commentData\n          .getProfileData()\n          .setFollowing(\n              userRelationshipQueryService.isUserFollowing(\n                  user.getId(), commentData.getProfileData().getId()));\n    }\n    return Optional.ofNullable(commentData);\n  }",
+                                                            "lineStart":  23,
+                                                            "lineEnd":  35,
+                                                            "annotations":  [
+
+                                                                            ],
+                                                            "endpoints":  [
+
+                                                                          ],
+                                                            "branches":  [
+                                                                             {
+                                                                                 "branchId":  "STMT-1",
+                                                                                 "kind":  "STATEMENT",
+                                                                                 "outcome":  "EXECUTABLE",
+                                                                                 "condition":  "executable statement",
+                                                                                 "lineStart":  24,
+                                                                                 "lineEnd":  24
+                                                                             },
+                                                                             {
+                                                                                 "branchId":  "IF-1-TRUE",
+                                                                                 "kind":  "IF",
+                                                                                 "outcome":  "TRUE",
+                                                                                 "condition":  "commentData == null",
+                                                                                 "lineStart":  26,
+                                                                                 "lineEnd":  26
+                                                                             },
+                                                                             {
+                                                                                 "branchId":  "IF-1-FALSE",
+                                                                                 "kind":  "IF",
+                                                                                 "outcome":  "FALSE",
+                                                                                 "condition":  "commentData == null",
+                                                                                 "lineStart":  28,
+                                                                                 "lineEnd":  32
+                                                                             },
+                                                                             {
+                                                                                 "branchId":  "STMT-2",
+                                                                                 "kind":  "STATEMENT",
+                                                                                 "outcome":  "EXECUTABLE",
+                                                                                 "condition":  "executable statement",
+                                                                                 "lineStart":  34,
+                                                                                 "lineEnd":  34
+                                                                             }
+                                                                         ]
+                                                        }
+                                                    ]
+                                    },
+                                    {
+                                        "id":  7991,
+                                        "packageName":  "io.spring.application.data",
+                                        "className":  "ArticleData",
+                                        "qualifiedName":  "io.spring.application.data.ArticleData",
+                                        "classType":  "OTHER",
+                                        "filePath":  "spring-boot-realworld-example-app-master/src/main/java/io/spring/application/data/ArticleData.java",
+                                        "sourceCode":  "package io.spring.application.data;\n\nimport com.fasterxml.jackson.annotation.JsonProperty;\nimport io.spring.application.DateTimeCursor;\nimport java.util.List;\nimport lombok.AllArgsConstructor;\nimport lombok.Data;\nimport lombok.NoArgsConstructor;\nimport org.joda.time.DateTime;\n\n@Data\n@NoArgsConstructor\n@AllArgsConstructor\npublic class ArticleData implements io.spring.application.Node {\n\n    private String id;\n\n    private String slug;\n\n    private String title;\n\n    private String description;\n\n    private String body;\n\n    private boolean favorited;\n\n    private int favoritesCount;\n\n    private DateTime createdAt;\n\n    private DateTime updatedAt;\n\n    private List\u003cString\u003e tagList;\n\n    @JsonProperty(\"author\")\n    private ProfileData profileData;\n\n    @Override\n    public DateTimeCursor getCursor() {\n        return new DateTimeCursor(updatedAt);\n    }\n}\n",
+                                        "annotations":  [
+
+                                                        ],
+                                        "methods":  [
+
+                                                    ]
+                                    },
+                                    {
+                                        "id":  7909,
+                                        "packageName":  "io.spring.core.user",
+                                        "className":  "User",
+                                        "qualifiedName":  "io.spring.core.user.User",
+                                        "classType":  "OTHER",
+                                        "filePath":  "spring-boot-realworld-example-app-master/src/main/java/io/spring/core/user/User.java",
+                                        "sourceCode":  "package io.spring.core.user;\n\nimport io.spring.Util;\nimport java.util.UUID;\nimport lombok.EqualsAndHashCode;\nimport lombok.Getter;\nimport lombok.NoArgsConstructor;\n\n@Getter\n@NoArgsConstructor\n@EqualsAndHashCode(of = { \"id\" })\npublic class User {\n\n    private String id;\n\n    private String email;\n\n    private String username;\n\n    private String password;\n\n    private String bio;\n\n    private String image;\n\n    public User(String email, String username, String password, String bio, String image) {\n        this.id = UUID.randomUUID().toString();\n        this.email = email;\n        this.username = username;\n        this.password = password;\n        this.bio = bio;\n        this.image = image;\n    }\n\n    public void update(String email, String username, String password, String bio, String image) {\n        if (!Util.isEmpty(email)) {\n            this.email = email;\n        }\n        if (!Util.isEmpty(username)) {\n            this.username = username;\n        }\n        if (!Util.isEmpty(password)) {\n            this.password = password;\n        }\n        if (!Util.isEmpty(bio)) {\n            this.bio = bio;\n        }\n        if (!Util.isEmpty(image)) {\n            this.image = image;\n        }\n    }\n}\n",
+                                        "annotations":  [
+
+                                                        ],
+                                        "methods":  [
+
+                                                    ]
+                                    },
+                                    {
+                                        "id":  7959,
+                                        "packageName":  "io.spring.infrastructure.mybatis.readservice",
+                                        "className":  "ArticleFavoritesReadService",
+                                        "qualifiedName":  "io.spring.infrastructure.mybatis.readservice.ArticleFavoritesReadService",
+                                        "classType":  "OTHER",
+                                        "filePath":  "spring-boot-realworld-example-app-master/src/main/java/io/spring/infrastructure/mybatis/readservice/ArticleFavoritesReadService.java",
+                                        "sourceCode":  "package io.spring.infrastructure.mybatis.readservice;\n\nimport io.spring.application.data.ArticleFavoriteCount;\nimport io.spring.core.user.User;\nimport java.util.List;\nimport java.util.Set;\nimport org.apache.ibatis.annotations.Mapper;\nimport org.apache.ibatis.annotations.Param;\n\n@Mapper\npublic interface ArticleFavoritesReadService {\n\n    boolean isUserFavorite(@Param(\"userId\") String userId, @Param(\"articleId\") String articleId);\n\n    int articleFavoriteCount(@Param(\"articleId\") String articleId);\n\n    List\u003cArticleFavoriteCount\u003e articlesFavoriteCount(@Param(\"ids\") List\u003cString\u003e ids);\n\n    Set\u003cString\u003e userFavorites(@Param(\"ids\") List\u003cString\u003e ids, @Param(\"currentUser\") User currentUser);\n}\n",
+                                        "annotations":  [
+
+                                                        ],
+                                        "methods":  [
+
+                                                    ]
+                                    },
+                                    {
+                                        "id":  7960,
+                                        "packageName":  "io.spring.infrastructure.mybatis.readservice",
+                                        "className":  "ArticleReadService",
+                                        "qualifiedName":  "io.spring.infrastructure.mybatis.readservice.ArticleReadService",
+                                        "classType":  "OTHER",
+                                        "filePath":  "spring-boot-realworld-example-app-master/src/main/java/io/spring/infrastructure/mybatis/readservice/ArticleReadService.java",
+                                        "sourceCode":  "package io.spring.infrastructure.mybatis.readservice;\n\nimport io.spring.application.CursorPageParameter;\nimport io.spring.application.Page;\nimport io.spring.application.data.ArticleData;\nimport java.util.List;\nimport org.apache.ibatis.annotations.Mapper;\nimport org.apache.ibatis.annotations.Param;\n\n@Mapper\npublic interface ArticleReadService {\n\n    ArticleData findById(@Param(\"id\") String id);\n\n    ArticleData findBySlug(@Param(\"slug\") String slug);\n\n    List\u003cString\u003e queryArticles(@Param(\"tag\") String tag, @Param(\"author\") String author, @Param(\"favoritedBy\") String favoritedBy, @Param(\"page\") Page page);\n\n    int countArticle(@Param(\"tag\") String tag, @Param(\"author\") String author, @Param(\"favoritedBy\") String favoritedBy);\n\n    List\u003cArticleData\u003e findArticles(@Param(\"articleIds\") List\u003cString\u003e articleIds);\n\n    List\u003cArticleData\u003e findArticlesOfAuthors(@Param(\"authors\") List\u003cString\u003e authors, @Param(\"page\") Page page);\n\n    List\u003cArticleData\u003e findArticlesOfAuthorsWithCursor(@Param(\"authors\") List\u003cString\u003e authors, @Param(\"page\") CursorPageParameter page);\n\n    int countFeedSize(@Param(\"authors\") List\u003cString\u003e authors);\n\n    List\u003cString\u003e findArticlesWithCursor(@Param(\"tag\") String tag, @Param(\"author\") String author, @Param(\"favoritedBy\") String favoritedBy, @Param(\"page\") CursorPageParameter page);\n}\n",
+                                        "annotations":  [
+
+                                                        ],
+                                        "methods":  [
+
+                                                    ]
+                                    },
+                                    {
+                                        "id":  7957,
+                                        "packageName":  "io.spring.infrastructure.mybatis.readservice",
+                                        "className":  "UserRelationshipQueryService",
+                                        "qualifiedName":  "io.spring.infrastructure.mybatis.readservice.UserRelationshipQueryService",
+                                        "classType":  "OTHER",
+                                        "filePath":  "spring-boot-realworld-example-app-master/src/main/java/io/spring/infrastructure/mybatis/readservice/UserRelationshipQueryService.java",
+                                        "sourceCode":  "package io.spring.infrastructure.mybatis.readservice;\n\nimport java.util.List;\nimport java.util.Set;\nimport org.apache.ibatis.annotations.Mapper;\nimport org.apache.ibatis.annotations.Param;\n\n@Mapper\npublic interface UserRelationshipQueryService {\n\n    boolean isUserFollowing(@Param(\"userId\") String userId, @Param(\"anotherUserId\") String anotherUserId);\n\n    Set\u003cString\u003e followingAuthors(@Param(\"userId\") String userId, @Param(\"ids\") List\u003cString\u003e ids);\n\n    List\u003cString\u003e followedUsers(@Param(\"userId\") String userId);\n}\n",
+                                        "annotations":  [
+
+                                                        ],
+                                        "methods":  [
+
+                                                    ]
+                                    },
+                                    {
+                                        "id":  7993,
+                                        "packageName":  "io.spring.application.data",
+                                        "className":  "CommentData",
+                                        "qualifiedName":  "io.spring.application.data.CommentData",
+                                        "classType":  "OTHER",
+                                        "filePath":  "spring-boot-realworld-example-app-master/src/main/java/io/spring/application/data/CommentData.java",
+                                        "sourceCode":  "package io.spring.application.data;\n\nimport com.fasterxml.jackson.annotation.JsonIgnore;\nimport com.fasterxml.jackson.annotation.JsonProperty;\nimport io.spring.application.DateTimeCursor;\nimport io.spring.application.Node;\nimport lombok.AllArgsConstructor;\nimport lombok.Data;\nimport lombok.NoArgsConstructor;\nimport org.joda.time.DateTime;\n\n@Data\n@NoArgsConstructor\n@AllArgsConstructor\npublic class CommentData implements Node {\n\n    private String id;\n\n    private String body;\n\n    @JsonIgnore\n    private String articleId;\n\n    private DateTime createdAt;\n\n    private DateTime updatedAt;\n\n    @JsonProperty(\"author\")\n    private ProfileData profileData;\n\n    @Override\n    public DateTimeCursor getCursor() {\n        return new DateTimeCursor(createdAt);\n    }\n}\n",
+                                        "annotations":  [
+
+                                                        ],
+                                        "methods":  [
+
+                                                    ]
+                                    },
+                                    {
+                                        "id":  7955,
+                                        "packageName":  "io.spring.infrastructure.mybatis.readservice",
+                                        "className":  "CommentReadService",
+                                        "qualifiedName":  "io.spring.infrastructure.mybatis.readservice.CommentReadService",
+                                        "classType":  "OTHER",
+                                        "filePath":  "spring-boot-realworld-example-app-master/src/main/java/io/spring/infrastructure/mybatis/readservice/CommentReadService.java",
+                                        "sourceCode":  "package io.spring.infrastructure.mybatis.readservice;\n\nimport io.spring.application.CursorPageParameter;\nimport io.spring.application.data.CommentData;\nimport java.util.List;\nimport org.apache.ibatis.annotations.Mapper;\nimport org.apache.ibatis.annotations.Param;\nimport org.joda.time.DateTime;\n\n@Mapper\npublic interface CommentReadService {\n\n    CommentData findById(@Param(\"id\") String id);\n\n    List\u003cCommentData\u003e findByArticleId(@Param(\"articleId\") String articleId);\n\n    List\u003cCommentData\u003e findByArticleIdWithCursor(@Param(\"articleId\") String articleId, @Param(\"page\") CursorPageParameter\u003cDateTime\u003e page);\n}\n",
+                                        "annotations":  [
+
+                                                        ],
+                                        "methods":  [
+
+                                                    ]
+                                    },
+                                    {
+                                        "id":  7990,
+                                        "packageName":  "io.spring.application.data",
+                                        "className":  "ProfileData",
+                                        "qualifiedName":  "io.spring.application.data.ProfileData",
+                                        "classType":  "OTHER",
+                                        "filePath":  "spring-boot-realworld-example-app-master/src/main/java/io/spring/application/data/ProfileData.java",
+                                        "sourceCode":  "package io.spring.application.data;\n\nimport com.fasterxml.jackson.annotation.JsonIgnore;\nimport lombok.AllArgsConstructor;\nimport lombok.Data;\nimport lombok.NoArgsConstructor;\n\n@Data\n@NoArgsConstructor\n@AllArgsConstructor\npublic class ProfileData {\n\n    @JsonIgnore\n    private String id;\n\n    private String username;\n\n    private String bio;\n\n    private String image;\n\n    private boolean following;\n}\n",
+                                        "annotations":  [
+
+                                                        ],
+                                        "methods":  [
+
+                                                    ]
+                                    }
+                                ],
+                    "approvedBusinessRules":  [
+                                                  {
+                                                      "id":  3809,
+                                                      "methodId":  16756,
+                                                      "ruleCode":  "BR-002",
+                                                      "description":  "Khi ket qua tim bai viet la null, service tra ve Optional.empty(); khi ket qua khong null, service tra ve Optional.of(articleData).",
+                                                      "reviewNote":  "SOURCE_BRANCH:IF-1\nAI category: BUSINESS_LOGIC. User review/chinh sua truoc khi approve.",
+                                                      "source":  "AI_GENERATED",
+                                                      "status":  "APPROVED",
+                                                      "isModified":  false,
+                                                      "sourceBranchId":  "IF-1"
+                                                  },
+                                                  {
+                                                      "id":  3832,
+                                                      "methodId":  16746,
+                                                      "ruleCode":  "BR-025",
+                                                      "description":  "Khi nhận yêu cầu tìm comment, service gọi commentReadService.findById để lấy dữ liệu comment.",
+                                                      "reviewNote":  "SOURCE_BRANCH:STMT-1\nAI category: INTEGRATION. User review/chinh sua truoc khi approve.",
+                                                      "source":  "AI_GENERATED",
+                                                      "status":  "APPROVED",
+                                                      "isModified":  false,
+                                                      "sourceBranchId":  "STMT-1"
+                                                  }
+                                              ],
+                    "approvedTestPlans":  [
+                                              {
+                                                  "id":  1754,
+                                                  "businessRuleId":  3809,
+                                                  "coveredRuleIds":  [
+                                                                         3809
+                                                                     ],
+                                                  "planCode":  "TP-023",
+                                                  "title":  "Bài viết theo id không tồn tại trả về Optional rỗng",
+                                                  "description":  "articleReadService.findById trả null: kết quả là Optional.empty(), không gọi fillExtraInfo và không truy vấn quan hệ theo dõi.\n[GreyTest testability: UNKNOWN] UNRESOLVED_HELPER_PATH @ spring-boot-realworld-example-app-master/src/main/java/io/spring/application/ArticleQueryService.java:38 findById — Lời gọi helper nội bộ chưa được phân tích đường đi trong MVP: fillExtraInfo. | Kiểm tra đường đi qua helper trước khi kết luận có thể điều khiển nhánh; không thay kết quả helper bằng giả định.",
+                                                  "testType":  "EDGE",
+                                                  "status":  "APPROVED",
+                                                  "isModified":  false
+                                              },
+                                              {
+                                                  "id":  1760,
+                                                  "businessRuleId":  3832,
+                                                  "coveredRuleIds":  [
+                                                                         3832,
+                                                                         3833
+                                                                     ],
+                                                  "planCode":  "TP-029",
+                                                  "title":  "Comment theo id không tồn tại trả về Optional rỗng",
+                                                  "description":  "findById trả null: kết quả là Optional.empty(), không gọi isUserFollowing và không cập nhật trạng thái following.",
+                                                  "testType":  "EDGE",
+                                                  "status":  "APPROVED",
+                                                  "isModified":  false
+                                              }
+                                          ],
+                    "approvedTestCases":  [
+                                              {
+                                                  "id":  2467,
+                                                  "testPlanId":  1754,
+                                                  "caseCode":  "TC-1202",
+                                                  "testType":  "EDGE",
+                                                  "description":  "findById khi articleReadService.findById tra null: tra Optional.empty(), khong goi fillExtraInfo.",
+                                                  "preconditions":  "articleReadService la mock inject qua constructor; articleReadService.findById tra null.\n[GreyTest testability: UNKNOWN] UNRESOLVED_HELPER_PATH @ spring-boot-realworld-example-app-master/src/main/java/io/spring/application/ArticleQueryService.java:38 findById — Lời gọi helper nội bộ chưa được phân tích đường đi trong MVP: fillExtraInfo. | Kiểm tra đường đi qua helper trước khi kết luận có thể điều khiển nhánh; không thay kết quả helper bằng giả định.",
+                                                  "testData":  {
+                                                                   "input":  {
+                                                                                 "id":  "missing-article",
+                                                                                 "user":  {
+                                                                                              "id":  "user-1",
+                                                                                              "bio":  "",
+                                                                                              "email":  "user@example.com",
+                                                                                              "image":  "",
+                                                                                              "password":  "password",
+                                                                                              "username":  "user"
+                                                                                          }
+                                                                             },
+                                                                   "mocks":  {
+                                                                                 "articleReadService.findById":  null
+                                                                             }
+                                                               },
+                                                  "expectedResult":  "Tra ve Optional.empty(); khong truy van quan he yeu thich hoac theo doi.",
+                                                  "priority":  "MEDIUM",
+                                                  "traceSource":  "BR-002 [IF-1-TRUE] -\u003e TP-023 -\u003e IF-1-TRUE",
+                                                  "status":  "APPROVED",
+                                                  "isModified":  false
+                                              },
+                                              {
+                                                  "id":  2473,
+                                                  "testPlanId":  1760,
+                                                  "caseCode":  "TC-1208",
+                                                  "testType":  "EDGE",
+                                                  "description":  "Tìm comment theo id không tồn tại trả về Optional rỗng mà không gọi isUserFollowing.",
+                                                  "preconditions":  "Mock commentReadService.findById trả null; không cần stubbing userRelationshipQueryService.",
+                                                  "testData":  {
+                                                                   "input":  {
+                                                                                 "id":  "khong-ton-tai",
+                                                                                 "user":  {
+                                                                                              "id":  "user-1"
+                                                                                          }
+                                                                             },
+                                                                   "mocks":  {
+                                                                                 "commentReadService.findById(khong-ton-tai)":  {
+                                                                                                                                    "return":  null
+                                                                                                                                }
+                                                                             }
+                                                               },
+                                                  "expectedResult":  "Optional.empty() và userRelationshipQueryService.isUserFollowing không được gọi.",
+                                                  "priority":  "MEDIUM",
+                                                  "traceSource":  "BR-026 [IF-1-TRUE] -\u003e TP-029 -\u003e IF-1-TRUE",
+                                                  "status":  "APPROVED",
+                                                  "isModified":  false
+                                              }
+                                          ],
+                    "existingApprovedTestCases":  [
+
+                                                  ],
+                    "previousGeneratedUnitTests":  [
+
+                                                   ],
+                    "existingTests":  [
+
+                                      ],
+                    "supportingResources":  [
+
+                                            ],
+                    "contextWarnings":  [
+
+                                        ]
+                },
+    "tests":  [
+                  {
+                      "case_id":  2467,
+                      "test_class_name":  "ArticleQueryServiceTest",
+                      "test_method_name":  "findById_WhenArticleNotFound_ReturnsEmpty",
+                      "package_name":  "io.spring.application.article",
+                      "generation_type":  "NEW_TEST",
+                      "source_code":  "package io.spring.application.article;\n\nimport static org.junit.jupiter.api.Assertions.assertFalse;\nimport static org.mockito.Mockito.verify;\nimport static org.mockito.Mockito.verifyNoMoreInteractions;\nimport static org.mockito.Mockito.when;\n\nimport io.spring.application.ArticleQueryService;\nimport io.spring.application.data.ArticleData;\nimport io.spring.core.user.User;\nimport io.spring.infrastructure.mybatis.readservice.ArticleFavoritesReadService;\nimport io.spring.infrastructure.mybatis.readservice.ArticleReadService;\nimport io.spring.infrastructure.mybatis.readservice.UserRelationshipQueryService;\nimport java.util.Optional;\nimport org.junit.jupiter.api.Test;\nimport org.junit.jupiter.api.extension.ExtendWith;\nimport org.mockito.InjectMocks;\nimport org.mockito.Mock;\nimport org.mockito.junit.jupiter.MockitoExtension;\n\n@ExtendWith(MockitoExtension.class)\nclass ArticleQueryServiceTest {\n\n    @Mock\n    private ArticleReadService articleReadService;\n\n    @Mock\n    private UserRelationshipQueryService userRelationshipQueryService;\n\n    @Mock\n    private ArticleFavoritesReadService articleFavoritesReadService;\n\n    @InjectMocks\n    private ArticleQueryService articleQueryService;\n\n    // GreyTest trace: findById | IF-1-TRUE | BR-002 -\u003e TP-023 -\u003e TC-1202\n    @Test\n    void findById_WhenArticleNotFound_ReturnsEmpty() {\n        // Arrange\n        User user = org.mockito.Mockito.mock(User.class);\n        org.mockito.Mockito.when(user.getId()).thenReturn(\"user-1\");\n        when(articleReadService.findById(\"missing-article\")).thenReturn(null);\n\n        // Act\n        Optional\u003cArticleData\u003e result = articleQueryService.findById(\"missing-article\", user);\n\n        // Assert\n        assertFalse(result.isPresent());\n        verify(articleReadService).findById(\"missing-article\");\n        verifyNoMoreInteractions(articleFavoritesReadService, userRelationshipQueryService);\n    }\n}\n"
+                  },
+                  {
+                      "case_id":  2473,
+                      "test_class_name":  "CommentQueryServiceTest",
+                      "test_method_name":  "findById_WhenCommentNotFound_ReturnsEmpty",
+                      "package_name":  "io.spring.application.comment",
+                      "generation_type":  "NEW_TEST",
+                      "source_code":  "package io.spring.application.comment;\n\nimport static org.junit.jupiter.api.Assertions.assertFalse;\nimport static org.mockito.Mockito.verify;\nimport static org.mockito.Mockito.verifyNoMoreInteractions;\nimport static org.mockito.Mockito.when;\n\nimport io.spring.application.CommentQueryService;\nimport io.spring.application.data.CommentData;\nimport io.spring.core.user.User;\nimport io.spring.infrastructure.mybatis.readservice.CommentReadService;\nimport io.spring.infrastructure.mybatis.readservice.UserRelationshipQueryService;\nimport java.util.Optional;\nimport org.junit.jupiter.api.Test;\nimport org.junit.jupiter.api.extension.ExtendWith;\nimport org.mockito.InjectMocks;\nimport org.mockito.Mock;\nimport org.mockito.junit.jupiter.MockitoExtension;\n\n@ExtendWith(MockitoExtension.class)\nclass CommentQueryServiceTest {\n\n    @Mock\n    private CommentReadService commentReadService;\n\n    @Mock\n    private UserRelationshipQueryService userRelationshipQueryService;\n\n    @InjectMocks\n    private CommentQueryService commentQueryService;\n\n    // GreyTest trace: findById | IF-1-TRUE | BR-026 -\u003e TP-029 -\u003e TC-1208\n    @Test\n    void findById_WhenCommentNotFound_ReturnsEmpty() {\n        // Arrange\n        User user = org.mockito.Mockito.mock(User.class);\n        org.mockito.Mockito.when(user.getId()).thenReturn(\"user-1\");\n        when(commentReadService.findById(\"khong-ton-tai\")).thenReturn(null);\n\n        // Act\n        Optional\u003cCommentData\u003e result = commentQueryService.findById(\"khong-ton-tai\", user);\n\n        // Assert\n        assertFalse(result.isPresent());\n        verify(commentReadService).findById(\"khong-ton-tai\");\n        verifyNoMoreInteractions(userRelationshipQueryService);\n    }\n}\n"
+                  }
+              ]
+}

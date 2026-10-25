@@ -67,7 +67,7 @@ class JavaSourceScanner {
                     .filter(path -> !isIgnoredPath(dir, path))
                     .toList();
         } catch (IOException exception) {
-            throw new SourceAnalysisException("Khong doc duoc thu muc source: " + dir, exception);
+            throw new SourceAnalysisException("Không đọc được thư mục source: " + dir, exception);
         }
     }
 
@@ -91,11 +91,11 @@ class JavaSourceScanner {
 
         if (failOnError && !failedFiles.isEmpty()) {
             throw new SourceAnalysisException(
-                    "Khong the parse " + failedFiles.size() + " file Java: " + String.join(", ", failedFiles));
+                    "Không thể parse " + failedFiles.size() + " file Java: " + String.join(", ", failedFiles));
         }
         if (results.isEmpty()) {
-            if (failedFiles.isEmpty()) throw new SourceAnalysisException("Khong tim thay file .java nao trong project");
-            throw new SourceAnalysisException("Khong parse duoc file production Java nao. File loi: "
+            if (failedFiles.isEmpty()) throw new SourceAnalysisException("Không tìm thấy file .java nào trong project");
+            throw new SourceAnalysisException("Không parse được file production Java nào. File lỗi: "
                     + String.join(", ", failedFiles));
         }
         return new ParseFilesResult(results, failedFiles);

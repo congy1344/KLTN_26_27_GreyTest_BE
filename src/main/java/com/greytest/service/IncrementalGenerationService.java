@@ -8,6 +8,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.Comparator;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 import com.github.javaparser.JavaParser;
@@ -26,6 +28,7 @@ import com.greytest.dto.agent.GenerationResponseDtos.TestCaseResponseDto;
 import com.greytest.dto.agent.GenerationResponseDtos.GeneratedTestCaseDto;
 import com.greytest.dto.agent.GenerationResponseDtos.TestPlanResponseDto;
 import com.greytest.dto.agent.GenerationResponseDtos.UnitTestResponseDto;
+import com.greytest.dto.agent.GenerationResponseDtos.BlockedUnitTestDto;
 import com.greytest.dto.diff.ImpactSummaryDto;
 import com.greytest.dto.diff.MethodDiffItem;
 import com.greytest.entity.AuthUser;
@@ -61,8 +64,11 @@ import com.greytest.entity.TestPlan;
 import com.greytest.repository.BusinessRuleRepository;
 import com.greytest.repository.TestCaseRepository;
 import com.greytest.repository.TestPlanRepository;
+import com.greytest.repository.TestPlanCoveredRuleRepository;
+import com.greytest.entity.TestPlanCoveredRule;
 import com.greytest.service.agent.AIAgentService;
 import com.greytest.service.agent.GenerationContextBuilder;
+import com.greytest.service.agent.TestFeasibilityBlockedException;
 
 import lombok.extern.slf4j.Slf4j;
 
@@ -84,9 +90,13 @@ public class IncrementalGenerationService {
     private final AIAgentService aiAgentService;
     private final BusinessRuleRepository businessRuleRepository;
     private final TestPlanRepository testPlanRepository;
+    private final TestPlanCoveredRuleRepository testPlanCoveredRuleRepository;
     private final TestCaseRepository testCaseRepository;
     private final SourceUpdateMapper sourceUpdateMapper;
     private final ObjectMapper objectMapper;
+    private final LlmBatchExecutor batchExecutor;
+    @Autowired(required = false)
+    private com.greytest.service.generation.IncrementalCheckpointCoordinator checkpoints;
 
     @Autowired
     public IncrementalGenerationService(
@@ -102,7 +112,8 @@ public class IncrementalGenerationService {
             SourceUpdateService sourceUpdateService,
             AIAgentService aiAgentService,
             SourceUpdateMapper sourceUpdateMapper,
-            ObjectMapper objectMapper) {
+            ObjectMapper objectMapper, TestPlanCoveredRuleRepository testPlanCoveredRuleRepository,
+            LlmBatchExecutor batchExecutor) {
         this.projectRepository = projectRepository;
         this.sourceUpdateRepository = sourceUpdateRepository;
         this.sourceUpdateItemRepository = sourceUpdateItemRepository;
@@ -111,11 +122,34 @@ public class IncrementalGenerationService {
         this.unitTestRepository = unitTestRepository;
         this.businessRuleRepository = businessRuleRepository;
         this.testPlanRepository = testPlanRepository;
+        this.testPlanCoveredRuleRepository = testPlanCoveredRuleRepository;
         this.testCaseRepository = testCaseRepository;
         this.sourceUpdateService = sourceUpdateService;
         this.aiAgentService = aiAgentService;
         this.sourceUpdateMapper = sourceUpdateMapper;
         this.objectMapper = objectMapper;
+        this.batchExecutor = batchExecutor;
+    }
+
+    /** Constructor compatible với các test/service khởi tạo thủ công ngoài Spring. */
+    public IncrementalGenerationService(
+            ProjectRepository projectRepository,
+            SourceUpdateRepository sourceUpdateRepository,
+            SourceUpdateItemRepository sourceUpdateItemRepository,
+            JavaClassRepository javaClassRepository,
+            JavaMethodRepository javaMethodRepository,
+            UnitTestRepository unitTestRepository,
+            BusinessRuleRepository businessRuleRepository,
+            TestPlanRepository testPlanRepository,
+            TestCaseRepository testCaseRepository,
+            SourceUpdateService sourceUpdateService,
+            AIAgentService aiAgentService,
+            SourceUpdateMapper sourceUpdateMapper,
+            ObjectMapper objectMapper, TestPlanCoveredRuleRepository testPlanCoveredRuleRepository) {
+        this(projectRepository, sourceUpdateRepository, sourceUpdateItemRepository, javaClassRepository,
+                javaMethodRepository, unitTestRepository, businessRuleRepository, testPlanRepository,
+                testCaseRepository, sourceUpdateService, aiAgentService, sourceUpdateMapper, objectMapper,
+                testPlanCoveredRuleRepository, null);
     }
 
     public IncrementalGenerationService(
@@ -131,7 +165,7 @@ public class IncrementalGenerationService {
             ObjectMapper objectMapper) {
         this(projectRepository, sourceUpdateRepository, sourceUpdateItemRepository, javaClassRepository,
                 javaMethodRepository, unitTestRepository, null, null, null, sourceUpdateService, aiAgentService,
-                sourceUpdateMapper, objectMapper);
+                sourceUpdateMapper, objectMapper, null, null);
     }
 
     /**
@@ -145,6 +179,33 @@ public class IncrementalGenerationService {
             Long updateId,
             GenerationProgressStage stage,
             AuthUser user) {
+        if(checkpoints!=null) {
+            authorizeGeneration(projectId,updateId,user);
+            return checkpoints.withRun(projectId,updateId,user==null ? null : user.getId(),
+                () -> generateStage(projectId,updateId,stage,user));
+        }
+        return generateStage(projectId,updateId,stage,user);
+    }
+
+    /** Một lượt Sinh Tất Cả dùng chung analysis và giữ lease xuyên suốt bốn stage. */
+    public SourceUpdateDto generateAll(Long projectId,Long updateId,AuthUser user) {
+        if(checkpoints!=null) authorizeGeneration(projectId,updateId,user);
+        java.util.function.Supplier<SourceUpdateDto> run=()->{
+            SourceUpdateDto result=null;
+            for(var stage:GenerationProgressStage.values()) result=generateStage(projectId,updateId,stage,user);
+            return result;
+        };
+        return checkpoints==null ? run.get() : checkpoints.withRun(projectId,updateId,user==null ? null : user.getId(),run);
+    }
+
+    private void authorizeGeneration(Long projectId,Long updateId,AuthUser user) {
+        var project=projectRepository.findById(projectId).orElseThrow(()->new ProjectNotFoundException(projectId));
+        sourceUpdateService.checkProjectAccess(project,user);
+        sourceUpdateRepository.findByIdAndProjectId(updateId,projectId)
+            .orElseThrow(()->new IllegalArgumentException("Không tìm thấy bản cập nhật "+updateId));
+    }
+
+    private SourceUpdateDto generateStage(Long projectId,Long updateId,GenerationProgressStage stage,AuthUser user) {
 
         Project project = projectRepository.findById(projectId)
                 .orElseThrow(() -> new ProjectNotFoundException(projectId));
@@ -155,32 +216,46 @@ public class IncrementalGenerationService {
                 .orElseThrow(() -> new IllegalArgumentException("Không tìm thấy bản cập nhật " + updateId));
 
         if (update.getStatus() != SourceUpdateStatus.ANALYZED
-                && update.getStatus() != SourceUpdateStatus.READY_TO_APPLY) {
+                && update.getStatus() != SourceUpdateStatus.READY_TO_APPLY
+                && !(checkpoints!=null && (update.getStatus()==SourceUpdateStatus.GENERATING || update.getStatus()==SourceUpdateStatus.FAILED))) {
             throw new IllegalArgumentException("Bản cập nhật phải ở trạng thái ANALYZED trước khi sinh AI: " + update.getStatus());
         }
 
-        if (stage != GenerationProgressStage.BUSINESS_RULE) requireAppliedBusinessRuleChanges(projectId, updateId);
+        // Snapshot downstream đọc overlay đã review; luồng cũ vẫn yêu cầu Apply oracle trước.
+        if (checkpoints == null && stage != GenerationProgressStage.BUSINESS_RULE) requireAppliedBusinessRuleChanges(projectId, updateId);
         update.setStatus(SourceUpdateStatus.GENERATING);
-        sourceUpdateRepository.save(update);
+        update=checkpoints==null ? sourceUpdateRepository.save(update) : checkpoints.changeStatus(updateId,SourceUpdateStatus.GENERATING);
 
-        ImpactSummaryDto impact = parseImpactSummary(update.getImpactSummary());
-
+        long stageStarted=System.nanoTime();
         try {
+            ImpactSummaryDto impact = parseImpactSummary(update.getImpactSummary());
+            if(checkpoints!=null) checkpoints.beginStage(updateId,stage);
             switch (stage) {
                 case BUSINESS_RULE -> generateIncrementalBusinessRules(projectId, updateId, impact);
-                case TEST_PLAN -> generateIncrementalTestPlans(projectId, updateId, impact);
-                case TEST_CASE -> generateIncrementalTestCases(projectId, updateId, impact);
+                case TEST_PLAN -> generateIncrementalTestPlans(projectId, updateId, impact, sourceUpdateService.getCandidateSourcePath(update));
+                case TEST_CASE -> generateIncrementalTestCases(projectId, updateId, impact, sourceUpdateService.getCandidateSourcePath(update));
                 case UNIT_TEST -> generateIncrementalUnitTests(projectId, update, impact);
             }
+            if(checkpoints!=null) checkpoints.completeStage(updateId,stage);
 
             update.setStatus(SourceUpdateStatus.READY_TO_APPLY);
-            update = sourceUpdateRepository.save(update);
+            update = checkpoints==null ? sourceUpdateRepository.save(update) : checkpoints.changeStatus(updateId,SourceUpdateStatus.READY_TO_APPLY);
         } catch (Exception ex) {
             log.error("Lỗi khi sinh tăng dần stage {}: {}", stage, ex.getMessage(), ex);
+            // Batch executor có thể bọc lỗi nghiệp vụ; còn case bị chặn thì tuyệt đối không mở Apply.
+            for (Throwable cause = ex; cause != null; cause = cause.getCause()) {
+                if (cause instanceof TestFeasibilityBlockedException blocked) {
+                    update.setStatus(SourceUpdateStatus.FAILED);
+                    if(checkpoints==null) sourceUpdateRepository.save(update); else checkpoints.changeStatus(updateId,SourceUpdateStatus.FAILED);
+                    throw blocked;
+                }
+            }
             List<SourceUpdateItem> items = sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId);
             update.setStatus(items.isEmpty() ? SourceUpdateStatus.ANALYZED : SourceUpdateStatus.READY_TO_APPLY);
-            sourceUpdateRepository.save(update);
+            if(checkpoints==null) sourceUpdateRepository.save(update); else checkpoints.changeStatus(updateId,update.getStatus());
             throw ex;
+        } finally {
+            GenerationJobContext.recordDuration("stage."+stage.name()+".wall",System.nanoTime()-stageStarted);
         }
 
         List<SourceUpdateItem> items = sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId);
@@ -188,28 +263,39 @@ public class IncrementalGenerationService {
     }
 
     private void generateIncrementalBusinessRules(Long projectId, Long updateId, ImpactSummaryDto impact) {
-        List<Set<Long>> batches = resolveTargetMethodBatches(projectId, impact);
+        List<Set<Long>> batches = checkpoints==null ? resolveTargetMethodBatches(projectId,updateId,impact)
+            : checkpoints.mutate(()->resolveTargetMethodBatches(projectId,updateId,impact));
 
         if (batches.isEmpty()) {
             log.info("Không có target method nào cần sinh lại BR cho project {}", projectId);
             return;
         }
 
-        List<GeneratedBusinessRuleDto> generatedRules = new ArrayList<>();
-        for (Set<Long> methodIds : batches) {
+        AtomicInteger nextBrNumber=new AtomicInteger(nextBusinessRuleNumber(projectId));
+        var snapshot=checkpoints==null ? null : sourceUpdateService.getCandidateSourcePath(
+                sourceUpdateRepository.findByIdAndProjectId(updateId,projectId).orElseThrow());
+        LlmBatchExecutor.mapOrSequential(batchExecutor, batches, methodIds -> {
             log.info("Gọi AI Agent sinh Business Rules cho batch {} methodIds: {}", methodIds.size(), methodIds);
-            BusinessRuleResponseDto response = aiAgentService.generateBusinessRules(projectId, methodIds);
-            if (response != null && response.rules() != null) {
-                generatedRules.addAll(response.rules());
-            }
-        }
+            return executeBatch(projectId,updateId,GenerationProgressStage.BUSINESS_RULE,methodIds,snapshot,
+                    BusinessRuleResponseDto.class,
+                    ids->snapshot==null ? aiAgentService.generateBusinessRules(projectId,ids)
+                        : aiAgentService.generateSnapshotBusinessRules(projectId,ids,snapshot),
+                    (ids,response)-> {
+                        var selected = response == null || response.rules() == null ? response
+                                : new BusinessRuleResponseDto(response.rules().stream()
+                                        .filter(rule -> rule != null && ids.contains(rule.methodId())).toList());
+                        persistBusinessRules(projectId,updateId,selected,nextBrNumber);
+                    });
+        });
+    }
 
+    private void persistBusinessRules(Long projectId,Long updateId,BusinessRuleResponseDto response,AtomicInteger nextBrNumber) {
+        var generatedRules=response==null || response.rules()==null ? List.<GeneratedBusinessRuleDto>of() : response.rules();
         if (!generatedRules.isEmpty()) {
-            int nextBrNumber = nextBusinessRuleNumber(projectId);
             log.info("Generated business rules: {}", generatedRules);
             log.info("Next business rule number: {}", nextBrNumber);
             for (var br : generatedRules) {
-                if (br == null || !batches.stream().anyMatch(ids -> ids.contains(br.methodId()))) continue;
+                if (br == null) continue;
                 SourceUpdateItem item = new SourceUpdateItem();
                 item.setSourceUpdateId(updateId);
                 item.setTargetType(SourceUpdateTargetType.BUSINESS_RULE);
@@ -224,8 +310,10 @@ public class IncrementalGenerationService {
                                 && (br.branchId() == null || sourceBranchId(methodRules.get(0).getReviewNote()) == null)
                                 ? methodRules.get(0) : null);
                 if (existing != null) {
-                    item = existingProposal(updateId, SourceUpdateTargetType.BUSINESS_RULE, existing.getId());
-                    if (isUserDecision(item)) continue;
+                    if (checkpoints == null) {
+                        item = existingProposal(updateId, SourceUpdateTargetType.BUSINESS_RULE, existing.getId());
+                        if (isUserDecision(item)) continue;
+                    }
                     item.setTargetId(existing.getId());
                     item.setAction(SourceUpdateAction.UPDATE);
                     item.setReason("Cập nhật Business Rule theo method bị thay đổi");
@@ -234,12 +322,12 @@ public class IncrementalGenerationService {
                     BusinessRule newRule = new BusinessRule();
                     newRule.setProjectId(projectId);
                     newRule.setMethodId(br.methodId());
-                    newRule.setRuleCode(String.format("BR-%03d", nextBrNumber++));
+                    newRule.setRuleCode(String.format("BR-%03d", nextBrNumber.getAndIncrement()));
                     newRule.setDescription(br.description());
-                    if (br.branchId() != null) newRule.setReviewNote("SOURCE_BRANCH:" + decisionId(br.branchId()));
                     newRule.setSource(RuleSource.AI_GENERATED);
                     newRule.setStatus(ReviewStatus.APPROVED);
                     newRule.setIsModified(false);
+                    newRule.setReviewNote(SourceBranchReference.write(br.branchId(), null));
                     newRule = businessRuleRepository.save(newRule);
                     item.setTargetId(newRule.getId());
                     item.setAction(SourceUpdateAction.CREATE);
@@ -250,14 +338,15 @@ public class IncrementalGenerationService {
                 item.setReviewStatus(existing != null && existing.getStatus() == ReviewStatus.APPROVED
                         && !Objects.equals(existing.getDescription(), br.description())
                         ? SourceUpdateReviewStatus.PENDING : SourceUpdateReviewStatus.ACCEPTED);
-                sourceUpdateItemRepository.save(item);
+                saveSourceUpdateItem(item);
             }
         }
     }
 
-    private void generateIncrementalTestPlans(Long projectId, Long updateId, ImpactSummaryDto impact) {
+    private void generateIncrementalTestPlans(Long projectId, Long updateId, ImpactSummaryDto impact, java.nio.file.Path snapshot) {
         Set<Long> removedRuleIds = sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId).stream()
                 .filter(i -> i.getTargetType() == SourceUpdateTargetType.BUSINESS_RULE && i.getAction() == SourceUpdateAction.REMOVE)
+                .filter(i->i.getReviewStatus()!=SourceUpdateReviewStatus.REJECTED)
                 .map(SourceUpdateItem::getTargetId)
                 .filter(Objects::nonNull)
                 .collect(Collectors.toSet());
@@ -268,6 +357,7 @@ public class IncrementalGenerationService {
         // Gom thêm các Business Rule mới được tạo (CREATE) từ stage trước
         sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId).stream()
                 .filter(i -> i.getTargetType() == SourceUpdateTargetType.BUSINESS_RULE && i.getAction() == SourceUpdateAction.CREATE)
+                .filter(i->i.getReviewStatus()!=SourceUpdateReviewStatus.REJECTED)
                 .map(SourceUpdateItem::getTargetId)
                 .filter(Objects::nonNull)
                 .forEach(ruleIds::add);
@@ -277,11 +367,27 @@ public class IncrementalGenerationService {
             return;
         }
 
-        log.info("Gọi AI Agent sinh Test Plan cho {} ruleIds: {}", ruleIds.size(), ruleIds);
-        TestPlanResponseDto response = aiAgentService.generateTestPlan(projectId, ruleIds);
+        List<Set<Long>> ruleBatches = partitionRuleIdsByMethod(projectId, ruleIds);
+        AtomicInteger nextTpNumber = new AtomicInteger(nextTestPlanNumber(projectId));
+        List<TestPlanResponseDto> responses = LlmBatchExecutor.mapOrSequential(
+                batchExecutor,
+                ruleBatches,
+                batch -> {
+                    log.info("Gọi AI Agent sinh Test Plan cho {} ruleIds: {}", batch.size(), batch);
+                    return executeBatch(projectId,updateId,GenerationProgressStage.TEST_PLAN,batch,snapshot,
+                        TestPlanResponseDto.class,ids->snapshot == null ? aiAgentService.generateTestPlan(projectId,ids)
+                                : aiAgentService.generateSnapshotTestPlan(projectId,ids,snapshot),
+                        (ids,response)->persistTestPlans(projectId,updateId,response,nextTpNumber));
+                });
 
+        if (responses.isEmpty()) {
+            log.info("AI không trả về Test Plan cho project {}", projectId);
+        }
+    }
+
+    private void persistTestPlans(Long projectId, Long updateId, TestPlanResponseDto response,
+            AtomicInteger nextTpNumber) {
         if (response != null && response.plans() != null) {
-            int nextTpNumber = nextTestPlanNumber(projectId);
             for (var tp : response.plans()) {
                 SourceUpdateItem item = new SourceUpdateItem();
                 item.setSourceUpdateId(updateId);
@@ -299,128 +405,138 @@ public class IncrementalGenerationService {
                     TestPlan newPlan = new TestPlan();
                     newPlan.setProjectId(projectId);
                     newPlan.setBusinessRuleId(tp.ruleId());
-                    newPlan.setPlanCode(String.format("TP-%03d", nextTpNumber++));
+                    newPlan.setPlanCode(String.format("TP-%03d", nextTpNumber.getAndIncrement()));
                     newPlan.setTitle(tp.title());
                     newPlan.setDescription(tp.description());
                     newPlan.setTestType(TestType.valueOf(tp.testType()));
                     newPlan.setStatus(ReviewStatus.APPROVED);
                     newPlan.setIsModified(false);
                     newPlan = testPlanRepository.save(newPlan);
+                    if (testPlanCoveredRuleRepository != null) {
+                        for (Long ruleId : tp.coveredRuleIds().stream().distinct().toList()) {
+                            TestPlanCoveredRule covered = new TestPlanCoveredRule();
+                            covered.setTestPlanId(newPlan.getId());
+                            covered.setBusinessRuleId(ruleId);
+                            testPlanCoveredRuleRepository.save(covered);
+                        }
+                    }
                     item.setTargetId(newPlan.getId());
                     item.setAction(SourceUpdateAction.CREATE);
                     item.setReason("Thêm mới Test Plan cho Business Rule mới");
                 }
                 item.setAfterData(toJson(tp));
                 item.setReviewStatus(SourceUpdateReviewStatus.ACCEPTED);
-                sourceUpdateItemRepository.save(item);
+                saveSourceUpdateItem(item);
             }
         }
     }
 
-    private void generateIncrementalTestCases(Long projectId, Long updateId, ImpactSummaryDto impact) {
+    private void generateIncrementalTestCases(Long projectId, Long updateId, ImpactSummaryDto impact, java.nio.file.Path snapshot) {
         Set<Long> removedPlanIds = sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId).stream()
                 .filter(i -> i.getTargetType() == SourceUpdateTargetType.TEST_PLAN && i.getAction() == SourceUpdateAction.REMOVE)
-                .map(SourceUpdateItem::getTargetId)
-                .filter(Objects::nonNull)
-                .collect(Collectors.toSet());
-
+                .filter(i->i.getReviewStatus()!=SourceUpdateReviewStatus.REJECTED)
+                .map(SourceUpdateItem::getTargetId).filter(Objects::nonNull).collect(Collectors.toSet());
         Set<Long> planIds = new HashSet<>(impact.affectedTestPlanIds());
         planIds.removeAll(removedPlanIds);
-
-        // Gom thêm các Test Plan mới được tạo (CREATE) từ stage trước
         sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId).stream()
                 .filter(i -> i.getTargetType() == SourceUpdateTargetType.TEST_PLAN && i.getAction() == SourceUpdateAction.CREATE)
-                .map(SourceUpdateItem::getTargetId)
-                .filter(Objects::nonNull)
-                .forEach(planIds::add);
+                .filter(i->i.getReviewStatus()!=SourceUpdateReviewStatus.REJECTED)
+                .map(SourceUpdateItem::getTargetId).filter(Objects::nonNull).forEach(planIds::add);
+        if (planIds.isEmpty()) return;
 
-        if (planIds.isEmpty()) {
-            log.info("Không có Test Plan nào cần sinh Test Case tăng dần cho project {}", projectId);
-            return;
-        }
+        List<Set<Long>> planBatches = partitionIds(planIds, GenerationContextBuilder.MAX_TEST_CASE_PLANS);
+        AtomicInteger nextCaseNumber = new AtomicInteger(nextTestCaseNumber(projectId));
+        List<TestCaseResponseDto> responses = LlmBatchExecutor.mapOrSequential(
+                batchExecutor, planBatches,
+                batch -> executeBatch(projectId,updateId,GenerationProgressStage.TEST_CASE,batch,snapshot,
+                        TestCaseResponseDto.class,ids->snapshot == null ? aiAgentService.generateTestCases(projectId,ids)
+                                : aiAgentService.generateSnapshotTestCases(projectId,ids,snapshot),
+                        (ids,response)->persistTestCases(projectId,updateId,ids,response,nextCaseNumber)));
+        if (responses.isEmpty()) log.info("AI không trả về Test Case cho project {}", projectId);
+    }
 
-        log.info("Gọi AI Agent sinh Test Cases cho {} planIds: {}", planIds.size(), planIds);
-        TestCaseResponseDto response = aiAgentService.generateTestCases(projectId, planIds);
-
-        if (response != null && response.cases() != null) {
-            // Nhóm các test case mới theo planId
-            Map<Long, List<GeneratedTestCaseDto>> newCasesByPlan = response.cases().stream()
-                    .filter(Objects::nonNull)
-                    .collect(Collectors.groupingBy(GeneratedTestCaseDto::planId));
-
-            int nextTestCaseNumber = nextTestCaseNumber(projectId);
-            for (Long planId : planIds) {
-                List<GeneratedTestCaseDto> newCases = newCasesByPlan.getOrDefault(planId, List.of());
-                List<TestCase> oldCases = testCaseRepository != null
-                        ? testCaseRepository.findByTestPlanId(planId)
-                        : List.of();
-
-                int matchCount = Math.min(oldCases.size(), newCases.size());
-                // Cập nhật các case tương ứng
-                for (int i = 0; i < matchCount; i++) {
-                    TestCase oldCase = oldCases.get(i);
-                    GeneratedTestCaseDto proposed = newCases.get(i);
-                    SourceUpdateItem item = existingProposal(updateId, SourceUpdateTargetType.TEST_CASE, oldCase.getId());
-                    if (isUserDecision(item)) continue;
-                    item.setSourceUpdateId(updateId);
-                    item.setTargetType(SourceUpdateTargetType.TEST_CASE);
-                    item.setTargetId(oldCases.get(i).getId());
-                    item.setAction(SourceUpdateAction.UPDATE);
-                    item.setReason("Cập nhật Test Case theo Test Plan bị ảnh hưởng");
-                    item.setAfterData(toJson(proposed));
-                    // Kỳ vọng và dữ liệu đã duyệt chỉ đổi sau khi người dùng chấp nhận đề xuất.
-                    item.setReviewStatus(oldCase.getStatus() == ReviewStatus.APPROVED
-                            && (!Objects.equals(oldCase.getExpectedResult(), proposed.expectedResult())
-                                    || !Objects.equals(oldCase.getTestData(), proposed.testData())
-                                    || !Objects.equals(oldCase.getPreconditions(), proposed.preconditions()))
-                            ? SourceUpdateReviewStatus.PENDING : SourceUpdateReviewStatus.ACCEPTED);
-                    sourceUpdateItemRepository.save(item);
+    private void persistTestCases(Long projectId, Long updateId, Set<Long> planIds,
+            TestCaseResponseDto response, AtomicInteger nextCaseNumber) {
+        if (response == null || response.cases() == null) return;
+        Map<Long, List<GeneratedTestCaseDto>> byPlan = response.cases().stream()
+                .filter(Objects::nonNull).filter(dto -> planIds.contains(dto.planId()))
+                .collect(Collectors.groupingBy(GeneratedTestCaseDto::planId));
+        for (Long planId : planIds) {
+            List<GeneratedTestCaseDto> generated = byPlan.getOrDefault(planId, List.of());
+            List<TestCase> existing = testCaseRepository == null ? List.of() : testCaseRepository.findByTestPlanId(planId);
+            int matched = Math.min(existing.size(), generated.size());
+            for (int i = 0; i < matched; i++) {
+                TestCase original = existing.get(i);
+                GeneratedTestCaseDto proposed = generated.get(i);
+                SourceUpdateItem item = checkpoints == null
+                        ? existingProposal(updateId, SourceUpdateTargetType.TEST_CASE, original.getId()) : new SourceUpdateItem();
+                if (checkpoints == null && isUserDecision(item)) continue;
+                item.setSourceUpdateId(updateId); item.setTargetType(SourceUpdateTargetType.TEST_CASE);
+                item.setTargetId(original.getId()); item.setAction(SourceUpdateAction.UPDATE);
+                item.setReason("Cập nhật Test Case theo Test Plan bị ảnh hưởng"); item.setAfterData(toJson(proposed));
+                item.setReviewStatus(original.getStatus() == ReviewStatus.APPROVED
+                        && (!Objects.equals(original.getExpectedResult(), proposed.expectedResult())
+                            || !Objects.equals(original.getTestData(), proposed.testData())
+                            || !Objects.equals(original.getPreconditions(), proposed.preconditions()))
+                        ? SourceUpdateReviewStatus.PENDING : SourceUpdateReviewStatus.ACCEPTED);
+                saveSourceUpdateItem(item);
+            }
+            for (int i = matched; i < generated.size(); i++) {
+                GeneratedTestCaseDto dto = generated.get(i);
+                Long createdId = null;
+                if (testCaseRepository != null) {
+                    TestCase tc = new TestCase();
+                    tc.setTestPlanId(planId);
+                    tc.setCaseCode(String.format("TC-%03d", nextCaseNumber.getAndIncrement()));
+                    tc.setTestType(TestType.valueOf(dto.testType()));
+                    tc.setDescription(dto.description()); tc.setPreconditions(dto.preconditions());
+                    tc.setTestData(dto.testData()); tc.setExpectedResult(dto.expectedResult());
+                    tc.setPriority(Priority.valueOf(dto.priority())); tc.setTraceSource(dto.traceSource());
+                    tc.setStatus(ReviewStatus.APPROVED); tc.setIsModified(false);
+                    createdId = testCaseRepository.save(tc).getId();
                 }
-
-                // Nếu số case mới nhiều hơn cũ: thêm mới
-                for (int i = matchCount; i < newCases.size(); i++) {
-                    GeneratedTestCaseDto dto = newCases.get(i);
-                    Long createdCaseId = null;
-                    if (testCaseRepository != null) {
-                        TestCase newTc = new TestCase();
-                        newTc.setTestPlanId(planId);
-                        newTc.setCaseCode(String.format("TC-%03d", nextTestCaseNumber++));
-                        newTc.setTestType(TestType.valueOf(dto.testType()));
-                        newTc.setDescription(dto.description());
-                        newTc.setPreconditions(dto.preconditions());
-                        newTc.setTestData(dto.testData());
-                        newTc.setExpectedResult(dto.expectedResult());
-                        newTc.setPriority(Priority.valueOf(dto.priority()));
-                        newTc.setTraceSource(dto.traceSource());
-                        newTc.setStatus(ReviewStatus.APPROVED);
-                        newTc.setIsModified(false);
-                        newTc = testCaseRepository.save(newTc);
-                        createdCaseId = newTc.getId();
+                saveSourceUpdateItem(updateId, SourceUpdateTargetType.TEST_CASE, createdId,
+                        "plan:" + planId + ":case:" + i, SourceUpdateAction.CREATE,
+                        "Them moi Test Case theo Test Plan bi anh huong", dto);
+            }
+            for (int i = matched; i < existing.size(); i++) {
+                TestCase stale = existing.get(i);
+                SourceUpdateItem draftItem = sourceUpdateItemRepository
+                        .findBySourceUpdateIdAndTargetTypeAndTargetId(
+                                updateId, SourceUpdateTargetType.TEST_CASE, stale.getId()).orElse(null);
+                if (draftItem != null && draftItem.getAction() == SourceUpdateAction.CREATE) {
+                    if(checkpoints!=null) checkpoints.assertActiveArtifactUnchanged(draftItem);
+                    if(checkpoints!=null && (draftItem.getUserRevision()>0 || !checkpoints.isRecordedOutput(draftItem))) {
+                        var proposal=new SourceUpdateItem(); proposal.setId(draftItem.getId()); proposal.setAction(SourceUpdateAction.REMOVE);
+                        throw new com.greytest.service.generation.GenerationConflictException(draftItem.getId(),toJson(proposal));
                     }
-                    SourceUpdateItem item = new SourceUpdateItem();
-                    item.setSourceUpdateId(updateId);
-                    item.setTargetType(SourceUpdateTargetType.TEST_CASE);
-                    item.setTargetId(createdCaseId);
-                    item.setAction(SourceUpdateAction.CREATE);
-                    item.setReason("Thêm mới Test Case theo Test Plan bị ảnh hưởng");
-                    item.setAfterData(toJson(dto));
-                    item.setReviewStatus(SourceUpdateReviewStatus.ACCEPTED);
-                    sourceUpdateItemRepository.save(item);
-                }
-
-                // Nếu số case cũ nhiều hơn mới: đánh dấu xóa các case thừa
-                for (int i = matchCount; i < oldCases.size(); i++) {
-                    SourceUpdateItem item = existingProposal(updateId, SourceUpdateTargetType.TEST_CASE, oldCases.get(i).getId());
-                    if (isUserDecision(item)) continue;
-                    item.setSourceUpdateId(updateId);
-                    item.setTargetType(SourceUpdateTargetType.TEST_CASE);
-                    item.setTargetId(oldCases.get(i).getId());
-                    item.setAction(SourceUpdateAction.REMOVE);
-                    item.setReason("Xóa Test Case cũ không còn phù hợp");
-                    item.setAfterData(null);
-                    item.setReviewStatus(oldCases.get(i).getStatus() == ReviewStatus.APPROVED
+                    var child=sourceUpdateItemRepository.findBySourceUpdateIdAndTargetKey(updateId,"case:"+stale.getId()).orElse(null);
+                    if(checkpoints!=null && child!=null && (child.getUserRevision()==null || child.getUserRevision()>0
+                            || child.getReviewStatus()==SourceUpdateReviewStatus.MODIFIED || child.getReviewStatus()==SourceUpdateReviewStatus.REJECTED
+                            || !checkpoints.isRecordedOutput(child))) {
+                        var proposal=new SourceUpdateItem(); proposal.setAction(SourceUpdateAction.REMOVE); proposal.setAfterData(child.getAfterData());
+                        throw new com.greytest.service.generation.GenerationConflictException(child.getId(),toJson(proposal));
+                    }
+                    if(checkpoints!=null && unitTestRepository.findByTestCaseId(stale.getId())!=null) {
+                        var proposal=new SourceUpdateItem(); proposal.setAction(SourceUpdateAction.REMOVE);
+                        throw new com.greytest.service.generation.GenerationConflictException(draftItem.getId(),toJson(proposal));
+                    }
+                    // Đây là artifact tạm do chính draft sinh ra; xóa ngay để Apply/Cancel
+                    // không giữ lại bản ghi mồ côi khi lần sinh sau trả ít case hơn.
+                    sourceUpdateItemRepository.findBySourceUpdateIdAndTargetKey(
+                            updateId, "case:" + stale.getId()).ifPresent(sourceUpdateItemRepository::delete);
+                    sourceUpdateItemRepository.delete(draftItem);
+                    if (testCaseRepository != null) testCaseRepository.deleteById(stale.getId());
+                } else {
+                    SourceUpdateItem item = checkpoints == null
+                            ? existingProposal(updateId, SourceUpdateTargetType.TEST_CASE, stale.getId()) : new SourceUpdateItem();
+                    if (checkpoints == null && isUserDecision(item)) continue;
+                    item.setSourceUpdateId(updateId); item.setTargetType(SourceUpdateTargetType.TEST_CASE);
+                    item.setTargetId(stale.getId()); item.setAction(SourceUpdateAction.REMOVE);
+                    item.setReason("Xóa Test Case cũ không còn phù hợp"); item.setAfterData(null);
+                    item.setReviewStatus(stale.getStatus() == ReviewStatus.APPROVED
                             ? SourceUpdateReviewStatus.PENDING : SourceUpdateReviewStatus.ACCEPTED);
-                    sourceUpdateItemRepository.save(item);
+                    saveSourceUpdateItem(item);
                 }
             }
         }
@@ -428,46 +544,187 @@ public class IncrementalGenerationService {
 
     private void generateIncrementalUnitTests(Long projectId, SourceUpdate update, ImpactSummaryDto impact) {
         Long updateId = update.getId();
-        Set<Long> removedCaseIds = sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId).stream()
+        List<SourceUpdateItem> existingItems = sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId);
+        Set<Long> removedCaseIds = existingItems.stream()
                 .filter(i -> i.getTargetType() == SourceUpdateTargetType.TEST_CASE && i.getAction() == SourceUpdateAction.REMOVE)
-                .map(SourceUpdateItem::getTargetId)
-                .filter(Objects::nonNull)
-                .collect(Collectors.toSet());
-
+                .filter(i->i.getReviewStatus()!=SourceUpdateReviewStatus.REJECTED)
+                .map(SourceUpdateItem::getTargetId).filter(Objects::nonNull).collect(Collectors.toSet());
         Set<Long> caseIds = new HashSet<>(impact.affectedTestCaseIds());
         caseIds.removeAll(removedCaseIds);
-
-        // Gom thêm các Test Case mới được tạo (CREATE) từ stage trước
-        sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId).stream()
+        existingItems.stream()
                 .filter(i -> i.getTargetType() == SourceUpdateTargetType.TEST_CASE && i.getAction() == SourceUpdateAction.CREATE)
-                .map(SourceUpdateItem::getTargetId)
-                .filter(Objects::nonNull)
-                .forEach(caseIds::add);
+                .filter(i->i.getReviewStatus()!=SourceUpdateReviewStatus.REJECTED)
+                .map(SourceUpdateItem::getTargetId).filter(Objects::nonNull).forEach(caseIds::add);
+        if (caseIds.isEmpty()) return;
 
-        if (caseIds.isEmpty()) {
-            log.info("Không có Test Case nào cần sinh Unit Test tăng dần cho project {}", projectId);
-            return;
+        List<Set<Long>> caseBatches = partitionIds(caseIds, GenerationContextBuilder.MAX_UNIT_TEST_CASES);
+        Map<Long, BlockedUnitTestDto> blockedCases = new java.util.concurrent.ConcurrentHashMap<>();
+        List<UnitTestResponseDto> responses;
+        try {
+            responses = LlmBatchExecutor.mapOrSequential(
+                batchExecutor, caseBatches,
+                batch -> executeBatch(projectId,updateId,GenerationProgressStage.UNIT_TEST,batch,
+                        sourceUpdateService.getCandidateSourcePath(update),UnitTestResponseDto.class,
+                        ids->aiAgentService.generateSnapshotUnitTests(projectId,ids,sourceUpdateService.getCandidateSourcePath(update)),
+                        (ids,response) -> {
+                    if (response != null && response.blockedCases() != null) {
+                        for (BlockedUnitTestDto blocked : response.blockedCases()) {
+                            if (blocked != null && caseIds.contains(blocked.caseId())) {
+                                blockedCases.put(blocked.caseId(), blocked);
+                            }
+                        }
+                    }
+                    persistUnitTests(updateId, ids, response);
+                }));
+        } catch (RuntimeException failure) {
+            if (!blockedCases.isEmpty()) throw blockedSnapshotFailure(blockedCases, failure);
+            throw failure;
         }
+        if (!blockedCases.isEmpty()) throw blockedSnapshotFailure(blockedCases, null);
+        if (responses.isEmpty()) log.info("AI không trả về Unit Test cho project {}", projectId);
+    }
 
-        log.info("Gọi AI Agent sinh Unit Tests cho {} caseIds: {}", caseIds.size(), caseIds);
-        UnitTestResponseDto response = aiAgentService.generateSnapshotUnitTests(
-                projectId, caseIds, sourceUpdateService.getCandidateSourcePath(update));
+    private TestFeasibilityBlockedException blockedSnapshotFailure(
+            Map<Long, BlockedUnitTestDto> blockedCases, Throwable cause) {
+        String details = blockedCases.values().stream().sorted(Comparator.comparing(BlockedUnitTestDto::caseId))
+                .map(blocked -> (blocked.caseCode() == null ? "Test Case" : blocked.caseCode())
+                        + " (ID " + blocked.caseId() + "): " + blocked.details())
+                .collect(Collectors.joining("; "));
+        return new TestFeasibilityBlockedException("Không thể Apply bản cập nhật vì còn Test Case bị chặn: "
+                + details + ". Các draft hợp lệ được giữ để xem lại. Hãy xử lý điều kiện bị chặn và tạo source ứng viên mới.", cause);
+    }
 
-        if (response != null && response.unitTests() != null) {
-            for (var ut : response.unitTests()) {
-                if (ut == null || !caseIds.contains(ut.caseId())) continue;
-                SourceUpdateItem item = new SourceUpdateItem();
-                item.setSourceUpdateId(updateId);
-                item.setTargetType(SourceUpdateTargetType.UNIT_TEST);
-                UnitTest existing = unitTestRepository != null ? unitTestRepository.findByTestCaseId(ut.caseId()) : null;
-                item.setTargetId(existing == null ? null : existing.getId());
-                item.setAction(existing == null ? SourceUpdateAction.CREATE : SourceUpdateAction.UPDATE);
-                item.setReason("Unit Test mới sinh tăng dần từ AI");
-                item.setAfterData(toJson(ut));
-                item.setReviewStatus(SourceUpdateReviewStatus.ACCEPTED);
-                sourceUpdateItemRepository.save(item);
+    private void persistUnitTests(Long updateId, Set<Long> caseIds, UnitTestResponseDto response) {
+        if (response == null || response.unitTests() == null) return;
+        for (var ut : response.unitTests()) {
+            if (ut == null || !caseIds.contains(ut.caseId())) continue;
+            UnitTest existing = unitTestRepository == null ? null : unitTestRepository.findByTestCaseId(ut.caseId());
+            saveSourceUpdateItem(updateId, SourceUpdateTargetType.UNIT_TEST,
+                    existing == null ? null : existing.getId(), "case:" + ut.caseId(),
+                    existing == null ? SourceUpdateAction.CREATE : SourceUpdateAction.UPDATE,
+                    "Unit Test mới sinh tăng dần từ AI", ut);
+        }
+    }
+
+    private void saveSourceUpdateItem(SourceUpdateItem item) {
+        SourceUpdateItem target = null;
+        if (item.getTargetId() != null) {
+            target = sourceUpdateItemRepository.findBySourceUpdateIdAndTargetTypeAndTargetId(
+                    item.getSourceUpdateId(), item.getTargetType(), item.getTargetId()).orElse(null);
+        } else if (item.getTargetKey() != null) {
+            target = sourceUpdateItemRepository.findBySourceUpdateIdAndTargetKey(
+                    item.getSourceUpdateId(), item.getTargetKey()).orElse(null);
+        }
+        if(checkpoints!=null) {
+            if(target!=null && target.getAction()==SourceUpdateAction.CREATE) checkpoints.assertActiveArtifactUnchanged(target);
+            if(item.getBeforeData()==null && (target==null || target.getAction()!=SourceUpdateAction.CREATE)) {
+                if(item.getAction()==SourceUpdateAction.CREATE && item.getTargetId()!=null) flushTemporaryArtifact(item);
+                item.setBeforeData(checkpoints.activeSnapshot(item));
             }
         }
+        if (target != null) {
+            if(checkpoints!=null && (target.getUserRevision()==null || target.getUserRevision()>0
+                    || target.getReviewStatus()==SourceUpdateReviewStatus.MODIFIED
+                    || target.getReviewStatus()==SourceUpdateReviewStatus.REJECTED
+                    || (target.getAfterData()!=null && target.getReviewStatus()==SourceUpdateReviewStatus.ACCEPTED
+                        && !checkpoints.isRecordedOutput(target)))) {
+                if(!Objects.equals(target.getAfterData(),item.getAfterData()) || target.getAction()!=item.getAction())
+                    throw new com.greytest.service.generation.GenerationConflictException(target.getId(),toJson(item));
+                return;
+            }
+            // Artifact tạm đã được tạo ở batch trước vẫn phải giữ CREATE để Apply/Cancel
+            // xử lý đúng bản ghi draft khi stage được tiếp tục.
+            SourceUpdateAction action = target.getAction() == SourceUpdateAction.CREATE
+                    && item.getAction() == SourceUpdateAction.UPDATE
+                            ? SourceUpdateAction.CREATE : item.getAction();
+            target.setTargetId(item.getTargetId());
+            target.setTargetKey(item.getTargetKey());
+            target.setAction(action);
+            target.setReason(item.getReason());
+            if(target.getBeforeData()==null) target.setBeforeData(item.getBeforeData());
+            target.setAfterData(item.getAfterData());
+            target.setReviewStatus(item.getReviewStatus());
+            item = target;
+        }
+        if(checkpoints!=null)
+            item.setReviewStatus(SourceUpdateReviewStatus.PENDING);
+        sourceUpdateItemRepository.save(item);
+    }
+
+    private void flushTemporaryArtifact(SourceUpdateItem item) {
+        switch(item.getTargetType()) {
+            case BUSINESS_RULE -> businessRuleRepository.flush();
+            case TEST_PLAN -> { testPlanRepository.flush(); if(testPlanCoveredRuleRepository!=null) testPlanCoveredRuleRepository.flush(); }
+            case TEST_CASE -> testCaseRepository.flush();
+            case UNIT_TEST -> { if(unitTestRepository!=null) unitTestRepository.flush(); }
+            default -> { }
+        }
+    }
+
+    private boolean protectedArtifact(SourceUpdateItem item) {
+        return switch(item.getTargetType()) {
+            case BUSINESS_RULE -> businessRuleRepository.findById(item.getTargetId()).map(r->Boolean.TRUE.equals(r.getIsModified()) || r.getStatus()==ReviewStatus.APPROVED).orElse(false);
+            case TEST_PLAN -> testPlanRepository.findById(item.getTargetId()).map(r->Boolean.TRUE.equals(r.getIsModified()) || r.getStatus()==ReviewStatus.APPROVED).orElse(false);
+            case TEST_CASE -> testCaseRepository.findById(item.getTargetId()).map(r->Boolean.TRUE.equals(r.getIsModified()) || r.getStatus()==ReviewStatus.APPROVED).orElse(false);
+            case UNIT_TEST -> unitTestRepository.existsById(item.getTargetId());
+            default -> true;
+        };
+    }
+
+    private <R> R executeBatch(Long projectId,Long updateId,GenerationProgressStage stage,Set<Long> ids,
+            java.nio.file.Path snapshot,Class<R> responseType,java.util.function.Function<Set<Long>,R> generate,
+            java.util.function.BiConsumer<Set<Long>,R> persist) {
+        if(checkpoints!=null) return checkpoints.executeBatch(projectId,updateId,stage,ids,snapshot,responseType,generate,persist);
+        R response=generate.apply(ids); persist.accept(ids,response); return response;
+    }
+
+    private void saveSourceUpdateItem(Long updateId, SourceUpdateTargetType targetType, Long targetId,
+            String targetKey, SourceUpdateAction action, String reason, Object afterData) {
+        SourceUpdateItem item = new SourceUpdateItem();
+        item.setSourceUpdateId(updateId);
+        item.setTargetType(targetType);
+        item.setTargetId(targetId);
+        item.setTargetKey(targetKey);
+        item.setAction(action);
+        item.setReason(reason);
+        item.setAfterData(afterData == null ? null : toJson(afterData));
+        item.setReviewStatus(SourceUpdateReviewStatus.ACCEPTED);
+        saveSourceUpdateItem(item);
+    }
+
+    private List<Set<Long>> partitionRuleIdsByMethod(Long projectId, Set<Long> ruleIds) {
+        if (businessRuleRepository == null) return partitionIds(ruleIds, GenerationContextBuilder.MAX_TEST_PLAN_METHODS);
+        Map<Long, List<Long>> byMethod = businessRuleRepository.findByProjectId(projectId).stream()
+                .filter(rule -> ruleIds.contains(rule.getId()))
+                .sorted(Comparator.comparing(BusinessRule::getMethodId, Comparator.nullsLast(Long::compareTo))
+                        .thenComparing(BusinessRule::getId))
+                .collect(Collectors.groupingBy(BusinessRule::getMethodId, LinkedHashMap::new,
+                        Collectors.mapping(BusinessRule::getId, Collectors.toList())));
+        Set<Long> resolved = byMethod.values().stream().flatMap(List::stream).collect(Collectors.toSet());
+        ruleIds.stream().filter(id -> !resolved.contains(id)).sorted()
+                .forEach(id -> byMethod.put(null, appendId(byMethod.get(null), id)));
+        List<List<Long>> methodGroups = new ArrayList<>(byMethod.values());
+        List<Set<Long>> batches = new ArrayList<>();
+        for (int start = 0; start < methodGroups.size(); start += GenerationContextBuilder.MAX_TEST_PLAN_METHODS) {
+            batches.add(methodGroups.subList(start, Math.min(start + GenerationContextBuilder.MAX_TEST_PLAN_METHODS, methodGroups.size()))
+                    .stream().flatMap(List::stream).collect(Collectors.toCollection(LinkedHashSet::new)));
+        }
+        return batches;
+    }
+
+    private List<Long> appendId(List<Long> ids, Long id) {
+        List<Long> result = ids == null ? new ArrayList<>() : new ArrayList<>(ids);
+        result.add(id);
+        return result;
+    }
+
+    private List<Set<Long>> partitionIds(Set<Long> ids, int batchSize) {
+        List<Long> sortedIds = ids.stream().filter(Objects::nonNull).sorted().toList();
+        List<Set<Long>> batches = new ArrayList<>();
+        for (int start = 0; start < sortedIds.size(); start += batchSize) {
+            batches.add(new LinkedHashSet<>(sortedIds.subList(start, Math.min(start + batchSize, sortedIds.size()))));
+        }
+        return batches;
     }
 
     /** Tái sử dụng đề xuất của analysis để không có hai quyết định cho cùng artifact. */
@@ -491,15 +748,11 @@ public class IncrementalGenerationService {
     }
 
     private String sourceBranchId(String reviewNote) {
-        if (reviewNote == null || !reviewNote.startsWith("SOURCE_BRANCH:")) return null;
-        return decisionId(reviewNote.substring("SOURCE_BRANCH:".length()).split("\\R", 2)[0]);
+        return SourceBranchReference.read(reviewNote);
     }
 
     private String decisionId(String branchId) {
-        if (branchId == null || branchId.isBlank()) return null;
-        String normalized = branchId.trim();
-        int separator = normalized.indexOf("::");
-        return separator < 0 ? normalized.replaceFirst("-(TRUE|FALSE)$", "") : normalized.substring(0, separator);
+        return SourceBranchReference.normalize(branchId);
     }
 
     /** Không sinh downstream bằng oracle cũ sau khi user đã chọn đổi yêu cầu trong draft. */
@@ -557,7 +810,7 @@ public class IncrementalGenerationService {
                 .max().orElse(0) + 1;
     }
 
-    private List<Set<Long>> resolveTargetMethodBatches(Long projectId, ImpactSummaryDto impact) {
+    private List<Set<Long>> resolveTargetMethodBatches(Long projectId,Long updateId, ImpactSummaryDto impact) {
         Map<Long, Set<Long>> methodIdsByClass = new LinkedHashMap<>();
         List<JavaClass> classes = javaClassRepository.findByProjectId(projectId);
 
@@ -569,7 +822,13 @@ public class IncrementalGenerationService {
             JavaMethod matchedMethod = null;
             JavaClass matchedClass = null;
 
-            for (JavaClass jc : classes) {
+            var sourceClasses=classes.stream().filter(c->Objects.equals(c.getQualifiedName(),changed.qualifiedClassName()))
+                .filter(c->changed.servicePath()==null || changed.servicePath().isBlank()
+                    || Objects.equals(ServiceScopeResolver.normalizeServicePath(ServiceScopeResolver.modulePath(c.getFilePath())),
+                        ServiceScopeResolver.normalizeServicePath(changed.servicePath())))
+                .toList();
+            if(sourceClasses.size()>1) throw new IllegalArgumentException("Ambiguous source module for "+changed.methodKey());
+            for (JavaClass jc : sourceClasses) {
                 if (Objects.equals(jc.getQualifiedName(), changed.qualifiedClassName())) {
                     matchedClass = jc;
                     List<JavaMethod> methods = javaMethodRepository.findByClassId(jc.getId());
@@ -582,25 +841,12 @@ public class IncrementalGenerationService {
                             break;
                         }
                     }
-                    if (matchedMethod == null && changed.diffType() != MethodDiffType.ADDED) {
-                        List<JavaMethod> nameMatches = methods.stream()
-                                .filter(m -> Objects.equals(m.getMethodName(), changed.methodName()))
-                                .toList();
-                        if (nameMatches.size() == 1) {
-                            matchedMethod = nameMatches.get(0);
-                        }
-                    }
                     if (matchedMethod != null) break;
                 }
             }
 
             if (matchedMethod != null) {
-                // Đảm bảo method đã sửa có source code mới nhất để AI sinh BR chính xác
-                if (changed.diffType() == MethodDiffType.MODIFIED && changed.afterSource() != null
-                        && !changed.afterSource().equals(matchedMethod.getSourceCode())) {
-                    matchedMethod.setSourceCode(changed.afterSource());
-                    matchedMethod = javaMethodRepository.save(matchedMethod);
-                }
+                // Source ứng viên chỉ đi vào context; source đang hoạt động đổi khi Apply.
                 methodIdsByClass.computeIfAbsent(matchedClass.getId(), ignored -> new LinkedHashSet<>())
                         .add(matchedMethod.getId());
             } else if (changed.diffType() == MethodDiffType.ADDED) {
@@ -615,7 +861,8 @@ public class IncrementalGenerationService {
                     matchedClass.setClassName(changed.className());
                     matchedClass.setPackageName(extractPackageName(changed.qualifiedClassName()));
                     matchedClass.setClassType(ClassType.SERVICE);
-                    matchedClass.setFilePath("");
+                    String module=changed.servicePath()==null || changed.servicePath().equals(".") ? "" : changed.servicePath()+"/";
+                    matchedClass.setFilePath(module+"src/main/java/"+changed.qualifiedClassName().replace('.','/')+".java");
                     matchedClass = javaClassRepository.save(matchedClass);
                     classes.add(matchedClass);
                 }
@@ -635,6 +882,13 @@ public class IncrementalGenerationService {
                 newMethod.setLineStart(1);
                 newMethod.setLineEnd(10);
                 newMethod = javaMethodRepository.save(newMethod);
+                if(checkpoints!=null) {
+                    var drafts=sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId).stream()
+                        .filter(i->i.getTargetType()==SourceUpdateTargetType.METHOD && i.getAction()==SourceUpdateAction.CREATE
+                            && Objects.equals(i.getTargetKey(),changed.methodKey())).toList();
+                    if(drafts.size()!=1) throw new IllegalArgumentException("Missing or ambiguous added method draft "+changed.methodKey());
+                    var draft=drafts.get(0); draft.setTargetId(newMethod.getId()); sourceUpdateItemRepository.save(draft);
+                }
                 methodIdsByClass.computeIfAbsent(matchedClass.getId(), ignored -> new LinkedHashSet<>())
                         .add(newMethod.getId());
             }
@@ -658,6 +912,7 @@ public class IncrementalGenerationService {
     }
 
     private ImpactSummaryDto parseImpactSummary(String json) {
+        if(checkpoints!=null) return com.greytest.service.generation.GenerationImpactValidator.parse(objectMapper,json);
         if (json == null || json.isBlank()) {
             return new ImpactSummaryDto(0, 0, 0, 0, List.of(), List.of(), List.of(), List.of(), List.of(), List.of());
         }
@@ -673,7 +928,7 @@ public class IncrementalGenerationService {
         try {
             return objectMapper.writeValueAsString(obj);
         } catch (JsonProcessingException e) {
-            return "{}";
+            throw new IllegalStateException("Cannot serialize generation output",e);
         }
     }
 }

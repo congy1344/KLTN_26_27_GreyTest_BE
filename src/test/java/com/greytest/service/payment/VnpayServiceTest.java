@@ -6,6 +6,8 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.assertThat;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 class VnpayServiceTest {
 
@@ -17,19 +19,28 @@ class VnpayServiceTest {
                 "CGXZLS0Z",
                 "XNBCJFAKAZQSGTARRLGCHVZWCIOIGSHN",
                 "https://sandbox.vnpayment.vn/paymentv2/vpcpay.html",
-                "http://localhost:5173/payment/vnpay-return"
+                "http://localhost:3000/payment/vnpay-return"
         );
     }
 
-    @Test
-    void createPaymentUrl_GeneratesValidUrlWithExpectedParameters() {
-        String url = vnpayService.createPaymentUrl("ORDER_123", 1000L, "Test Payment", "127.0.0.1");
+    @ParameterizedTest
+    @CsvSource({"10000, 1000000", "20000, 2000000"})
+    void createPaymentUrl_GeneratesValidUrlWithExpectedParameters(long amount, String vnpAmount) {
+        String url = vnpayService.createPaymentUrl("ORDER_123", amount, "Test Payment", "127.0.0.1");
 
         assertThat(url).startsWith("https://sandbox.vnpayment.vn/paymentv2/vpcpay.html?");
         assertThat(url).contains("vnp_TmnCode=CGXZLS0Z");
-        assertThat(url).contains("vnp_Amount=100000"); // 1000 * 100
+        assertThat(url).contains("vnp_Amount=" + vnpAmount + "&");
         assertThat(url).contains("vnp_TxnRef=ORDER_123");
+        assertThat(url).contains("vnp_ReturnUrl=http%3A%2F%2Flocalhost%3A3000%2Fpayment%2Fvnpay-return");
         assertThat(url).contains("vnp_SecureHash=");
+    }
+
+    @Test
+    void createPaymentUrl_WithCustomReturnUrl_UsesCustomUrl() {
+        String url = vnpayService.createPaymentUrl("ORDER_123", 1000L, "Test Payment", "127.0.0.1", "https://my-domain.com/return");
+
+        assertThat(url).contains("vnp_ReturnUrl=https%3A%2F%2Fmy-domain.com%2Freturn");
     }
 
     @Test

@@ -175,6 +175,21 @@ class SourceUpdateControllerTest {
         }
 
         @Test
+        void generateAllUsesOneServerOrchestratedRunWithCurrentUser() throws Exception {
+                AuthUser user = user();
+                when(authService.currentUser("token")).thenReturn(user);
+                SourceUpdateDto dto = new SourceUpdateDto(200L, 10L, 1L, 2L,
+                                SourceUpdateStatus.READY_TO_APPLY, 1, "{}", List.of(),
+                                LocalDateTime.now(), LocalDateTime.now());
+                when(incrementalGenerationService.generateAll(10L, 200L, user)).thenReturn(dto);
+
+                mockMvc.perform(post("/api/projects/10/source-updates/200/generate-all")
+                                .header("Authorization", "token"))
+                                .andExpect(status().isOk()).andExpect(jsonPath("$.id").value(200L));
+                verify(incrementalGenerationService).generateAll(10L, 200L, user);
+        }
+
+        @Test
         void cancelUpdateReturnsNoContent() throws Exception {
                 AuthUser user = user();
                 when(authService.currentUser("token")).thenReturn(user);

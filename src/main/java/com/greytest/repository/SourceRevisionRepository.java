@@ -12,4 +12,6 @@ import com.greytest.entity.SourceRevision;
 public interface SourceRevisionRepository extends JpaRepository<SourceRevision, Long> {
     List<SourceRevision> findByProjectIdOrderByCreatedAtDesc(Long projectId);
     Optional<SourceRevision> findFirstByProjectIdOrderByCreatedAtDesc(Long projectId);
+    List<SourceRevision> findByStoragePath(String storagePath);
+    Optional<SourceRevision> findFirstByProjectIdAndStoragePath(Long projectId,String storagePath);
 }

@@ -50,16 +50,16 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ErrorResponse> handleMissingHeader(MissingRequestHeaderException e) {
         if ("Authorization".equalsIgnoreCase(e.getHeaderName())) {
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
-                    .body(new ErrorResponse("AUTH_ERROR", "Token dang nhap la bat buoc"));
+                    .body(new ErrorResponse("AUTH_ERROR", "Token đăng nhập là bắt buộc"));
         }
         return ResponseEntity.status(HttpStatus.BAD_REQUEST)
-                .body(new ErrorResponse("BAD_REQUEST", "Thieu header bat buoc: " + e.getHeaderName()));
+                .body(new ErrorResponse("BAD_REQUEST", "Thiếu header bắt buộc: " + e.getHeaderName()));
     }
 
     @ExceptionHandler(NoResourceFoundException.class)
     public ResponseEntity<ErrorResponse> handleNoResource(NoResourceFoundException e) {
         return ResponseEntity.status(HttpStatus.NOT_FOUND)
-                .body(new ErrorResponse("NOT_FOUND", "Endpoint khong ton tai"));
+                .body(new ErrorResponse("NOT_FOUND", "Endpoint không tồn tại"));
     }
 
     @ExceptionHandler(IllegalArgumentException.class)

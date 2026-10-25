@@ -14,6 +14,9 @@ import java.nio.file.Path;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.greytest.dto.AnalysisManifestDto;
@@ -54,6 +57,97 @@ import com.greytest.service.analysis.AnalysisService;
 import com.greytest.service.analysis.ExistingTestService;
 
 class GenerationContextBuilderTest {
+    @Test void nestedUpstreamReadsInsideOneSnapshotDoNotMutateComputeIfAbsent() {
+        mockCommonInputs(); stubApprovedUnitTestCase(11L);
+        var context=GenerationContextBuilder.withInputSnapshot(()->builder.buildUnitTestContext(1L,Set.of(30L)));
+        assertThat(context.approvedTestCases()).hasSize(1);
+        assertThat(context.approvedTestPlans()).hasSize(1);
+        assertThat(context.approvedBusinessRules()).hasSize(1);
+    }
+    @Test
+    void downstreamContextReadsFreshDraftOverlaysAndRejectsCrossProjectUpdate() throws Exception {
+        mockCommonInputs();
+        stubApprovedUnitTestCase(11L);
+        var updates = mock(com.greytest.repository.SourceUpdateRepository.class);
+        var proposals = mock(com.greytest.repository.SourceUpdateItemRepository.class);
+        var update = new com.greytest.entity.SourceUpdate(); update.setId(100L); update.setProjectId(1L);
+        when(updates.findByIdAndProjectId(100L, 1L)).thenReturn(java.util.Optional.of(update));
+        var br = draft(com.greytest.entity.enums.SourceUpdateTargetType.BUSINESS_RULE, 7L,
+                "{\"method_id\":11,\"description\":\"Draft business rule\",\"category\":\"VALIDATION\"}");
+        var plan = draft(com.greytest.entity.enums.SourceUpdateTargetType.TEST_PLAN, 20L,
+                "{\"method_id\":11,\"rule_id\":7,\"covered_rule_ids\":[7],\"title\":\"Draft plan\",\"description\":\"Draft plan detail\",\"test_type\":\"BOUNDARY\"}");
+        var testCase = draft(com.greytest.entity.enums.SourceUpdateTargetType.TEST_CASE, 30L,
+                "{\"plan_id\":20,\"test_type\":\"BOUNDARY\",\"description\":\"Draft case\",\"preconditions\":\"draft setup\",\"test_data\":{\"input\":{},\"mocks\":{}},\"expected_result\":\"Draft outcome\",\"priority\":\"HIGH\",\"trace_source\":\"BR-001 -> TP-001\"}");
+        when(proposals.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(100L)).thenReturn(List.of(br, plan, testCase));
+        builder.configureIncrementalInputs(null, updates, proposals, objectMapper);
+        try (var scope = com.greytest.service.GenerationJobContext.openScope(42L)) {
+            com.greytest.service.GenerationJobContext.setSourceUpdateId(100L);
+            var context = builder.buildUnitTestContext(1L, Set.of(30L));
+            assertThat(context.approvedBusinessRules().get(0).description()).isEqualTo("Draft business rule");
+            assertThat(context.approvedTestPlans().get(0).title()).isEqualTo("Draft plan");
+            assertThat(context.approvedTestCases().get(0).expectedResult()).isEqualTo("Draft outcome");
+            br.setAfterData(br.getAfterData().replace("Draft business rule", "Edited by user"));
+            assertThat(builder.buildTestPlanContext(1L, Set.of(7L)).approvedBusinessRules().get(0).description()).isEqualTo("Edited by user");
+            br.setReviewStatus(com.greytest.entity.enums.SourceUpdateReviewStatus.REJECTED);
+            assertThat(builder.buildTestPlanContext(1L, Set.of(7L)).approvedBusinessRules().get(0).description()).isNotEqualTo("Edited by user");
+            br.setReviewStatus(com.greytest.entity.enums.SourceUpdateReviewStatus.ACCEPTED);
+            br.setAction(com.greytest.entity.enums.SourceUpdateAction.KEEP);
+            assertThat(builder.buildTestPlanContext(1L, Set.of(7L)).approvedBusinessRules().get(0).description()).isNotEqualTo("Edited by user");
+            when(updates.findByIdAndProjectId(100L, 1L)).thenReturn(java.util.Optional.empty());
+            assertThatThrownBy(() -> builder.buildTestPlanContext(1L, Set.of(7L))).isInstanceOf(IllegalArgumentException.class);
+        }
+    }
+
+    @Test void pendingInputsAreAvailableOnlyInsideTheirIncrementalDraftScope() {
+        mockCommonInputs(); stubApprovedUnitTestCase(11L);
+        businessRuleRepository.findByProjectId(1L).get(0).setStatus(ReviewStatus.PENDING_REVIEW);
+        testPlanRepository.findByProjectId(1L).get(0).setStatus(ReviewStatus.PENDING_REVIEW);
+        testCaseRepository.findByTestPlanId(20L).get(0).setStatus(ReviewStatus.PENDING_REVIEW);
+        var updates = mock(com.greytest.repository.SourceUpdateRepository.class);
+        var proposals = mock(com.greytest.repository.SourceUpdateItemRepository.class);
+        var update = new com.greytest.entity.SourceUpdate(); update.setId(100L); update.setProjectId(1L);
+        when(updates.findByIdAndProjectId(100L, 1L)).thenReturn(java.util.Optional.of(update));
+        builder.configureIncrementalInputs(null, updates, proposals, objectMapper);
+
+        assertThatThrownBy(() -> builder.buildTestPlanContext(1L, Set.of(7L)))
+                .isInstanceOf(com.greytest.exception.InvalidProjectStatusException.class);
+        try (var scope = com.greytest.service.GenerationJobContext.openScope(42L)) {
+            com.greytest.service.GenerationJobContext.setSourceUpdateId(100L);
+            var context = builder.buildUnitTestContext(1L, Set.of(30L));
+            assertThat(context.approvedBusinessRules()).extracting("id").containsExactly(7L);
+            assertThat(context.approvedTestPlans()).extracting("id").containsExactly(20L);
+            assertThat(context.approvedTestCases()).extracting("id").containsExactly(30L);
+        }
+        assertThatThrownBy(() -> builder.buildTestPlanContext(1L, Set.of(7L)))
+                .isInstanceOf(com.greytest.exception.InvalidProjectStatusException.class);
+    }
+
+    @Test void inputSnapshotReadsUpstreamOnceAndNestedScopeReadsFresh() {
+        mockCommonInputs(); stubApprovedUnitTestCase(11L);
+        var first=builder.buildTestPlanContext(1L,Set.of(7L)).approvedBusinessRules().get(0).description();
+        GenerationContextBuilder.withInputSnapshot(()-> {
+            assertThat(builder.buildTestPlanContext(1L,Set.of(7L)).approvedBusinessRules().get(0).description()).isEqualTo(first);
+            var changed=new BusinessRule(); changed.setId(7L); changed.setMethodId(11L); changed.setRuleCode("BR-001");
+            changed.setStatus(ReviewStatus.APPROVED); changed.setDescription("fresh upstream revision");
+            when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(changed));
+            assertThat(builder.buildTestPlanContext(1L,Set.of(7L)).approvedBusinessRules().get(0).description()).isEqualTo(first);
+            GenerationContextBuilder.withInputSnapshot(()-> {
+                assertThat(builder.buildTestPlanContext(1L,Set.of(7L)).approvedBusinessRules().get(0).description()).isEqualTo("fresh upstream revision");
+                return null;
+            });
+            assertThat(builder.buildTestPlanContext(1L,Set.of(7L)).approvedBusinessRules().get(0).description()).isEqualTo(first);
+            return null;
+        });
+        assertThat(builder.buildTestPlanContext(1L,Set.of(7L)).approvedBusinessRules().get(0).description()).isEqualTo("fresh upstream revision");
+    }
+
+    private com.greytest.entity.SourceUpdateItem draft(com.greytest.entity.enums.SourceUpdateTargetType type, long id, String data) {
+        var item = new com.greytest.entity.SourceUpdateItem(); item.setSourceUpdateId(100L);
+        item.setTargetType(type); item.setTargetId(id); item.setAfterData(data);
+        item.setAction(com.greytest.entity.enums.SourceUpdateAction.UPDATE);
+        item.setReviewStatus(com.greytest.entity.enums.SourceUpdateReviewStatus.ACCEPTED);
+        return item;
+    }
 
     private final AnalysisService analysisService = mock(AnalysisService.class);
     private final AnalysisManifestService manifestService = mock(AnalysisManifestService.class);
@@ -63,6 +157,7 @@ class GenerationContextBuilderTest {
     private final TestPlanCoveredRuleRepository testPlanCoveredRuleRepository = mock(TestPlanCoveredRuleRepository.class);
     private final TestCaseRepository testCaseRepository = mock(TestCaseRepository.class);
     private final UnitTestRepository unitTestRepository = mock(UnitTestRepository.class);
+    private final com.greytest.repository.ProjectRepository projectRepository = mock(com.greytest.repository.ProjectRepository.class);
     private final GenerationContextBuilder builder = new GenerationContextBuilder(
             analysisService,
             manifestService,
@@ -71,8 +166,292 @@ class GenerationContextBuilderTest {
             testPlanRepository,
             testPlanCoveredRuleRepository,
             testCaseRepository,
-            unitTestRepository);
+            unitTestRepository,
+            projectRepository);
     private final ObjectMapper objectMapper = new ObjectMapper();
+
+    @Test
+    void carriesRelatedResourcesThroughPlanCaseAndUnitContexts(@TempDir Path root) throws Exception {
+        mockCommonInputs();
+        stubApprovedUnitTestCase(11L);
+        writeSnapshotSource(root, "src/main/java/demo/UserService.java",
+                "package demo; class UserService { User createUser(String email) { return null; } }");
+        writeSnapshotSource(root, "src/main/resources/mapper.xml",
+                "<mapper namespace=\"demo.UserService\"><select id=\"find\">select 1</select></mapper>");
+        var project = new com.greytest.entity.Project(); project.setStoragePath(root.toString());
+        when(projectRepository.findById(1L)).thenReturn(java.util.Optional.of(project));
+        for (Object context : List.of(builder.buildTestPlanContext(1L, Set.of(7L)),
+                builder.buildTestCaseContext(1L, Set.of(20L)), builder.buildUnitTestContext(1L, Set.of(30L)))) {
+            var json = objectMapper.valueToTree(context);
+            assertThat(json.has("supportingResources")).isTrue();
+            assertThat(json.get("supportingResources").toString()).contains("mapper.xml", "select 1");
+        }
+    }
+
+    @Test
+    void candidateContextsReadCandidateResourcesAndKeepMissingEvidenceWarnings(@TempDir Path root) throws Exception {
+        mockCommonInputs();
+        stubApprovedUnitTestCase(11L);
+        Path active = root.resolve("active");
+        Path candidate = root.resolve("candidate");
+        String javaSource = "package demo; class UserService { User createUser(String email) { return null; } }";
+        writeSnapshotSource(active, "src/main/java/demo/UserService.java", javaSource);
+        writeSnapshotSource(candidate, "src/main/java/demo/UserService.java", javaSource);
+        writeSnapshotSource(active, "src/main/resources/mapper.xml",
+                "<mapper namespace=\"demo.UserService\"><select id=\"find\">active only</select></mapper>");
+        writeSnapshotSource(candidate, "src/main/resources/mapper.xml",
+                "<mapper namespace=\"demo.UserService\"><select id=\"find\">candidate only<include refid=\"missing\"/></select></mapper>");
+        var project = new com.greytest.entity.Project();
+        project.setStoragePath(active.toString());
+        when(projectRepository.findById(1L)).thenReturn(java.util.Optional.of(project));
+
+        for (Object context : List.of(builder.buildSnapshotTestPlanContext(1L, Set.of(7L), candidate),
+                builder.buildSnapshotTestCaseContext(1L, Set.of(20L), candidate),
+                builder.buildSnapshotUnitTestContext(1L, Set.of(30L), candidate))) {
+            var json = objectMapper.valueToTree(context);
+            assertThat(json.path("supportingResources").toString()).contains("candidate only").doesNotContain("active only");
+            assertThat(json.path("contextWarnings").toString()).contains("missing");
+        }
+    }
+
+    @Test
+    void reusesStoredAnalysisOnlyWithinOneGenerationJob() {
+        mockCommonInputs();
+        com.greytest.service.GenerationJobContext.bind(42L, ignored -> { });
+        try {
+            builder.buildBusinessRuleGenerationContext(1L, Set.of(11L));
+            builder.buildBusinessRuleGenerationContext(1L, Set.of(11L));
+            org.mockito.Mockito.verify(analysisService).getAnalysisResult(1L);
+        } finally {
+            com.greytest.service.GenerationJobContext.clear();
+        }
+        builder.buildBusinessRuleGenerationContext(1L, Set.of(11L));
+        org.mockito.Mockito.verify(analysisService, org.mockito.Mockito.times(2)).getAnalysisResult(1L);
+    }
+
+    @Test
+    void sourceCacheSeparatesSnapshotsAndRefreshesNextJob(@TempDir Path root) throws Exception {
+        mockCommonInputs();
+        Path first = root.resolve("first");
+        Path second = root.resolve("second");
+        String relative = "src/main/java/demo/UserService.java";
+        String original = "package demo; class UserService { User createUser(String email) { throw new IllegalArgumentException(\"original\"); } }";
+        String changed = original.replace("original", "changed");
+        writeSnapshotSource(first, relative, original);
+        writeSnapshotSource(second, relative, changed);
+        com.greytest.service.GenerationJobContext.bind(42L, ignored -> { });
+        try {
+            assertThat(builder.buildSnapshotTestPlanContext(1L, Set.of(7L), first).classes())
+                    .anySatisfy(c -> assertThat(c.sourceCode()).contains("original"));
+            writeSnapshotSource(first, relative, changed);
+            assertThat(builder.buildSnapshotTestPlanContext(1L, Set.of(7L), first).classes())
+                    .anySatisfy(c -> assertThat(c.sourceCode()).contains("changed"));
+            assertThat(builder.buildSnapshotTestPlanContext(1L, Set.of(7L), second).classes())
+                    .anySatisfy(c -> assertThat(c.sourceCode()).contains("changed"));
+            var updatedRule = ruleEntity(7L, 11L, ReviewStatus.APPROVED);
+            updatedRule.setDescription("Updated rule within job");
+            when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(updatedRule));
+            assertThat(builder.buildSnapshotTestPlanContext(1L, Set.of(7L), first).approvedBusinessRules())
+                    .extracting("description").containsExactly("Updated rule within job");
+        } finally {
+            com.greytest.service.GenerationJobContext.clear();
+        }
+        assertThat(builder.buildSnapshotTestPlanContext(1L, Set.of(7L), first).classes())
+                .anySatisfy(c -> assertThat(c.sourceCode()).contains("changed"));
+    }
+
+    @Test
+    void cachedActiveAnalysisCannotBypassStrictSnapshotValidation(@TempDir Path root) throws Exception {
+        mockCommonInputs();
+        writeSnapshotSource(root, "src/main/java/demo/UserService.java",
+                "package demo; class UserService { User createUser(String email) { return null; } }");
+        writeSnapshotSource(root, "src/main/java/demo/Broken.java", "class Broken { invalid java");
+        var project = new com.greytest.entity.Project();
+        project.setStoragePath(root.toString());
+        when(projectRepository.findById(1L)).thenReturn(java.util.Optional.of(project));
+        com.greytest.service.GenerationJobContext.bind(42L, ignored -> { });
+        try {
+            builder.buildTestPlanContext(1L, Set.of(7L));
+            assertThatThrownBy(() -> builder.buildSnapshotTestPlanContext(1L, Set.of(7L), root))
+                    .isInstanceOf(LlmResponseException.class);
+        } finally {
+            com.greytest.service.GenerationJobContext.clear();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"same-package", "wildcard"})
+    void businessRuleDependenciesAndResourcesPreferTheTargetModule(String layout, @TempDir Path root) throws Exception {
+        mockCommonInputs();
+        var project = new com.greytest.entity.Project(); project.setStoragePath(root.toString());
+        when(projectRepository.findById(1L)).thenReturn(java.util.Optional.of(project));
+        var base = analysis();
+        var old = base.classes().get(1);
+        String repoPackage = layout.equals("wildcard") ? "demo.model" : "demo";
+        String repoType = repoPackage + ".Repo";
+        String repoPath = repoPackage.replace('.', '/') + "/Repo.java";
+        var service = new JavaClassDto(10L, "demo", "UserService", "demo.UserService", "SERVICE",
+                "module-b/src/main/java/demo/UserService.java", "package demo; import " + repoPackage
+                        + ".*; class UserService { Repo repo; }", List.of(), old.methods());
+        var wrong = new JavaClassDto(80L, repoPackage, "Repo", repoType, "OTHER", "module-a/src/main/java/" + repoPath,
+                "package " + repoPackage + "; class Repo { @org.springframework.beans.factory.annotation.Value(\"${limit}\") int limit; String wrong; }", List.of(), List.of());
+        var correct = new JavaClassDto(81L, repoPackage, "Repo", repoType, "OTHER", "module-b/src/main/java/" + repoPath,
+                "package " + repoPackage + "; class Repo { @org.springframework.beans.factory.annotation.Value(\"${limit}\") int limit; String correct; }", List.of(), List.of());
+        when(analysisService.getAnalysisResult(1L)).thenReturn(new AnalysisResultDto(base.projectId(), base.projectName(), base.status(),
+                3, base.totalMethods(), 0, 0, 0, 0, 3, 3, 0, List.of(), List.of(service, wrong, correct), List.of(), List.of()));
+        for (String module : List.of("module-a", "module-b")) Files.createDirectories(root.resolve(module + "/src/main/resources"));
+        Files.writeString(root.resolve("module-a/src/main/resources/application.properties"), "limit=111\n");
+        Files.writeString(root.resolve("module-b/src/main/resources/application.properties"), "limit=222\n");
+
+        var context = builder.buildBusinessRuleGenerationContext(1L, Set.of(11L));
+
+        assertThat(context.classes()).filteredOn(type -> type.qualifiedName().equals(repoType))
+                .singleElement().satisfies(type -> assertThat(type.sourceCode()).contains("correct").doesNotContain("wrong"));
+        assertThat(objectMapper.valueToTree(context).path("supportingResources").toString()).contains("222").doesNotContain("111");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"module-b", "common"})
+    void businessRulesResolveImplementationImportsAcrossFolders(String contractModule) {
+        mockCommonInputs();
+        var base = analysisWithServiceSource("package demo; import demo.contract.Lookup; class UserService { Lookup lookup; }");
+        var previous = base.classes().get(1);
+        var service = new JavaClassDto(previous.id(), previous.packageName(), previous.className(), previous.qualifiedName(),
+                previous.classType(), "module-b/src/main/java/demo/UserService.java", previous.sourceCode(), previous.annotations(), previous.methods());
+        var contract = new JavaClassDto(80L, "demo.contract", "Lookup", "demo.contract.Lookup", "OTHER",
+                contractModule + "/src/main/java/demo/contract/Lookup.java", "package demo.contract; interface Lookup {}", List.of(), List.of());
+        var implementation = new JavaClassDto(81L, "demo.persistence", "JdbcLookup", "demo.persistence.JdbcLookup", "OTHER",
+                "module-b/src/main/java/demo/persistence/JdbcLookup.java", "package demo.persistence; import demo.contract.*; class JdbcLookup implements Lookup {}", List.of(), List.of());
+        var other = new JavaClassDto(82L, "demo.persistence", "JdbcLookup", "demo.persistence.JdbcLookup", "OTHER",
+                "module-a/src/main/java/demo/persistence/JdbcLookup.java", implementation.sourceCode(), List.of(), List.of());
+        when(analysisService.getAnalysisResult(1L)).thenReturn(new AnalysisResultDto(base.projectId(), base.projectName(), base.status(),
+                4, base.totalMethods(), 0, 0, 0, 0, 4, 4, 0, List.of(), List.of(service, contract, other, implementation), List.of(), List.of()));
+
+        assertThat(builder.buildBusinessRuleGenerationContext(1L, Set.of(11L)).classes())
+                .filteredOn(type -> type.qualifiedName().equals("demo.persistence.JdbcLookup"))
+                .singleElement().satisfies(type -> assertThat(type.filePath()).startsWith("module-b/"));
+    }
+
+    @Test
+    void businessRulesReceiveRelatedImplementationsResourcesAndExistingTests(@TempDir Path root) throws Exception {
+        mockCommonInputs();
+        var project = new com.greytest.entity.Project();
+        project.setStoragePath(root.toString());
+        when(projectRepository.findById(1L)).thenReturn(java.util.Optional.of(project));
+        var base = analysis();
+        var method = new JavaMethodDto(11L, "createUser", "void", List.of(), List.of(), "PUBLIC",
+                "void createUser() { lookup.find(); }", 1, 1, List.of(), List.of());
+        var service = new JavaClassDto(10L, "demo", "UserService", "demo.UserService", "SERVICE",
+                "src/main/java/demo/UserService.java",
+                "package demo; import demo.repo.Lookup; class UserService { Lookup lookup; "
+                        + "@org.springframework.beans.factory.annotation.Value(\"${article.limit:10}\") int limit; "
+                        + method.sourceCode() + " }", List.of(), List.of(method));
+        var repository = new JavaClassDto(81L, "demo.repo", "Lookup", "demo.repo.Lookup", "OTHER",
+                "src/main/java/demo/repo/Lookup.java", "package demo.repo; interface Lookup { void find(); }", List.of(), List.of());
+        var implementation = new JavaClassDto(82L, "demo.repo", "JdbcLookup", "demo.repo.JdbcLookup", "OTHER",
+                "src/main/java/demo/repo/JdbcLookup.java",
+                "package demo.repo; class JdbcLookup implements Lookup { ArticleMapper mapper; public void find() { mapper.find(); } }",
+                List.of(), List.of());
+        var mapper = new JavaClassDto(83L, "demo.repo", "ArticleMapper", "demo.repo.ArticleMapper", "OTHER",
+                "src/main/java/demo/repo/ArticleMapper.java", "package demo.repo; interface ArticleMapper { void find(); }", List.of(), List.of());
+        when(analysisService.getAnalysisResult(1L)).thenReturn(new AnalysisResultDto(
+                base.projectId(), base.projectName(), base.status(), 4, 1, 0, 0, 0, 1, 4, 4, 0,
+                List.of(), List.of(service, repository, implementation, mapper), List.of(), List.of()));
+        Path resources = root.resolve("src/main/resources");
+        Files.createDirectories(resources.resolve("mapper"));
+        Files.writeString(resources.resolve("mapper/ArticleMapper.xml"),
+                "<!DOCTYPE mapper PUBLIC \"-//mybatis.org//DTD Mapper 3.0//EN\" \"https://mybatis.org/dtd/mybatis-3-mapper.dtd\">"
+                        + "<mapper namespace=\"demo.repo.ArticleMapper\"><select id=\"find\">select coalesce(count(*), 0) from articles</select></mapper>");
+        Files.writeString(resources.resolve("mapper/Unrelated.xml"), "<mapper namespace=\"other.Mapper\"><select id=\"find\">unrelated-query</select></mapper>");
+        Files.writeString(resources.resolve("application.yml"), "article:\n  limit: 12\nspring:\n  datasource:\n    password: do-not-send\nunrelated: unrelated-value\n");
+        Files.writeString(resources.resolve("application-test.properties"), "article.limit=20\napi.secret=do-not-send\n");
+        var unrelated = new ExistingTestDto(90L, 1L, "src/test/java/other/OtherTest.java", "other", "OtherTest",
+                99L, null, List.of(), List.of(), "class OtherTest {}", null);
+        when(existingTestService.list(1L)).thenReturn(List.of(existingTest(), unrelated));
+
+        var context = builder.buildBusinessRuleGenerationContext(1L, Set.of(11L));
+        var json = objectMapper.valueToTree(context);
+
+        assertThat(context.classes()).extracting("qualifiedName")
+                .contains("demo.repo.Lookup", "demo.repo.JdbcLookup", "demo.repo.ArticleMapper");
+        assertThat(context.classes().stream().flatMap(type -> type.methods().stream()).map(item -> item.id()))
+                .containsExactly(11L);
+        assertThat(context.existingTests()).extracting("testClassName").containsExactly("UserServiceTest");
+        assertThat(json.path("supportingResources").toString()).contains("coalesce(count(*)", "article.limit", "12", "20")
+                .doesNotContain("do-not-send", "unrelated-query", "unrelated-value");
+        assertThat(json.path("supportingResources").toString()).contains("mapper/ArticleMapper.xml", "application.yml", "application-test.properties");
+    }
+
+    @Test
+    void businessRuleResourcesStayInTheSelectedModuleAndDoNotExpandEntities(@TempDir Path root) throws Exception {
+        mockCommonInputs();
+        var project = new com.greytest.entity.Project(); project.setStoragePath(root.toString());
+        when(projectRepository.findById(1L)).thenReturn(java.util.Optional.of(project));
+        var base = analysisWithServiceSource("package demo; class UserService { @org.springframework.beans.factory.annotation.Value(\"${limit:5}\") int limit; }");
+        var previous = base.classes().get(1);
+        var service = new JavaClassDto(previous.id(), previous.packageName(), previous.className(), previous.qualifiedName(),
+                previous.classType(), "orders/src/main/java/demo/UserService.java", previous.sourceCode(), previous.annotations(), previous.methods());
+        when(analysisService.getAnalysisResult(1L)).thenReturn(new AnalysisResultDto(
+                base.projectId(), base.projectName(), base.status(), 1, 2, 0, 0, 0, 0, 1, 1, 0,
+                List.of(), List.of(service), List.of(), List.of()));
+        Path resources = root.resolve("orders/src/main/resources");
+        Files.createDirectories(resources);
+        Files.writeString(resources.resolve("application.properties"), "limit=7\n");
+        Path other = root.resolve("payments/src/main/resources"); Files.createDirectories(other);
+        Files.writeString(other.resolve("application.properties"), "limit=9999\n");
+        Files.writeString(resources.resolve("evil.xml"), "<!DOCTYPE mapper [<!ENTITY leak SYSTEM \"file:///not-allowed\">]>"
+                + "<mapper namespace=\"demo.UserService\"><select id=\"find\">&leak;</select></mapper>");
+
+        var json = objectMapper.valueToTree(builder.buildBusinessRuleGenerationContext(1L, Set.of(11L)));
+
+        assertThat(json.path("supportingResources").toString()).contains("limit", "7").doesNotContain("9999", "file:///not-allowed");
+        assertThat(json.path("contextWarnings").toString()).contains("evil.xml");
+    }
+
+    @ParameterizedTest
+    @CsvSource({"int, get", "Integer, get", "long, getOrDefault", "boolean, get"})
+    void everyGenerationStageReceivesTheSameDeclaredTypesAndReachedHelpers(String fieldType, String lookup) {
+        mockCommonInputs();
+        stubApprovedUnitTestCase(11L);
+        BusinessRule rule = ruleEntity(7L, 11L, ReviewStatus.APPROVED);
+        rule.setIsModified(true);
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(rule));
+        String helper = "private void enrich(Payload item) { item.setCount(counts." + lookup
+                + "(item.getId()" + (lookup.equals("getOrDefault") ? ", 0L" : "") + ")); }";
+        String serviceSource = "package demo; import demo.model.Payload; import java.util.Map; "
+                + "class UserService { Map<String, " + (fieldType.equals("boolean") ? "Boolean" : fieldType.equals("long") ? "Long" : "Integer")
+                + "> counts; void createUser(Payload item) { enrich(item); } " + helper + " }";
+        AnalysisResultDto base = analysisWithServiceSource(serviceSource);
+        JavaClassDto payload = new JavaClassDto(80L, "demo.model", "Payload", "demo.model.Payload", "OTHER",
+                "src/main/java/demo/model/Payload.java",
+                "package demo.model; @lombok.Data class Payload extends BasePayload { private " + fieldType + " count; }",
+                List.of(), List.of());
+        JavaClassDto parent = new JavaClassDto(81L, "demo.model", "BasePayload", "demo.model.BasePayload", "OTHER",
+                "src/main/java/demo/model/BasePayload.java",
+                "package demo.model; class BasePayload { String id; public String getId() { return id; } }",
+                List.of(), List.of());
+        JavaClassDto unrelated = new JavaClassDto(82L, "other", "Payload", "other.Payload", "OTHER",
+                "src/main/java/other/Payload.java", "package other; class Payload {}", List.of(), List.of());
+        when(analysisService.getAnalysisResult(1L)).thenReturn(new AnalysisResultDto(
+                base.projectId(), base.projectName(), base.status(), 5, base.totalMethods(), 0, 0, 0, 0, 5, 5, 0,
+                List.of(), List.of(base.classes().get(0), base.classes().get(1), payload, parent, unrelated), List.of(), List.of()));
+
+        var stages = List.of(
+                builder.buildBusinessRuleGenerationContext(1L, Set.of(11L)).classes(),
+                builder.buildBusinessRuleReviewContext(1L, Set.of(7L)).classes(),
+                builder.buildTestPlanContext(1L, Set.of(7L)).classes(),
+                builder.buildTestCaseContext(1L, Set.of(20L)).classes(),
+                builder.buildUnitTestContext(1L, Set.of(30L)).classes());
+
+        for (var classes : stages) {
+            assertThat(classes).extracting("qualifiedName")
+                    .containsExactly("demo.UserService", "demo.model.Payload", "demo.model.BasePayload");
+            assertThat(classes.get(0).sourceCode()).contains(helper);
+            assertThat(classes.get(1).sourceCode()).contains("private " + fieldType + " count;");
+            assertThat(classes.stream().flatMap(type -> type.methods().stream()).map(method -> method.id()))
+                    .containsExactly(11L);
+        }
+    }
 
     @Test
     void buildsDeterministicBusinessRuleGenerationContext() throws Exception {
@@ -85,7 +464,7 @@ class GenerationContextBuilderTest {
         assertThat(second).isEqualTo(first);
         assertThat(first.length()).isLessThan(10_000);
         assertThat(context.analysis().totalClasses()).isEqualTo(2);
-        assertThat(context.existingTests()).isEmpty();
+        assertThat(context.existingTests()).extracting("testClassName").containsExactly("UserServiceTest");
         assertThat(context.serviceRepositoryRelations()).extracting("serviceQualifiedName")
                 .containsExactly("demo.UserService");
         assertThat(context.controllerServiceRelations()).isEmpty();
@@ -268,6 +647,57 @@ class GenerationContextBuilderTest {
     }
 
     @Test
+    void planAndCaseContextsUseFullActiveSourceWithoutChangingIds(@TempDir Path snapshot) throws Exception {
+        mockCommonInputs();
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(ruleEntity(7L, 11L, ReviewStatus.APPROVED)));
+        when(testPlanRepository.findByProjectId(1L)).thenReturn(List.of(testPlan(20L, 7L, "TP-001")));
+        var project = new com.greytest.entity.Project(); project.setStoragePath(snapshot.toString());
+        when(projectRepository.findById(1L)).thenReturn(java.util.Optional.of(project));
+        Path source = snapshot.resolve("src/main/java/demo/UserService.java");
+        Files.createDirectories(source.getParent());
+        Files.writeString(source, "package demo; import demo.crypto.Hasher; class UserService { "
+                + "private static final Hasher encoder = new Hasher(); private UserRepository repository; "
+                + "User createUser(String email) { return null; } User updateUser() { return null; } }");
+
+        var plan = builder.buildTestPlanContext(1L, Set.of(7L));
+        var cases = builder.buildTestCaseContext(1L, Set.of(20L));
+
+        for (var classes : List.of(plan.classes(), cases.classes())) {
+            assertThat(classes).singleElement().satisfies(service -> {
+                assertThat(service.id()).isEqualTo(10L);
+                assertThat(service.methods()).extracting("id").containsExactly(11L);
+                assertThat(service.sourceCode()).contains("import demo.crypto.Hasher", "static final Hasher encoder");
+            });
+        }
+        assertThat(analysisService.getAnalysisResult(1L).classes().stream()
+                .filter(sourceClass -> sourceClass.qualifiedName().equals("demo.UserService")).findFirst().orElseThrow().sourceCode())
+                .doesNotContain("Hasher");
+    }
+
+    @Test
+    void stagedAddedMethodUsesCandidateForPlanAndCaseBeforeApply(@TempDir Path workspace) throws Exception {
+        mockCommonInputs();
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(ruleEntity(7L, 11L, ReviewStatus.APPROVED)));
+        when(testPlanRepository.findByProjectId(1L)).thenReturn(List.of(testPlan(20L, 7L, "TP-001")));
+        Path active = workspace.resolve("active"), candidate = workspace.resolve("candidate");
+        for (Path root : List.of(active, candidate)) Files.createDirectories(root.resolve("src/main/java/demo"));
+        Files.writeString(active.resolve("src/main/java/demo/UserService.java"), "package demo; class UserService {} ");
+        Files.writeString(candidate.resolve("src/main/java/demo/UserService.java"),
+                "package demo; class UserService { private final Hasher encoder = new Hasher(); User createUser(String email) { return null; } }");
+        var project = new com.greytest.entity.Project(); project.setStoragePath(active.toString());
+        when(projectRepository.findById(1L)).thenReturn(java.util.Optional.of(project));
+
+        var plan = builder.buildSnapshotTestPlanContext(1L, Set.of(7L), candidate);
+        var cases = builder.buildSnapshotTestCaseContext(1L, Set.of(20L), candidate);
+        for (var classes : List.of(plan.classes(), cases.classes())) {
+            assertThat(classes).singleElement().satisfies(service -> {
+                assertThat(service.sourceCode()).contains("final Hasher encoder", "createUser");
+                assertThat(service.methods()).extracting("id").containsExactly(11L);
+            });
+        }
+    }
+
+    @Test
     void testPlanContextUsesOnlyApprovedRuleMethods() {
         mockCommonInputs();
         BusinessRule approved = ruleEntity(7L, 11L, ReviewStatus.APPROVED);
@@ -324,6 +754,7 @@ class GenerationContextBuilderTest {
         assertThat(context.approvedBusinessRules()).extracting("id").containsExactly(7L);
         assertThat(context.classes()).extracting("className").containsExactly("UserService");
         assertThat(context.classes().get(0).methods()).extracting("id").containsExactly(11L);
+        assertThat(context.classes().get(0).sourceCode()).contains("private UserRepository repository");
         assertThat(context.existingTests()).extracting("testClassName").containsExactly("UserServiceTest");
     }
 

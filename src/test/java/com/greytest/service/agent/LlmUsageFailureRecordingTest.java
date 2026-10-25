@@ -58,7 +58,7 @@ class LlmUsageFailureRecordingTest {
 
             assertThatThrownBy(() -> client.complete("# Prompt: unit-test"))
                     .isInstanceOf(LlmResponseException.class)
-                    .hasMessageContaining("khong co text output");
+                    .hasMessageContaining("không có text output");
 
             JsonNode summary = objectMapper.readTree(
                     tempDirectory.resolve("failed-output-run/summary.json").toFile());

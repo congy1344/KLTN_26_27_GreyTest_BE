@@ -15,6 +15,7 @@ import org.springframework.stereotype.Service;
 
 import com.greytest.entity.Project;
 import com.greytest.repository.ProjectRepository;
+import com.greytest.service.GenerationJobContext;
 
 /** Đọc cấu hình build để chọn Java và test framework phù hợp khi sinh Unit Test. */
 @Service
@@ -169,7 +170,132 @@ public class ProjectJavaVersionDetector {
         }
     }
 
+    /** Cung cấp build thật của module và các cấp cha để AI đối chiếu dependency/exclusion, không đoán thư viện fixture. */
+    public java.util.Map<String, String> buildEvidence(Long projectId, List<String> sourcePaths) {
+        return projectRoot(projectId).map(root -> snapshotBuildEvidence(root, sourcePaths)).orElse(java.util.Map.of());
+    }
+
+    public java.util.Map<String, String> snapshotBuildEvidence(Path snapshot, List<String> sourcePaths) {
+        Path root = snapshot.toAbsolutePath().normalize();
+        if (sourcePaths == null || sourcePaths.isEmpty()) return java.util.Map.of();
+        List<Path> sources = sourcePaths.stream().filter(path -> path != null && !path.isBlank())
+                .map(path -> root.resolve(path).normalize()).filter(path -> path.startsWith(root)).toList();
+        var evidence = new java.util.LinkedHashMap<String, String>();
+        int remaining = 64_000;
+        for (Path build : buildFiles(root)) {
+            if (sources.stream().noneMatch(source -> source.startsWith(build.getParent()))) continue;
+            String content = readBuildSource(build).orElse("");
+            if (content.isBlank() || content.length() > remaining) continue;
+            evidence.put(root.relativize(build).toString().replace('\\', '/'), content);
+            remaining -= content.length();
+        }
+        return java.util.Collections.unmodifiableMap(evidence);
+    }
+
+    /** Chỉ dùng version có bằng chứng trong build của module; không lấy Mockito của GreyTest. */
+    public Optional<MockitoVersionInfo> detectMockitoVersion(Long projectId, List<String> sourcePaths) {
+        return projectRoot(projectId).flatMap(root -> detectSnapshotMockitoVersion(root, sourcePaths));
+    }
+
+    public Optional<MockitoVersionInfo> detectSnapshotMockitoVersion(Path snapshot, List<String> sourcePaths) {
+        Path root = snapshot.toAbsolutePath().normalize();
+        List<Path> builds = buildFiles(root);
+        List<String> paths = sourcePaths == null || sourcePaths.isEmpty() ? List.of("pom.xml") : sourcePaths;
+        List<MockitoVersionInfo> detected = new ArrayList<>();
+        for (String path : paths) {
+            if (path == null || path.isBlank()) continue;
+            Path source = root.resolve(path).normalize();
+            if (!source.startsWith(root)) return Optional.empty();
+            List<Path> ancestors = builds.stream().filter(file -> source.startsWith(file.getParent()))
+                    .sorted(Comparator.comparingInt(Path::getNameCount).reversed()).toList();
+            Optional<MockitoVersionInfo> info = mockitoVersion(root, ancestors);
+            if (info.isEmpty()) return Optional.empty();
+            detected.add(info.get());
+        }
+        if (detected.isEmpty()) return Optional.empty();
+        return detected.stream().allMatch(info -> info.major() == detected.get(0).major()
+                && info.supportsNoInteractions() == detected.get(0).supportsNoInteractions())
+                ? Optional.of(detected.get(0)) : Optional.empty();
+    }
+
+    private Optional<MockitoVersionInfo> mockitoVersion(Path root, List<Path> builds) {
+        var properties = new java.util.HashMap<String, String>();
+        var propertyFiles = new java.util.HashMap<String, Path>();
+        var sources = new java.util.HashMap<Path, String>();
+        for (Path build : builds) {
+            String source = readBuildSource(build).orElse("");
+            // Không có effective POM/profile activation: dùng API portable thay vì đoán version.
+            if (source.matches("(?s).*<profiles\\b.*")) return Optional.empty();
+            sources.put(build, source.replaceAll("(?s)<build\\b[^>]*>.*?</build>", "")
+                    .replaceAll("(?s)<reporting\\b[^>]*>.*?</reporting>", ""));
+        }
+        for (int index = builds.size() - 1; index >= 0; index--) {
+            Path build = builds.get(index);
+            String source = sources.get(build);
+            Matcher block = Pattern.compile("(?s)<properties>(.*?)</properties>").matcher(source);
+            while (block.find()) {
+                Matcher property = Pattern.compile("<([\\w.-]+)>\\s*([^<>]+?)\\s*</\\1>").matcher(block.group(1));
+                while (property.find()) {
+                    properties.put(property.group(1), property.group(2).trim()); propertyFiles.put(property.group(1), build);
+                }
+            }
+            Matcher gradleProperty = Pattern.compile("(?:val |def |ext\\.)?([\\w]+)\\s*=\\s*['\"]([^'\"]+)['\"]").matcher(source);
+            while (gradleProperty.find()) properties.put(gradleProperty.group(1), gradleProperty.group(2));
+        }
+        for (Path build : builds) {
+            String source = sources.get(build);
+            List<String> versions = new ArrayList<>();
+            Matcher dependency = Pattern.compile("(?s)<dependency>(.*?)</dependency>").matcher(source);
+            while (dependency.find()) {
+                String value = dependency.group(1);
+                if (!value.matches("(?s).*<groupId>\\s*org\\.mockito\\s*</groupId>.*")
+                        || !value.matches("(?s).*<artifactId>\\s*mockito-(core|inline|junit-jupiter|bom)\\s*</artifactId>.*")) continue;
+                Matcher version = Pattern.compile("<version>\\s*([^<]+)\\s*</version>").matcher(value);
+                if (version.find()) versions.add(version.group(1).trim());
+            }
+            Matcher gradle = Pattern.compile("org\\.mockito:mockito-(?:core|inline|junit-jupiter|bom):([^'\"\\s)]+)").matcher(source);
+            while (gradle.find()) versions.add(gradle.group(1));
+            if (!versions.isEmpty()) {
+                List<String> resolved = versions.stream().map(version -> resolveMockitoVersion(version, properties)).toList();
+                if (resolved.stream().anyMatch(version -> !version.matches("[1-9][0-9]*\\.[0-9]+(?:[.\\w-]*)"))) return Optional.empty();
+                var info = new MockitoVersionInfo(resolved.get(0), root.relativize(build).toString());
+                return resolved.stream().map(version -> new MockitoVersionInfo(version, info.buildFile()))
+                        .allMatch(other -> other.major() == info.major() && other.supportsNoInteractions() == info.supportsNoInteractions())
+                        ? Optional.of(info) : Optional.empty();
+            }
+        }
+        if (properties.containsKey("mockito.version")) {
+            String version = resolveMockitoVersion(properties.get("mockito.version"), properties);
+            return version.matches("[1-9][0-9]*\\.[0-9]+(?:[.\\w-]*)")
+                    ? Optional.of(new MockitoVersionInfo(version, root.relativize(propertyFiles.get("mockito.version")).toString())) : Optional.empty();
+        }
+        for (Path build : builds) {
+            Matcher boot = SPRING_BOOT_PARENT.matcher(sources.get(build));
+            if (boot.find() && "2".equals(boot.group(1)) && Integer.parseInt(boot.group(2)) <= 1)
+                return Optional.of(new MockitoVersionInfo("2.x", root.relativize(build).toString()));
+        }
+        return Optional.empty();
+    }
+
+    private String resolveMockitoVersion(String value, java.util.Map<String, String> properties) {
+        for (int step = 0; step < 10; step++) {
+            String key = value.startsWith("${") && value.endsWith("}") ? value.substring(2, value.length() - 1)
+                    : value.startsWith("$") ? value.substring(1) : null;
+            if (key == null || !properties.containsKey(key)) break;
+            value = properties.get(key);
+        }
+        return value;
+    }
+
     private List<Path> buildFiles(Path root) {
+        return GenerationJobContext.memoize(new BuildFilesKey(root.toAbsolutePath().normalize()),
+                () -> scanBuildFiles(root));
+    }
+
+    private record BuildFilesKey(Path root) { }
+    private record BuildSourceKey(Path file) { }
+
+    private List<Path> scanBuildFiles(Path root) {
         List<Path> result = new ArrayList<>();
         try (Stream<Path> paths = Files.walk(root)) {
             paths.filter(Files::isRegularFile)
@@ -180,10 +306,15 @@ public class ProjectJavaVersionDetector {
         } catch (IOException ignored) {
             return List.of();
         }
-        return result;
+        return List.copyOf(result);
     }
 
     private Optional<String> readBuildSource(Path buildFile) {
+        return GenerationJobContext.memoize(new BuildSourceKey(buildFile.toAbsolutePath().normalize()),
+                () -> loadBuildSource(buildFile));
+    }
+
+    private Optional<String> loadBuildSource(Path buildFile) {
         try {
             if (Files.size(buildFile) > MAX_BUILD_FILE_BYTES) return Optional.empty();
             return Optional.of(stripComments(Files.readString(buildFile),
@@ -289,5 +420,12 @@ public class ProjectJavaVersionDetector {
     public enum TestFramework { JUNIT4, JUNIT5 }
 
     public record TestFrameworkInfo(TestFramework framework, String buildFile) {
+    }
+
+    public record MockitoVersionInfo(String version, String buildFile) {
+        public int major() { return Integer.parseInt(version.split("\\.")[0]); }
+        public boolean supportsNoInteractions() {
+            return major() > 3 || major() == 3 && !version.matches("3\\.0(?:\\.0)?(?:[-A-Za-z].*)?");
+        }
     }
 }

@@ -6,12 +6,16 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verifyNoInteractions;
 
 import java.time.LocalDate;
 import java.util.Optional;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 
 import com.greytest.dto.UserQuotaResponse;
 import com.greytest.entity.AuthUser;
@@ -123,5 +127,54 @@ class UserServiceTest {
         assertThat(response.used()).isEqualTo(100);
         assertThat(response.remaining()).isEqualTo(0);
         assertThat(response.exceeded()).isTrue();
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = UserTier.class, names = {"PLUS", "PRO"})
+    void cancelsPaidTierForCurrentUser(UserTier tier) {
+        AuthUser user = new AuthUser();
+        user.setId(42L);
+        user.setTier(tier);
+        when(authUserRepository.findById(42L)).thenReturn(Optional.of(user));
+        UsageQuota free = new UsageQuota();
+        free.setQuotaLimit(100);
+        free.setQuotaUsed(120);
+        free.setPeriodStart(LocalDate.of(2026, 10, 1));
+        when(usageQuotaService.downgradeToFree(42L)).thenReturn(free);
+        when(usageQuotaService.getDefaultLimit()).thenReturn(100);
+
+        UserQuotaResponse response = userService.cancelSubscription(user);
+
+        assertThat(user.getTier()).isEqualTo(UserTier.FREE);
+        assertThat(response.tier()).isEqualTo(UserTier.FREE);
+        assertThat(response.remaining()).isZero();
+        assertThat(response.used()).isEqualTo(120);
+        assertThat(response.resetDate()).isEqualTo(LocalDate.of(2026, 11, 1));
+        assertThat(response.exceeded()).isTrue();
+        verify(authUserRepository).save(user);
+        verify(userActivityService).record(eq(42L), eq(ActivityAction.USER_CANCEL_TIER), any(),
+                eq(java.util.Map.of("previousTier", tier.name(), "newTier", "FREE")));
+    }
+
+    @Test
+    void repeatedCancellationDoesNotResetFreeQuotaOrRecordAnotherChange() {
+        AuthUser user = new AuthUser();
+        user.setId(42L);
+        user.setTier(UserTier.FREE);
+        when(authUserRepository.findById(42L)).thenReturn(Optional.of(user));
+        UsageQuota free = new UsageQuota();
+        free.setQuotaLimit(100);
+        free.setQuotaUsed(25);
+        free.setPeriodStart(LocalDate.of(2026, 10, 1));
+        when(usageQuotaService.current(42L)).thenReturn(free);
+        when(usageQuotaService.getDefaultLimit()).thenReturn(100);
+
+        UserQuotaResponse response = userService.cancelSubscription(user);
+
+        assertThat(response.used()).isEqualTo(25);
+        assertThat(response.remaining()).isEqualTo(75);
+        verify(usageQuotaService, never()).downgradeToFree(any());
+        verify(authUserRepository, never()).save(any());
+        verifyNoInteractions(userActivityService);
     }
 }

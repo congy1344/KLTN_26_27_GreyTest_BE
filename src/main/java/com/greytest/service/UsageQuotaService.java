@@ -119,7 +119,11 @@ public class UsageQuotaService {
 
     @Transactional
     public synchronized UsageQuota downgradeToFree(Long userId) {
-        return updateLimit(userId, defaultLimit);
+        UsageQuota quota = currentForUpdate(userId);
+        quota.setQuotaLimit(defaultLimit);
+        // Chuẩn hóa về tháng để lần đọc kế tiếp không vô tình xóa số lượt đã dùng.
+        quota.setPeriodStart(LocalDate.now(clock).withDayOfMonth(1));
+        return repository.save(quota);
     }
 
     public int getPlusLimit() {

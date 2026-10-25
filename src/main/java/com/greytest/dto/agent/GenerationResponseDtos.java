@@ -84,7 +84,18 @@ public final class GenerationResponseDtos {
     }
 
     public record UnitTestResponseDto(
-            @JsonProperty("unit_tests") @NotEmpty @Valid List<GeneratedUnitTestDto> unitTests) {
+            @JsonProperty("unit_tests") @NotEmpty @Valid List<GeneratedUnitTestDto> unitTests,
+            @com.fasterxml.jackson.annotation.JsonIgnore List<BlockedUnitTestDto> blockedCases) {
+        public UnitTestResponseDto {
+            blockedCases = blockedCases == null ? List.of() : List.copyOf(blockedCases);
+        }
+        public UnitTestResponseDto(List<GeneratedUnitTestDto> unitTests) {
+            this(unitTests, List.of());
+        }
+    }
+
+    /** Chỉ backend tạo kết luận feasibility; không cho LLM tự loại case khỏi kết quả. */
+    public record BlockedUnitTestDto(Long caseId, String caseCode, String details) {
     }
 
     public record GeneratedUnitTestDto(

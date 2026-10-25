@@ -75,14 +75,14 @@ public class TestCaseService {
         if(scope==null) ensureCanGenerate(project);
         List<TestPlan> projectPlans = scope==null?plans.findByProjectId(projectId):scopedPlans(projectId,scope);
         if (!resume && projectPlans.stream().anyMatch(plan -> !cases.findByTestPlanId(plan.getId()).isEmpty())) {
-            throw new InvalidProjectStatusException("Project da co Test Case. Hay chon mot Test Plan cu the de sinh lai.");
+            throw new InvalidProjectStatusException("Project đã có Test Case. Hãy chọn một Test Plan cụ thể để sinh lại.");
         }
         List<TestPlan> approvedPlans = projectPlans.stream()
                 .filter(plan -> plan.getStatus() == ReviewStatus.APPROVED)
                 .sorted(Comparator.comparing(TestPlan::getId))
                 .toList();
         if (approvedPlans.isEmpty()) {
-            throw new LlmResponseException("Khong co Test Plan de sinh Test Case.");
+            throw new LlmResponseException("Không có Test Plan để sinh Test Case.");
         }
 
         List<TestPlan> targetPlans = resume
@@ -91,7 +91,7 @@ public class TestCaseService {
 
         if (targetPlans.isEmpty()) {
             generationProgress.log(projectId, GenerationProgressStage.TEST_CASE,
-                    "Tat ca Test Plan da co Test Case.");
+                    "Tất cả Test Plan đã có Test Case.");
             transactions.executeWithoutResult(status -> {
                 Project currentProject = projects.findById(projectId)
                         .orElseThrow(() -> new ProjectNotFoundException(projectId));
@@ -99,7 +99,7 @@ public class TestCaseService {
                 projects.save(currentProject);
             });
             generationProgress.completeAfterCommit(projectId, GenerationProgressStage.TEST_CASE,
-                    "Hoan tat: tat ca Test Plan da co Test Case.");
+                    "Hoàn tất: tất cả Test Plan đã có Test Case.");
             return list(projectId);
         }
 
@@ -275,7 +275,7 @@ public class TestCaseService {
                 .map(GeneratedTestCaseDto::planId)
                 .collect(java.util.stream.Collectors.toSet());
         if (validBatch.isEmpty() || !generatedPlanIds.equals(batchPlanIds)) {
-            throw new LlmResponseException("AI chua sinh du Test Case cho moi Test Plan da approve.");
+            throw new LlmResponseException("AI chưa sinh đủ Test Case cho mỗi Test Plan đã approve.", true);
         }
         return validBatch;
     }
@@ -286,7 +286,7 @@ public class TestCaseService {
     public List<TestCaseDto> regenerate(Long projectId,String servicePath,Long planId) {
         var scope=scopeResolver.resolve(projectId,servicePath);
         if(scopedPlans(projectId,scope).stream().noneMatch(plan->planId.equals(plan.getId()))) {
-            throw new IllegalArgumentException("Test Plan khong thuoc servicePath da chon.");
+            throw new IllegalArgumentException("Test Plan không thuộc servicePath đã chọn.");
         }
         return regenerate(projectId,planId);
     }
@@ -318,7 +318,7 @@ public class TestCaseService {
                                 || !planId.equals(testCase.planId())
                                 || !isValid(testCase, projectId))) {
             throw new LlmResponseException(
-                    "AI phai sinh Test Case chi cho Test Plan " + plan.getPlanCode() + ".");
+                    "AI phải sinh Test Case chỉ cho Test Plan " + plan.getPlanCode() + ".");
         }
         generationProgress.advance(projectId, GenerationProgressStage.TEST_CASE,
                 "Đã nhận và kiểm tra " + generatedCases.size() + " Test Case từ AI.");
@@ -360,7 +360,7 @@ public class TestCaseService {
                 .map(TestPlan::getId)
                 .collect(java.util.stream.Collectors.toSet());
         if (!currentPlanIds.equals(expectedPlanIds)) {
-            throw new InvalidProjectStatusException("Test Plan da thay doi trong luc sinh Test Case. Hay thu lai.");
+            throw new InvalidProjectStatusException("Test Plan đã thay đổi trong lúc sinh Test Case. Hãy thử lại.");
         }
         cases.deleteAll(currentPlans.stream()
                 .flatMap(plan -> cases.findByTestPlanId(plan.getId()).stream())
@@ -389,7 +389,7 @@ public class TestCaseService {
         TestPlan currentPlan = requireApprovedPlan(projectId, expectedPlan.id());
         if (!expectedPlan.equals(snapshot(currentPlan))) {
             throw new InvalidProjectStatusException(
-                    "Test Plan da thay doi trong luc sinh Test Case. Hay thu lai.");
+                    "Test Plan đã thay đổi trong lúc sinh Test Case. Hãy thử lại.");
         }
 
         cases.deleteAll(cases.findByTestPlanId(currentPlan.getId()));
@@ -408,16 +408,16 @@ public class TestCaseService {
         if (!Set.of(ProjectStatus.PLAN_APPROVED, ProjectStatus.CASE_PENDING_REVIEW,
                 ProjectStatus.CASE_APPROVED, ProjectStatus.TEST_GENERATED,
                 ProjectStatus.COVERAGE_ANALYZED, ProjectStatus.COMPLETED).contains(project.getStatus())) {
-            throw new InvalidProjectStatusException("Chi sinh Test Case sau khi Test Plan da approve.");
+            throw new InvalidProjectStatusException("Chỉ sinh Test Case sau khi Test Plan đã approve.");
         }
     }
 
     private TestPlan requireApprovedPlan(Long projectId, Long planId) {
         TestPlan plan = plans.findById(planId)
-                .orElseThrow(() -> new IllegalArgumentException("Khong tim thay Test Plan " + planId));
+                .orElseThrow(() -> new IllegalArgumentException("Không tìm thấy Test Plan " + planId));
         if (!projectId.equals(plan.getProjectId()) || plan.getStatus() != ReviewStatus.APPROVED) {
             throw new InvalidProjectStatusException(
-                    "Test Plan phai thuoc project hien tai va da approve.");
+                    "Test Plan phải thuộc project hiện tại và đã approve.");
         }
         return plan;
     }
@@ -477,7 +477,7 @@ public class TestCaseService {
     public List<TestCaseDto> generateSupplemental(Long projectId,String servicePath,List<CoverageGapDto> gaps,int round) {
         var scope=scopeResolver.resolve(projectId,servicePath);
         if(gaps.stream().map(CoverageGapDto::methodId).anyMatch(id->id==null||!scope.methodIds().contains(id))) {
-            throw new IllegalArgumentException("Coverage gap khong thuoc servicePath da chon.");
+            throw new IllegalArgumentException("Coverage gap không thuộc servicePath đã chọn.");
         }
         return generateSupplemental(projectId,gaps,round);
     }
@@ -512,19 +512,19 @@ public class TestCaseService {
         projects.save(p);
         return saved.stream().map(this::dto).toList();
     }
-    @Transactional public TestCaseDto create(Long projectId, CreateTestCaseRequest r) { Project p=ensureProject(projectId); TestPlan plan=plans.findById(r.testPlanId()).orElseThrow(); if(!projectId.equals(plan.getProjectId())) throw new IllegalArgumentException("Test Plan khong thuoc project"); ensureEditable(p); TestCase c=new TestCase(); c.setTestPlanId(plan.getId()); c.setCaseCode(nextCode(projectId)); c.setTestType(r.testType()); c.setDescription(r.description().trim()); c.setPreconditions(r.preconditions().trim()); c.setTestData(r.testData()); c.setExpectedResult(r.expectedResult().trim()); c.setPriority(r.priority()); c.setTraceSource(r.traceSource().trim()); c.setStatus(ReviewStatus.PENDING_REVIEW); c.setIsModified(false); p.setStatus(ProjectStatus.CASE_PENDING_REVIEW); projects.save(p); return dto(cases.save(c)); }
+    @Transactional public TestCaseDto create(Long projectId, CreateTestCaseRequest r) { Project p=ensureProject(projectId); TestPlan plan=plans.findById(r.testPlanId()).orElseThrow(); if(!projectId.equals(plan.getProjectId())) throw new IllegalArgumentException("Test Plan không thuộc project"); ensureEditable(p); TestCase c=new TestCase(); c.setTestPlanId(plan.getId()); c.setCaseCode(nextCode(projectId)); c.setTestType(r.testType()); c.setDescription(r.description().trim()); c.setPreconditions(r.preconditions().trim()); c.setTestData(r.testData()); c.setExpectedResult(r.expectedResult().trim()); c.setPriority(r.priority()); c.setTraceSource(r.traceSource().trim()); c.setStatus(ReviewStatus.PENDING_REVIEW); c.setIsModified(false); p.setStatus(ProjectStatus.CASE_PENDING_REVIEW); projects.save(p); return dto(cases.save(c)); }
     public TestCaseDto create(Long projectId,String servicePath,CreateTestCaseRequest request) {
         var scope=scopeResolver.resolve(projectId,servicePath);
         if(scopedPlans(projectId,scope).stream().noneMatch(plan->request.testPlanId().equals(plan.getId())))
-            throw new IllegalArgumentException("Test Plan khong thuoc servicePath da chon.");
+            throw new IllegalArgumentException("Test Plan không thuộc servicePath đã chọn.");
         return create(projectId,request);
     }
 
-    @Transactional(readOnly=true) public Long projectIdForCase(Long caseId) { TestCase c=cases.findById(caseId).orElseThrow(()->new IllegalArgumentException("Khong tim thay Test Case "+caseId)); return plans.findById(c.getTestPlanId()).orElseThrow(()->new IllegalArgumentException("Test Case khong co Test Plan")).getProjectId(); }
+    @Transactional(readOnly=true) public Long projectIdForCase(Long caseId) { TestCase c=cases.findById(caseId).orElseThrow(()->new IllegalArgumentException("Không tìm thấy Test Case "+caseId)); return plans.findById(c.getTestPlanId()).orElseThrow(()->new IllegalArgumentException("Test Case không có Test Plan")).getProjectId(); }
     // Sửa case (HITL): đánh dấu isModified và đưa project về trạng thái chờ review lại
-    @Transactional public TestCaseDto update(Long caseId, com.greytest.dto.UpdateTestCaseRequest r) { TestCase c=cases.findById(caseId).orElseThrow(()->new IllegalArgumentException("Khong tim thay Test Case "+caseId)); Project p=ensureProject(projectIdForCase(caseId)); ensureEditable(p); c.setTestType(r.testType()); c.setDescription(r.description().trim()); c.setPreconditions(r.preconditions().trim()); c.setTestData(r.testData()); c.setExpectedResult(r.expectedResult().trim()); c.setPriority(r.priority()); c.setTraceSource(r.traceSource().trim()); c.setStatus(ReviewStatus.PENDING_REVIEW); c.setIsModified(true); p.setStatus(ProjectStatus.CASE_PENDING_REVIEW); projects.save(p); return dto(cases.save(c)); }
-    @Transactional public void delete(Long caseId) { TestCase c=cases.findById(caseId).orElseThrow(()->new IllegalArgumentException("Khong tim thay Test Case "+caseId)); Project p=ensureProject(projectIdForCase(caseId)); ensureEditable(p); cases.delete(c); p.setStatus(ProjectStatus.CASE_PENDING_REVIEW); projects.save(p); }
-    @Transactional public List<TestCaseDto> approve(Long projectId) { Project p=ensureProject(projectId); if(p.getStatus()!=ProjectStatus.CASE_PENDING_REVIEW) throw new InvalidProjectStatusException("Chi approve Test Case dang cho review."); var all=list(projectId); if(all.isEmpty()) throw new InvalidProjectStatusException("Can co it nhat mot Test Case."); var entities=plans.findByProjectId(projectId).stream().flatMap(x->cases.findByTestPlanId(x.getId()).stream()).toList(); entities.forEach(c->{c.setStatus(ReviewStatus.APPROVED); cases.save(c);}); p.setStatus(ProjectStatus.CASE_APPROVED); projects.save(p); return entities.stream().map(this::dto).toList(); }
+    @Transactional public TestCaseDto update(Long caseId, com.greytest.dto.UpdateTestCaseRequest r) { TestCase c=cases.findById(caseId).orElseThrow(()->new IllegalArgumentException("Không tìm thấy Test Case "+caseId)); Project p=ensureProject(projectIdForCase(caseId)); ensureEditable(p); c.setTestType(r.testType()); c.setDescription(r.description().trim()); c.setPreconditions(r.preconditions().trim()); c.setTestData(r.testData()); c.setExpectedResult(r.expectedResult().trim()); c.setPriority(r.priority()); c.setTraceSource(r.traceSource().trim()); c.setStatus(ReviewStatus.PENDING_REVIEW); c.setIsModified(true); p.setStatus(ProjectStatus.CASE_PENDING_REVIEW); projects.save(p); return dto(cases.save(c)); }
+    @Transactional public void delete(Long caseId) { TestCase c=cases.findById(caseId).orElseThrow(()->new IllegalArgumentException("Không tìm thấy Test Case "+caseId)); Project p=ensureProject(projectIdForCase(caseId)); ensureEditable(p); cases.delete(c); p.setStatus(ProjectStatus.CASE_PENDING_REVIEW); projects.save(p); }
+    @Transactional public List<TestCaseDto> approve(Long projectId) { Project p=ensureProject(projectId); if(p.getStatus()!=ProjectStatus.CASE_PENDING_REVIEW) throw new InvalidProjectStatusException("Chỉ approve Test Case đang chờ review."); var all=list(projectId); if(all.isEmpty()) throw new InvalidProjectStatusException("Cần có ít nhất một Test Case."); var entities=plans.findByProjectId(projectId).stream().flatMap(x->cases.findByTestPlanId(x.getId()).stream()).toList(); entities.forEach(c->{c.setStatus(ReviewStatus.APPROVED); cases.save(c);}); p.setStatus(ProjectStatus.CASE_APPROVED); projects.save(p); return entities.stream().map(this::dto).toList(); }
     @Transactional public List<TestCaseDto> approve(Long projectId,String servicePath) {
         Project p=ensureProject(projectId);
         List<TestPlan> targetPlans;
@@ -535,7 +535,7 @@ public class TestCaseService {
             targetPlans = scopedPlans(projectId, scope);
         }
         var entities=targetPlans.stream().flatMap(plan->cases.findByTestPlanId(plan.getId()).stream()).toList();
-        if(entities.isEmpty()) throw new InvalidProjectStatusException("Can co it nhat mot Test Case.");
+        if(entities.isEmpty()) throw new InvalidProjectStatusException("Cần có ít nhất một Test Case.");
         entities.forEach(c->{c.setStatus(ReviewStatus.APPROVED);cases.save(c);});
         p.setStatus(ProjectStatus.CASE_APPROVED);projects.save(p);
         return entities.stream().map(this::dto).toList();
@@ -558,7 +558,7 @@ public class TestCaseService {
     private String nextCode(Long id){ return "TC-"+String.format("%03d", cases.count()+1); }
     // Cho phép thao tác cả sau khi đã có coverage — vòng lặp gap: bổ sung case → approve lại
     // → sinh lại unit test → upload jacoco vòng mới. Mọi thay đổi đều kéo status về CASE_PENDING_REVIEW.
-    private void ensureEditable(Project p){ if(!Set.of(ProjectStatus.BR_PENDING_REVIEW, ProjectStatus.BR_APPROVED, ProjectStatus.PLAN_PENDING_REVIEW, ProjectStatus.PLAN_APPROVED,ProjectStatus.CASE_PENDING_REVIEW,ProjectStatus.CASE_APPROVED,ProjectStatus.TEST_GENERATED,ProjectStatus.COVERAGE_ANALYZED,ProjectStatus.COMPLETED).contains(p.getStatus())) throw new InvalidProjectStatusException("Chi thao tac Test Case sau khi Test Plan da co."); }
+    private void ensureEditable(Project p){ if(!Set.of(ProjectStatus.BR_PENDING_REVIEW, ProjectStatus.BR_APPROVED, ProjectStatus.PLAN_PENDING_REVIEW, ProjectStatus.PLAN_APPROVED,ProjectStatus.CASE_PENDING_REVIEW,ProjectStatus.CASE_APPROVED,ProjectStatus.TEST_GENERATED,ProjectStatus.COVERAGE_ANALYZED,ProjectStatus.COMPLETED).contains(p.getStatus())) throw new InvalidProjectStatusException("Chỉ thao tác Test Case sau khi Test Plan đã có."); }
     private List<TestPlan> scopedPlans(Long projectId,ServiceScopeResolver.ServiceScope scope) {
         var ruleIds=rules.findByProjectId(projectId).stream()
                 .filter(rule->rule.getMethodId()!=null && scope.methodIds().contains(rule.getMethodId()))

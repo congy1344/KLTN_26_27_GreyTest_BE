@@ -27,27 +27,27 @@ public class GenerationResponseParser {
 
     public <T> T parse(String response, Class<T> responseType) {
         if (response == null || response.isBlank()) {
-            throw new LlmResponseException("LLM response rong.");
+            throw new LlmResponseException("LLM response rỗng.", true);
         }
         try {
             String payload = normalizeJsonNumericSuffixes(jsonPayload(response));
             if (responseType == UnitTestResponseDto.class) rejectUnitTestGenerationError(payload);
             T parsed = objectMapper.readValue(payload, responseType);
             if (parsed == null) {
-                throw new LlmResponseException("LLM response khong dung schema: payload null");
+                throw new LlmResponseException("LLM response không đúng schema: payload null", true);
             }
             var violations = validator.validate(parsed);
             if (!violations.isEmpty()) {
                 String firstError = violations.stream()
                         .min(Comparator.comparing(item -> item.getPropertyPath().toString()))
                         .map(item -> item.getPropertyPath() + " " + item.getMessage())
-                        .orElse("schema khong hop le");
-                throw new LlmResponseException("LLM response khong dung schema: " + firstError);
+                        .orElse("schema không hợp lệ");
+                throw new LlmResponseException("LLM response không đúng schema: " + firstError, true);
             }
             return parsed;
         } catch (JsonProcessingException exception) {
             // Output hỏng do model nondeterminism (cắt cụt, lặp từ...) → cho phép gọi lại lần 2
-            throw new LlmResponseException("LLM response khong phai JSON hop le.", exception, true);
+            throw new LlmResponseException("LLM response không phải JSON hợp lệ.", exception, true);
         }
     }
 
@@ -57,7 +57,7 @@ public class GenerationResponseParser {
         // Thiếu source hoặc lệch Test Case phải dừng rõ lý do; retry cùng dữ kiện dễ ép AI bịa test.
         JsonNode error = root.get("generation_error");
         if (root.has("unit_tests")) {
-            throw new LlmResponseException("LLM response khong dung schema: generation_error cannot accompany unit_tests.");
+            throw new LlmResponseException("LLM response không đúng schema: generation_error cannot accompany unit_tests.");
         }
         JsonNode caseId = error.path("case_id");
         JsonNode reason = error.path("reason");
@@ -66,11 +66,24 @@ public class GenerationResponseParser {
                 || !reason.isTextual() || !("MISSING_SOURCE".equals(reason.asText())
                         || "UNSUPPORTED_BEHAVIOR".equals(reason.asText()))
                 || !details.isTextual() || details.asText().isBlank()) {
-            throw new LlmResponseException("LLM response khong dung schema: generation_error requires a positive case_id, "
+            throw new LlmResponseException("LLM response không đúng schema: generation_error requires a positive case_id, "
                     + "reason MISSING_SOURCE or UNSUPPORTED_BEHAVIOR, and nonempty details.");
         }
-        throw new LlmResponseException("Khong the sinh Unit Test cho case_id=" + caseId.asLong()
-                + " (" + reason.asText() + "): " + details.asText());
+        throw new UnitTestGenerationError(caseId.asLong(), reason.asText(), details.asText());
+    }
+
+    static final class UnitTestGenerationError extends LlmResponseException {
+        private final Long caseId;
+        private final String reason;
+
+        UnitTestGenerationError(Long caseId, String reason, String details) {
+            super("Không thể sinh Unit Test cho case_id=" + caseId + " (" + reason + "): " + details);
+            this.caseId = caseId;
+            this.reason = reason;
+        }
+
+        Long caseId() { return caseId; }
+        String reason() { return reason; }
     }
 
     private String jsonPayload(String response) {

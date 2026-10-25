@@ -120,6 +120,12 @@ public class SourceUpdateController {
         return sourceUpdateService.applyUpdate(projectId, updateId, user);
     }
 
+    @PostMapping("/{updateId}/generate-all")
+    public SourceUpdateDto generateAll(@PathVariable Long projectId, @PathVariable Long updateId,
+            @RequestHeader("Authorization") String authorization) {
+        return incrementalGenerationService.generateAll(projectId, updateId, authService.currentUser(authorization));
+    }
+
     @PostMapping("/{updateId}/cancel")
     public ResponseEntity<Void> cancelUpdate(
             @PathVariable Long projectId,

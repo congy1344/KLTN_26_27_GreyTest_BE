@@ -37,7 +37,7 @@ public class MockLlmClient implements LlmClient {
         if (normalized.contains("prompt: coverage-refinement")) return testCase(prompt, true);
         if (normalized.contains("prompt: test-case")) return testCase(prompt);
         if (normalized.contains("prompt: unit-test")) return unitTest(prompt);
-        throw new LlmResponseException("MockLlmClient khong nhan dien duoc prompt template.");
+        throw new LlmResponseException("MockLlmClient không nhận diện được prompt template.");
     }
 
     private String businessRule(String prompt) {
