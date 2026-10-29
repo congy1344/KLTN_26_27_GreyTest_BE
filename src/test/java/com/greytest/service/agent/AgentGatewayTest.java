@@ -618,7 +618,8 @@ class AgentGatewayTest {
             assertThat(service.languageInstruction()).contains("in English", "JSON keys", "file paths");
 
             LocaleContextHolder.setLocale(Locale.forLanguageTag("vi"));
-            assertThat(service.languageInstruction()).contains("tieng Viet", "API", "Unit Test", "khong dich guong ep");
+            assertThat(service.languageInstruction()).contains("tiếng Việt có dấu đầy đủ", "reason", "suggested_description",
+                    "Không viết tiếng Việt không dấu", "API", "Unit Test", "không dịch gượng ép");
         } finally {
             LocaleContextHolder.resetLocaleContext();
         }

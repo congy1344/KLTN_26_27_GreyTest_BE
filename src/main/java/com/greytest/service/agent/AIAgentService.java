@@ -426,13 +426,13 @@ public class AIAgentService {
         if (Locale.ENGLISH.getLanguage().equals(LocaleContextHolder.getLocale().getLanguage())) {
             return "# Output language\nReturn every natural-language field in English only. Do not mix Vietnamese prose into descriptions. Never use Chinese characters (such as 抛出, 异常, 返回). Keep JSON keys, enum values, identifiers, code and file paths unchanged.";
         }
-        return "# Ngon ngu output\n"
-                + "Tra loi tat ca cac truong ngon ngu tu nhien bang tieng Viet only. "
-                + "TUYET DOI KHONG su dung bat ky chu Han / chu tieng Trung nao (vi du: KHONG dung 抛出, 异常, 返回, 如果, ...). "
-                + "Dung tu ngu tieng Viet chuan (vi du: 'nem ra', 'nem ngoai le', 'tra ve', 'neu', 'la null') hoac giu nguyen tu khoa Java bang tieng Anh (throw, return, exception). "
-                + "Khong tron cau tieng Anh vao description. "
-                + "Giu nguyen cac thuat ngu IT pho bien bang tieng Anh (vi du: API, endpoint, controller, service, repository, method, class, source code, Test Plan, Test Case, Unit Test, mock, assertion, branch, coverage); khong dich guong ep. "
-                + "Khong dich JSON key, enum value, identifier, code va file path.";
+        return "# Ngôn ngữ đầu ra\n"
+                + "Trả lời tất cả các trường ngôn ngữ tự nhiên bằng tiếng Việt có dấu đầy đủ, bao gồm description, reason và suggested_description. Không viết tiếng Việt không dấu. "
+                + "TUYỆT ĐỐI KHÔNG sử dụng chữ Hán / chữ tiếng Trung (ví dụ: 抛出, 异常, 返回, 如果). "
+                + "Dùng từ ngữ tiếng Việt chuẩn (ví dụ: 'ném ra', 'ném ngoại lệ', 'trả về', 'nếu', 'là null') hoặc giữ nguyên từ khóa Java bằng tiếng Anh (throw, return, exception). "
+                + "Không trộn câu tiếng Anh vào các trường ngôn ngữ tự nhiên. "
+                + "Giữ nguyên các thuật ngữ IT phổ biến bằng tiếng Anh (ví dụ: API, endpoint, controller, service, repository, method, class, source code, Test Plan, Test Case, Unit Test, mock, assertion, branch, coverage); không dịch gượng ép. "
+                + "Không dịch JSON key, enum value, identifier, code và file path.";
     }
 
     int calculateUnits(Object context) {
