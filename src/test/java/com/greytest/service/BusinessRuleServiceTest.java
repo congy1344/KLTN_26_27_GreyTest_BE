@@ -73,6 +73,116 @@ class BusinessRuleServiceTest {
     }
 
     @Test
+    void generatesIndependentBatchesConcurrentlyWithoutDuplicateRuleCodes() throws Exception {
+        mockProject();
+        mockProjectSave();
+        mockServiceMethods(method(11L, "first"), method(12L, "second"),
+                method(13L, "third"), method(14L, "fourth"));
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of());
+        mockBusinessRuleSave();
+        var started = new java.util.concurrent.CountDownLatch(2);
+        when(aiAgentService.generateBusinessRules(org.mockito.ArgumentMatchers.eq(1L), any(Set.class)))
+                .thenAnswer(invocation -> {
+                    assertThat(GenerationJobContext.actorUserId()).isEqualTo(42L);
+                    started.countDown();
+                    assertThat(started.await(3, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+                    Set<Long> ids = invocation.getArgument(1);
+                    return new BusinessRuleResponseDto(ids.stream().map(id ->
+                            new GeneratedBusinessRuleDto(id, "Rule for method " + id, "BUSINESS_LOGIC")).toList());
+                });
+        var executor = new LlmBatchExecutor(2, 0, 0);
+        GenerationJobContext.bind(42L, ignored -> { });
+        try {
+            var service = new BusinessRuleService(businessRuleRepository, projectRepository,
+                    javaClassRepository, javaMethodRepository, aiAgentService, generationProgressService,
+                    transactionManager, scopeResolver, scopedStatuses, executor);
+            var rules = service.generate(1L);
+            assertThat(rules).hasSize(4);
+            assertThat(rules).extracting(BusinessRuleDto::ruleCode).doesNotHaveDuplicates();
+            assertThat(rules).extracting(BusinessRuleDto::methodId).containsExactlyInAnyOrder(11L, 12L, 13L, 14L);
+        } finally {
+            GenerationJobContext.clear();
+            executor.shutdown();
+        }
+    }
+
+    @Test
+    void concurrentFailureKeepsCompletedBatchesAndResumeSkipsThem() {
+        mockProject();
+        mockProjectSave();
+        mockServiceMethods(method(11L, "first"), method(12L, "second"), method(13L, "third"),
+                method(14L, "fourth"), method(15L, "fifth"), method(16L, "sixth"), method(17L, "seventh"));
+        List<BusinessRule> persisted = new java.util.concurrent.CopyOnWriteArrayList<>();
+        when(businessRuleRepository.findByProjectId(1L)).thenAnswer(ignored -> List.copyOf(persisted));
+        AtomicLong ids = new AtomicLong(100);
+        when(businessRuleRepository.save(any(BusinessRule.class))).thenAnswer(invocation -> {
+            BusinessRule rule = invocation.getArgument(0);
+            rule.setId(ids.getAndIncrement());
+            persisted.add(rule);
+            return rule;
+        });
+        var firstAttempt = new java.util.concurrent.atomic.AtomicBoolean(true);
+        var original = new com.greytest.service.agent.LlmResponseException("provider failed");
+        when(aiAgentService.generateBusinessRules(org.mockito.ArgumentMatchers.eq(1L), any(Set.class)))
+                .thenAnswer(invocation -> {
+                    Set<Long> methodIds = invocation.getArgument(1);
+                    if (methodIds.contains(11L) && firstAttempt.getAndSet(false)) throw original;
+                    return new BusinessRuleResponseDto(methodIds.stream().map(id ->
+                            new GeneratedBusinessRuleDto(id, "Rule for method " + id, "BUSINESS_LOGIC")).toList());
+                });
+        var executor = new LlmBatchExecutor(2, 0, 0);
+        try {
+            var service = new BusinessRuleService(businessRuleRepository, projectRepository,
+                    javaClassRepository, javaMethodRepository, aiAgentService, generationProgressService,
+                    transactionManager, scopeResolver, scopedStatuses, executor);
+            assertThatThrownBy(() -> service.generate(1L)).isSameAs(original);
+            assertThat(persisted).hasSize(4);
+            assertThat(service.generate(1L)).extracting(BusinessRuleDto::methodId).containsExactly(11L, 12L, 13L);
+            assertThat(persisted).hasSize(7).extracting(BusinessRule::getRuleCode).doesNotHaveDuplicates();
+            verify(generationProgressService).resume(org.mockito.ArgumentMatchers.eq(1L),
+                    org.mockito.ArgumentMatchers.eq(com.greytest.dto.GenerationProgressStage.BUSINESS_RULE),
+                    org.mockito.ArgumentMatchers.anyList(), org.mockito.ArgumentMatchers.eq(Set.of(1, 2)),
+                    org.mockito.ArgumentMatchers.anyString());
+            verify(aiAgentService).generateBusinessRules(1L, Set.of(14L, 15L, 16L));
+            verify(aiAgentService).generateBusinessRules(1L, Set.of(17L));
+        } finally {
+            executor.shutdown();
+        }
+    }
+
+    @Test
+    void pauseLetsRunningBatchesPersistAndSkipsQueuedBatches() {
+        mockProject();
+        mockServiceMethods(method(11L, "first"), method(12L, "second"), method(13L, "third"),
+                method(14L, "fourth"), method(15L, "fifth"), method(16L, "sixth"), method(17L, "seventh"));
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of());
+        mockBusinessRuleSave();
+        var progress = new GenerationProgressService();
+        var started = new java.util.concurrent.CountDownLatch(2);
+        when(aiAgentService.generateBusinessRules(org.mockito.ArgumentMatchers.eq(1L), any(Set.class)))
+                .thenAnswer(invocation -> {
+                    started.countDown();
+                    assertThat(started.await(3, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+                    progress.pause(1L, com.greytest.dto.GenerationProgressStage.BUSINESS_RULE, "Pause requested");
+                    Set<Long> methodIds = invocation.getArgument(1);
+                    return new BusinessRuleResponseDto(methodIds.stream().map(id ->
+                            new GeneratedBusinessRuleDto(id, "Rule for method " + id, "BUSINESS_LOGIC")).toList());
+                });
+        var executor = new LlmBatchExecutor(2, 0, 0);
+        try {
+            var service = new BusinessRuleService(businessRuleRepository, projectRepository,
+                    javaClassRepository, javaMethodRepository, aiAgentService, progress,
+                    transactionManager, scopeResolver, scopedStatuses, executor);
+            assertThat(service.generate(1L)).hasSize(6);
+            verify(aiAgentService, org.mockito.Mockito.never()).generateBusinessRules(1L, Set.of(17L));
+            assertThat(progress.isPaused(1L, com.greytest.dto.GenerationProgressStage.BUSINESS_RULE)).isTrue();
+            verify(projectRepository, org.mockito.Mockito.never()).save(any());
+        } finally {
+            executor.shutdown();
+        }
+    }
+
+    @Test
     void generatePersistsAiGeneratedRules() {
         mockProject();
         mockProjectSave();
@@ -254,7 +364,7 @@ class BusinessRuleServiceTest {
 
         assertThatThrownBy(() -> service().generate(1L))
                 .isInstanceOf(com.greytest.service.agent.LlmResponseException.class)
-                .hasMessageContaining("ngoai Service method");
+                .hasMessageContaining("ngoài Service method");
     }
 
     @Test
@@ -461,7 +571,7 @@ class BusinessRuleServiceTest {
 
         assertThatThrownBy(() -> service().generate(1L))
                 .isInstanceOf(com.greytest.service.agent.LlmResponseException.class)
-                .hasMessageContaining("trung Business Rule");
+                .hasMessageContaining("trùng Business Rule");
     }
 
     @Test
@@ -484,7 +594,7 @@ class BusinessRuleServiceTest {
 
         assertThatThrownBy(() -> service().generate(1L))
                 .isInstanceOf(com.greytest.service.agent.LlmResponseException.class)
-                .hasMessageContaining("source anchor khong thuoc method");
+                .hasMessageContaining("source anchor không thuộc method");
     }
 
     @Test
@@ -500,7 +610,7 @@ class BusinessRuleServiceTest {
 
         assertThatThrownBy(() -> service().generate(1L))
                 .isInstanceOf(com.greytest.service.agent.LlmResponseException.class)
-                .hasMessageContaining("source anchor khong thuoc method");
+                .hasMessageContaining("source anchor không thuộc method");
     }
 
     @Test
@@ -555,7 +665,7 @@ class BusinessRuleServiceTest {
 
         assertThatThrownBy(() -> service().generate(1L))
                 .isInstanceOf(com.greytest.service.agent.LlmResponseException.class)
-                .hasMessageContaining("chua bao phu du quyet dinh control-flow", "IF-2");
+                .hasMessageContaining("chưa bao phủ đủ quyết định control-flow", "IF-2");
     }
     @Test
     void generateRetriesCurrentBatchWhenFirstResponseMissesBranch() {
@@ -651,7 +761,7 @@ class BusinessRuleServiceTest {
                                 11L, "Tra ve user khi ton tai.", "BUSINESS_LOGIC", "IF-1-TRUE"))));
         assertThatThrownBy(() -> service().generate(1L))
                 .isInstanceOf(com.greytest.service.agent.LlmResponseException.class)
-                .hasMessageContaining("trung Business Rule", "IF-1");
+                .hasMessageContaining("trùng Business Rule", "IF-1");
     }
 
     @Test
@@ -735,7 +845,7 @@ class BusinessRuleServiceTest {
             assertThat(item.suggestedDescription()).isNull();
         });
         assertThatThrownBy(() -> service().acceptSuggestion(7L))
-                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("khong co goi y AI");
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("không có gợi ý AI");
         assertThat(service().approve(1L)).singleElement().satisfies(item -> {
             assertThat(item.status()).isEqualTo(ReviewStatus.APPROVED);
             assertThat(item.description()).isEqualTo(description);
@@ -778,7 +888,7 @@ class BusinessRuleServiceTest {
 
         assertThatThrownBy(() -> service().review(1L))
                 .isInstanceOf(com.greytest.service.agent.LlmResponseException.class)
-                .hasMessageContaining("khong review Business Rule nao");
+                .hasMessageContaining("không review Business Rule nào");
     }
 
     @Test
@@ -788,7 +898,7 @@ class BusinessRuleServiceTest {
 
         assertThatThrownBy(() -> service().generate(1L))
                 .isInstanceOf(InvalidProjectStatusException.class)
-                .hasMessageContaining("chua co service method");
+                .hasMessageContaining("chưa có service method");
     }
 
     @Test
@@ -832,6 +942,102 @@ class BusinessRuleServiceTest {
         assertThat(existing.getSource()).isEqualTo(RuleSource.AI_GENERATED);
         org.mockito.Mockito.verifyNoInteractions(aiAgentService);
     }
+
+    @Test
+    void resumeWhilePendingReviewSkipsCompletedAiMethodsAndKeepsTheirText() {
+        Project project = new Project();
+        project.setId(1L);
+        project.setStatus(ProjectStatus.BR_PENDING_REVIEW);
+        when(projectRepository.findById(1L)).thenReturn(Optional.of(project));
+        mockProjectSave();
+        mockServiceMethods(method(11L, "completed"), method(12L, "missing"));
+        BusinessRule existing = rule(7L, 11L, "Keep completed rule.");
+        existing.setSource(RuleSource.AI_GENERATED);
+        existing.setIsModified(false);
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(existing));
+        when(aiAgentService.generateBusinessRules(org.mockito.ArgumentMatchers.eq(1L), any(Set.class)))
+                .thenAnswer(invocation -> {
+                    Set<Long> ids = invocation.getArgument(1);
+                    return new BusinessRuleResponseDto(ids.stream().map(id ->
+                            new GeneratedBusinessRuleDto(id, "New rule for " + id, "BUSINESS_LOGIC")).toList());
+                });
+        mockBusinessRuleSave();
+
+        assertThat(service().generate(1L)).extracting(BusinessRuleDto::methodId).containsExactly(12L);
+        assertThat(existing.getDescription()).isEqualTo("Keep completed rule.");
+        verify(aiAgentService).generateBusinessRules(1L, Set.of(12L));
+    }
+
+    @Test
+    void regenerationPreservesEditedRuleWhileUpdatingUntouchedAiRule() {
+        Project project = new Project();
+        project.setId(1L);
+        project.setStatus(ProjectStatus.BR_PENDING_REVIEW);
+        when(projectRepository.findById(1L)).thenReturn(Optional.of(project));
+        mockProjectSave();
+        JavaMethod first = method(11L, "first");
+        JavaMethod second = method(12L, "second");
+        first.setSourceCode("public boolean first(boolean ready) { if (ready) return true; return false; }");
+        second.setSourceCode("public boolean second(boolean ready) { if (ready) return true; return false; }");
+        mockServiceMethods(first, second);
+        BusinessRule edited = rule(7L, 11L, "User edited requirement.");
+        edited.setSource(RuleSource.AI_GENERATED);
+        edited.setReviewNote("SOURCE_BRANCH:IF-1\nEdited.");
+        BusinessRule untouched = rule(8L, 12L, "Old AI rule.");
+        untouched.setRuleCode("BR-002");
+        untouched.setSource(RuleSource.AI_GENERATED);
+        untouched.setIsModified(false);
+        untouched.setReviewNote("SOURCE_BRANCH:IF-1\nGenerated.");
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(edited, untouched));
+        when(aiAgentService.generateBusinessRules(1L, Set.of(11L, 12L))).thenReturn(new BusinessRuleResponseDto(List.of(
+                new GeneratedBusinessRuleDto(11L, "AI replacement for edited rule.", "BUSINESS_LOGIC", "IF-1"),
+                new GeneratedBusinessRuleDto(12L, "New AI rule.", "BUSINESS_LOGIC", "IF-1"))));
+        mockBusinessRuleSave();
+
+        assertThat(service().generate(1L, false)).extracting(BusinessRuleDto::id).containsExactly(8L);
+        assertThat(edited.getDescription()).isEqualTo("User edited requirement.");
+        assertThat(edited.getIsModified()).isTrue();
+        assertThat(untouched.getDescription()).isEqualTo("New AI rule.");
+        verify(businessRuleRepository, org.mockito.Mockito.never()).save(edited);
+    }
+
+    @Test
+    void regenerationPreservesApprovedAiRuleWhileUpdatingPendingAiRule() {
+        Project project = new Project();
+        project.setId(1L);
+        project.setStatus(ProjectStatus.BR_PENDING_REVIEW);
+        when(projectRepository.findById(1L)).thenReturn(Optional.of(project));
+        mockProjectSave();
+        JavaMethod first = method(11L, "first");
+        JavaMethod second = method(12L, "second");
+        first.setSourceCode("public boolean first(boolean ready) { if (ready) return true; return false; }");
+        second.setSourceCode("public boolean second(boolean ready) { if (ready) return true; return false; }");
+        mockServiceMethods(first, second);
+        BusinessRule approved = rule(7L, 11L, "Approved requirement.");
+        approved.setSource(RuleSource.AI_GENERATED);
+        approved.setStatus(ReviewStatus.APPROVED);
+        approved.setIsModified(false);
+        approved.setReviewNote("SOURCE_BRANCH:IF-1\nApproved.");
+        BusinessRule pending = rule(8L, 12L, "Old pending rule.");
+        pending.setRuleCode("BR-002");
+        pending.setSource(RuleSource.AI_GENERATED);
+        pending.setIsModified(false);
+        pending.setReviewNote("SOURCE_BRANCH:IF-1\nGenerated.");
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(approved, pending));
+        when(aiAgentService.generateBusinessRules(1L, Set.of(11L, 12L))).thenReturn(new BusinessRuleResponseDto(List.of(
+                new GeneratedBusinessRuleDto(11L, "AI replacement for approved rule.", "BUSINESS_LOGIC", "IF-1"),
+                new GeneratedBusinessRuleDto(12L, "New pending rule.", "BUSINESS_LOGIC", "IF-1"))));
+        mockBusinessRuleSave();
+
+        assertThat(service().generate(1L, false)).extracting(BusinessRuleDto::id).containsExactly(8L);
+
+        assertThat(approved.getDescription()).isEqualTo("Approved requirement.");
+        assertThat(approved.getStatus()).isEqualTo(ReviewStatus.APPROVED);
+        assertThat(approved.getIsModified()).isFalse();
+        assertThat(pending.getDescription()).isEqualTo("New pending rule.");
+        verify(businessRuleRepository, org.mockito.Mockito.never()).save(approved);
+    }
+
     @Test
     void generateOnlyAcceptsRulesForMethodsWithoutBusinessRule() {
 
@@ -857,7 +1063,7 @@ class BusinessRuleServiceTest {
 
         assertThatThrownBy(() -> service().review(1L))
                 .isInstanceOf(InvalidProjectStatusException.class)
-                .hasMessageContaining("Khong co Business Rule", "can AI review");
+                .hasMessageContaining("Không có Business Rule", "cần AI review");
     }
 
     @Test
@@ -870,7 +1076,7 @@ class BusinessRuleServiceTest {
 
         assertThatThrownBy(() -> service().review(1L))
                 .isInstanceOf(InvalidProjectStatusException.class)
-                .hasMessageContaining("can AI review");
+                .hasMessageContaining("cần AI review");
 
         verifyNoInteractions(aiAgentService);
     }
@@ -1035,7 +1241,7 @@ class BusinessRuleServiceTest {
 
         assertThatThrownBy(() -> service().approve(1L))
                 .isInstanceOf(InvalidProjectStatusException.class)
-                .hasMessageContaining("Khong the xac minh", "phan tich lai project");
+                .hasMessageContaining("Không thể xác minh", "phan tich lai project");
     }
 
     @Test
@@ -1050,7 +1256,7 @@ class BusinessRuleServiceTest {
                 11L,
                 " save a daily statistical data point for an account, capturing normalized incomes, expenses, and current exchange rates. ")))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("Business Rule da ton tai");
+                .hasMessageContaining("Business Rule đã tồn tại");
     }
     @Test
     void createAllowsSameDescriptionForAnotherServiceMethod() {
@@ -1113,7 +1319,7 @@ class BusinessRuleServiceTest {
         assertThatThrownBy(() -> service().create(1L, new CreateBusinessRuleRequest(
                 11L, "Mo ta khac cho cung mot quyet dinh.", "IF-1")))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("Quyet dinh source da co Business Rule", "IF-1");
+                .hasMessageContaining("Quyết định source đã có Business Rule", "IF-1");
     }
 
     @Test
@@ -1131,7 +1337,7 @@ class BusinessRuleServiceTest {
                 "Email phai dung dinh dang hop le."));
 
         assertThat(updated.isModified()).isTrue();
-        assertThat(updated.reviewNote()).contains("AI review lai la tuy chon");
+        assertThat(updated.reviewNote()).contains("AI review lại là tùy chọn");
     }
 
     @Test
@@ -1161,7 +1367,7 @@ class BusinessRuleServiceTest {
                 .isEqualTo("Email phai dung dinh dang hop le.");
         assertThat(accepted.description()).isEqualTo("Email phai dung dinh dang hop le.");
         assertThat(accepted.isModified()).isFalse();
-        assertThat(accepted.reviewNote()).isEqualTo("Da ap dung goi y AI.");
+        assertThat(accepted.reviewNote()).isEqualTo("Đã áp dụng gợi ý AI.");
         assertThat(accepted.suggestedDescription()).isNull();
     }
 
@@ -1186,7 +1392,7 @@ class BusinessRuleServiceTest {
         assertThat(service().list(1L).get(0).suggestedDescription()).isNull();
         assertThatThrownBy(() -> service().acceptSuggestion(7L))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("khong co goi y AI");
+                .hasMessageContaining("không có gợi ý AI");
     }
 
     @Test

@@ -75,13 +75,14 @@ public class BusinessRuleController {
     public ResponseEntity<GenerationJobAcceptedDto> generate(
             @PathVariable Long projectId,
             @RequestParam(required = false) String servicePath,
+            @RequestParam(defaultValue = "true") boolean resume,
             @RequestHeader("Authorization") String authorization) {
         AuthUser actor = requireAccess(projectId, authorization);
         return ResponseEntity.accepted().body(generationJobService.submit(
                 projectId,
                 actor.getId(),
                 GenerationProgressStage.BUSINESS_RULE,
-                () -> businessRuleService.generate(projectId, servicePath)));
+                () -> businessRuleService.generate(projectId, servicePath, resume)));
     }
 
     @PostMapping("/api/projects/{projectId}/business-rules/review")

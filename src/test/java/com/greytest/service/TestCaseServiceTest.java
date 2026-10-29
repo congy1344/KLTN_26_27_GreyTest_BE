@@ -533,7 +533,7 @@ class TestCaseServiceTest {
 
         assertThatThrownBy(() -> service.generate(1L))
                 .isInstanceOf(InvalidProjectStatusException.class)
-                .hasMessageContaining("chon mot Test Plan");
+                .hasMessageContaining("chọn một Test Plan");
 
         verify(ai, org.mockito.Mockito.never()).generateTestCases(
                 org.mockito.ArgumentMatchers.anyLong(),
@@ -580,7 +580,7 @@ class TestCaseServiceTest {
 
         assertThatThrownBy(() -> service.regenerate(1L, 20L))
                 .isInstanceOf(LlmResponseException.class)
-                .hasMessageContaining("chi cho Test Plan");
+                .hasMessageContaining("chỉ cho Test Plan");
 
         verify(cases, org.mockito.Mockito.never()).deleteAll(org.mockito.ArgumentMatchers.anyList());
         verify(cases, org.mockito.Mockito.never()).saveAll(org.mockito.ArgumentMatchers.anyList());

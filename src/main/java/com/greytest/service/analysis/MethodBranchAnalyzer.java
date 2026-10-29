@@ -37,7 +37,7 @@ public final class MethodBranchAnalyzer {
 
     public static List<SourceBranchDto> analyze(String sourceCode, Integer methodLineStart) {
         if (sourceCode == null || sourceCode.isBlank()) {
-            throw new IllegalStateException("Source method rong, khong the xac minh control-flow.");
+            throw new IllegalStateException("Source method rỗng, không thể xác minh control-flow.");
         }
         try {
             ParseResult<MethodDeclaration> parseResult = JavaParserFactory.parseMethodDeclaration(sourceCode);
@@ -104,7 +104,7 @@ public final class MethodBranchAnalyzer {
             return List.copyOf(merged);
         } catch (RuntimeException exception) {
             throw new IllegalStateException(
-                    "Khong parse duoc source method de xac minh control-flow.", exception);
+                    "Không parse được source method để xác minh control-flow.", exception);
         }
     }
 

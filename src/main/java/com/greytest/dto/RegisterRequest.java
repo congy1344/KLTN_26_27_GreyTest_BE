@@ -5,12 +5,12 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
 
 public record RegisterRequest(
-        @Email(message = "Email khong hop le")
-        @NotBlank(message = "Email la bat buoc")
+        @Email(message = "Email không hợp lệ")
+        @NotBlank(message = "Email là bắt buộc")
         String email,
-        @NotBlank(message = "Mat khau la bat buoc")
-        @Size(min = 6, message = "Mat khau phai co toi thieu 6 ky tu")
+        @NotBlank(message = "Mật khẩu là bắt buộc")
+        @Size(min = 6, message = "Mật khẩu phải có tối thiểu 6 ký tự")
         String password,
-        @NotBlank(message = "Ho ten la bat buoc")
+        @NotBlank(message = "Họ tên là bắt buộc")
         String fullName) {
 }

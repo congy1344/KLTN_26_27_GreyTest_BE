@@ -48,6 +48,7 @@ import com.greytest.service.agent.GenerationContextBuilder;
 import com.greytest.service.agent.LlmResponseException;
 import com.greytest.service.analysis.MethodBranchAnalyzer;
 
+/** Sinh, lưu và quản lý review Business Rule từ các service method của project. */
 @Service
 public class BusinessRuleService {
 
@@ -65,6 +66,7 @@ public class BusinessRuleService {
     private final TransactionTemplate transactions;
     private ServiceScopeResolver scopeResolver;
     private ServicePipelineStatusService scopedStatuses;
+    private LlmBatchExecutor batchExecutor;
 
     public BusinessRuleService(
             BusinessRuleRepository businessRuleRepository,
@@ -83,7 +85,6 @@ public class BusinessRuleService {
         this.transactions = new TransactionTemplate(transactionManager);
     }
 
-    @org.springframework.beans.factory.annotation.Autowired
     public BusinessRuleService(
             BusinessRuleRepository businessRuleRepository,
             ProjectRepository projectRepository,
@@ -98,6 +99,23 @@ public class BusinessRuleService {
                 aiAgentService, generationProgressService, transactionManager);
         this.scopeResolver = scopeResolver;
         this.scopedStatuses = scopedStatuses;
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public BusinessRuleService(
+            BusinessRuleRepository businessRuleRepository,
+            ProjectRepository projectRepository,
+            JavaClassRepository javaClassRepository,
+            JavaMethodRepository javaMethodRepository,
+            AIAgentService aiAgentService,
+            GenerationProgressService generationProgressService,
+            PlatformTransactionManager transactionManager,
+            ServiceScopeResolver scopeResolver,
+            ServicePipelineStatusService scopedStatuses,
+            LlmBatchExecutor batchExecutor) {
+        this(businessRuleRepository, projectRepository, javaClassRepository, javaMethodRepository,
+                aiAgentService, generationProgressService, transactionManager, scopeResolver, scopedStatuses);
+        this.batchExecutor = batchExecutor;
     }
 
     @Transactional(readOnly = true)
@@ -124,7 +142,7 @@ public class BusinessRuleService {
     @Transactional(readOnly = true)
     public Long projectIdForRule(Long ruleId) {
         return businessRuleRepository.findById(ruleId)
-                .orElseThrow(() -> new IllegalArgumentException("Khong tim thay business rule " + ruleId))
+                .orElseThrow(() -> new IllegalArgumentException("Không tìm thấy business rule " + ruleId))
                 .getProjectId();
     }
 
@@ -133,7 +151,7 @@ public class BusinessRuleService {
     public BusinessRuleDto create(Long projectId, String servicePath, CreateBusinessRuleRequest request) {
         Set<Long> methodIds = scopeResolver.resolve(projectId, servicePath).methodIds();
         if (!methodIds.contains(request.methodId())) {
-            throw new IllegalArgumentException("Service method khong thuoc servicePath da chon.");
+            throw new IllegalArgumentException("Service method không thuộc servicePath đã chọn.");
         }
         return create(projectId, request);
     }
@@ -162,7 +180,7 @@ public class BusinessRuleService {
         rule.setIsModified(true);
         rule.setReviewNote(withSourceBranch(
                 sourceBranchId,
-                "AI review la tuy chon de kiem tra do ro rang."));
+                "AI review là tùy chọn để kiểm tra độ rõ ràng."));
         project.setStatus(ProjectStatus.BR_PENDING_REVIEW);
         projectRepository.save(project);
         return toDto(businessRuleRepository.save(rule));
@@ -171,7 +189,7 @@ public class BusinessRuleService {
     @Transactional
     public BusinessRuleDto update(Long ruleId, UpdateBusinessRuleRequest request) {
         BusinessRule rule = businessRuleRepository.findById(ruleId)
-                .orElseThrow(() -> new IllegalArgumentException("Khong tim thay business rule " + ruleId));
+                .orElseThrow(() -> new IllegalArgumentException("Không tìm thấy business rule " + ruleId));
         Project project = ensureProjectExists(rule.getProjectId());
         ensureBusinessRuleEditable(project);
         String description = request.description().trim();
@@ -189,7 +207,7 @@ public class BusinessRuleService {
         rule.setIsModified(true);
         rule.setReviewNote(withSourceBranch(
                 sourceBranchId,
-                "Da sua thu cong. AI review lai la tuy chon."));
+                "Đã sửa thủ công. AI review lại là tùy chọn."));
         project.setStatus(ProjectStatus.BR_PENDING_REVIEW);
         projectRepository.save(project);
         return toDto(businessRuleRepository.save(rule));
@@ -198,7 +216,7 @@ public class BusinessRuleService {
     @Transactional
     public void delete(Long ruleId) {
         BusinessRule rule = businessRuleRepository.findById(ruleId)
-                .orElseThrow(() -> new IllegalArgumentException("Khong tim thay business rule " + ruleId));
+                .orElseThrow(() -> new IllegalArgumentException("Không tìm thấy business rule " + ruleId));
         Project project = ensureProjectExists(rule.getProjectId());
         ensureBusinessRuleEditable(project);
         // Cascade DB xóa Plan/Case/Unit Test gắn với rule này; đưa project về chờ review lại
@@ -208,18 +226,26 @@ public class BusinessRuleService {
     }
 
     public List<BusinessRuleDto> generate(Long projectId) {
-        return generate(projectId, null, null);
+        return generate(projectId, true);
+    }
+
+    public List<BusinessRuleDto> generate(Long projectId, boolean resume) {
+        return generate(projectId, null, null, resume);
     }
 
     public List<BusinessRuleDto> generate(Long projectId, String servicePath) {
+        return generate(projectId, servicePath, true);
+    }
+
+    public List<BusinessRuleDto> generate(Long projectId, String servicePath, boolean resume) {
         var scope = scopeResolver.resolve(projectId, servicePath);
-        return generate(projectId, scope.methodIds(), scopedStatuses.status(projectId, scope));
+        return generate(projectId, scope.methodIds(), scopedStatuses.status(projectId, scope), resume);
     }
 
     private List<BusinessRuleDto> generate(
             Long projectId,
             Set<Long> scopedMethodIds,
-            ProjectStatus scopedStatus) {
+            ProjectStatus scopedStatus, boolean resume) {
         Project project = ensureProjectExists(projectId);
         ensureBusinessRuleEditable(scopedStatus == null ? project.getStatus() : scopedStatus);
 
@@ -231,21 +257,20 @@ public class BusinessRuleService {
                 .collect(Collectors.toSet());
         if (validMethodIds.isEmpty()) {
             throw new InvalidProjectStatusException(
-                    "Project chua co service method nao de AI sinh Business Rule. Hay kiem tra ket qua Analysis.");
+                    "Project chưa có service method nào để AI sinh Business Rule. Hãy kiểm tra kết quả Analysis.");
         }
 
         List<BusinessRule> existingRules = businessRuleRepository.findByProjectId(projectId).stream()
                 .filter(rule -> scopedMethodIds == null || (rule.getMethodId() != null && scopedMethodIds.contains(rule.getMethodId())))
                 .toList();
         ProjectStatus effectiveStatus = scopedStatus == null ? project.getStatus() : scopedStatus;
-        // backfillAiRules: khi đã có rule AI cũ chưa modified, cho phép cập nhật nội dung
-        // (dùng trong saveGeneratedRulesInTransaction), KHÔNG dùng để mở rộng uncoveredMethodIds
-        boolean backfillAiRules = effectiveStatus == ProjectStatus.BR_PENDING_REVIEW
+        // Chỉ thao tác Sinh lại mới được cập nhật BR AI chưa sửa; Tiếp tục giữ kết quả đã lưu.
+        boolean backfillAiRules = !resume && effectiveStatus == ProjectStatus.BR_PENDING_REVIEW
                 && existingRules.stream().anyMatch(rule -> rule.getSource() == RuleSource.AI_GENERATED
                         && !Boolean.TRUE.equals(rule.getIsModified()));
-        // Chỉ sinh phần decision còn thiếu; backfill không làm chạy lại method đã đủ BR.
+        // Tiếp tục chỉ sinh decision còn thiếu; Sinh lại là lựa chọn rõ ràng cho BR AI chưa sửa.
         Set<Long> uncoveredMethodIds = serviceMethods.stream()
-                .filter(method -> needsGeneration(method, existingRules))
+                .filter(method -> !resume || needsGeneration(method, existingRules))
                 .map(JavaMethod::getId)
                 .collect(Collectors.toCollection(HashSet::new));
         if (uncoveredMethodIds.isEmpty()) {
@@ -269,32 +294,22 @@ public class BusinessRuleService {
         }
         stepLabels.add("Kiểm tra và lưu Business Rule vào CSDL");
 
-        int firstPendingBatchIndex = -1;
+        Set<Integer> completedBatchIndices = new LinkedHashSet<>();
+        List<BusinessRuleBatch> pendingBatches = new ArrayList<>();
         for (int i = 0; i < totalBatches; i++) {
-            if (allBatches.get(i).stream().anyMatch(uncoveredMethodIds::contains)) {
-                firstPendingBatchIndex = i;
-                break;
-            }
+            Set<Long> activeIds = allBatches.get(i).stream().filter(uncoveredMethodIds::contains)
+                    .collect(Collectors.toCollection(LinkedHashSet::new));
+            if (activeIds.isEmpty()) completedBatchIndices.add(i);
+            else pendingBatches.add(new BusinessRuleBatch(i, activeIds));
         }
-        if (firstPendingBatchIndex < 0) {
-            firstPendingBatchIndex = totalBatches;
-        }
-
-        if (firstPendingBatchIndex > 0) {
-            generationProgressService.resume(
-                    projectId,
-                    GenerationProgressStage.BUSINESS_RULE,
-                    stepLabels,
-                    firstPendingBatchIndex,
-                    "Tiếp tục sinh từ batch " + (firstPendingBatchIndex + 1) + "/" + totalBatches
-                            + " (" + uncoveredMethodIds.size() + " Service method còn lại).");
+        int firstPendingBatchIndex = pendingBatches.get(0).index();
+        if (!completedBatchIndices.isEmpty()) {
+            generationProgressService.resume(projectId, GenerationProgressStage.BUSINESS_RULE,
+                    stepLabels, completedBatchIndices,
+                    "Tiếp tục sinh các batch còn thiếu (" + uncoveredMethodIds.size() + " Service method còn lại).");
         } else {
-            generationProgressService.start(
-                    projectId,
-                    GenerationProgressStage.BUSINESS_RULE,
-                    stepLabels,
-                    "Đã xác định " + serviceMethods.size() + " Service method trong "
-                            + totalBatches + " batch.");
+            generationProgressService.start(projectId, GenerationProgressStage.BUSINESS_RULE, stepLabels,
+                    "Đã xác định " + serviceMethods.size() + " Service method trong " + totalBatches + " batch.");
         }
 
         List<BusinessRuleDto> created = new ArrayList<>();
@@ -302,47 +317,39 @@ public class BusinessRuleService {
         int firstRuleNumber = nextRuleNumber(businessRuleRepository.findByProjectId(projectId));
         int lastAttemptedBatchNumber = firstPendingBatchIndex + 1;
         try {
-        for (int i = 0; i < totalBatches; i++) {
-            Set<Long> batchMethodIds = allBatches.get(i);
-            Set<Long> activeMethodIds = batchMethodIds.stream()
-                    .filter(uncoveredMethodIds::contains)
-                    .collect(Collectors.toCollection(LinkedHashSet::new));
-            if (activeMethodIds.isEmpty()) {
-                // Batch này đã được sinh và lưu trước đó, bỏ qua để tiếp tục batch dang dở
-                continue;
-            }
-            if (generationProgressService.isPaused(projectId, GenerationProgressStage.BUSINESS_RULE)) {
-                break;
-            }
-            int batchNumber = i + 1;
-            lastAttemptedBatchNumber = batchNumber;
-            String currentSummary = formatMethodBatchSummary(activeMethodIds, methodNameMap);
-            generationProgressService.log(projectId, GenerationProgressStage.BUSINESS_RULE,
-                    "Đang gọi AI phân tích batch " + batchNumber + "/" + totalBatches
-                            + " (" + currentSummary + ")...");
-            BusinessRuleResponseDto response = generateValidatedBusinessRules(projectId, activeMethodIds);
-            List<GeneratedBusinessRuleDto> orderedRules = new ArrayList<>();
-            for (Long methodId : activeMethodIds) {
-                response.rules().stream()
-                        .filter(java.util.Objects::nonNull)
-                        .filter(rule -> methodId.equals(rule.methodId()))
-                        .sorted(Comparator.comparingInt(rule -> branchOrder(methodId, rule.branchId())))
-                        .forEach(orderedRules::add);
-            }
-            List<BusinessRuleDto> batch = saveGeneratedRulesInTransaction(
-                    projectId,
-                    orderedRules,
-                    RuleSource.AI_GENERATED,
-                    activeMethodIds,
-                    Set.of(),
-                    existingRuleKeys,
-                    firstRuleNumber + created.size(),
-                    backfillAiRules);
-            created.addAll(batch);
-            generationProgressService.advance(projectId, GenerationProgressStage.BUSINESS_RULE,
-                    "Batch " + batchNumber + "/" + totalBatches + ": đã sinh "
-                            + batch.size() + " Business Rule cho " + currentSummary + ".");
-        }
+        LlmBatchExecutor.mapOrSequential(batchExecutor, pendingBatches,
+                () -> generationProgressService.isPaused(projectId, GenerationProgressStage.BUSINESS_RULE),
+                batch -> {
+                    int batchNumber = batch.index() + 1;
+                    generationProgressService.setStepStatus(projectId, GenerationProgressStage.BUSINESS_RULE,
+                            batch.index(), com.greytest.dto.GenerationProgressStepStatus.RUNNING);
+                    generationProgressService.log(projectId, GenerationProgressStage.BUSINESS_RULE,
+                            "Đang gọi AI phân tích batch " + batchNumber + "/" + totalBatches
+                                    + " (" + formatMethodBatchSummary(batch.methodIds(), methodNameMap) + ")...");
+                    BusinessRuleResponseDto response = generateValidatedBusinessRules(projectId, batch.methodIds());
+                    List<GeneratedBusinessRuleDto> orderedRules = new ArrayList<>();
+                    for (Long methodId : batch.methodIds()) {
+                        response.rules().stream().filter(java.util.Objects::nonNull)
+                                .filter(rule -> methodId.equals(rule.methodId()))
+                                .sorted(Comparator.comparingInt(rule -> branchOrder(methodId, rule.branchId())))
+                                .forEach(orderedRules::add);
+                    }
+                    return orderedRules;
+                },
+                (completedBatch, orderedRules) -> {
+                    BusinessRuleBatch batch = pendingBatches.get(completedBatch - 1);
+                    // Lưu lần lượt để các batch hoàn tất đồng thời không nhận trùng mã BR.
+                    synchronized (created) {
+                        List<BusinessRuleDto> saved = saveGeneratedRulesInTransaction(projectId, orderedRules,
+                                RuleSource.AI_GENERATED, batch.methodIds(), Set.of(), existingRuleKeys,
+                                firstRuleNumber + created.size(), backfillAiRules);
+                        created.addAll(saved);
+                        generationProgressService.advanceStep(projectId, GenerationProgressStage.BUSINESS_RULE,
+                                batch.index(), "Batch " + (batch.index() + 1) + "/" + totalBatches + ": đã sinh "
+                                        + saved.size() + " Business Rule cho "
+                                        + formatMethodBatchSummary(batch.methodIds(), methodNameMap) + ".");
+                    }
+                });
 
         if (generationProgressService.isPaused(projectId, GenerationProgressStage.BUSINESS_RULE)) {
             generationProgressService.log(projectId, GenerationProgressStage.BUSINESS_RULE,
@@ -362,7 +369,14 @@ public class BusinessRuleService {
             if (generationProgressService.isPaused(projectId, GenerationProgressStage.BUSINESS_RULE)) {
                 return created;
             }
-            boolean isQuota = isUsageQuotaExceeded(exception);
+            int failedBatch = LlmBatchExecutor.failedBatch(exception, 0);
+            if (failedBatch > 0 && failedBatch <= pendingBatches.size()) {
+                lastAttemptedBatchNumber = pendingBatches.get(failedBatch - 1).index() + 1;
+                generationProgressService.failStep(projectId, GenerationProgressStage.BUSINESS_RULE,
+                        lastAttemptedBatchNumber - 1, "Sinh Business Rule thất bại.");
+            }
+            RuntimeException originalFailure = LlmBatchExecutor.originalFailure(exception);
+            boolean isQuota = isUsageQuotaExceeded(originalFailure);
             String failureLocation = lastAttemptedBatchNumber <= totalBatches
                     ? "Dừng ở batch " + lastAttemptedBatchNumber + "/" + totalBatches + "."
                     : "Dừng ở bước kiểm tra và lưu Business Rule.";
@@ -374,9 +388,11 @@ public class BusinessRuleService {
                     : " Sinh Business Rule thất bại; xem thông báo lỗi để biết chi tiết.";
             generationProgressService.fail(projectId, GenerationProgressStage.BUSINESS_RULE,
                     failureLocation + " " + persistedSummary + detailMsg);
-            throw exception;
+            throw originalFailure;
         }
     }
+
+    private record BusinessRuleBatch(int index, Set<Long> methodIds) { }
 
     private boolean isUsageQuotaExceeded(Throwable exception) {
         Throwable current = exception;
@@ -423,7 +439,7 @@ public class BusinessRuleService {
                 .toList();
         if (dirtyRules.isEmpty()) {
             throw new InvalidProjectStatusException(
-                    "Khong co Business Rule do nguoi dung them hoac sua can AI review.");
+                    "Không có Business Rule do người dùng thêm hoặc sửa cần AI review.");
         }
 
         Set<Long> pendingRuleIds = dirtyRules.stream().map(BusinessRule::getId).collect(Collectors.toSet());
@@ -442,7 +458,7 @@ public class BusinessRuleService {
                     response.reviewedRules(),
                     activeRules);
             if (reviewedBatch.isEmpty()) {
-                throw new LlmResponseException("AI khong review Business Rule nao trong danh sach can review.");
+                throw new LlmResponseException("AI không review Business Rule nào trong danh sách cần review.");
             }
             reviewedBatch.stream().map(ReviewedBusinessRuleDto::ruleId).forEach(pendingRuleIds::remove);
             reviewed.addAll(reviewedBatch);
@@ -455,12 +471,12 @@ public class BusinessRuleService {
     @Transactional
     public BusinessRuleDto acceptSuggestion(Long ruleId) {
         BusinessRule rule = businessRuleRepository.findById(ruleId)
-                .orElseThrow(() -> new IllegalArgumentException("Khong tim thay Business Rule " + ruleId));
+                .orElseThrow(() -> new IllegalArgumentException("Không tìm thấy Business Rule " + ruleId));
         Project project = ensureProjectExists(rule.getProjectId());
         ensureBusinessRuleEditable(project);
         String suggestion = suggestedDescription(rule.getReviewNote());
         if (suggestion == null) {
-            throw new IllegalArgumentException("Business Rule khong co goi y AI de ap dung.");
+            throw new IllegalArgumentException("Business Rule không có gợi ý AI để áp dụng.");
         }
         ensureUniqueDescription(businessRuleRepository.findByProjectId(rule.getProjectId()).stream()
                 .filter(existing -> rule.getMethodId().equals(existing.getMethodId()))
@@ -471,7 +487,7 @@ public class BusinessRuleService {
         rule.setIsModified(false);
         rule.setReviewNote(withSourceBranch(
                 sourceBranchId(rule.getReviewNote()),
-                "Da ap dung goi y AI."));
+                "Đã áp dụng gợi ý AI."));
         project.setStatus(ProjectStatus.BR_PENDING_REVIEW);
         projectRepository.save(project);
         return toDto(businessRuleRepository.save(rule));
@@ -493,7 +509,7 @@ public class BusinessRuleService {
                 .filter(rule -> scopedMethodIds == null || (rule.getMethodId() != null && scopedMethodIds.contains(rule.getMethodId())))
                 .toList();
         if (rules.isEmpty()) {
-            throw new InvalidProjectStatusException("Can co it nhat mot Business Rule truoc khi approve.");
+            throw new InvalidProjectStatusException("Cần có ít nhất một Business Rule trước khi approve.");
         }
         ensureNoDuplicateDecisions(rules);
         List<String> missingBranches = serviceMethods(projectId).stream()
@@ -511,7 +527,7 @@ public class BusinessRuleService {
                 .toList();
         if (!missingBranches.isEmpty()) {
             throw new InvalidProjectStatusException(
-                    "Chua the approve vi con quyet dinh source chua co Business Rule: " + missingBranches);
+                    "Chưa thể approve vì còn quyết định source chưa có Business Rule: " + missingBranches);
         }
         for (BusinessRule rule : rules) {
             rule.setStatus(ReviewStatus.APPROVED);
@@ -598,13 +614,14 @@ public class BusinessRuleService {
             String cleanDescription = com.greytest.util.TextSanitizer.cleanAiText(generatedRule.description().trim());
             if (replaceAiGenerated && existing != null
                     && existing.getSource() == RuleSource.AI_GENERATED
+                    && existing.getStatus() != ReviewStatus.APPROVED
                     && !Boolean.TRUE.equals(existing.getIsModified())) {
                 existing.setDescription(cleanDescription);
                 existing.setStatus(ReviewStatus.PENDING_REVIEW);
                 existing.setIsModified(false);
                 existing.setReviewNote(withSourceBranch(
                         generatedRule.branchId(),
-                        "AI category: " + generatedRule.category() + ". User review/chinh sua truoc khi approve."));
+                        "AI category: " + generatedRule.category() + ". User review/chỉnh sửa trước khi approve."));
                 existingRuleKeys.add(key);
                 created.add(toDto(businessRuleRepository.save(existing)));
                 continue;
@@ -621,7 +638,7 @@ public class BusinessRuleService {
             rule.setIsModified(false);
             rule.setReviewNote(withSourceBranch(
                     generatedRule.branchId(),
-                    "AI category: " + generatedRule.category() + ". User review/chinh sua truoc khi approve."));
+                    "AI category: " + generatedRule.category() + ". User review/chỉnh sửa trước khi approve."));
             created.add(toDto(businessRuleRepository.save(rule)));
         }
         return created;
@@ -717,7 +734,7 @@ public class BusinessRuleService {
                     throw exception;
                 }
                 GenerationJobContext.log(
-                        "AI chua bao phu dung control-flow. Dang tu sinh lai batch hien tai (lan "
+                        "AI chưa bao phủ đúng control-flow. Đang tự sinh lại batch hiện tại (lần "
                                 + (attempt + 1) + "/" + MAX_SEMANTIC_ATTEMPTS + ").");
             }
         }
@@ -746,14 +763,14 @@ public class BusinessRuleService {
             Set<Long> activeMethodIds,
             BusinessRuleResponseDto response) {
         if (response == null || response.rules() == null) {
-            throw new LlmResponseException("AI khong tra ve danh sach Business Rule hop le.");
+            throw new LlmResponseException("AI không trả về danh sách Business Rule hợp lệ.");
         }
         if (response.rules().stream()
                 .filter(java.util.Objects::nonNull)
                 .map(GeneratedBusinessRuleDto::methodId)
                 .anyMatch(methodId -> methodId == null || !activeMethodIds.contains(methodId))) {
             throw new LlmResponseException(
-                    "AI tra ve Business Rule nam ngoai Service method dang phan tich: " + activeMethodIds + ".");
+                    "AI trả về Business Rule nằm ngoài Service method đang phân tích: " + activeMethodIds + ".");
         }
         ensureBranchCoverage(activeMethodIds, response.rules());
     }
@@ -770,7 +787,7 @@ public class BusinessRuleService {
                 Set<String> missing = new LinkedHashSet<>(expected);
                 missing.removeAll(returned);
                 throw new LlmResponseException(
-                        "AI chua bao phu du quyet dinh control-flow cua method " + methodId + ": " + missing);
+                        "AI chưa bao phủ đủ quyết định control-flow của method " + methodId + ": " + missing);
             }
         }
     }
@@ -779,7 +796,7 @@ public class BusinessRuleService {
             Set<Long> activeMethodIds,
             List<GeneratedBusinessRuleDto> generatedRules) {
         if (generatedRules == null) {
-            throw new LlmResponseException("AI khong tra ve danh sach Business Rule hop le.");
+            throw new LlmResponseException("AI không trả về danh sách Business Rule hợp lệ.");
         }
         Map<Long, Set<String>> returnedByMethod = new java.util.HashMap<>();
         Set<String> uniqueDecisionAssignments = new HashSet<>();
@@ -789,15 +806,15 @@ public class BusinessRuleService {
                     || rule.description() == null || rule.description().isBlank()
                     || !activeMethodIds.contains(rule.methodId())) {
                 throw new LlmResponseException(
-                        "AI tra ve Business Rule nam ngoai Service method dang phan tich.");
+                        "AI trả về Business Rule nằm ngoài Service method đang phân tích.");
             }
             String normalizedDescription = descriptionKey(rule.description());
             Set<String> methodDescriptions = descriptionsByMethod.computeIfAbsent(
                     rule.methodId(), ignored -> new HashSet<>());
             if (!methodDescriptions.add(normalizedDescription)) {
                 throw new LlmResponseException(
-                        "AI sinh trung Business Rule cho method " + rule.methodId()
-                                + ": mo ta trung lap giua cac decision.");
+                        "AI sinh trùng Business Rule cho method " + rule.methodId()
+                                + ": mô tả trùng lặp giữa các decision.");
             }
             Set<String> expected = requiredDecisionIds(rule.methodId());
             String branchId = decisionId(rule.branchId());
@@ -805,24 +822,24 @@ public class BusinessRuleService {
             if (expected.isEmpty()) {
                 if (branchId != null && !sourceAnchors.contains(branchId)) {
                     throw new LlmResponseException(
-                            "AI tra ve source anchor khong thuoc method " + rule.methodId() + ": " + rule.branchId());
+                            "AI trả về source anchor không thuộc method " + rule.methodId() + ": " + rule.branchId());
                 }
             } else if (branchId != null
                     && !expected.contains(branchId)
                     && !sourceAnchors.contains(branchId)) {
                 throw new LlmResponseException(
-                        "AI tra ve source anchor khong thuoc method " + rule.methodId() + ": " + rule.branchId());
+                        "AI trả về source anchor không thuộc method " + rule.methodId() + ": " + rule.branchId());
             }
             if (branchId == null && !sourceAnchors.isEmpty()) {
                 throw new LlmResponseException(
-                        "AI chua gan source anchor cho Business Rule cua method " + rule.methodId() + ".");
+                        "AI chưa gắn source anchor cho Business Rule của method " + rule.methodId() + ".");
             }
             String assignment = rule.methodId() + "\n" + branchId;
             if (branchId != null && expected.contains(branchId)
                     && !uniqueDecisionAssignments.add(assignment)) {
                 throw new LlmResponseException(
-                        "AI sinh trung Business Rule cho method " + rule.methodId()
-                                + ", quyet dinh " + branchId + ".");
+                        "AI sinh trùng Business Rule cho method " + rule.methodId()
+                                + ", quyết định " + branchId + ".");
             }
             if (branchId != null) {
                 if (expected.contains(branchId)) {
@@ -836,7 +853,7 @@ public class BusinessRuleService {
     private Set<String> requiredDecisionIds(Long methodId) {
         JavaMethod method = javaMethodRepository.findById(methodId)
                 .orElseThrow(() -> new LlmResponseException(
-                        "Khong tim thay Service method " + methodId + " de xac minh Business Rule."));
+                        "Không tìm thấy Service method " + methodId + " để xác minh Business Rule."));
         return decisionIds(method);
     }
 
@@ -851,7 +868,7 @@ public class BusinessRuleService {
     private Set<String> sourceAnchorIds(Long methodId) {
         JavaMethod method = javaMethodRepository.findById(methodId)
                 .orElseThrow(() -> new LlmResponseException(
-                        "Khong tim thay Service method " + methodId + " de xac minh source anchor."));
+                        "Không tìm thấy Service method " + methodId + " để xác minh source anchor."));
         return sourceBranches(method).stream()
                 .filter(branch -> "STATEMENT".equals(branch.kind()))
                 .map(SourceBranchDto::branchId)
@@ -866,8 +883,8 @@ public class BusinessRuleService {
             return branches;
         } catch (IllegalStateException exception) {
             throw new InvalidProjectStatusException(
-                    "Khong the xac minh source anchor cua method " + method.getMethodName()
-                            + ". Hay phan tich lai project.");
+                    "Không thể xác minh source anchor của method " + method.getMethodName()
+                            + ". Hãy phân tích lại project.");
         }
     }
 
@@ -883,8 +900,8 @@ public class BusinessRuleService {
                 || branch.lineEnd() < branch.lineStart());
         if (invalidRange) {
             throw new InvalidProjectStatusException(
-                    "Range source cua source anchor nam ngoai method " + method.getMethodName()
-                            + ". Hay phan tich lai project.");
+                    "Range source của source anchor nằm ngoài method " + method.getMethodName()
+                            + ". Hãy phân tích lại project.");
         }
     }
 
@@ -958,7 +975,7 @@ public class BusinessRuleService {
         for (BusinessRule rule : rules) {
             if (currentRuleId != null && currentRuleId.equals(rule.getId())) continue;
             if (rule.getDescription() != null && descriptionKey(rule.getDescription()).equals(newKey)) {
-                throw new IllegalArgumentException("Business Rule da ton tai trong project: " + rule.getRuleCode());
+                throw new IllegalArgumentException("Business Rule đã tồn tại trong project: " + rule.getRuleCode());
             }
         }
     }
@@ -974,7 +991,7 @@ public class BusinessRuleService {
             if (methodId.equals(rule.getMethodId())
                     && branchId.equals(sourceBranchId(rule.getReviewNote()))) {
                 throw new IllegalArgumentException(
-                        "Quyet dinh source da co Business Rule: " + branchId);
+                        "Quyết định source đã có Business Rule: " + branchId);
             }
         }
     }
@@ -998,7 +1015,7 @@ public class BusinessRuleService {
                 .toList();
         if (!duplicates.isEmpty()) {
             throw new InvalidProjectStatusException(
-                    "Chua the approve vi mot quyet dinh source dang co nhieu Business Rule: " + duplicates);
+                    "Chưa thể approve vì một quyết định source đang có nhiều Business Rule: " + duplicates);
         }
     }
 
@@ -1053,13 +1070,13 @@ public class BusinessRuleService {
         Set<String> validBranchIds = requiredDecisionIds(methodId);
         if (validBranchIds.isEmpty()) {
             if (branchId != null) {
-                throw new IllegalArgumentException("Method khong co quyet dinh source de gan Business Rule.");
+                throw new IllegalArgumentException("Method không có quyết định source để gắn Business Rule.");
             }
             return null;
         }
         if (branchId == null || !validBranchIds.contains(branchId)) {
             throw new IllegalArgumentException(
-                    "Hay chon mot quyet dinh source hop le cho Business Rule: " + validBranchIds);
+                    "Hãy chọn một quyết định source hợp lệ cho Business Rule: " + validBranchIds);
         }
         return branchId;
     }
@@ -1114,14 +1131,14 @@ public class BusinessRuleService {
 
     private Long requireProjectServiceMethod(Long projectId, Long methodId) {
         if (methodId == null) {
-            throw new IllegalArgumentException("Business Rule phai lien ket voi mot Service method.");
+            throw new IllegalArgumentException("Business Rule phải liên kết với một Service method.");
         }
         JavaMethod method = javaMethodRepository.findById(methodId)
-                .orElseThrow(() -> new IllegalArgumentException("Khong tim thay Service method " + methodId));
+                .orElseThrow(() -> new IllegalArgumentException("Không tìm thấy Service method " + methodId));
         JavaClass javaClass = javaClassRepository.findById(method.getClassId())
-                .orElseThrow(() -> new IllegalArgumentException("Khong tim thay class cua method " + methodId));
+                .orElseThrow(() -> new IllegalArgumentException("Không tìm thấy class của method " + methodId));
         if (!projectId.equals(javaClass.getProjectId()) || javaClass.getClassType() != ClassType.SERVICE) {
-            throw new IllegalArgumentException("Method phai la Service method cua project hien tai.");
+            throw new IllegalArgumentException("Method phải là Service method của project hiện tại.");
         }
         return methodId;
     }
@@ -1135,7 +1152,7 @@ public class BusinessRuleService {
     private void ensureBusinessRuleEditable(ProjectStatus status) {
         if (status == ProjectStatus.UPLOADED || status == ProjectStatus.FAILED) {
             throw new InvalidProjectStatusException(
-                    "Chi co the thao tac Business Rule sau khi project da ANALYZED.");
+                    "Chỉ có thể thao tác Business Rule sau khi project đã ANALYZED.");
         }
     }
 

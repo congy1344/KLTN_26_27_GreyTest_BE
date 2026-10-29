@@ -1,0 +1,357 @@
+{
+  "context": {
+    "project": {
+      "id": 870,
+      "name": "hospital-management-demo-main",
+      "status": "TEST_GENERATED"
+    },
+    "analysis": {
+      "totalClasses": 64,
+      "totalMethods": 163,
+      "totalEndpoints": 38,
+      "totalRelations": 4,
+      "totalControllerServiceRelations": 35,
+      "existingTestFiles": 0,
+      "totalProductionFiles": 57,
+      "parsedProductionFiles": 57,
+      "failedParseFiles": 0,
+      "failedParseFilePaths": []
+    },
+    "supportingResources": [],
+    "contextWarnings": [],
+    "classes": [
+      {
+        "id": 8891,
+        "packageName": "com.hospital.billing.service",
+        "className": "InvoiceService",
+        "qualifiedName": "com.hospital.billing.service.InvoiceService",
+        "classType": "SERVICE",
+        "filePath": "hospital-management-demo-main/backend/billing-service/src/main/java/com/hospital/billing/service/InvoiceService.java",
+        "sourceCode": "package com.hospital.billing.service;\n\nimport com.hospital.billing.client.AppointmentServiceClient;\nimport com.hospital.billing.client.PatientServiceClient;\nimport com.hospital.billing.dto.*;\nimport com.hospital.billing.model.Invoice;\nimport com.hospital.billing.model.Invoice.InvoiceStatus;\nimport com.hospital.billing.repository.InvoiceRepository;\nimport com.hospital.common.exception.ResourceNotFoundException;\nimport lombok.RequiredArgsConstructor;\nimport lombok.extern.slf4j.Slf4j;\nimport org.springframework.stereotype.Service;\nimport org.springframework.transaction.annotation.Transactional;\nimport java.math.BigDecimal;\nimport java.time.LocalDateTime;\nimport java.time.format.DateTimeFormatter;\nimport java.util.List;\nimport java.util.stream.Collectors;\n\n@Service\n@RequiredArgsConstructor\n@Slf4j\npublic class InvoiceService {\n\n    private final InvoiceRepository invoiceRepository;\n\n    private final PatientServiceClient patientServiceClient;\n\n    private final AppointmentServiceClient appointmentServiceClient;\n\n    @Transactional\n    public InvoiceResponseDto createInvoice(InvoiceRequestDto requestDto) {\n        log.info(\"Creating invoice for appointment ID: {}\", requestDto.getAppointmentId());\n        // Check if invoice already exists for this appointment\n        if (invoiceRepository.existsByAppointmentId(requestDto.getAppointmentId())) {\n            throw new IllegalArgumentException(\"Invoice already exists for appointment ID: \" + requestDto.getAppointmentId());\n        }\n        // Fetch patient details\n        PatientDto patient = patientServiceClient.getPatientById(requestDto.getPatientId());\n        if (patient == null) {\n            throw new ResourceNotFoundException(\"Patient\", \"id\", requestDto.getPatientId());\n        }\n        // Fetch appointment details\n        AppointmentDto appointment = appointmentServiceClient.getAppointmentById(requestDto.getAppointmentId());\n        if (appointment == null) {\n            throw new ResourceNotFoundException(\"Appointment\", \"id\", requestDto.getAppointmentId());\n        }\n        // Create invoice\n        Invoice invoice = new Invoice();\n        invoice.setPatientId(requestDto.getPatientId());\n        invoice.setAppointmentId(requestDto.getAppointmentId());\n        invoice.setInvoiceNumber(generateInvoiceNumber());\n        invoice.setConsultationFee(requestDto.getConsultationFee());\n        invoice.setMedicationCharges(requestDto.getMedicationCharges());\n        invoice.setTestCharges(requestDto.getTestCharges());\n        invoice.setOtherCharges(requestDto.getOtherCharges());\n        invoice.setDiscount(requestDto.getDiscount());\n        invoice.setTax(requestDto.getTax());\n        invoice.setNotes(requestDto.getNotes());\n        // Calculate total\n        invoice.calculateTotal();\n        Invoice savedInvoice = invoiceRepository.save(invoice);\n        log.info(\"Invoice created successfully with ID: {}\", savedInvoice.getId());\n        return enrichInvoiceResponse(savedInvoice, patient, appointment);\n    }\n\n    @Transactional(readOnly = true)\n    public InvoiceResponseDto getInvoiceById(Long id) {\n        log.debug(\"Fetching invoice with ID: {}\", id);\n        Invoice invoice = invoiceRepository.findById(id).orElseThrow(() -> new ResourceNotFoundException(\"Invoice\", \"id\", id));\n        return enrichInvoiceResponse(invoice);\n    }\n\n    @Transactional(readOnly = true)\n    public List<InvoiceResponseDto> getAllInvoices() {\n        log.debug(\"Fetching all invoices\");\n        return invoiceRepository.findAll().stream().map(this::enrichInvoiceResponse).collect(Collectors.toList());\n    }\n\n    @Transactional(readOnly = true)\n    public List<InvoiceResponseDto> getInvoicesByPatientId(Long patientId) {\n        log.debug(\"Fetching invoices for patient ID: {}\", patientId);\n        return invoiceRepository.findByPatientId(patientId).stream().map(this::enrichInvoiceResponse).collect(Collectors.toList());\n    }\n\n    @Transactional(readOnly = true)\n    public InvoiceResponseDto getInvoiceByAppointmentId(Long appointmentId) {\n        log.debug(\"Fetching invoice for appointment ID: {}\", appointmentId);\n        Invoice invoice = invoiceRepository.findByAppointmentId(appointmentId).orElseThrow(() -> new ResourceNotFoundException(\"Invoice\", \"appointmentId\", appointmentId));\n        return enrichInvoiceResponse(invoice);\n    }\n\n    @Transactional(readOnly = true)\n    public List<InvoiceResponseDto> getInvoicesByStatus(InvoiceStatus status) {\n        log.debug(\"Fetching invoices with status: {}\", status);\n        return invoiceRepository.findByStatus(status).stream().map(this::enrichInvoiceResponse).collect(Collectors.toList());\n    }\n\n    @Transactional\n    public InvoiceResponseDto addPayment(Long invoiceId, PaymentRequestDto paymentDto) {\n        log.info(\"Adding payment of {} to invoice ID: {}\", paymentDto.getAmount(), invoiceId);\n        Invoice invoice = invoiceRepository.findById(invoiceId).orElseThrow(() -> new ResourceNotFoundException(\"Invoice\", \"id\", invoiceId));\n        if (invoice.getStatus() == InvoiceStatus.PAID) {\n            throw new IllegalArgumentException(\"Invoice is already fully paid\");\n        }\n        if (invoice.getStatus() == InvoiceStatus.CANCELLED) {\n            throw new IllegalArgumentException(\"Cannot add payment to cancelled invoice\");\n        }\n        // Validate payment amount\n        BigDecimal newPaidAmount = invoice.getPaidAmount().add(paymentDto.getAmount());\n        if (newPaidAmount.compareTo(invoice.getTotalAmount()) > 0) {\n            throw new IllegalArgumentException(\"Payment amount exceeds total amount\");\n        }\n        // Update payment details\n        invoice.setPaidAmount(newPaidAmount);\n        invoice.setPaymentMethod(paymentDto.getPaymentMethod());\n        // Update notes if provided\n        if (paymentDto.getNotes() != null && !paymentDto.getNotes().isEmpty()) {\n            String existingNotes = invoice.getNotes() != null ? invoice.getNotes() + \"\\n\" : \"\";\n            invoice.setNotes(existingNotes + paymentDto.getNotes());\n        }\n        // Recalculate total (which also updates status)\n        invoice.calculateTotal();\n        // Set paid timestamp if fully paid\n        if (invoice.getStatus() == InvoiceStatus.PAID) {\n            invoice.setPaidAt(LocalDateTime.now());\n        }\n        Invoice updatedInvoice = invoiceRepository.save(invoice);\n        log.info(\"Payment added successfully. Invoice status: {}\", updatedInvoice.getStatus());\n        return enrichInvoiceResponse(updatedInvoice);\n    }\n\n    @Transactional\n    public InvoiceResponseDto cancelInvoice(Long invoiceId) {\n        log.info(\"Cancelling invoice ID: {}\", invoiceId);\n        Invoice invoice = invoiceRepository.findById(invoiceId).orElseThrow(() -> new ResourceNotFoundException(\"Invoice\", \"id\", invoiceId));\n        if (invoice.getStatus() == InvoiceStatus.PAID) {\n            throw new IllegalArgumentException(\"Cannot cancel a paid invoice. Please process a refund instead.\");\n        }\n        invoice.setStatus(InvoiceStatus.CANCELLED);\n        Invoice cancelledInvoice = invoiceRepository.save(invoice);\n        log.info(\"Invoice cancelled successfully\");\n        return enrichInvoiceResponse(cancelledInvoice);\n    }\n\n    @Transactional\n    public InvoiceResponseDto refundInvoice(Long invoiceId) {\n        log.info(\"Refunding invoice ID: {}\", invoiceId);\n        Invoice invoice = invoiceRepository.findById(invoiceId).orElseThrow(() -> new ResourceNotFoundException(\"Invoice\", \"id\", invoiceId));\n        if (invoice.getStatus() != InvoiceStatus.PAID) {\n            throw new IllegalArgumentException(\"Only paid invoices can be refunded\");\n        }\n        invoice.setStatus(InvoiceStatus.REFUNDED);\n        invoice.setPaidAmount(BigDecimal.ZERO);\n        invoice.setBalanceAmount(invoice.getTotalAmount());\n        invoice.setPaidAt(null);\n        Invoice refundedInvoice = invoiceRepository.save(invoice);\n        log.info(\"Invoice refunded successfully\");\n        return enrichInvoiceResponse(refundedInvoice);\n    }\n\n    private InvoiceResponseDto enrichInvoiceResponse(Invoice invoice) {\n        PatientDto patient = patientServiceClient.getPatientById(invoice.getPatientId());\n        AppointmentDto appointment = appointmentServiceClient.getAppointmentById(invoice.getAppointmentId());\n        return enrichInvoiceResponse(invoice, patient, appointment);\n    }\n\n    private InvoiceResponseDto enrichInvoiceResponse(Invoice invoice, PatientDto patient, AppointmentDto appointment) {\n        return InvoiceResponseDto.builder().id(invoice.getId()).patientId(invoice.getPatientId()).patientName(patient != null ? patient.getFirstName() + \" \" + patient.getLastName() : null).appointmentId(invoice.getAppointmentId()).appointmentDate(appointment != null ? appointment.getAppointmentDate() : null).invoiceNumber(invoice.getInvoiceNumber()).consultationFee(invoice.getConsultationFee()).medicationCharges(invoice.getMedicationCharges()).testCharges(invoice.getTestCharges()).otherCharges(invoice.getOtherCharges()).discount(invoice.getDiscount()).tax(invoice.getTax()).totalAmount(invoice.getTotalAmount()).paidAmount(invoice.getPaidAmount()).balanceAmount(invoice.getBalanceAmount()).status(invoice.getStatus()).paymentMethod(invoice.getPaymentMethod()).notes(invoice.getNotes()).paidAt(invoice.getPaidAt()).createdAt(invoice.getCreatedAt()).updatedAt(invoice.getUpdatedAt()).build();\n    }\n\n    private String generateInvoiceNumber() {\n        String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern(\"yyyyMMddHHmmss\"));\n        return \"INV-\" + timestamp;\n    }\n}\n",
+        "annotations": [
+          {
+            "id": 11212,
+            "targetType": "CLASS",
+            "category": "COMPONENT",
+            "annotationName": "Service",
+            "attributes": "@Service"
+          },
+          {
+            "id": 11213,
+            "targetType": "METHOD",
+            "category": "TRANSACTION",
+            "annotationName": "Transactional",
+            "attributes": "@Transactional"
+          },
+          {
+            "id": 11214,
+            "targetType": "METHOD",
+            "category": "TRANSACTION",
+            "annotationName": "Transactional",
+            "attributes": "@Transactional(readOnly = true)"
+          },
+          {
+            "id": 11215,
+            "targetType": "METHOD",
+            "category": "TRANSACTION",
+            "annotationName": "Transactional",
+            "attributes": "@Transactional(readOnly = true)"
+          },
+          {
+            "id": 11216,
+            "targetType": "METHOD",
+            "category": "TRANSACTION",
+            "annotationName": "Transactional",
+            "attributes": "@Transactional(readOnly = true)"
+          },
+          {
+            "id": 11217,
+            "targetType": "METHOD",
+            "category": "TRANSACTION",
+            "annotationName": "Transactional",
+            "attributes": "@Transactional(readOnly = true)"
+          },
+          {
+            "id": 11218,
+            "targetType": "METHOD",
+            "category": "TRANSACTION",
+            "annotationName": "Transactional",
+            "attributes": "@Transactional(readOnly = true)"
+          },
+          {
+            "id": 11219,
+            "targetType": "METHOD",
+            "category": "TRANSACTION",
+            "annotationName": "Transactional",
+            "attributes": "@Transactional"
+          },
+          {
+            "id": 11220,
+            "targetType": "METHOD",
+            "category": "TRANSACTION",
+            "annotationName": "Transactional",
+            "attributes": "@Transactional"
+          },
+          {
+            "id": 11221,
+            "targetType": "METHOD",
+            "category": "TRANSACTION",
+            "annotationName": "Transactional",
+            "attributes": "@Transactional"
+          }
+        ],
+        "methods": [
+          {
+            "id": 18671,
+            "classQualifiedName": "com.hospital.billing.service.InvoiceService",
+            "methodName": "getInvoiceByAppointmentId",
+            "returnType": "InvoiceResponseDto",
+            "parameters": [
+              {
+                "name": "appointmentId",
+                "type": "Long"
+              }
+            ],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "@Transactional(readOnly = true)\n    public InvoiceResponseDto getInvoiceByAppointmentId(Long appointmentId) {\n        log.debug(\"Fetching invoice for appointment ID: {}\", appointmentId);\n        Invoice invoice = invoiceRepository.findByAppointmentId(appointmentId)\n                .orElseThrow(() -> new ResourceNotFoundException(\"Invoice\", \"appointmentId\", appointmentId));\n        \n        return enrichInvoiceResponse(invoice);\n    }",
+            "lineStart": 98,
+            "lineEnd": 105,
+            "annotations": [
+              {
+                "id": 11217,
+                "targetType": "METHOD",
+                "category": "TRANSACTION",
+                "annotationName": "Transactional",
+                "attributes": "@Transactional(readOnly = true)"
+              }
+            ],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 100,
+                "lineEnd": 100
+              },
+              {
+                "branchId": "STMT-2",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 101,
+                "lineEnd": 102
+              },
+              {
+                "branchId": "STMT-3",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 104,
+                "lineEnd": 104
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": 8877,
+        "packageName": "com.hospital.billing.client",
+        "className": "AppointmentServiceClient",
+        "qualifiedName": "com.hospital.billing.client.AppointmentServiceClient",
+        "classType": "OTHER",
+        "filePath": "hospital-management-demo-main/backend/billing-service/src/main/java/com/hospital/billing/client/AppointmentServiceClient.java",
+        "sourceCode": "package com.hospital.billing.client;\n\nimport com.hospital.billing.dto.AppointmentDto;\nimport com.hospital.common.dto.ApiResponse;\nimport lombok.RequiredArgsConstructor;\nimport lombok.extern.slf4j.Slf4j;\nimport org.springframework.beans.factory.annotation.Qualifier;\nimport org.springframework.core.ParameterizedTypeReference;\nimport org.springframework.stereotype.Component;\nimport org.springframework.web.reactive.function.client.WebClient;\n\n@Component\n@RequiredArgsConstructor\n@Slf4j\npublic class AppointmentServiceClient {\n\n    @Qualifier(\"appointmentWebClient\")\n    private final WebClient appointmentWebClient;\n\n    public AppointmentDto getAppointmentById(Long appointmentId) {\n        log.debug(\"Fetching appointment with ID: {}\", appointmentId);\n        try {\n            ApiResponse<AppointmentDto> response = appointmentWebClient.get().uri(\"/{id}\", appointmentId).retrieve().bodyToMono(new ParameterizedTypeReference<ApiResponse<AppointmentDto>>() {\n            }).block();\n            return response != null ? response.getData() : null;\n        } catch (Exception e) {\n            log.error(\"Error fetching appointment with ID {}: {}\", appointmentId, e.getMessage());\n            throw new RuntimeException(\"Failed to fetch appointment details: \" + e.getMessage());\n        }\n    }\n}\n",
+        "annotations": [
+          {
+            "id": 11194,
+            "targetType": "CLASS",
+            "category": "COMPONENT",
+            "annotationName": "Component",
+            "attributes": "@Component"
+          }
+        ],
+        "methods": []
+      },
+      {
+        "id": 8878,
+        "packageName": "com.hospital.billing.client",
+        "className": "PatientServiceClient",
+        "qualifiedName": "com.hospital.billing.client.PatientServiceClient",
+        "classType": "OTHER",
+        "filePath": "hospital-management-demo-main/backend/billing-service/src/main/java/com/hospital/billing/client/PatientServiceClient.java",
+        "sourceCode": "package com.hospital.billing.client;\n\nimport com.hospital.billing.dto.PatientDto;\nimport com.hospital.common.dto.ApiResponse;\nimport lombok.RequiredArgsConstructor;\nimport lombok.extern.slf4j.Slf4j;\nimport org.springframework.beans.factory.annotation.Qualifier;\nimport org.springframework.core.ParameterizedTypeReference;\nimport org.springframework.stereotype.Component;\nimport org.springframework.web.reactive.function.client.WebClient;\n\n@Component\n@RequiredArgsConstructor\n@Slf4j\npublic class PatientServiceClient {\n\n    @Qualifier(\"patientWebClient\")\n    private final WebClient patientWebClient;\n\n    public PatientDto getPatientById(Long patientId) {\n        log.debug(\"Fetching patient with ID: {}\", patientId);\n        try {\n            ApiResponse<PatientDto> response = patientWebClient.get().uri(\"/{id}\", patientId).retrieve().bodyToMono(new ParameterizedTypeReference<ApiResponse<PatientDto>>() {\n            }).block();\n            return response != null ? response.getData() : null;\n        } catch (Exception e) {\n            log.error(\"Error fetching patient with ID {}: {}\", patientId, e.getMessage());\n            throw new RuntimeException(\"Failed to fetch patient details: \" + e.getMessage());\n        }\n    }\n}\n",
+        "annotations": [
+          {
+            "id": 11195,
+            "targetType": "CLASS",
+            "category": "COMPONENT",
+            "annotationName": "Component",
+            "attributes": "@Component"
+          }
+        ],
+        "methods": []
+      },
+      {
+        "id": 8881,
+        "packageName": "com.hospital.billing.dto",
+        "className": "AppointmentDto",
+        "qualifiedName": "com.hospital.billing.dto.AppointmentDto",
+        "classType": "OTHER",
+        "filePath": "hospital-management-demo-main/backend/billing-service/src/main/java/com/hospital/billing/dto/AppointmentDto.java",
+        "sourceCode": "package com.hospital.billing.dto;\n\nimport lombok.AllArgsConstructor;\nimport lombok.Data;\nimport lombok.NoArgsConstructor;\nimport java.math.BigDecimal;\n\n@Data\n@NoArgsConstructor\n@AllArgsConstructor\npublic class AppointmentDto {\n\n    private Long id;\n\n    private Long patientId;\n\n    private String patientName;\n\n    private Long doctorId;\n\n    private String doctorName;\n\n    private String doctorSpecialization;\n\n    private String appointmentDate;\n\n    private String appointmentTime;\n\n    private String status;\n\n    private BigDecimal consultationFee;\n}\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8882,
+        "packageName": "com.hospital.billing.dto",
+        "className": "InvoiceRequestDto",
+        "qualifiedName": "com.hospital.billing.dto.InvoiceRequestDto",
+        "classType": "OTHER",
+        "filePath": "hospital-management-demo-main/backend/billing-service/src/main/java/com/hospital/billing/dto/InvoiceRequestDto.java",
+        "sourceCode": "package com.hospital.billing.dto;\n\nimport com.hospital.billing.model.Invoice.PaymentMethod;\nimport jakarta.validation.constraints.*;\nimport lombok.AllArgsConstructor;\nimport lombok.Data;\nimport lombok.NoArgsConstructor;\nimport java.math.BigDecimal;\n\n@Data\n@NoArgsConstructor\n@AllArgsConstructor\npublic class InvoiceRequestDto {\n\n    @NotNull(message = \"Patient ID is required\")\n    private Long patientId;\n\n    @NotNull(message = \"Appointment ID is required\")\n    private Long appointmentId;\n\n    @NotNull(message = \"Consultation fee is required\")\n    @DecimalMin(value = \"0.0\", inclusive = false, message = \"Consultation fee must be greater than 0\")\n    private BigDecimal consultationFee;\n\n    @DecimalMin(value = \"0.0\", message = \"Medication charges must be non-negative\")\n    private BigDecimal medicationCharges = BigDecimal.ZERO;\n\n    @DecimalMin(value = \"0.0\", message = \"Test charges must be non-negative\")\n    private BigDecimal testCharges = BigDecimal.ZERO;\n\n    @DecimalMin(value = \"0.0\", message = \"Other charges must be non-negative\")\n    private BigDecimal otherCharges = BigDecimal.ZERO;\n\n    @DecimalMin(value = \"0.0\", message = \"Discount must be non-negative\")\n    private BigDecimal discount = BigDecimal.ZERO;\n\n    @DecimalMin(value = \"0.0\", message = \"Tax must be non-negative\")\n    private BigDecimal tax = BigDecimal.ZERO;\n\n    private String notes;\n}\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8883,
+        "packageName": "com.hospital.billing.dto",
+        "className": "InvoiceResponseDto",
+        "qualifiedName": "com.hospital.billing.dto.InvoiceResponseDto",
+        "classType": "OTHER",
+        "filePath": "hospital-management-demo-main/backend/billing-service/src/main/java/com/hospital/billing/dto/InvoiceResponseDto.java",
+        "sourceCode": "package com.hospital.billing.dto;\n\nimport com.hospital.billing.model.Invoice.InvoiceStatus;\nimport com.hospital.billing.model.Invoice.PaymentMethod;\nimport lombok.AllArgsConstructor;\nimport lombok.Builder;\nimport lombok.Data;\nimport lombok.NoArgsConstructor;\nimport java.math.BigDecimal;\nimport java.time.LocalDateTime;\n\n@Data\n@NoArgsConstructor\n@AllArgsConstructor\n@Builder\npublic class InvoiceResponseDto {\n\n    private Long id;\n\n    private Long patientId;\n\n    private String patientName;\n\n    private Long appointmentId;\n\n    private String appointmentDate;\n\n    private String invoiceNumber;\n\n    private BigDecimal consultationFee;\n\n    private BigDecimal medicationCharges;\n\n    private BigDecimal testCharges;\n\n    private BigDecimal otherCharges;\n\n    private BigDecimal discount;\n\n    private BigDecimal tax;\n\n    private BigDecimal totalAmount;\n\n    private BigDecimal paidAmount;\n\n    private BigDecimal balanceAmount;\n\n    private InvoiceStatus status;\n\n    private PaymentMethod paymentMethod;\n\n    private String notes;\n\n    private LocalDateTime paidAt;\n\n    private LocalDateTime createdAt;\n\n    private LocalDateTime updatedAt;\n}\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8884,
+        "packageName": "com.hospital.billing.dto",
+        "className": "PatientDto",
+        "qualifiedName": "com.hospital.billing.dto.PatientDto",
+        "classType": "OTHER",
+        "filePath": "hospital-management-demo-main/backend/billing-service/src/main/java/com/hospital/billing/dto/PatientDto.java",
+        "sourceCode": "package com.hospital.billing.dto;\n\nimport lombok.AllArgsConstructor;\nimport lombok.Data;\nimport lombok.NoArgsConstructor;\n\n@Data\n@NoArgsConstructor\n@AllArgsConstructor\npublic class PatientDto {\n\n    private Long id;\n\n    private String firstName;\n\n    private String lastName;\n\n    private String email;\n\n    private String phone;\n}\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8885,
+        "packageName": "com.hospital.billing.dto",
+        "className": "PaymentRequestDto",
+        "qualifiedName": "com.hospital.billing.dto.PaymentRequestDto",
+        "classType": "OTHER",
+        "filePath": "hospital-management-demo-main/backend/billing-service/src/main/java/com/hospital/billing/dto/PaymentRequestDto.java",
+        "sourceCode": "package com.hospital.billing.dto;\n\nimport com.hospital.billing.model.Invoice.PaymentMethod;\nimport jakarta.validation.constraints.DecimalMin;\nimport jakarta.validation.constraints.NotNull;\nimport lombok.AllArgsConstructor;\nimport lombok.Data;\nimport lombok.NoArgsConstructor;\nimport java.math.BigDecimal;\n\n@Data\n@NoArgsConstructor\n@AllArgsConstructor\npublic class PaymentRequestDto {\n\n    @NotNull(message = \"Payment amount is required\")\n    @DecimalMin(value = \"0.01\", message = \"Payment amount must be greater than 0\")\n    private BigDecimal amount;\n\n    @NotNull(message = \"Payment method is required\")\n    private PaymentMethod paymentMethod;\n\n    private String notes;\n}\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8887,
+        "packageName": "com.hospital.billing.model",
+        "className": "Invoice",
+        "qualifiedName": "com.hospital.billing.model.Invoice",
+        "classType": "ENTITY",
+        "filePath": "hospital-management-demo-main/backend/billing-service/src/main/java/com/hospital/billing/model/Invoice.java",
+        "sourceCode": "package com.hospital.billing.model;\n\nimport jakarta.persistence.*;\nimport lombok.AllArgsConstructor;\nimport lombok.Data;\nimport lombok.NoArgsConstructor;\nimport org.hibernate.annotations.CreationTimestamp;\nimport org.hibernate.annotations.UpdateTimestamp;\nimport java.math.BigDecimal;\nimport java.time.LocalDateTime;\n\n@Entity\n@Table(name = \"invoices\")\n@Data\n@NoArgsConstructor\n@AllArgsConstructor\npublic class Invoice {\n\n    @Id\n    @GeneratedValue(strategy = GenerationType.IDENTITY)\n    private Long id;\n\n    @Column(nullable = false)\n    private Long patientId;\n\n    @Column(nullable = false)\n    private Long appointmentId;\n\n    @Column(nullable = false, unique = true)\n    private String invoiceNumber;\n\n    @Column(nullable = false, precision = 10, scale = 2)\n    private BigDecimal consultationFee;\n\n    @Column(precision = 10, scale = 2)\n    private BigDecimal medicationCharges = BigDecimal.ZERO;\n\n    @Column(precision = 10, scale = 2)\n    private BigDecimal testCharges = BigDecimal.ZERO;\n\n    @Column(precision = 10, scale = 2)\n    private BigDecimal otherCharges = BigDecimal.ZERO;\n\n    @Column(precision = 10, scale = 2)\n    private BigDecimal discount = BigDecimal.ZERO;\n\n    @Column(precision = 10, scale = 2)\n    private BigDecimal tax = BigDecimal.ZERO;\n\n    @Column(nullable = false, precision = 10, scale = 2)\n    private BigDecimal totalAmount;\n\n    @Column(nullable = false, precision = 10, scale = 2)\n    private BigDecimal paidAmount = BigDecimal.ZERO;\n\n    @Column(nullable = false, precision = 10, scale = 2)\n    private BigDecimal balanceAmount;\n\n    @Enumerated(EnumType.STRING)\n    @Column(nullable = false)\n    private InvoiceStatus status = InvoiceStatus.PENDING;\n\n    @Enumerated(EnumType.STRING)\n    private PaymentMethod paymentMethod;\n\n    @Column(columnDefinition = \"TEXT\")\n    private String notes;\n\n    private LocalDateTime paidAt;\n\n    @CreationTimestamp\n    @Column(updatable = false)\n    private LocalDateTime createdAt;\n\n    @UpdateTimestamp\n    private LocalDateTime updatedAt;\n\n    public enum InvoiceStatus {\n\n        PENDING, PARTIALLY_PAID, PAID, CANCELLED, REFUNDED\n    }\n\n    public enum PaymentMethod {\n\n        CASH,\n        CREDIT_CARD,\n        DEBIT_CARD,\n        UPI,\n        NET_BANKING,\n        INSURANCE\n    }\n\n    // Helper method to calculate total\n    public void calculateTotal() {\n        BigDecimal subtotal = consultationFee.add(medicationCharges).add(testCharges).add(otherCharges);\n        BigDecimal afterDiscount = subtotal.subtract(discount);\n        this.totalAmount = afterDiscount.add(tax);\n        this.balanceAmount = totalAmount.subtract(paidAmount);\n        // Update status based on payment\n        if (balanceAmount.compareTo(BigDecimal.ZERO) == 0) {\n            this.status = InvoiceStatus.PAID;\n        } else if (paidAmount.compareTo(BigDecimal.ZERO) > 0) {\n            this.status = InvoiceStatus.PARTIALLY_PAID;\n        } else {\n            this.status = InvoiceStatus.PENDING;\n        }\n    }\n}\n",
+        "annotations": [
+          {
+            "id": 11209,
+            "targetType": "CLASS",
+            "category": "PERSISTENCE",
+            "annotationName": "Entity",
+            "attributes": "@Entity"
+          },
+          {
+            "id": 11210,
+            "targetType": "CLASS",
+            "category": "PERSISTENCE",
+            "annotationName": "Table",
+            "attributes": "@Table(name = \"invoices\")"
+          }
+        ],
+        "methods": []
+      },
+      {
+        "id": 8888,
+        "packageName": "com.hospital.billing.model",
+        "className": "InvoiceStatus",
+        "qualifiedName": "com.hospital.billing.model.Invoice.InvoiceStatus",
+        "classType": "ENUM",
+        "filePath": "hospital-management-demo-main/backend/billing-service/src/main/java/com/hospital/billing/model/Invoice.java",
+        "sourceCode": "package com.hospital.billing.model;\n\nimport jakarta.persistence.*;\nimport lombok.AllArgsConstructor;\nimport lombok.Data;\nimport lombok.NoArgsConstructor;\nimport org.hibernate.annotations.CreationTimestamp;\nimport org.hibernate.annotations.UpdateTimestamp;\nimport java.math.BigDecimal;\nimport java.time.LocalDateTime;\n\n@Entity\n@Table(name = \"invoices\")\n@Data\n@NoArgsConstructor\n@AllArgsConstructor\npublic class Invoice {\n\n    @Id\n    @GeneratedValue(strategy = GenerationType.IDENTITY)\n    private Long id;\n\n    @Column(nullable = false)\n    private Long patientId;\n\n    @Column(nullable = false)\n    private Long appointmentId;\n\n    @Column(nullable = false, unique = true)\n    private String invoiceNumber;\n\n    @Column(nullable = false, precision = 10, scale = 2)\n    private BigDecimal consultationFee;\n\n    @Column(precision = 10, scale = 2)\n    private BigDecimal medicationCharges = BigDecimal.ZERO;\n\n    @Column(precision = 10, scale = 2)\n    private BigDecimal testCharges = BigDecimal.ZERO;\n\n    @Column(precision = 10, scale = 2)\n    private BigDecimal otherCharges = BigDecimal.ZERO;\n\n    @Column(precision = 10, scale = 2)\n    private BigDecimal discount = BigDecimal.ZERO;\n\n    @Column(precision = 10, scale = 2)\n    private BigDecimal tax = BigDecimal.ZERO;\n\n    @Column(nullable = false, precision = 10, scale = 2)\n    private BigDecimal totalAmount;\n\n    @Column(nullable = false, precision = 10, scale = 2)\n    private BigDecimal paidAmount = BigDecimal.ZERO;\n\n    @Column(nullable = false, precision = 10, scale = 2)\n    private BigDecimal balanceAmount;\n\n    @Enumerated(EnumType.STRING)\n    @Column(nullable = false)\n    private InvoiceStatus status = InvoiceStatus.PENDING;\n\n    @Enumerated(EnumType.STRING)\n    private PaymentMethod paymentMethod;\n\n    @Column(columnDefinition = \"TEXT\")\n    private String notes;\n\n    private LocalDateTime paidAt;\n\n    @CreationTimestamp\n    @Column(updatable = false)\n    private LocalDateTime createdAt;\n\n    @UpdateTimestamp\n    private LocalDateTime updatedAt;\n\n    public enum InvoiceStatus {\n\n        PENDING, PARTIALLY_PAID, PAID, CANCELLED, REFUNDED\n    }\n\n    public enum PaymentMethod {\n\n        CASH,\n        CREDIT_CARD,\n        DEBIT_CARD,\n        UPI,\n        NET_BANKING,\n        INSURANCE\n    }\n\n    // Helper method to calculate total\n    public void calculateTotal() {\n        BigDecimal subtotal = consultationFee.add(medicationCharges).add(testCharges).add(otherCharges);\n        BigDecimal afterDiscount = subtotal.subtract(discount);\n        this.totalAmount = afterDiscount.add(tax);\n        this.balanceAmount = totalAmount.subtract(paidAmount);\n        // Update status based on payment\n        if (balanceAmount.compareTo(BigDecimal.ZERO) == 0) {\n            this.status = InvoiceStatus.PAID;\n        } else if (paidAmount.compareTo(BigDecimal.ZERO) > 0) {\n            this.status = InvoiceStatus.PARTIALLY_PAID;\n        } else {\n            this.status = InvoiceStatus.PENDING;\n        }\n    }\n}\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8890,
+        "packageName": "com.hospital.billing.repository",
+        "className": "InvoiceRepository",
+        "qualifiedName": "com.hospital.billing.repository.InvoiceRepository",
+        "classType": "REPOSITORY",
+        "filePath": "hospital-management-demo-main/backend/billing-service/src/main/java/com/hospital/billing/repository/InvoiceRepository.java",
+        "sourceCode": "package com.hospital.billing.repository;\n\nimport com.hospital.billing.model.Invoice;\nimport com.hospital.billing.model.Invoice.InvoiceStatus;\nimport org.springframework.data.jpa.repository.JpaRepository;\nimport org.springframework.stereotype.Repository;\nimport java.util.List;\nimport java.util.Optional;\n\n@Repository\npublic interface InvoiceRepository extends JpaRepository<Invoice, Long> {\n\n    Optional<Invoice> findByInvoiceNumber(String invoiceNumber);\n\n    List<Invoice> findByPatientId(Long patientId);\n\n    Optional<Invoice> findByAppointmentId(Long appointmentId);\n\n    List<Invoice> findByStatus(InvoiceStatus status);\n\n    List<Invoice> findByPatientIdAndStatus(Long patientId, InvoiceStatus status);\n\n    boolean existsByAppointmentId(Long appointmentId);\n}\n",
+        "annotations": [
+          {
+            "id": 11211,
+            "targetType": "CLASS",
+            "category": "COMPONENT",
+            "annotationName": "Repository",
+            "attributes": "@Repository"
+          }
+        ],
+        "methods": []
+      },
+      {
+        "id": 8894,
+        "packageName": "com.hospital.common.exception",
+        "className": "ResourceNotFoundException",
+        "qualifiedName": "com.hospital.common.exception.ResourceNotFoundException",
+        "classType": "OTHER",
+        "filePath": "hospital-management-demo-main/backend/common-lib/src/main/java/com/hospital/common/exception/ResourceNotFoundException.java",
+        "sourceCode": "package com.hospital.common.exception;\n\npublic class ResourceNotFoundException extends RuntimeException {\n\n    public ResourceNotFoundException(String message) {\n        super(message);\n    }\n\n    public ResourceNotFoundException(String resourceName, String fieldName, Object fieldValue) {\n        super(String.format(\"%s not found with %s: '%s'\", resourceName, fieldName, fieldValue));\n    }\n}\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8892,
+        "packageName": "com.hospital.common.dto",
+        "className": "ApiResponse",
+        "qualifiedName": "com.hospital.common.dto.ApiResponse",
+        "classType": "OTHER",
+        "filePath": "hospital-management-demo-main/backend/common-lib/src/main/java/com/hospital/common/dto/ApiResponse.java",
+        "sourceCode": "package com.hospital.common.dto;\n\nimport lombok.AllArgsConstructor;\nimport lombok.Data;\nimport lombok.NoArgsConstructor;\n\n@Data\n@AllArgsConstructor\n@NoArgsConstructor\npublic class ApiResponse<T> {\n\n    private boolean success;\n\n    private String message;\n\n    private T data;\n\n    public static <T> ApiResponse<T> success(T data) {\n        return new ApiResponse<>(true, \"Operation successful\", data);\n    }\n\n    public static <T> ApiResponse<T> success(String message, T data) {\n        return new ApiResponse<>(true, message, data);\n    }\n\n    public static <T> ApiResponse<T> error(String message) {\n        return new ApiResponse<>(false, message, null);\n    }\n}\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8889,
+        "packageName": "com.hospital.billing.model",
+        "className": "PaymentMethod",
+        "qualifiedName": "com.hospital.billing.model.Invoice.PaymentMethod",
+        "classType": "ENUM",
+        "filePath": "hospital-management-demo-main/backend/billing-service/src/main/java/com/hospital/billing/model/Invoice.java",
+        "sourceCode": "package com.hospital.billing.model;\n\nimport jakarta.persistence.*;\nimport lombok.AllArgsConstructor;\nimport lombok.Data;\nimport lombok.NoArgsConstructor;\nimport org.hibernate.annotations.CreationTimestamp;\nimport org.hibernate.annotations.UpdateTimestamp;\nimport java.math.BigDecimal;\nimport java.time.LocalDateTime;\n\n@Entity\n@Table(name = \"invoices\")\n@Data\n@NoArgsConstructor\n@AllArgsConstructor\npublic class Invoice {\n\n    @Id\n    @GeneratedValue(strategy = GenerationType.IDENTITY)\n    private Long id;\n\n    @Column(nullable = false)\n    private Long patientId;\n\n    @Column(nullable = false)\n    private Long appointmentId;\n\n    @Column(nullable = false, unique = true)\n    private String invoiceNumber;\n\n    @Column(nullable = false, precision = 10, scale = 2)\n    private BigDecimal consultationFee;\n\n    @Column(precision = 10, scale = 2)\n    private BigDecimal medicationCharges = BigDecimal.ZERO;\n\n    @Column(precision = 10, scale = 2)\n    private BigDecimal testCharges = BigDecimal.ZERO;\n\n    @Column(precision = 10, scale = 2)\n    private BigDecimal otherCharges = BigDecimal.ZERO;\n\n    @Column(precision = 10, scale = 2)\n    private BigDecimal discount = BigDecimal.ZERO;\n\n    @Column(precision = 10, scale = 2)\n    private BigDecimal tax = BigDecimal.ZERO;\n\n    @Column(nullable = false, precision = 10, scale = 2)\n    private BigDecimal totalAmount;\n\n    @Column(nullable = false, precision = 10, scale = 2)\n    private BigDecimal paidAmount = BigDecimal.ZERO;\n\n    @Column(nullable = false, precision = 10, scale = 2)\n    private BigDecimal balanceAmount;\n\n    @Enumerated(EnumType.STRING)\n    @Column(nullable = false)\n    private InvoiceStatus status = InvoiceStatus.PENDING;\n\n    @Enumerated(EnumType.STRING)\n    private PaymentMethod paymentMethod;\n\n    @Column(columnDefinition = \"TEXT\")\n    private String notes;\n\n    private LocalDateTime paidAt;\n\n    @CreationTimestamp\n    @Column(updatable = false)\n    private LocalDateTime createdAt;\n\n    @UpdateTimestamp\n    private LocalDateTime updatedAt;\n\n    public enum InvoiceStatus {\n\n        PENDING, PARTIALLY_PAID, PAID, CANCELLED, REFUNDED\n    }\n\n    public enum PaymentMethod {\n\n        CASH,\n        CREDIT_CARD,\n        DEBIT_CARD,\n        UPI,\n        NET_BANKING,\n        INSURANCE\n    }\n\n    // Helper method to calculate total\n    public void calculateTotal() {\n        BigDecimal subtotal = consultationFee.add(medicationCharges).add(testCharges).add(otherCharges);\n        BigDecimal afterDiscount = subtotal.subtract(discount);\n        this.totalAmount = afterDiscount.add(tax);\n        this.balanceAmount = totalAmount.subtract(paidAmount);\n        // Update status based on payment\n        if (balanceAmount.compareTo(BigDecimal.ZERO) == 0) {\n            this.status = InvoiceStatus.PAID;\n        } else if (paidAmount.compareTo(BigDecimal.ZERO) > 0) {\n            this.status = InvoiceStatus.PARTIALLY_PAID;\n        } else {\n            this.status = InvoiceStatus.PENDING;\n        }\n    }\n}\n",
+        "annotations": [],
+        "methods": []
+      }
+    ],
+    "serviceRepositoryRelations": [],
+    "controllerServiceRelations": [],
+    "dependencyCalls": [],
+    "existingTests": []
+  },
+  "response": {
+    "rules": [
+      {
+        "method_id": 18671,
+        "description": "Khi không tìm thấy hóa đơn theo mã lịch hẹn, service ném ResourceNotFoundException với thông điệp \"Invoice not found with appointmentId: '<appointmentId>'.\"",
+        "category": "VALIDATION",
+        "branch_id": "STMT-2"
+      }
+    ]
+  }
+}

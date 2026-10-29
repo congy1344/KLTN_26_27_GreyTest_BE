@@ -1,0 +1,1036 @@
+{
+  "context": {
+    "project": {
+      "id": 870,
+      "name": "hospital-management-demo-main",
+      "status": "CASE_APPROVED"
+    },
+    "analysis": {
+      "totalClasses": 64,
+      "totalMethods": 163,
+      "totalEndpoints": 38,
+      "totalRelations": 4,
+      "totalControllerServiceRelations": 35,
+      "existingTestFiles": 0,
+      "totalProductionFiles": 57,
+      "parsedProductionFiles": 57,
+      "failedParseFiles": 0,
+      "failedParseFilePaths": []
+    },
+    "classes": [
+      {
+        "id": 8875,
+        "packageName": "com.hospital.appointment.service",
+        "className": "AppointmentService",
+        "qualifiedName": "com.hospital.appointment.service.AppointmentService",
+        "classType": "SERVICE",
+        "filePath": "hospital-management-demo-main/backend/appointment-service/src/main/java/com/hospital/appointment/service/AppointmentService.java",
+        "sourceCode": "package com.hospital.appointment.service;\n\nimport com.hospital.appointment.client.DoctorServiceClient;\nimport com.hospital.appointment.client.PatientServiceClient;\nimport com.hospital.appointment.dto.*;\nimport com.hospital.appointment.model.Appointment;\nimport com.hospital.appointment.repository.AppointmentRepository;\nimport com.hospital.common.exception.ResourceNotFoundException;\nimport lombok.RequiredArgsConstructor;\nimport lombok.extern.slf4j.Slf4j;\nimport org.springframework.stereotype.Service;\nimport org.springframework.transaction.annotation.Transactional;\nimport java.time.LocalDate;\nimport java.time.LocalDateTime;\nimport java.util.List;\nimport java.util.stream.Collectors;\n\n@Service\n@RequiredArgsConstructor\n@Slf4j\npublic class AppointmentService {\n\n    private final AppointmentRepository appointmentRepository;\n\n    private final PatientServiceClient patientServiceClient;\n\n    private final DoctorServiceClient doctorServiceClient;\n\n    @Transactional\n    public AppointmentResponseDto createAppointment(AppointmentRequestDto requestDto) {\n        log.info(\"Creating appointment for patient {} with doctor {}\", requestDto.getPatientId(), requestDto.getDoctorId());\n        // Validate patient exists\n        PatientDto patient = patientServiceClient.getPatientById(requestDto.getPatientId());\n        log.debug(\"Patient validated: {}\", patient.getFullName());\n        // Validate doctor exists and is available\n        DoctorDto doctor = doctorServiceClient.getDoctorById(requestDto.getDoctorId());\n        log.debug(\"Doctor validated: {}\", doctor.getFullName());\n        if (!doctor.getIsAvailable()) {\n            throw new IllegalArgumentException(\"Doctor is not available for appointments\");\n        }\n        // Check for conflicting appointments\n        appointmentRepository.findConflictingAppointment(requestDto.getDoctorId(), requestDto.getAppointmentDate(), requestDto.getAppointmentTime()).ifPresent(a -> {\n            throw new IllegalArgumentException(\"Doctor already has an appointment at \" + requestDto.getAppointmentTime() + \" on \" + requestDto.getAppointmentDate());\n        });\n        Appointment appointment = new Appointment();\n        appointment.setPatientId(requestDto.getPatientId());\n        appointment.setDoctorId(requestDto.getDoctorId());\n        appointment.setAppointmentDate(requestDto.getAppointmentDate());\n        appointment.setAppointmentTime(requestDto.getAppointmentTime());\n        appointment.setReason(requestDto.getReason());\n        appointment.setNotes(requestDto.getNotes());\n        appointment.setStatus(requestDto.getStatus() != null ? requestDto.getStatus() : Appointment.AppointmentStatus.SCHEDULED);\n        Appointment savedAppointment = appointmentRepository.save(appointment);\n        log.info(\"Appointment created successfully with ID: {}\", savedAppointment.getId());\n        return enrichAppointmentResponse(savedAppointment, patient, doctor);\n    }\n\n    @Transactional(readOnly = true)\n    public AppointmentResponseDto getAppointmentById(Long id) {\n        log.debug(\"Fetching appointment with ID: {}\", id);\n        Appointment appointment = appointmentRepository.findById(id).orElseThrow(() -> new ResourceNotFoundException(\"Appointment\", \"id\", id));\n        return enrichAppointmentResponse(appointment);\n    }\n\n    @Transactional(readOnly = true)\n    public List<AppointmentResponseDto> getAllAppointments() {\n        log.debug(\"Fetching all appointments\");\n        return appointmentRepository.findAll().stream().map(this::enrichAppointmentResponse).collect(Collectors.toList());\n    }\n\n    @Transactional(readOnly = true)\n    public List<AppointmentResponseDto> getAppointmentsByPatient(Long patientId) {\n        log.debug(\"Fetching appointments for patient: {}\", patientId);\n        return appointmentRepository.findByPatientId(patientId).stream().map(this::enrichAppointmentResponse).collect(Collectors.toList());\n    }\n\n    @Transactional(readOnly = true)\n    public List<AppointmentResponseDto> getAppointmentsByDoctor(Long doctorId) {\n        log.debug(\"Fetching appointments for doctor: {}\", doctorId);\n        return appointmentRepository.findByDoctorId(doctorId).stream().map(this::enrichAppointmentResponse).collect(Collectors.toList());\n    }\n\n    @Transactional(readOnly = true)\n    public List<AppointmentResponseDto> getAppointmentsByDate(LocalDate date) {\n        log.debug(\"Fetching appointments for date: {}\", date);\n        return appointmentRepository.findByAppointmentDate(date).stream().map(this::enrichAppointmentResponse).collect(Collectors.toList());\n    }\n\n    @Transactional(readOnly = true)\n    public List<AppointmentResponseDto> getAppointmentsByStatus(Appointment.AppointmentStatus status) {\n        log.debug(\"Fetching appointments with status: {}\", status);\n        return appointmentRepository.findByStatus(status).stream().map(this::enrichAppointmentResponse).collect(Collectors.toList());\n    }\n\n    @Transactional\n    public AppointmentResponseDto updateAppointmentStatus(Long id, Appointment.AppointmentStatus status) {\n        log.info(\"Updating appointment {} status to {}\", id, status);\n        Appointment appointment = appointmentRepository.findById(id).orElseThrow(() -> new ResourceNotFoundException(\"Appointment\", \"id\", id));\n        appointment.setStatus(status);\n        if (status == Appointment.AppointmentStatus.CANCELLED) {\n            appointment.setCancelledAt(LocalDateTime.now());\n        } else if (status == Appointment.AppointmentStatus.COMPLETED) {\n            appointment.setCompletedAt(LocalDateTime.now());\n        }\n        Appointment updatedAppointment = appointmentRepository.save(appointment);\n        log.info(\"Appointment status updated successfully\");\n        return enrichAppointmentResponse(updatedAppointment);\n    }\n\n    @Transactional\n    public AppointmentResponseDto updateAppointmentDetails(Long id, String diagnosis, String prescription) {\n        log.info(\"Updating appointment {} medical details\", id);\n        Appointment appointment = appointmentRepository.findById(id).orElseThrow(() -> new ResourceNotFoundException(\"Appointment\", \"id\", id));\n        appointment.setDiagnosis(diagnosis);\n        appointment.setPrescription(prescription);\n        Appointment updatedAppointment = appointmentRepository.save(appointment);\n        log.info(\"Appointment medical details updated successfully\");\n        return enrichAppointmentResponse(updatedAppointment);\n    }\n\n    @Transactional\n    public void deleteAppointment(Long id) {\n        log.info(\"Deleting appointment with ID: {}\", id);\n        Appointment appointment = appointmentRepository.findById(id).orElseThrow(() -> new ResourceNotFoundException(\"Appointment\", \"id\", id));\n        appointmentRepository.delete(appointment);\n        log.info(\"Appointment deleted successfully\");\n    }\n\n    private AppointmentResponseDto enrichAppointmentResponse(Appointment appointment) {\n        try {\n            PatientDto patient = patientServiceClient.getPatientById(appointment.getPatientId());\n            DoctorDto doctor = doctorServiceClient.getDoctorById(appointment.getDoctorId());\n            return enrichAppointmentResponse(appointment, patient, doctor);\n        } catch (Exception e) {\n            log.warn(\"Could not enrich appointment response: {}\", e.getMessage());\n            return new AppointmentResponseDto(appointment);\n        }\n    }\n\n    private AppointmentResponseDto enrichAppointmentResponse(Appointment appointment, PatientDto patient, DoctorDto doctor) {\n        AppointmentResponseDto response = new AppointmentResponseDto(appointment);\n        response.setPatientName(patient.getFullName());\n        response.setDoctorName(doctor.getFullName());\n        response.setDoctorSpecialization(doctor.getSpecialization());\n        return response;\n    }\n}\n",
+        "annotations": [
+          {
+            "id": 11183,
+            "targetType": "CLASS",
+            "category": "COMPONENT",
+            "annotationName": "Service",
+            "attributes": "@Service"
+          },
+          {
+            "id": 11184,
+            "targetType": "METHOD",
+            "category": "TRANSACTION",
+            "annotationName": "Transactional",
+            "attributes": "@Transactional"
+          },
+          {
+            "id": 11185,
+            "targetType": "METHOD",
+            "category": "TRANSACTION",
+            "annotationName": "Transactional",
+            "attributes": "@Transactional(readOnly = true)"
+          },
+          {
+            "id": 11186,
+            "targetType": "METHOD",
+            "category": "TRANSACTION",
+            "annotationName": "Transactional",
+            "attributes": "@Transactional(readOnly = true)"
+          },
+          {
+            "id": 11187,
+            "targetType": "METHOD",
+            "category": "TRANSACTION",
+            "annotationName": "Transactional",
+            "attributes": "@Transactional(readOnly = true)"
+          },
+          {
+            "id": 11188,
+            "targetType": "METHOD",
+            "category": "TRANSACTION",
+            "annotationName": "Transactional",
+            "attributes": "@Transactional(readOnly = true)"
+          },
+          {
+            "id": 11189,
+            "targetType": "METHOD",
+            "category": "TRANSACTION",
+            "annotationName": "Transactional",
+            "attributes": "@Transactional(readOnly = true)"
+          },
+          {
+            "id": 11190,
+            "targetType": "METHOD",
+            "category": "TRANSACTION",
+            "annotationName": "Transactional",
+            "attributes": "@Transactional(readOnly = true)"
+          },
+          {
+            "id": 11191,
+            "targetType": "METHOD",
+            "category": "TRANSACTION",
+            "annotationName": "Transactional",
+            "attributes": "@Transactional"
+          },
+          {
+            "id": 11192,
+            "targetType": "METHOD",
+            "category": "TRANSACTION",
+            "annotationName": "Transactional",
+            "attributes": "@Transactional"
+          },
+          {
+            "id": 11193,
+            "targetType": "METHOD",
+            "category": "TRANSACTION",
+            "annotationName": "Transactional",
+            "attributes": "@Transactional"
+          }
+        ],
+        "methods": [
+          {
+            "id": 18633,
+            "classQualifiedName": "com.hospital.appointment.service.AppointmentService",
+            "methodName": "getAppointmentsByPatient",
+            "returnType": "List<AppointmentResponseDto>",
+            "parameters": [
+              {
+                "name": "patientId",
+                "type": "Long"
+              }
+            ],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "@Transactional(readOnly = true)\n    public List<AppointmentResponseDto> getAppointmentsByPatient(Long patientId) {\n        log.debug(\"Fetching appointments for patient: {}\", patientId);\n        return appointmentRepository.findByPatientId(patientId).stream()\n                .map(this::enrichAppointmentResponse)\n                .collect(Collectors.toList());\n    }",
+            "lineStart": 91,
+            "lineEnd": 97,
+            "annotations": [
+              {
+                "id": 11187,
+                "targetType": "METHOD",
+                "category": "TRANSACTION",
+                "annotationName": "Transactional",
+                "attributes": "@Transactional(readOnly = true)"
+              }
+            ],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 93,
+                "lineEnd": 93
+              },
+              {
+                "branchId": "STMT-2",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 94,
+                "lineEnd": 96
+              }
+            ]
+          },
+          {
+            "id": 18634,
+            "classQualifiedName": "com.hospital.appointment.service.AppointmentService",
+            "methodName": "getAppointmentsByDoctor",
+            "returnType": "List<AppointmentResponseDto>",
+            "parameters": [
+              {
+                "name": "doctorId",
+                "type": "Long"
+              }
+            ],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "@Transactional(readOnly = true)\n    public List<AppointmentResponseDto> getAppointmentsByDoctor(Long doctorId) {\n        log.debug(\"Fetching appointments for doctor: {}\", doctorId);\n        return appointmentRepository.findByDoctorId(doctorId).stream()\n                .map(this::enrichAppointmentResponse)\n                .collect(Collectors.toList());\n    }",
+            "lineStart": 99,
+            "lineEnd": 105,
+            "annotations": [
+              {
+                "id": 11188,
+                "targetType": "METHOD",
+                "category": "TRANSACTION",
+                "annotationName": "Transactional",
+                "attributes": "@Transactional(readOnly = true)"
+              }
+            ],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 101,
+                "lineEnd": 101
+              },
+              {
+                "branchId": "STMT-2",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 102,
+                "lineEnd": 104
+              }
+            ]
+          },
+          {
+            "id": 18638,
+            "classQualifiedName": "com.hospital.appointment.service.AppointmentService",
+            "methodName": "updateAppointmentDetails",
+            "returnType": "AppointmentResponseDto",
+            "parameters": [
+              {
+                "name": "id",
+                "type": "Long"
+              },
+              {
+                "name": "diagnosis",
+                "type": "String"
+              },
+              {
+                "name": "prescription",
+                "type": "String"
+              }
+            ],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "@Transactional\n    public AppointmentResponseDto updateAppointmentDetails(Long id, String diagnosis, String prescription) {\n        log.info(\"Updating appointment {} medical details\", id);\n        \n        Appointment appointment = appointmentRepository.findById(id)\n                .orElseThrow(() -> new ResourceNotFoundException(\"Appointment\", \"id\", id));\n        \n        appointment.setDiagnosis(diagnosis);\n        appointment.setPrescription(prescription);\n        \n        Appointment updatedAppointment = appointmentRepository.save(appointment);\n        log.info(\"Appointment medical details updated successfully\");\n        \n        return enrichAppointmentResponse(updatedAppointment);\n    }",
+            "lineStart": 144,
+            "lineEnd": 158,
+            "annotations": [
+              {
+                "id": 11192,
+                "targetType": "METHOD",
+                "category": "TRANSACTION",
+                "annotationName": "Transactional",
+                "attributes": "@Transactional"
+              }
+            ],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 146,
+                "lineEnd": 146
+              },
+              {
+                "branchId": "STMT-2",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 148,
+                "lineEnd": 149
+              },
+              {
+                "branchId": "STMT-3",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 151,
+                "lineEnd": 151
+              },
+              {
+                "branchId": "STMT-4",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 152,
+                "lineEnd": 152
+              },
+              {
+                "branchId": "STMT-5",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 154,
+                "lineEnd": 154
+              },
+              {
+                "branchId": "STMT-6",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 155,
+                "lineEnd": 155
+              },
+              {
+                "branchId": "STMT-7",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 157,
+                "lineEnd": 157
+              }
+            ]
+          },
+          {
+            "id": 18639,
+            "classQualifiedName": "com.hospital.appointment.service.AppointmentService",
+            "methodName": "deleteAppointment",
+            "returnType": "void",
+            "parameters": [
+              {
+                "name": "id",
+                "type": "Long"
+              }
+            ],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "@Transactional\n    public void deleteAppointment(Long id) {\n        log.info(\"Deleting appointment with ID: {}\", id);\n        \n        Appointment appointment = appointmentRepository.findById(id)\n                .orElseThrow(() -> new ResourceNotFoundException(\"Appointment\", \"id\", id));\n        \n        appointmentRepository.delete(appointment);\n        log.info(\"Appointment deleted successfully\");\n    }",
+            "lineStart": 160,
+            "lineEnd": 169,
+            "annotations": [
+              {
+                "id": 11193,
+                "targetType": "METHOD",
+                "category": "TRANSACTION",
+                "annotationName": "Transactional",
+                "attributes": "@Transactional"
+              }
+            ],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 162,
+                "lineEnd": 162
+              },
+              {
+                "branchId": "STMT-2",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 164,
+                "lineEnd": 165
+              },
+              {
+                "branchId": "STMT-3",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 167,
+                "lineEnd": 167
+              },
+              {
+                "branchId": "STMT-4",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 168,
+                "lineEnd": 168
+              }
+            ]
+          },
+          {
+            "id": 18640,
+            "classQualifiedName": "com.hospital.appointment.service.AppointmentService",
+            "methodName": "enrichAppointmentResponse",
+            "returnType": "AppointmentResponseDto",
+            "parameters": [
+              {
+                "name": "appointment",
+                "type": "Appointment"
+              }
+            ],
+            "throwsList": [],
+            "visibility": "PRIVATE",
+            "sourceCode": "private AppointmentResponseDto enrichAppointmentResponse(Appointment appointment) {\n        try {\n            PatientDto patient = patientServiceClient.getPatientById(appointment.getPatientId());\n            DoctorDto doctor = doctorServiceClient.getDoctorById(appointment.getDoctorId());\n            return enrichAppointmentResponse(appointment, patient, doctor);\n        } catch (Exception e) {\n            log.warn(\"Could not enrich appointment response: {}\", e.getMessage());\n            return new AppointmentResponseDto(appointment);\n        }\n    }",
+            "lineStart": 171,
+            "lineEnd": 180,
+            "annotations": [],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 172,
+                "lineEnd": 179
+              }
+            ]
+          },
+          {
+            "id": 18641,
+            "classQualifiedName": "com.hospital.appointment.service.AppointmentService",
+            "methodName": "enrichAppointmentResponse",
+            "returnType": "AppointmentResponseDto",
+            "parameters": [
+              {
+                "name": "appointment",
+                "type": "Appointment"
+              },
+              {
+                "name": "patient",
+                "type": "PatientDto"
+              },
+              {
+                "name": "doctor",
+                "type": "DoctorDto"
+              }
+            ],
+            "throwsList": [],
+            "visibility": "PRIVATE",
+            "sourceCode": "private AppointmentResponseDto enrichAppointmentResponse(\n            Appointment appointment, PatientDto patient, DoctorDto doctor) {\n        AppointmentResponseDto response = new AppointmentResponseDto(appointment);\n        response.setPatientName(patient.getFullName());\n        response.setDoctorName(doctor.getFullName());\n        response.setDoctorSpecialization(doctor.getSpecialization());\n        return response;\n    }",
+            "lineStart": 182,
+            "lineEnd": 189,
+            "annotations": [],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 184,
+                "lineEnd": 184
+              },
+              {
+                "branchId": "STMT-2",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 185,
+                "lineEnd": 185
+              },
+              {
+                "branchId": "STMT-3",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 186,
+                "lineEnd": 186
+              },
+              {
+                "branchId": "STMT-4",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 187,
+                "lineEnd": 187
+              },
+              {
+                "branchId": "STMT-5",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 188,
+                "lineEnd": 188
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": 8861,
+        "packageName": "com.hospital.appointment.client",
+        "className": "DoctorServiceClient",
+        "qualifiedName": "com.hospital.appointment.client.DoctorServiceClient",
+        "classType": "OTHER",
+        "filePath": "hospital-management-demo-main/backend/appointment-service/src/main/java/com/hospital/appointment/client/DoctorServiceClient.java",
+        "sourceCode": "package com.hospital.appointment.client;\n\nimport com.hospital.appointment.dto.DoctorDto;\nimport lombok.extern.slf4j.Slf4j;\nimport org.springframework.beans.factory.annotation.Qualifier;\nimport org.springframework.stereotype.Component;\nimport org.springframework.web.reactive.function.client.WebClient;\nimport reactor.core.publisher.Mono;\n\n@Component\n@Slf4j\npublic class DoctorServiceClient {\n\n    private final WebClient webClient;\n\n    public DoctorServiceClient(@Qualifier(\"doctorWebClient\") WebClient webClient) {\n        this.webClient = webClient;\n    }\n\n    public DoctorDto getDoctorById(Long doctorId) {\n        log.debug(\"Fetching doctor details from doctor-service for ID: {}\", doctorId);\n        try {\n            return webClient.get().uri(\"/{id}\", doctorId).retrieve().bodyToMono(ApiResponseWrapper.class).map(response -> response.getData()).block();\n        } catch (Exception e) {\n            log.error(\"Error fetching doctor details for ID: {}\", doctorId, e);\n            throw new RuntimeException(\"Doctor with ID \" + doctorId + \" not found or service unavailable\");\n        }\n    }\n\n    // Wrapper class to match the ApiResponse structure\n    private static class ApiResponseWrapper {\n\n        private boolean success;\n\n        private String message;\n\n        private DoctorDto data;\n\n        public boolean isSuccess() {\n            return success;\n        }\n\n        public void setSuccess(boolean success) {\n            this.success = success;\n        }\n\n        public String getMessage() {\n            return message;\n        }\n\n        public void setMessage(String message) {\n            this.message = message;\n        }\n\n        public DoctorDto getData() {\n            return data;\n        }\n\n        public void setData(DoctorDto data) {\n            this.data = data;\n        }\n    }\n}\n",
+        "annotations": [
+          {
+            "id": 11165,
+            "targetType": "CLASS",
+            "category": "COMPONENT",
+            "annotationName": "Component",
+            "attributes": "@Component"
+          }
+        ],
+        "methods": []
+      },
+      {
+        "id": 8863,
+        "packageName": "com.hospital.appointment.client",
+        "className": "PatientServiceClient",
+        "qualifiedName": "com.hospital.appointment.client.PatientServiceClient",
+        "classType": "OTHER",
+        "filePath": "hospital-management-demo-main/backend/appointment-service/src/main/java/com/hospital/appointment/client/PatientServiceClient.java",
+        "sourceCode": "package com.hospital.appointment.client;\n\nimport com.hospital.appointment.dto.PatientDto;\nimport lombok.extern.slf4j.Slf4j;\nimport org.springframework.beans.factory.annotation.Qualifier;\nimport org.springframework.stereotype.Component;\nimport org.springframework.web.reactive.function.client.WebClient;\nimport reactor.core.publisher.Mono;\n\n@Component\n@Slf4j\npublic class PatientServiceClient {\n\n    private final WebClient webClient;\n\n    public PatientServiceClient(@Qualifier(\"patientWebClient\") WebClient webClient) {\n        this.webClient = webClient;\n    }\n\n    public PatientDto getPatientById(Long patientId) {\n        log.debug(\"Fetching patient details from patient-service for ID: {}\", patientId);\n        try {\n            return webClient.get().uri(\"/{id}\", patientId).retrieve().bodyToMono(ApiResponseWrapper.class).map(response -> response.getData()).block();\n        } catch (Exception e) {\n            log.error(\"Error fetching patient details for ID: {}\", patientId, e);\n            throw new RuntimeException(\"Patient with ID \" + patientId + \" not found or service unavailable\");\n        }\n    }\n\n    // Wrapper class to match the ApiResponse structure\n    private static class ApiResponseWrapper {\n\n        private boolean success;\n\n        private String message;\n\n        private PatientDto data;\n\n        public boolean isSuccess() {\n            return success;\n        }\n\n        public void setSuccess(boolean success) {\n            this.success = success;\n        }\n\n        public String getMessage() {\n            return message;\n        }\n\n        public void setMessage(String message) {\n            this.message = message;\n        }\n\n        public PatientDto getData() {\n            return data;\n        }\n\n        public void setData(PatientDto data) {\n            this.data = data;\n        }\n    }\n}\n",
+        "annotations": [
+          {
+            "id": 11166,
+            "targetType": "CLASS",
+            "category": "COMPONENT",
+            "annotationName": "Component",
+            "attributes": "@Component"
+          }
+        ],
+        "methods": []
+      },
+      {
+        "id": 8867,
+        "packageName": "com.hospital.appointment.dto",
+        "className": "AppointmentRequestDto",
+        "qualifiedName": "com.hospital.appointment.dto.AppointmentRequestDto",
+        "classType": "OTHER",
+        "filePath": "hospital-management-demo-main/backend/appointment-service/src/main/java/com/hospital/appointment/dto/AppointmentRequestDto.java",
+        "sourceCode": "package com.hospital.appointment.dto;\n\nimport com.hospital.appointment.model.Appointment;\nimport jakarta.validation.constraints.Future;\nimport jakarta.validation.constraints.NotBlank;\nimport jakarta.validation.constraints.NotNull;\nimport lombok.AllArgsConstructor;\nimport lombok.Data;\nimport lombok.NoArgsConstructor;\nimport java.time.LocalDate;\nimport java.time.LocalTime;\n\n@Data\n@NoArgsConstructor\n@AllArgsConstructor\npublic class AppointmentRequestDto {\n\n    @NotNull(message = \"Patient ID is required\")\n    private Long patientId;\n\n    @NotNull(message = \"Doctor ID is required\")\n    private Long doctorId;\n\n    @NotNull(message = \"Appointment date is required\")\n    private LocalDate appointmentDate;\n\n    @NotNull(message = \"Appointment time is required\")\n    private LocalTime appointmentTime;\n\n    @NotBlank(message = \"Reason for appointment is required\")\n    private String reason;\n\n    private String notes;\n\n    private Appointment.AppointmentStatus status;\n}\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8868,
+        "packageName": "com.hospital.appointment.dto",
+        "className": "AppointmentResponseDto",
+        "qualifiedName": "com.hospital.appointment.dto.AppointmentResponseDto",
+        "classType": "OTHER",
+        "filePath": "hospital-management-demo-main/backend/appointment-service/src/main/java/com/hospital/appointment/dto/AppointmentResponseDto.java",
+        "sourceCode": "package com.hospital.appointment.dto;\n\nimport com.hospital.appointment.model.Appointment;\nimport lombok.AllArgsConstructor;\nimport lombok.Data;\nimport lombok.NoArgsConstructor;\nimport java.time.LocalDate;\nimport java.time.LocalDateTime;\nimport java.time.LocalTime;\n\n@Data\n@NoArgsConstructor\n@AllArgsConstructor\npublic class AppointmentResponseDto {\n\n    private Long id;\n\n    private Long patientId;\n\n    private String patientName;\n\n    private Long doctorId;\n\n    private String doctorName;\n\n    private String doctorSpecialization;\n\n    private LocalDate appointmentDate;\n\n    private LocalTime appointmentTime;\n\n    private Appointment.AppointmentStatus status;\n\n    private String reason;\n\n    private String notes;\n\n    private String diagnosis;\n\n    private String prescription;\n\n    private LocalDateTime createdAt;\n\n    private LocalDateTime updatedAt;\n\n    private LocalDateTime cancelledAt;\n\n    private LocalDateTime completedAt;\n\n    public AppointmentResponseDto(Appointment appointment) {\n        this.id = appointment.getId();\n        this.patientId = appointment.getPatientId();\n        this.doctorId = appointment.getDoctorId();\n        this.appointmentDate = appointment.getAppointmentDate();\n        this.appointmentTime = appointment.getAppointmentTime();\n        this.status = appointment.getStatus();\n        this.reason = appointment.getReason();\n        this.notes = appointment.getNotes();\n        this.diagnosis = appointment.getDiagnosis();\n        this.prescription = appointment.getPrescription();\n        this.createdAt = appointment.getCreatedAt();\n        this.updatedAt = appointment.getUpdatedAt();\n        this.cancelledAt = appointment.getCancelledAt();\n        this.completedAt = appointment.getCompletedAt();\n    }\n}\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8869,
+        "packageName": "com.hospital.appointment.dto",
+        "className": "DoctorDto",
+        "qualifiedName": "com.hospital.appointment.dto.DoctorDto",
+        "classType": "OTHER",
+        "filePath": "hospital-management-demo-main/backend/appointment-service/src/main/java/com/hospital/appointment/dto/DoctorDto.java",
+        "sourceCode": "package com.hospital.appointment.dto;\n\nimport lombok.AllArgsConstructor;\nimport lombok.Data;\nimport lombok.NoArgsConstructor;\n\n@Data\n@NoArgsConstructor\n@AllArgsConstructor\npublic class DoctorDto {\n\n    private Long id;\n\n    private String firstName;\n\n    private String lastName;\n\n    private String specialization;\n\n    private Boolean isAvailable;\n\n    public String getFullName() {\n        return \"Dr. \" + firstName + \" \" + lastName;\n    }\n}\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8870,
+        "packageName": "com.hospital.appointment.dto",
+        "className": "PatientDto",
+        "qualifiedName": "com.hospital.appointment.dto.PatientDto",
+        "classType": "OTHER",
+        "filePath": "hospital-management-demo-main/backend/appointment-service/src/main/java/com/hospital/appointment/dto/PatientDto.java",
+        "sourceCode": "package com.hospital.appointment.dto;\n\nimport lombok.AllArgsConstructor;\nimport lombok.Data;\nimport lombok.NoArgsConstructor;\n\n@Data\n@NoArgsConstructor\n@AllArgsConstructor\npublic class PatientDto {\n\n    private Long id;\n\n    private String firstName;\n\n    private String lastName;\n\n    private String email;\n\n    private String phone;\n\n    public String getFullName() {\n        return firstName + \" \" + lastName;\n    }\n}\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8872,
+        "packageName": "com.hospital.appointment.model",
+        "className": "Appointment",
+        "qualifiedName": "com.hospital.appointment.model.Appointment",
+        "classType": "ENTITY",
+        "filePath": "hospital-management-demo-main/backend/appointment-service/src/main/java/com/hospital/appointment/model/Appointment.java",
+        "sourceCode": "package com.hospital.appointment.model;\n\nimport jakarta.persistence.*;\nimport lombok.AllArgsConstructor;\nimport lombok.Data;\nimport lombok.NoArgsConstructor;\nimport org.hibernate.annotations.CreationTimestamp;\nimport org.hibernate.annotations.UpdateTimestamp;\nimport java.time.LocalDate;\nimport java.time.LocalDateTime;\nimport java.time.LocalTime;\n\n@Entity\n@Table(name = \"appointments\")\n@Data\n@NoArgsConstructor\n@AllArgsConstructor\npublic class Appointment {\n\n    @Id\n    @GeneratedValue(strategy = GenerationType.IDENTITY)\n    private Long id;\n\n    @Column(name = \"patient_id\", nullable = false)\n    private Long patientId;\n\n    @Column(name = \"doctor_id\", nullable = false)\n    private Long doctorId;\n\n    @Column(name = \"appointment_date\", nullable = false)\n    private LocalDate appointmentDate;\n\n    @Column(name = \"appointment_time\", nullable = false)\n    private LocalTime appointmentTime;\n\n    @Enumerated(EnumType.STRING)\n    @Column(name = \"status\", nullable = false)\n    private AppointmentStatus status = AppointmentStatus.SCHEDULED;\n\n    @Column(name = \"reason\", columnDefinition = \"TEXT\")\n    private String reason;\n\n    @Column(name = \"notes\", columnDefinition = \"TEXT\")\n    private String notes;\n\n    @Column(name = \"diagnosis\", columnDefinition = \"TEXT\")\n    private String diagnosis;\n\n    @Column(name = \"prescription\", columnDefinition = \"TEXT\")\n    private String prescription;\n\n    @CreationTimestamp\n    @Column(name = \"created_at\", updatable = false)\n    private LocalDateTime createdAt;\n\n    @UpdateTimestamp\n    @Column(name = \"updated_at\")\n    private LocalDateTime updatedAt;\n\n    @Column(name = \"cancelled_at\")\n    private LocalDateTime cancelledAt;\n\n    @Column(name = \"completed_at\")\n    private LocalDateTime completedAt;\n\n    public enum AppointmentStatus {\n\n        SCHEDULED,\n        CONFIRMED,\n        IN_PROGRESS,\n        COMPLETED,\n        CANCELLED,\n        NO_SHOW\n    }\n}\n",
+        "annotations": [
+          {
+            "id": 11180,
+            "targetType": "CLASS",
+            "category": "PERSISTENCE",
+            "annotationName": "Entity",
+            "attributes": "@Entity"
+          },
+          {
+            "id": 11181,
+            "targetType": "CLASS",
+            "category": "PERSISTENCE",
+            "annotationName": "Table",
+            "attributes": "@Table(name = \"appointments\")"
+          }
+        ],
+        "methods": []
+      },
+      {
+        "id": 8874,
+        "packageName": "com.hospital.appointment.repository",
+        "className": "AppointmentRepository",
+        "qualifiedName": "com.hospital.appointment.repository.AppointmentRepository",
+        "classType": "REPOSITORY",
+        "filePath": "hospital-management-demo-main/backend/appointment-service/src/main/java/com/hospital/appointment/repository/AppointmentRepository.java",
+        "sourceCode": "package com.hospital.appointment.repository;\n\nimport com.hospital.appointment.model.Appointment;\nimport org.springframework.data.jpa.repository.JpaRepository;\nimport org.springframework.data.jpa.repository.Query;\nimport org.springframework.data.repository.query.Param;\nimport org.springframework.stereotype.Repository;\nimport java.time.LocalDate;\nimport java.time.LocalTime;\nimport java.util.List;\nimport java.util.Optional;\n\n@Repository\npublic interface AppointmentRepository extends JpaRepository<Appointment, Long> {\n\n    List<Appointment> findByPatientId(Long patientId);\n\n    List<Appointment> findByDoctorId(Long doctorId);\n\n    List<Appointment> findByAppointmentDate(LocalDate date);\n\n    @Query(\"SELECT a FROM Appointment a WHERE a.status = :status\")\n    List<Appointment> findByStatus(@Param(\"status\") Appointment.AppointmentStatus status);\n\n    @Query(\"SELECT a FROM Appointment a WHERE a.doctorId = :doctorId AND a.appointmentDate = :date\")\n    List<Appointment> findByDoctorIdAndDate(@Param(\"doctorId\") Long doctorId, @Param(\"date\") LocalDate date);\n\n    @Query(\"SELECT a FROM Appointment a WHERE a.patientId = :patientId AND a.appointmentDate = :date\")\n    List<Appointment> findByPatientIdAndDate(@Param(\"patientId\") Long patientId, @Param(\"date\") LocalDate date);\n\n    @Query(\"SELECT a FROM Appointment a WHERE \" + \"a.doctorId = :doctorId AND \" + \"a.appointmentDate = :date AND \" + \"a.appointmentTime = :time AND \" + \"a.status NOT IN ('CANCELLED', 'NO_SHOW')\")\n    Optional<Appointment> findConflictingAppointment(@Param(\"doctorId\") Long doctorId, @Param(\"date\") LocalDate date, @Param(\"time\") LocalTime time);\n\n    @Query(\"SELECT a FROM Appointment a WHERE \" + \"a.appointmentDate >= :startDate AND \" + \"a.appointmentDate <= :endDate\")\n    List<Appointment> findByDateRange(@Param(\"startDate\") LocalDate startDate, @Param(\"endDate\") LocalDate endDate);\n\n    @Query(\"SELECT a FROM Appointment a WHERE \" + \"a.doctorId = :doctorId AND \" + \"a.appointmentDate >= :startDate AND \" + \"a.appointmentDate <= :endDate\")\n    List<Appointment> findByDoctorIdAndDateRange(@Param(\"doctorId\") Long doctorId, @Param(\"startDate\") LocalDate startDate, @Param(\"endDate\") LocalDate endDate);\n}\n",
+        "annotations": [
+          {
+            "id": 11182,
+            "targetType": "CLASS",
+            "category": "COMPONENT",
+            "annotationName": "Repository",
+            "attributes": "@Repository"
+          }
+        ],
+        "methods": []
+      },
+      {
+        "id": 8894,
+        "packageName": "com.hospital.common.exception",
+        "className": "ResourceNotFoundException",
+        "qualifiedName": "com.hospital.common.exception.ResourceNotFoundException",
+        "classType": "OTHER",
+        "filePath": "hospital-management-demo-main/backend/common-lib/src/main/java/com/hospital/common/exception/ResourceNotFoundException.java",
+        "sourceCode": "package com.hospital.common.exception;\n\npublic class ResourceNotFoundException extends RuntimeException {\n\n    public ResourceNotFoundException(String message) {\n        super(message);\n    }\n\n    public ResourceNotFoundException(String resourceName, String fieldName, Object fieldValue) {\n        super(String.format(\"%s not found with %s: '%s'\", resourceName, fieldName, fieldValue));\n    }\n}\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8862,
+        "packageName": "com.hospital.appointment.client",
+        "className": "ApiResponseWrapper",
+        "qualifiedName": "com.hospital.appointment.client.DoctorServiceClient.ApiResponseWrapper",
+        "classType": "OTHER",
+        "filePath": "hospital-management-demo-main/backend/appointment-service/src/main/java/com/hospital/appointment/client/DoctorServiceClient.java",
+        "sourceCode": "package com.hospital.appointment.client;\n\nimport com.hospital.appointment.dto.DoctorDto;\nimport lombok.extern.slf4j.Slf4j;\nimport org.springframework.beans.factory.annotation.Qualifier;\nimport org.springframework.stereotype.Component;\nimport org.springframework.web.reactive.function.client.WebClient;\nimport reactor.core.publisher.Mono;\n\n@Component\n@Slf4j\npublic class DoctorServiceClient {\n\n    private final WebClient webClient;\n\n    public DoctorServiceClient(@Qualifier(\"doctorWebClient\") WebClient webClient) {\n        this.webClient = webClient;\n    }\n\n    public DoctorDto getDoctorById(Long doctorId) {\n        log.debug(\"Fetching doctor details from doctor-service for ID: {}\", doctorId);\n        try {\n            return webClient.get().uri(\"/{id}\", doctorId).retrieve().bodyToMono(ApiResponseWrapper.class).map(response -> response.getData()).block();\n        } catch (Exception e) {\n            log.error(\"Error fetching doctor details for ID: {}\", doctorId, e);\n            throw new RuntimeException(\"Doctor with ID \" + doctorId + \" not found or service unavailable\");\n        }\n    }\n\n    // Wrapper class to match the ApiResponse structure\n    private static class ApiResponseWrapper {\n\n        private boolean success;\n\n        private String message;\n\n        private DoctorDto data;\n\n        public boolean isSuccess() {\n            return success;\n        }\n\n        public void setSuccess(boolean success) {\n            this.success = success;\n        }\n\n        public String getMessage() {\n            return message;\n        }\n\n        public void setMessage(String message) {\n            this.message = message;\n        }\n\n        public DoctorDto getData() {\n            return data;\n        }\n\n        public void setData(DoctorDto data) {\n            this.data = data;\n        }\n    }\n}\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8864,
+        "packageName": "com.hospital.appointment.client",
+        "className": "ApiResponseWrapper",
+        "qualifiedName": "com.hospital.appointment.client.PatientServiceClient.ApiResponseWrapper",
+        "classType": "OTHER",
+        "filePath": "hospital-management-demo-main/backend/appointment-service/src/main/java/com/hospital/appointment/client/PatientServiceClient.java",
+        "sourceCode": "package com.hospital.appointment.client;\n\nimport com.hospital.appointment.dto.PatientDto;\nimport lombok.extern.slf4j.Slf4j;\nimport org.springframework.beans.factory.annotation.Qualifier;\nimport org.springframework.stereotype.Component;\nimport org.springframework.web.reactive.function.client.WebClient;\nimport reactor.core.publisher.Mono;\n\n@Component\n@Slf4j\npublic class PatientServiceClient {\n\n    private final WebClient webClient;\n\n    public PatientServiceClient(@Qualifier(\"patientWebClient\") WebClient webClient) {\n        this.webClient = webClient;\n    }\n\n    public PatientDto getPatientById(Long patientId) {\n        log.debug(\"Fetching patient details from patient-service for ID: {}\", patientId);\n        try {\n            return webClient.get().uri(\"/{id}\", patientId).retrieve().bodyToMono(ApiResponseWrapper.class).map(response -> response.getData()).block();\n        } catch (Exception e) {\n            log.error(\"Error fetching patient details for ID: {}\", patientId, e);\n            throw new RuntimeException(\"Patient with ID \" + patientId + \" not found or service unavailable\");\n        }\n    }\n\n    // Wrapper class to match the ApiResponse structure\n    private static class ApiResponseWrapper {\n\n        private boolean success;\n\n        private String message;\n\n        private PatientDto data;\n\n        public boolean isSuccess() {\n            return success;\n        }\n\n        public void setSuccess(boolean success) {\n            this.success = success;\n        }\n\n        public String getMessage() {\n            return message;\n        }\n\n        public void setMessage(String message) {\n            this.message = message;\n        }\n\n        public PatientDto getData() {\n            return data;\n        }\n\n        public void setData(PatientDto data) {\n            this.data = data;\n        }\n    }\n}\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8873,
+        "packageName": "com.hospital.appointment.model",
+        "className": "AppointmentStatus",
+        "qualifiedName": "com.hospital.appointment.model.Appointment.AppointmentStatus",
+        "classType": "ENUM",
+        "filePath": "hospital-management-demo-main/backend/appointment-service/src/main/java/com/hospital/appointment/model/Appointment.java",
+        "sourceCode": "package com.hospital.appointment.model;\n\nimport jakarta.persistence.*;\nimport lombok.AllArgsConstructor;\nimport lombok.Data;\nimport lombok.NoArgsConstructor;\nimport org.hibernate.annotations.CreationTimestamp;\nimport org.hibernate.annotations.UpdateTimestamp;\nimport java.time.LocalDate;\nimport java.time.LocalDateTime;\nimport java.time.LocalTime;\n\n@Entity\n@Table(name = \"appointments\")\n@Data\n@NoArgsConstructor\n@AllArgsConstructor\npublic class Appointment {\n\n    @Id\n    @GeneratedValue(strategy = GenerationType.IDENTITY)\n    private Long id;\n\n    @Column(name = \"patient_id\", nullable = false)\n    private Long patientId;\n\n    @Column(name = \"doctor_id\", nullable = false)\n    private Long doctorId;\n\n    @Column(name = \"appointment_date\", nullable = false)\n    private LocalDate appointmentDate;\n\n    @Column(name = \"appointment_time\", nullable = false)\n    private LocalTime appointmentTime;\n\n    @Enumerated(EnumType.STRING)\n    @Column(name = \"status\", nullable = false)\n    private AppointmentStatus status = AppointmentStatus.SCHEDULED;\n\n    @Column(name = \"reason\", columnDefinition = \"TEXT\")\n    private String reason;\n\n    @Column(name = \"notes\", columnDefinition = \"TEXT\")\n    private String notes;\n\n    @Column(name = \"diagnosis\", columnDefinition = \"TEXT\")\n    private String diagnosis;\n\n    @Column(name = \"prescription\", columnDefinition = \"TEXT\")\n    private String prescription;\n\n    @CreationTimestamp\n    @Column(name = \"created_at\", updatable = false)\n    private LocalDateTime createdAt;\n\n    @UpdateTimestamp\n    @Column(name = \"updated_at\")\n    private LocalDateTime updatedAt;\n\n    @Column(name = \"cancelled_at\")\n    private LocalDateTime cancelledAt;\n\n    @Column(name = \"completed_at\")\n    private LocalDateTime completedAt;\n\n    public enum AppointmentStatus {\n\n        SCHEDULED,\n        CONFIRMED,\n        IN_PROGRESS,\n        COMPLETED,\n        CANCELLED,\n        NO_SHOW\n    }\n}\n",
+        "annotations": [],
+        "methods": []
+      }
+    ],
+    "approvedBusinessRules": [
+      {
+        "id": 4710,
+        "methodId": 18633,
+        "ruleCode": "BR-001",
+        "description": "Khi truy vấn lịch hẹn theo mã bệnh nhân, service gọi findByPatientId với patientId, làm giàu từng lịch hẹn thành AppointmentResponseDto và trả về danh sách kết quả.",
+        "reviewNote": "SOURCE_BRANCH:STMT-2\nAI category: BUSINESS_LOGIC. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-2"
+      },
+      {
+        "id": 4711,
+        "methodId": 18634,
+        "ruleCode": "BR-002",
+        "description": "Khi truy vấn lịch hẹn theo mã bác sĩ, service gọi findByDoctorId với doctorId, làm giàu từng lịch hẹn thành AppointmentResponseDto và trả về danh sách kết quả.",
+        "reviewNote": "SOURCE_BRANCH:STMT-2\nAI category: BUSINESS_LOGIC. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-2"
+      },
+      {
+        "id": 4722,
+        "methodId": 18639,
+        "ruleCode": "BR-013",
+        "description": "Khi mã lịch hẹn tồn tại, service xóa lịch hẹn đó khỏi repository.",
+        "reviewNote": "SOURCE_BRANCH:STMT-3\nAI category: SIDE_EFFECT. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-3"
+      },
+      {
+        "id": 4723,
+        "methodId": 18640,
+        "ruleCode": "BR-014",
+        "description": "Khi lấy thông tin bệnh nhân và bác sĩ thành công, service gọi getPatientById và getDoctorById để bổ sung tên bệnh nhân, tên bác sĩ và chuyên khoa vào phản hồi; nếu xảy ra Exception trong quá trình làm giàu, service trả về phản hồi chỉ tạo từ lịch hẹn.",
+        "reviewNote": "SOURCE_BRANCH:STMT-1\nAI category: BUSINESS_LOGIC. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-1"
+      },
+      {
+        "id": 4724,
+        "methodId": 18641,
+        "ruleCode": "BR-015",
+        "description": "Khi tạo phản hồi từ lịch hẹn cùng thông tin bệnh nhân và bác sĩ, service bổ sung tên bệnh nhân, tên bác sĩ và chuyên khoa của bác sĩ vào phản hồi.",
+        "reviewNote": "SOURCE_BRANCH:STMT-2\nAI category: BUSINESS_LOGIC. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-2"
+      },
+      {
+        "id": 4732,
+        "methodId": 18638,
+        "ruleCode": "BR-023",
+        "description": "Khi không tìm thấy cuộc hẹn theo id, service ném ResourceNotFoundException với thông báo \"Appointment not found with id: '<id>'\".",
+        "reviewNote": "SOURCE_BRANCH:STMT-2\nAI category: VALIDATION. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-2"
+      },
+      {
+        "id": 4733,
+        "methodId": 18638,
+        "ruleCode": "BR-024",
+        "description": "Khi nhận thông tin chẩn đoán và đơn thuốc, service cập nhật hai trường này trên cuộc hẹn.",
+        "reviewNote": "SOURCE_BRANCH:STMT-3\nAI category: SIDE_EFFECT. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-3"
+      },
+      {
+        "id": 4734,
+        "methodId": 18638,
+        "ruleCode": "BR-025",
+        "description": "Khi đã cập nhật thông tin y tế, service lưu cuộc hẹn đã cập nhật.",
+        "reviewNote": "SOURCE_BRANCH:STMT-5\nAI category: SIDE_EFFECT. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-5"
+      },
+      {
+        "id": 4735,
+        "methodId": 18638,
+        "ruleCode": "BR-026",
+        "description": "Khi đã lưu cuộc hẹn, service tạo phản hồi bằng helper enrichAppointmentResponse.",
+        "reviewNote": "SOURCE_BRANCH:STMT-7\nAI category: BUSINESS_LOGIC. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-7"
+      }
+    ],
+    "approvedTestPlans": [
+      {
+        "id": 2406,
+        "businessRuleId": 4722,
+        "coveredRuleIds": [
+          4722
+        ],
+        "planCode": "TP-001",
+        "title": "Xóa cuộc hẹn tồn tại",
+        "description": "Khi tìm thấy cuộc hẹn theo mã, service xóa cuộc hẹn đó khỏi repository.",
+        "testType": "HAPPY_PATH",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2407,
+        "businessRuleId": 4723,
+        "coveredRuleIds": [
+          4723
+        ],
+        "planCode": "TP-002",
+        "title": "Làm giàu phản hồi cuộc hẹn",
+        "description": "Khi lấy thông tin bệnh nhân và bác sĩ thành công, phản hồi có tên bệnh nhân, tên bác sĩ và chuyên khoa; nếu xảy ra Exception, phản hồi chỉ gồm dữ liệu từ cuộc hẹn.",
+        "testType": "EDGE",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2408,
+        "businessRuleId": 4724,
+        "coveredRuleIds": [
+          4724
+        ],
+        "planCode": "TP-003",
+        "title": "Bổ sung thông tin vào phản hồi",
+        "description": "Khi tạo phản hồi từ cuộc hẹn cùng thông tin bệnh nhân và bác sĩ, service bổ sung tên bệnh nhân, tên bác sĩ và chuyên khoa của bác sĩ.",
+        "testType": "HAPPY_PATH",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2409,
+        "businessRuleId": 4732,
+        "coveredRuleIds": [
+          4732
+        ],
+        "planCode": "TP-004",
+        "title": "Không tìm thấy cuộc hẹn khi cập nhật",
+        "description": "Khi không tìm thấy cuộc hẹn theo id, service ném ResourceNotFoundException với thông báo \"Appointment not found with id: '<id>'\".\n[GreyTest testability: UNKNOWN] UNRESOLVED_HELPER_PATH @ hospital-management-demo-main/backend/appointment-service/src/main/java/com/hospital/appointment/service/AppointmentService.java:118 updateAppointmentDetails — Lời gọi helper nội bộ chưa được phân tích đường đi trong MVP: enrichAppointmentResponse. | Kiểm tra đường đi qua helper trước khi kết luận có thể điều khiển nhánh; không thay kết quả helper bằng giả định.",
+        "testType": "EXCEPTION",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2410,
+        "businessRuleId": 4733,
+        "coveredRuleIds": [
+          4733,
+          4734,
+          4735
+        ],
+        "planCode": "TP-005",
+        "title": "Cập nhật và lưu thông tin y tế",
+        "description": "Khi nhận chẩn đoán và đơn thuốc, service cập nhật cả hai trường, lưu cuộc hẹn và tạo phản hồi bằng helper enrichAppointmentResponse.\n[GreyTest testability: UNKNOWN] UNRESOLVED_HELPER_PATH @ hospital-management-demo-main/backend/appointment-service/src/main/java/com/hospital/appointment/service/AppointmentService.java:118 updateAppointmentDetails — Lời gọi helper nội bộ chưa được phân tích đường đi trong MVP: enrichAppointmentResponse. | Kiểm tra đường đi qua helper trước khi kết luận có thể điều khiển nhánh; không thay kết quả helper bằng giả định.",
+        "testType": "HAPPY_PATH",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2411,
+        "businessRuleId": 4710,
+        "coveredRuleIds": [
+          4710
+        ],
+        "planCode": "TP-006",
+        "title": "Tra cứu lịch hẹn theo bệnh nhân",
+        "description": "Kiểm tra service truy vấn theo patientId, làm giàu từng lịch hẹn và trả về danh sách kết quả.",
+        "testType": "HAPPY_PATH",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2412,
+        "businessRuleId": 4711,
+        "coveredRuleIds": [
+          4711
+        ],
+        "planCode": "TP-007",
+        "title": "Tra cứu lịch hẹn theo bác sĩ",
+        "description": "Kiểm tra service truy vấn theo doctorId, làm giàu từng lịch hẹn và trả về danh sách kết quả.",
+        "testType": "HAPPY_PATH",
+        "status": "APPROVED",
+        "isModified": false
+      }
+    ],
+    "approvedTestCases": [
+      {
+        "id": 3015,
+        "testPlanId": 2406,
+        "caseCode": "TC-1519",
+        "testType": "HAPPY_PATH",
+        "description": "Xóa cuộc hẹn đang tồn tại khỏi repository.",
+        "preconditions": "AppointmentRepository.findById(501L) trả về cuộc hẹn có id 501L. AppointmentService được khởi tạo với mock AppointmentRepository, PatientServiceClient và DoctorServiceClient; hai client không được gọi trên đường đi này.",
+        "testData": {
+          "input": {
+            "id": 501,
+            "method": "deleteAppointment"
+          },
+          "mocks": {
+            "appointmentRepository.delete": "Xác minh được gọi với chính Appointment đã tìm thấy",
+            "appointmentRepository.findById(501L": "Optional chứa Appointment có id 501L"
+          }
+        },
+        "expectedResult": "Service hoàn tất không ném exception và gọi appointmentRepository.delete với cuộc hẹn có id 501L.",
+        "priority": "HIGH",
+        "traceSource": "BR-013 [STMT-3] -> TP-001 -> STMT-1, STMT-2, STMT-3, STMT-4",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 3016,
+        "testPlanId": 2407,
+        "caseCode": "TC-1520",
+        "testType": "HAPPY_PATH",
+        "description": "Làm giàu phản hồi cuộc hẹn khi tra cứu theo bệnh nhân và cả hai dịch vụ thông tin đều trả dữ liệu.",
+        "preconditions": "AppointmentService được khởi tạo với mock AppointmentRepository, PatientServiceClient và DoctorServiceClient. Repository trả về một cuộc hẹn có patientId 71L và doctorId 82L. Hai client trả về DTO có dữ liệu tên hợp lệ.",
+        "testData": {
+          "input": {
+            "method": "getAppointmentsByPatient",
+            "patientId": 71
+          },
+          "mocks": {
+            "doctorServiceClient.getDoctorById(82L)": "DoctorDto(82L, Bình, Trần, Tim mạch, true)",
+            "patientServiceClient.getPatientById(71L)": "PatientDto(71L, An, Nguyễn, an@example.test, 0900000001)",
+            "appointmentRepository.findByPatientId(71L)": "Danh sách chứa Appointment(id=501L, patientId=71L, doctorId=82L, appointmentDate=2025-06-10, appointmentTime=09:30, status=SCHEDULED, reason=Khám định kỳ, notes=null, diagnosis=null, prescription=null, createdAt=null, updatedAt=null, cancelledAt=null, completedAt=null)"
+          }
+        },
+        "expectedResult": "Trả về danh sách một AppointmentResponseDto với id=501L, patientId=71L, patientName=\"An Nguyễn\", doctorId=82L, doctorName=\"Dr. Bình Trần\", doctorSpecialization=\"Tim mạch\", appointmentDate=2025-06-10, appointmentTime=09:30, status=SCHEDULED, reason=\"Khám định kỳ\"; các trường notes, diagnosis, prescription, createdAt, updatedAt, cancelledAt và completedAt là null. Các lời gọi enrichment dùng đúng patientId và doctorId của cuộc hẹn.",
+        "priority": "HIGH",
+        "traceSource": "BR-014 [STMT-1] -> TP-002 -> STMT-1, STMT-2; BR-001 [STMT-2] -> TP-006 -> STMT-1, STMT-2",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 3017,
+        "testPlanId": 2407,
+        "caseCode": "TC-1521",
+        "testType": "EDGE",
+        "description": "Trả phản hồi chỉ từ cuộc hẹn nếu truy vấn thông tin bệnh nhân ném Exception trong quá trình làm giàu.",
+        "preconditions": "AppointmentService được khởi tạo với mock AppointmentRepository, PatientServiceClient và DoctorServiceClient. Repository trả về một cuộc hẹn có patientId 71L và doctorId 82L. PatientServiceClient ném RuntimeException khi được gọi; do exception xảy ra trước truy vấn bác sĩ, DoctorServiceClient không được gọi.",
+        "testData": {
+          "input": {
+            "method": "getAppointmentsByPatient",
+            "patientId": 71
+          },
+          "mocks": {
+            "doctorServiceClient.getDoctorById(82L)": "Không thiết lập mock vì luồng đã thoát khỏi khối try trước lời gọi này",
+            "patientServiceClient.getPatientById(71L)": "Ném RuntimeException",
+            "appointmentRepository.findByPatientId(71L)": "Danh sách chứa Appointment(id=501L, patientId=71L, doctorId=82L, appointmentDate=2025-06-10, appointmentTime=09:30, status=SCHEDULED, reason=Khám định kỳ, notes=null, diagnosis=null, prescription=null, createdAt=null, updatedAt=null, cancelledAt=null, completedAt=null)"
+          }
+        },
+        "expectedResult": "Service vẫn trả về danh sách một AppointmentResponseDto được tạo từ cuộc hẹn: id=501L, patientId=71L, doctorId=82L, appointmentDate=2025-06-10, appointmentTime=09:30, status=SCHEDULED, reason=\"Khám định kỳ\"; các trường tên bệnh nhân, tên bác sĩ, chuyên khoa, notes, diagnosis, prescription, createdAt, updatedAt, cancelledAt và completedAt là null. Không yêu cầu gọi DoctorServiceClient trên đường đi này.",
+        "priority": "MEDIUM",
+        "traceSource": "BR-014 [STMT-1] -> TP-002 -> STMT-1; BR-001 [STMT-2] -> TP-006 -> STMT-1, STMT-2",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 3018,
+        "testPlanId": 2408,
+        "caseCode": "TC-1522",
+        "testType": "HAPPY_PATH",
+        "description": "Bổ sung tên bệnh nhân, tên bác sĩ và chuyên khoa vào phản hồi từ thông tin đã có.",
+        "preconditions": "AppointmentService được khởi tạo với mock AppointmentRepository, PatientServiceClient và DoctorServiceClient. AppointmentRepository.findByDoctorId trả về một cuộc hẹn có patientId=71L và doctorId=82L. Các client trả về DTO đầy đủ; appointment status và các trường nghiệp vụ khác được giữ nguyên khi ánh xạ.",
+        "testData": {
+          "input": {
+            "method": "getAppointmentsByDoctor",
+            "doctorId": 82
+          },
+          "mocks": {
+            "doctorServiceClient.getDoctorById(82L)": "DoctorDto(82L, Bình, Trần, Tim mạch, true)",
+            "patientServiceClient.getPatientById(71L)": "PatientDto(71L, Mai, Lê, mai@example.test, 0900000002)",
+            "appointmentRepository.findByDoctorId(82L)": "Danh sách chứa Appointment(id=502L, patientId=71L, doctorId=82L, appointmentDate=2025-06-11, appointmentTime=10:15, status=CONFIRMED, reason=Đau ngực, notes=Theo dõi, diagnosis=null, prescription=null, createdAt=null, updatedAt=null, cancelledAt=null, completedAt=null)"
+          }
+        },
+        "expectedResult": "Trả về danh sách một AppointmentResponseDto có patientName=\"Mai Lê\", doctorName=\"Dr. Bình Trần\" và doctorSpecialization=\"Tim mạch\"; các trường khác phản ánh cuộc hẹn id=502L, patientId=71L, doctorId=82L, appointmentDate=2025-06-11, appointmentTime=10:15, status=CONFIRMED, reason=\"Đau ngực\", notes=\"Theo dõi\", diagnosis=null, prescription=null, createdAt=null, updatedAt=null, cancelledAt=null và completedAt=null.",
+        "priority": "HIGH",
+        "traceSource": "BR-015 [STMT-2] -> TP-003 -> STMT-1, STMT-2, STMT-3, STMT-4, STMT-5",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 3019,
+        "testPlanId": 2409,
+        "caseCode": "TC-1523",
+        "testType": "EXCEPTION",
+        "description": "Ném ResourceNotFoundException với thông báo đã quy định khi không tìm thấy cuộc hẹn cần cập nhật.",
+        "preconditions": "AppointmentService được khởi tạo với mock AppointmentRepository, PatientServiceClient và DoctorServiceClient. appointmentRepository.findById trả về Optional rỗng; không có cuộc hẹn để lưu và helper enrichment không được gọi.\n[GreyTest testability: UNKNOWN] UNRESOLVED_HELPER_PATH @ hospital-management-demo-main/backend/appointment-service/src/main/java/com/hospital/appointment/service/AppointmentService.java:118 updateAppointmentDetails — Lời gọi helper nội bộ chưa được phân tích đường đi trong MVP: enrichAppointmentResponse. | Kiểm tra đường đi qua helper trước khi kết luận có thể điều khiển nhánh; không thay kết quả helper bằng giả định.",
+        "testData": {
+          "input": {
+            "id": 501,
+            "method": "updateAppointmentDetails",
+            "diagnosis": "Viêm họng",
+            "prescription": "Nghỉ ngơi"
+          },
+          "mocks": {
+            "appointmentRepository.save": "Không thiết lập mock vì method ném exception trước khi lưu",
+            "doctorServiceClient.getDoctorById": "Không thiết lập mock vì helper không được gọi",
+            "patientServiceClient.getPatientById": "Không thiết lập mock vì helper không được gọi",
+            "appointmentRepository.findById(501L)": "Optional.empty()"
+          }
+        },
+        "expectedResult": "Service ném ResourceNotFoundException có thông báo chính xác \"Appointment not found with id: '501'\". Không cập nhật, lưu hoặc làm giàu cuộc hẹn.",
+        "priority": "HIGH",
+        "traceSource": "BR-023 [STMT-2] -> TP-004 -> STMT-1, STMT-2",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 3020,
+        "testPlanId": 2410,
+        "caseCode": "TC-1524",
+        "testType": "HAPPY_PATH",
+        "description": "Cập nhật chẩn đoán và đơn thuốc, lưu cuộc hẹn rồi tạo phản hồi đã làm giàu.",
+        "preconditions": "AppointmentService được khởi tạo với mock AppointmentRepository, PatientServiceClient và DoctorServiceClient. Repository tìm thấy cuộc hẹn id=501L với patientId=71L và doctorId=82L. save trả về chính entity đã nhận sau khi các trường được cập nhật, giữ nguyên các trường nghiệp vụ hiện có. Client trả về thông tin bệnh nhân và bác sĩ tương ứng.\n[GreyTest testability: UNKNOWN] UNRESOLVED_HELPER_PATH @ hospital-management-demo-main/backend/appointment-service/src/main/java/com/hospital/appointment/service/AppointmentService.java:118 updateAppointmentDetails — Lời gọi helper nội bộ chưa được phân tích đường đi trong MVP: enrichAppointmentResponse. | Kiểm tra đường đi qua helper trước khi kết luận có thể điều khiển nhánh; không thay kết quả helper bằng giả định.",
+        "testData": {
+          "input": {
+            "id": 501,
+            "method": "updateAppointmentDetails",
+            "diagnosis": "Viêm họng cấp",
+            "prescription": "Uống thuốc theo chỉ định"
+          },
+          "mocks": {
+            "appointmentRepository.save": "Trả về chính Appointment đã nhận sau khi cập nhật diagnosis=\"Viêm họng cấp\" và prescription=\"Uống thuốc theo chỉ định\"",
+            "appointmentRepository.findById(501L)": "Optional chứa Appointment(id=501L, patientId=71L, doctorId=82L, appointmentDate=2025-06-10, appointmentTime=09:30, status=SCHEDULED, reason=Khám, notes=null, diagnosis=Chẩn đoán cũ, prescription=Đơn cũ, createdAt=null, updatedAt=null, cancelledAt=null, completedAt=null)",
+            "doctorServiceClient.getDoctorById(82L)": "DoctorDto(82L, Bình, Trần, Tim mạch, true)",
+            "patientServiceClient.getPatientById(71L)": "PatientDto(71L, An, Nguyễn, an@example.test, 0900000001)"
+          }
+        },
+        "expectedResult": "Service lưu cuộc hẹn với diagnosis=\"Viêm họng cấp\" và prescription=\"Uống thuốc theo chỉ định\". Trả về AppointmentResponseDto có id=501L, patientId=71L, patientName=\"An Nguyễn\", doctorId=82L, doctorName=\"Dr. Bình Trần\", doctorSpecialization=\"Tim mạch\", appointmentDate=2025-06-10, appointmentTime=09:30, status=SCHEDULED, reason=\"Khám\", notes=null, diagnosis=\"Viêm họng cấp\", prescription=\"Uống thuốc theo chỉ định\", createdAt=null, updatedAt=null, cancelledAt=null và completedAt=null. Source hiện tại nuốt Exception phát sinh trong helper enrichment và khi đó trả DTO chỉ ánh xạ từ entity; assertion enrichment này vẫn theo các Business Rule đã duyệt.",
+        "priority": "HIGH",
+        "traceSource": "BR-024 [STMT-3] -> TP-005 -> STMT-1, STMT-2; BR-025 [STMT-5] -> TP-005 -> STMT-5, STMT-6; BR-026 [STMT-7] -> TP-005 -> STMT-7; BR-014 [STMT-1] -> TP-002 -> STMT-1; BR-015 [STMT-2] -> TP-003 -> STMT-1, STMT-2, STMT-3, STMT-4, STMT-5",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 3021,
+        "testPlanId": 2411,
+        "caseCode": "TC-1525",
+        "testType": "HAPPY_PATH",
+        "description": "Tra cứu lịch hẹn theo patientId, làm giàu từng phần tử và trả danh sách.",
+        "preconditions": "AppointmentService được khởi tạo với mock AppointmentRepository, PatientServiceClient và DoctorServiceClient. Repository trả về hai cuộc hẹn có patientId=71L, lần lượt có doctorId=82L và doctorId=83L. Các client trả DTO tương ứng cho mỗi cuộc hẹn.",
+        "testData": {
+          "input": {
+            "method": "getAppointmentsByPatient",
+            "patientId": 71
+          },
+          "mocks": {
+            "doctorServiceClient.getDoctorById(82L)": "DoctorDto(82L, Bình, Trần, Tim mạch, true)",
+            "doctorServiceClient.getDoctorById(83L)": "DoctorDto(83L, Hoa, Phạm, Nội khoa, true)",
+            "patientServiceClient.getPatientById(71L)": "Trả PatientDto(71L, An, Nguyễn, an@example.test, 0900000001) cho mỗi cuộc hẹn",
+            "appointmentRepository.findByPatientId(71L)": "Danh sách [Appointment(id=501L, patientId=71L, doctorId=82L, appointmentDate=2025-06-10, appointmentTime=09:30, status=SCHEDULED, reason=Khám định kỳ, notes=null, diagnosis=null, prescription=null, createdAt=null, updatedAt=null, cancelledAt=null, completedAt=null), Appointment(id=502L, patientId=71L, doctorId=83L, appointmentDate=2025-06-11, appointmentTime=10:15, status=CONFIRMED, reason=Đau ngực, notes=Theo dõi, diagnosis=null, prescription=null, createdAt=null, updatedAt=null, cancelledAt=null, completedAt=null)]"
+          }
+        },
+        "expectedResult": "Trả về hai AppointmentResponseDto theo thứ tự repository. Phần tử id=501L có patientName=\"An Nguyễn\", doctorName=\"Dr. Bình Trần\", doctorSpecialization=\"Tim mạch\"; phần tử id=502L có patientName=\"An Nguyễn\", doctorName=\"Dr. Hoa Phạm\", doctorSpecialization=\"Nội khoa\". Mỗi phần tử giữ nguyên các trường còn lại từ cuộc hẹn tương ứng.",
+        "priority": "HIGH",
+        "traceSource": "BR-001 [STMT-2] -> TP-006 -> STMT-1, STMT-2; BR-014 [STMT-1] -> TP-002 -> STMT-1",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 3022,
+        "testPlanId": 2412,
+        "caseCode": "TC-1526",
+        "testType": "HAPPY_PATH",
+        "description": "Tra cứu lịch hẹn theo doctorId, làm giàu từng phần tử và trả danh sách.",
+        "preconditions": "AppointmentService được khởi tạo với mock AppointmentRepository, PatientServiceClient và DoctorServiceClient. Repository trả về hai cuộc hẹn có doctorId=82L, lần lượt có patientId=71L và patientId=72L. Các client trả DTO tương ứng cho từng patientId; client bác sĩ trả DTO cho doctorId=82L.",
+        "testData": {
+          "input": {
+            "method": "getAppointmentsByDoctor",
+            "doctorId": 82
+          },
+          "mocks": {
+            "doctorServiceClient.getDoctorById(82L)": "DoctorDto(82L, Bình, Trần, Tim mạch, true) cho mỗi cuộc hẹn",
+            "patientServiceClient.getPatientById(71L)": "PatientDto(71L, An, Nguyễn, an@example.test, 0900000001)",
+            "patientServiceClient.getPatientById(72L)": "PatientDto(72L, Mai, Lê, mai@example.test, 0900000002)",
+            "appointmentRepository.findByDoctorId(82L)": "Danh sách [Appointment(id=601L, patientId=71L, doctorId=82L, appointmentDate=2025-06-12, appointmentTime=11:00, status=SCHEDULED, reason=Khám, notes=null, diagnosis=null, prescription=null, createdAt=null, updatedAt=null, cancelledAt=null, completedAt=null), Appointment(id=602L, patientId=72L, doctorId=82L, appointmentDate=2025-06-12, appointmentTime=11:30, status=CONFIRMED, reason=Tái khám, notes=null, diagnosis=null, prescription=null, createdAt=null, updatedAt=null, cancelledAt=null, completedAt=null)]"
+          }
+        },
+        "expectedResult": "Trả về hai AppointmentResponseDto theo thứ tự repository. Phần tử id=601L có patientName=\"An Nguyễn\"; phần tử id=602L có patientName=\"Mai Lê\"; cả hai có doctorName=\"Dr. Bình Trần\" và doctorSpecialization=\"Tim mạch\". Mỗi phần tử giữ nguyên các trường còn lại từ cuộc hẹn tương ứng.",
+        "priority": "HIGH",
+        "traceSource": "BR-002 [STMT-2] -> TP-007 -> STMT-1, STMT-2; BR-014 [STMT-1] -> TP-002 -> STMT-1",
+        "status": "APPROVED",
+        "isModified": false
+      }
+    ],
+    "existingApprovedTestCases": [],
+    "previousGeneratedUnitTests": [],
+    "existingTests": [],
+    "supportingResources": [],
+    "contextWarnings": []
+  },
+  "test": {
+    "case_id": 3021,
+    "test_class_name": "AppointmentServiceTest",
+    "test_method_name": "getAppointmentsByPatient_twoAppointments_enrichesInRepositoryOrder",
+    "package_name": "com.hospital.appointment.service",
+    "generation_type": "NEW_TEST",
+    "source_code": "// GREYTEST_SOURCE_V1 8287cefd5b53ac5eeca0559f0e1a14837bdedeb39b136cbbc318325664d34026 aG9zcGl0YWwtbWFuYWdlbWVudC1kZW1vLW1haW4vYmFja2VuZC9hcHBvaW50bWVudC1zZXJ2aWNlL3NyYy9tYWluL2phdmEvY29tL2hvc3BpdGFsL2FwcG9pbnRtZW50L3NlcnZpY2UvQXBwb2ludG1lbnRTZXJ2aWNlLmphdmE=\n// GREYTEST_SOURCE_V1 0d7c08c97be1674bab403c69167cf3c73d7b8afbd407db0b4db78c0751491fed aG9zcGl0YWwtbWFuYWdlbWVudC1kZW1vLW1haW4vYmFja2VuZC9hcHBvaW50bWVudC1zZXJ2aWNlL3NyYy9tYWluL2phdmEvY29tL2hvc3BpdGFsL2FwcG9pbnRtZW50L2NsaWVudC9Eb2N0b3JTZXJ2aWNlQ2xpZW50LmphdmE=\n// GREYTEST_SOURCE_V1 c34ca4199854a04647db03708e5ae65cdedd271e75bfb1fe01f10b3ebd58a4dd aG9zcGl0YWwtbWFuYWdlbWVudC1kZW1vLW1haW4vYmFja2VuZC9hcHBvaW50bWVudC1zZXJ2aWNlL3NyYy9tYWluL2phdmEvY29tL2hvc3BpdGFsL2FwcG9pbnRtZW50L2NsaWVudC9QYXRpZW50U2VydmljZUNsaWVudC5qYXZh\n// GREYTEST_SOURCE_V1 88d3d90242749e8d078661d3a8a52c898b0a585a625832090d145f3ea73cecb8 aG9zcGl0YWwtbWFuYWdlbWVudC1kZW1vLW1haW4vYmFja2VuZC9hcHBvaW50bWVudC1zZXJ2aWNlL3NyYy9tYWluL2phdmEvY29tL2hvc3BpdGFsL2FwcG9pbnRtZW50L2R0by9BcHBvaW50bWVudFJlcXVlc3REdG8uamF2YQ==\n// GREYTEST_SOURCE_V1 d3ed9b4882f73758869d71abb69e977262d8c393c910fd373ed93763a5642ad3 aG9zcGl0YWwtbWFuYWdlbWVudC1kZW1vLW1haW4vYmFja2VuZC9hcHBvaW50bWVudC1zZXJ2aWNlL3NyYy9tYWluL2phdmEvY29tL2hvc3BpdGFsL2FwcG9pbnRtZW50L2R0by9BcHBvaW50bWVudFJlc3BvbnNlRHRvLmphdmE=\n// GREYTEST_SOURCE_V1 f3102a70b28b4241180fed26bd387fa5d80cb580824078f03cb48bb4a9199a32 aG9zcGl0YWwtbWFuYWdlbWVudC1kZW1vLW1haW4vYmFja2VuZC9hcHBvaW50bWVudC1zZXJ2aWNlL3NyYy9tYWluL2phdmEvY29tL2hvc3BpdGFsL2FwcG9pbnRtZW50L2R0by9Eb2N0b3JEdG8uamF2YQ==\n// GREYTEST_SOURCE_V1 9c01b742da23e2b4f90d036b01d5d930bb951d1f26be66460d66b12cf3208332 aG9zcGl0YWwtbWFuYWdlbWVudC1kZW1vLW1haW4vYmFja2VuZC9hcHBvaW50bWVudC1zZXJ2aWNlL3NyYy9tYWluL2phdmEvY29tL2hvc3BpdGFsL2FwcG9pbnRtZW50L2R0by9QYXRpZW50RHRvLmphdmE=\n// GREYTEST_SOURCE_V1 d25ca20fc57ebabaac1ad69c93baf2e3bd1dae8f56fb869ab84ccb5127982e63 aG9zcGl0YWwtbWFuYWdlbWVudC1kZW1vLW1haW4vYmFja2VuZC9hcHBvaW50bWVudC1zZXJ2aWNlL3NyYy9tYWluL2phdmEvY29tL2hvc3BpdGFsL2FwcG9pbnRtZW50L21vZGVsL0FwcG9pbnRtZW50LmphdmE=\n// GREYTEST_SOURCE_V1 6a314c530fdcdecde7f385029204c025fc4c42b91f6bfa1d4ab63e4390f576c3 aG9zcGl0YWwtbWFuYWdlbWVudC1kZW1vLW1haW4vYmFja2VuZC9hcHBvaW50bWVudC1zZXJ2aWNlL3NyYy9tYWluL2phdmEvY29tL2hvc3BpdGFsL2FwcG9pbnRtZW50L3JlcG9zaXRvcnkvQXBwb2ludG1lbnRSZXBvc2l0b3J5LmphdmE=\n// GREYTEST_SOURCE_V1 f6d3c6d64f87b0bc6972ebd0a06ede53ef7d80a7b79752fb5e50033326d43880 aG9zcGl0YWwtbWFuYWdlbWVudC1kZW1vLW1haW4vYmFja2VuZC9jb21tb24tbGliL3NyYy9tYWluL2phdmEvY29tL2hvc3BpdGFsL2NvbW1vbi9leGNlcHRpb24vUmVzb3VyY2VOb3RGb3VuZEV4Y2VwdGlvbi5qYXZh\npackage com.hospital.appointment.service;\n\nimport com.hospital.appointment.client.DoctorServiceClient;\nimport com.hospital.appointment.client.PatientServiceClient;\nimport com.hospital.appointment.dto.AppointmentResponseDto;\nimport com.hospital.appointment.dto.DoctorDto;\nimport com.hospital.appointment.dto.PatientDto;\nimport com.hospital.appointment.model.Appointment;\nimport com.hospital.appointment.repository.AppointmentRepository;\nimport org.junit.jupiter.api.Test;\nimport org.junit.jupiter.api.extension.ExtendWith;\nimport org.mockito.InjectMocks;\nimport org.mockito.Mock;\nimport org.mockito.junit.jupiter.MockitoExtension;\n\nimport java.time.LocalDate;\nimport java.time.LocalTime;\nimport java.util.Arrays;\nimport java.util.List;\n\nimport static org.junit.jupiter.api.Assertions.assertEquals;\nimport static org.junit.jupiter.api.Assertions.assertNull;\nimport static org.mockito.Mockito.verify;\nimport static org.mockito.Mockito.when;\n\n@ExtendWith(MockitoExtension.class)\nclass AppointmentServiceTest {\n    @Mock private AppointmentRepository appointmentRepository;\n    @Mock private PatientServiceClient patientServiceClient;\n    @Mock private DoctorServiceClient doctorServiceClient;\n    @InjectMocks private AppointmentService appointmentService;\n\n    // GreyTest trace: getAppointmentsByPatient | each repository result is enriched in order | BR-001 -> TP-006 -> TC-1525\n    @Test\n    void getAppointmentsByPatient_twoAppointments_enrichesInRepositoryOrder() {\n        // Arrange\n        Appointment first = new Appointment();\n        first.setId(501L);\n        first.setPatientId(71L);\n        first.setDoctorId(82L);\n        first.setAppointmentDate(LocalDate.of(2025, 6, 10));\n        first.setAppointmentTime(LocalTime.of(9, 30));\n        first.setStatus(Appointment.AppointmentStatus.SCHEDULED);\n        first.setReason(\"Khám định kỳ\");\n        Appointment second = new Appointment();\n        second.setId(502L);\n        second.setPatientId(71L);\n        second.setDoctorId(83L);\n        second.setAppointmentDate(LocalDate.of(2025, 6, 11));\n        second.setAppointmentTime(LocalTime.of(10, 15));\n        second.setStatus(Appointment.AppointmentStatus.CONFIRMED);\n        second.setReason(\"Đau ngực\");\n        second.setNotes(\"Theo dõi\");\n        when(appointmentRepository.findByPatientId(71L)).thenReturn(Arrays.asList(first, second));\n        when(patientServiceClient.getPatientById(71L)).thenReturn(new PatientDto(71L, \"An\", \"Nguyễn\", \"an@example.test\", \"0900000001\"));\n        when(doctorServiceClient.getDoctorById(82L)).thenReturn(new DoctorDto(82L, \"Bình\", \"Trần\", \"Tim mạch\", true));\n        when(doctorServiceClient.getDoctorById(83L)).thenReturn(new DoctorDto(83L, \"Hoa\", \"Phạm\", \"Nội khoa\", true));\n\n        // Act\n        List<AppointmentResponseDto> results = appointmentService.getAppointmentsByPatient(71L);\n\n        // Assert\n        assertEquals(2, results.size());\n        AppointmentResponseDto firstResult = results.get(0);\n        assertEquals(501L, firstResult.getId());\n        assertEquals(71L, firstResult.getPatientId());\n        assertEquals(\"An Nguyễn\", firstResult.getPatientName());\n        assertEquals(82L, firstResult.getDoctorId());\n        assertEquals(\"Dr. Bình Trần\", firstResult.getDoctorName());\n        assertEquals(\"Tim mạch\", firstResult.getDoctorSpecialization());\n        assertEquals(LocalDate.of(2025, 6, 10), firstResult.getAppointmentDate());\n        assertEquals(LocalTime.of(9, 30), firstResult.getAppointmentTime());\n        assertEquals(Appointment.AppointmentStatus.SCHEDULED, firstResult.getStatus());\n        assertEquals(\"Khám định kỳ\", firstResult.getReason());\n        assertNull(firstResult.getNotes());\n        assertNull(firstResult.getDiagnosis());\n        assertNull(firstResult.getPrescription());\n        assertNull(firstResult.getCreatedAt());\n        assertNull(firstResult.getUpdatedAt());\n        assertNull(firstResult.getCancelledAt());\n        assertNull(firstResult.getCompletedAt());\n        AppointmentResponseDto secondResult = results.get(1);\n        assertEquals(502L, secondResult.getId());\n        assertEquals(71L, secondResult.getPatientId());\n        assertEquals(\"An Nguyễn\", secondResult.getPatientName());\n        assertEquals(83L, secondResult.getDoctorId());\n        assertEquals(\"Dr. Hoa Phạm\", secondResult.getDoctorName());\n        assertEquals(\"Nội khoa\", secondResult.getDoctorSpecialization());\n        assertEquals(LocalDate.of(2025, 6, 11), secondResult.getAppointmentDate());\n        assertEquals(LocalTime.of(10, 15), secondResult.getAppointmentTime());\n        assertEquals(Appointment.AppointmentStatus.CONFIRMED, secondResult.getStatus());\n        assertEquals(\"Đau ngực\", secondResult.getReason());\n        assertEquals(\"Theo dõi\", secondResult.getNotes());\n        assertNull(secondResult.getDiagnosis());\n        assertNull(secondResult.getPrescription());\n        assertNull(secondResult.getCreatedAt());\n        assertNull(secondResult.getUpdatedAt());\n        assertNull(secondResult.getCancelledAt());\n        assertNull(secondResult.getCompletedAt());\n        verify(appointmentRepository).findByPatientId(71L);\n        verify(patientServiceClient).getPatientById(71L);\n        verify(patientServiceClient).getPatientById(71L);\n        verify(doctorServiceClient).getDoctorById(82L);\n        verify(doctorServiceClient).getDoctorById(83L);\n    }\n}"
+  }
+}

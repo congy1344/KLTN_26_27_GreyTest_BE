@@ -38,6 +38,106 @@ import com.greytest.service.agent.LlmResponseException;
 @ExtendWith(MockitoExtension.class)
 class UnitTestServiceTest {
 
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.EnumSource(value = ProjectStatus.class, names = {"CASE_APPROVED", "TEST_GENERATED"})
+    void keepsValidTestsAndRecoversOnlyMissingNonBlockedCases(ProjectStatus initialStatus) {
+        Project project = new Project();
+        project.setId(1L);
+        project.setStatus(initialStatus);
+        TestPlan plan = new TestPlan();
+        plan.setId(20L);
+        plan.setProjectId(1L);
+        plan.setBusinessRuleId(10L);
+        plan.setStatus(ReviewStatus.APPROVED);
+        List<TestCase> approved = List.of(approvedCase(1L, 20L), approvedCase(2L, 20L), approvedCase(3L, 20L));
+        when(projects.findById(1L)).thenReturn(Optional.of(project));
+        when(projects.findByIdForUpdate(1L)).thenReturn(Optional.of(project));
+        when(cases.findAll()).thenReturn(approved);
+        when(plans.findById(20L)).thenReturn(Optional.of(plan));
+        when(cases.findById(1L)).thenReturn(Optional.of(approved.get(0)));
+        when(cases.findById(3L)).thenReturn(Optional.of(approved.get(2)));
+        when(ai.generateUnitTests(1L, Set.of(1L, 2L, 3L))).thenReturn(new UnitTestResponseDto(
+                List.of(generated(1L, validSource("ServiceTest", "case1"))),
+                List.of(new com.greytest.dto.agent.GenerationResponseDtos.BlockedUnitTestDto(2L, "TC-002", "Math.random branch cannot be controlled"))));
+        when(ai.generateUnitTests(1L, Set.of(3L))).thenReturn(new UnitTestResponseDto(
+                List.of(generated(3L, validSource("ServiceTest", "case3")))));
+        when(units.saveAll(org.mockito.ArgumentMatchers.anyList())).thenAnswer(invocation -> invocation.getArgument(0));
+
+        var result = org.junit.jupiter.api.Assertions.assertDoesNotThrow(() -> service.generate(1L));
+
+        assertThat(result).extracting("testCaseId").containsExactly(1L, 3L);
+        verify(ai).validateUnitTestPrerequisites(1L, Set.of(1L, 2L, 3L));
+        verify(ai, org.mockito.Mockito.times(2)).generateUnitTests(org.mockito.ArgumentMatchers.eq(1L), org.mockito.ArgumentMatchers.anySet());
+        assertThat(project.getStatus()).isEqualTo(ProjectStatus.CASE_APPROVED);
+        verify(generationProgress).partialAfterCommit(org.mockito.ArgumentMatchers.eq(1L),
+                org.mockito.ArgumentMatchers.eq(com.greytest.dto.GenerationProgressStage.UNIT_TEST),
+                org.mockito.ArgumentMatchers.contains("TC-002"));
+        verify(generationProgress, never()).completeAfterCommit(org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyString());
+    }
+
+    @Test
+    void allBlockedSupplementalCasesFinishPartialWithoutRetryOrProjectPromotion() {
+        Project project = new Project();
+        project.setId(1L);
+        project.setStatus(ProjectStatus.CASE_APPROVED);
+        TestPlan plan = new TestPlan();
+        plan.setId(20L);
+        plan.setProjectId(1L);
+        plan.setBusinessRuleId(10L);
+        plan.setStatus(ReviewStatus.APPROVED);
+        TestCase blocked = approvedCase(31L, 20L);
+        when(projects.findById(1L)).thenReturn(Optional.of(project));
+        when(projects.findByIdForUpdate(1L)).thenReturn(Optional.of(project));
+        when(cases.findById(31L)).thenReturn(Optional.of(blocked));
+        when(plans.findById(20L)).thenReturn(Optional.of(plan));
+        when(ai.generateUnitTests(1L, Set.of(31L))).thenReturn(new UnitTestResponseDto(List.of(),
+                List.of(new com.greytest.dto.agent.GenerationResponseDtos.BlockedUnitTestDto(31L, "TC-031", "Uncontrollable random branch"))));
+        when(units.saveAll(org.mockito.ArgumentMatchers.anyList())).thenAnswer(invocation -> invocation.getArgument(0));
+
+        assertThat(org.junit.jupiter.api.Assertions.assertDoesNotThrow(() -> service.generateSupplemental(1L, List.of(31L)))).isEmpty();
+
+        verify(ai).generateUnitTests(1L, Set.of(31L));
+        verify(ai).validateUnitTestPrerequisites(1L, Set.of(31L));
+        verify(projects, never()).save(org.mockito.ArgumentMatchers.any());
+        verify(generationProgress).partialAfterCommit(org.mockito.ArgumentMatchers.eq(1L),
+                org.mockito.ArgumentMatchers.eq(com.greytest.dto.GenerationProgressStage.UNIT_TEST), org.mockito.ArgumentMatchers.contains("TC-031"));
+    }
+
+    @Test
+    void continuesWithIndependentBatchesWhenAnEntireBatchIsBlocked() {
+        Project project = new Project();
+        project.setId(1L);
+        project.setStatus(ProjectStatus.CASE_APPROVED);
+        TestPlan plan = new TestPlan();
+        plan.setId(20L);
+        plan.setProjectId(1L);
+        plan.setBusinessRuleId(10L);
+        plan.setStatus(ReviewStatus.APPROVED);
+        List<TestCase> approved = LongStream.rangeClosed(1, 9).mapToObj(id -> approvedCase(id, 20L)).toList();
+        when(projects.findById(1L)).thenReturn(Optional.of(project));
+        when(projects.findByIdForUpdate(1L)).thenReturn(Optional.of(project));
+        when(cases.findAll()).thenReturn(approved);
+        when(plans.findById(20L)).thenReturn(Optional.of(plan));
+        when(cases.findById(9L)).thenReturn(Optional.of(approved.get(8)));
+        when(ai.generateUnitTests(org.mockito.ArgumentMatchers.eq(1L), org.mockito.ArgumentMatchers.anySet()))
+                .thenAnswer(invocation -> {
+                    Set<Long> ids = invocation.getArgument(1);
+                    if(ids.contains(1L)) return new UnitTestResponseDto(List.of(), ids.stream()
+                            .map(id -> new com.greytest.dto.agent.GenerationResponseDtos.BlockedUnitTestDto(id, "TC-" + id, "Uncontrollable random branch"))
+                            .toList());
+                    return new UnitTestResponseDto(List.of(generated(9L, validSource("ServiceTest", "case9"))));
+                });
+        when(units.saveAll(org.mockito.ArgumentMatchers.anyList())).thenAnswer(invocation -> invocation.getArgument(0));
+
+        assertThat(service.generate(1L)).singleElement().extracting("testCaseId").isEqualTo(9L);
+
+        verify(ai).validateUnitTestPrerequisites(1L, LongStream.rangeClosed(1, 9).boxed().collect(java.util.stream.Collectors.toSet()));
+        verify(ai, org.mockito.Mockito.times(2)).generateUnitTests(org.mockito.ArgumentMatchers.eq(1L), org.mockito.ArgumentMatchers.anySet());
+        verify(generationProgress).partialAfterCommit(org.mockito.ArgumentMatchers.eq(1L),
+                org.mockito.ArgumentMatchers.eq(com.greytest.dto.GenerationProgressStage.UNIT_TEST), org.mockito.ArgumentMatchers.contains("8 Test Case"));
+        assertThat(project.getStatus()).isEqualTo(ProjectStatus.CASE_APPROVED);
+    }
+
     @Mock private UnitTestRepository units;
     @Mock private TestCaseRepository cases;
     @Mock private TestPlanRepository plans;

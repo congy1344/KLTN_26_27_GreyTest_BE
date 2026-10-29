@@ -19,6 +19,51 @@ import com.greytest.exception.GenerationInProgressException;
 
 class GenerationProgressServiceTest {
 
+    @Test
+    void partialPublishesAfterCommitAndRemainsTerminalWithoutClaimingFullSuccess() {
+        service.start(9L, GenerationProgressStage.UNIT_TEST, 2, "Bắt đầu.");
+        service.advance(9L, GenerationProgressStage.UNIT_TEST, "Đã lưu phần hợp lệ.");
+        TransactionSynchronizationManager.initSynchronization();
+        try {
+            service.partialAfterCommit(9L, GenerationProgressStage.UNIT_TEST, "TC-002 bị chặn: random.");
+            assertThat(service.get(9L, GenerationProgressStage.UNIT_TEST).status()).isEqualTo(GenerationProgressStatus.RUNNING);
+            assertThat(TransactionSynchronizationManager.getSynchronizations()).hasSize(1);
+            var synchronization = TransactionSynchronizationManager.getSynchronizations().get(0);
+            synchronization.afterCommit();
+            synchronization.afterCompletion(TransactionSynchronization.STATUS_COMMITTED);
+            service.completeIfActive(9L, GenerationProgressStage.UNIT_TEST, "Worker done");
+            service.failIfActive(9L, GenerationProgressStage.UNIT_TEST, "Worker failed");
+            var partial = service.get(9L, GenerationProgressStage.UNIT_TEST);
+            assertThat(partial.status().name()).isEqualTo("PARTIAL");
+            assertThat(partial.percent()).isLessThan(100);
+            assertThat(partial.steps()).noneMatch(step -> step.status() == GenerationProgressStepStatus.RUNNING);
+            assertThat(partial.logs()).anyMatch(log -> log.message().contains("TC-002"));
+        } finally {
+            TransactionSynchronizationManager.clearSynchronization();
+        }
+    }
+
+    @Test
+    void partialRollsBackToFailureAndExpiresLikeOtherTerminalStates() {
+        service.start(9L, GenerationProgressStage.UNIT_TEST, 1, "Bắt đầu.");
+        TransactionSynchronizationManager.initSynchronization();
+        try {
+            service.partialAfterCommit(9L, GenerationProgressStage.UNIT_TEST, "Partial");
+            assertThat(TransactionSynchronizationManager.getSynchronizations()).hasSize(1);
+            TransactionSynchronizationManager.getSynchronizations().get(0)
+                    .afterCompletion(TransactionSynchronization.STATUS_ROLLED_BACK);
+            assertThat(service.get(9L, GenerationProgressStage.UNIT_TEST).status()).isEqualTo(GenerationProgressStatus.FAILED);
+        } finally {
+            TransactionSynchronizationManager.clearSynchronization();
+        }
+        MutableClock clock = new MutableClock(Instant.parse("2026-08-14T00:00:00Z"));
+        GenerationProgressService expiring = new GenerationProgressService(clock);
+        expiring.start(9L, GenerationProgressStage.UNIT_TEST, 1, "Start");
+        expiring.partialAfterCommit(9L, GenerationProgressStage.UNIT_TEST, "Blocked");
+        clock.advanceSeconds(901);
+        assertThat(expiring.get(9L, GenerationProgressStage.UNIT_TEST).status()).isEqualTo(GenerationProgressStatus.IDLE);
+    }
+
     private final GenerationProgressService service = new GenerationProgressService();
 
     @Test

@@ -1,0 +1,921 @@
+{
+  "context": {
+    "project": {
+      "id": 871,
+      "name": "Hospital-Management-System",
+      "status": "CASE_APPROVED"
+    },
+    "analysis": {
+      "totalClasses": 61,
+      "totalMethods": 152,
+      "totalEndpoints": 55,
+      "totalRelations": 19,
+      "totalControllerServiceRelations": 62,
+      "existingTestFiles": 0,
+      "totalProductionFiles": 62,
+      "parsedProductionFiles": 62,
+      "failedParseFiles": 0,
+      "failedParseFilePaths": []
+    },
+    "classes": [
+      {
+        "id": 8972,
+        "packageName": "com.example.HMS.service",
+        "className": "AppointmentService",
+        "qualifiedName": "com.example.HMS.service.AppointmentService",
+        "classType": "SERVICE",
+        "filePath": "Hospital-Management-System/HMS/src/main/java/com/example/HMS/service/AppointmentService.java",
+        "sourceCode": "package com.example.HMS.service;\r\n\r\nimport com.example.HMS.anotations.Auditable;\r\nimport com.example.HMS.dto.AppointmentDto;\r\nimport com.example.HMS.dto.AppointmentMapper;\r\nimport com.example.HMS.entity.Appointment;\r\nimport com.example.HMS.entity.Doctor;\r\nimport com.example.HMS.entity.Patient;\r\nimport com.example.HMS.enums.AppointmentStatus;\r\nimport com.example.HMS.exception.AppointmentNotFoundException;\r\nimport com.example.HMS.exception.DoctorNotFoundException;\r\nimport com.example.HMS.exception.PatientNotFoundException;\r\nimport com.example.HMS.repository.AppointmentRepository;\r\nimport com.example.HMS.repository.DoctorRepository;\r\nimport com.example.HMS.repository.PatientRepository;\r\nimport lombok.RequiredArgsConstructor;\r\nimport org.hibernate.Hibernate;\r\nimport org.springframework.cache.annotation.CacheEvict;\r\nimport org.springframework.cache.annotation.CachePut;\r\nimport org.springframework.cache.annotation.Cacheable;\r\nimport org.springframework.cache.annotation.Caching;\r\nimport org.springframework.data.domain.Page;\r\nimport org.springframework.data.domain.PageRequest;\r\nimport org.springframework.data.domain.Pageable;\r\nimport org.springframework.stereotype.Service;\r\nimport java.time.LocalDate;\r\nimport java.util.List;\r\nimport java.util.Optional;\r\n\r\n@Service\r\n@RequiredArgsConstructor\r\npublic class AppointmentService {\r\n\r\n    private final AppointmentRepository appointmentRepository;\r\n\r\n    private final DoctorRepository doctorRepository;\r\n\r\n    private final PatientRepository patientRepository;\r\n\r\n    private final AppointmentMapper appointmentMapper;\r\n\r\n    // create appointment\r\n    @Auditable(action = \"CREATE_APPOINTMENT\")\r\n    public AppointmentDto createAppointment(AppointmentDto dto) {\r\n        if (dto == null) {\r\n            throw new IllegalArgumentException(\"Appointment data cannot be null\");\r\n        }\r\n        Appointment appointmentEntity = appointmentMapper.toEntity(dto);\r\n        Doctor doctor = doctorRepository.findById(dto.getDoctorId()).orElseThrow(() -> new DoctorNotFoundException(\"Doctor not found with id: \" + dto.getDoctorId()));\r\n        Patient patient = patientRepository.findById(dto.getPatientId()).orElseThrow(() -> new PatientNotFoundException(\"Patient not found with id: \" + dto.getPatientId()));\r\n        appointmentEntity.setDoctor(doctor);\r\n        appointmentEntity.setPatient(patient);\r\n        Appointment appointment = appointmentRepository.save(appointmentEntity);\r\n        return appointmentMapper.toDto(appointment);\r\n    }\r\n\r\n    // get all appointments\r\n    public Page<AppointmentDto> getAllAppointment(int page, int size) {\r\n        Pageable pageable = PageRequest.of(page, size);\r\n        Page<Appointment> appointments = appointmentRepository.findAll(pageable);\r\n        return appointments.map(appointmentMapper::toDto);\r\n    }\r\n\r\n    // get appointment by id\r\n    @Cacheable(value = \"appointments\", key = \"#appointmentId\")\r\n    public AppointmentDto getAppointmentById(Long appointmentId) {\r\n        Optional<Appointment> optionalAppointment = appointmentRepository.findById(appointmentId);\r\n        if (optionalAppointment.isEmpty()) {\r\n            throw new AppointmentNotFoundException(String.format(\"Failed to find the appointment with id %d\", appointmentId));\r\n        }\r\n        Appointment appointment = optionalAppointment.get();\r\n        // Force load lazy associations\r\n        Hibernate.initialize(appointment.getDoctor());\r\n        Hibernate.initialize(appointment.getPatient());\r\n        return appointmentMapper.toDto(appointment);\r\n    }\r\n\r\n    // update appointment\r\n    @Caching(put = { @CachePut(value = \"appointments\", key = \"#appointmentId\") }, evict = { @CacheEvict(value = \"appointmentsByDoctor\", allEntries = true), @CacheEvict(value = \"appointmentsByPatient\", allEntries = true) })\r\n    @Auditable(action = \"UPDATE_APPOINTMENT\")\r\n    public AppointmentDto updateAppointmentById(Long appointmentId, AppointmentDto dto) {\r\n        Optional<Appointment> optionalAppointment = appointmentRepository.findById(appointmentId);\r\n        if (optionalAppointment.isEmpty()) {\r\n            throw new AppointmentNotFoundException(String.format(\"Failed to find the appointment with id %d\", appointmentId));\r\n        }\r\n        Appointment appointment = optionalAppointment.get();\r\n        if (dto.getDoctorId() != null) {\r\n            Doctor doctor = doctorRepository.findById(dto.getDoctorId()).orElseThrow(() -> new DoctorNotFoundException(\"Doctor not found with id: \" + dto.getDoctorId()));\r\n            appointment.setDoctor(doctor);\r\n        }\r\n        if (dto.getPatientId() != null) {\r\n            Patient patient = patientRepository.findById(dto.getPatientId()).orElseThrow(() -> new PatientNotFoundException(\"Patient not found with id: \" + dto.getPatientId()));\r\n            appointment.setPatient(patient);\r\n        }\r\n        if (dto.getTime() != null) {\r\n            appointment.setTime(dto.getTime());\r\n        }\r\n        if (dto.getDate() != null) {\r\n            appointment.setDate(dto.getDate());\r\n        }\r\n        if (dto.getStatus() != null) {\r\n            appointment.setStatus(dto.getStatus());\r\n        }\r\n        if (dto.getEmail() != null) {\r\n            appointment.setPatientEmail(dto.getEmail());\r\n        }\r\n        Appointment savedAppointment = appointmentRepository.save(appointment);\r\n        return appointmentMapper.toDto(savedAppointment);\r\n    }\r\n\r\n    // Reschedule appointment\r\n    @Auditable(action = \"RESCHEDULE_APPOINTMENT\")\r\n    public AppointmentDto rescheduleAppointment(Long appointmentId, AppointmentDto dto) {\r\n        Optional<Appointment> optionalAppointment = appointmentRepository.findById(appointmentId);\r\n        if (optionalAppointment.isEmpty()) {\r\n            throw new AppointmentNotFoundException(String.format(\"Failed to find the appointment with id %d\", appointmentId));\r\n        }\r\n        Appointment appointment = optionalAppointment.get();\r\n        if (dto.getTime() != null) {\r\n            appointment.setTime(dto.getTime());\r\n        }\r\n        if (dto.getDate() != null) {\r\n            appointment.setDate(dto.getDate());\r\n        }\r\n        if (dto.getStatus() != null) {\r\n            appointment.setStatus(AppointmentStatus.APPOINTMENT_RESCHEDULED);\r\n        }\r\n        Appointment savedAppointment = appointmentRepository.save(appointment);\r\n        return appointmentMapper.toDto(savedAppointment);\r\n    }\r\n\r\n    // cancel appointment\r\n    @Caching(evict = { @CacheEvict(value = \"appointments\", key = \"#appointmentId\"), @CacheEvict(value = \"appointmentsByDoctor\", allEntries = true), @CacheEvict(value = \"appointmentsByPatient\", allEntries = true), @CacheEvict(value = \"allAppointments\", allEntries = true) })\r\n    @Auditable(action = \"CANCEL_APPOINTMENT\")\r\n    public Appointment cancelAppointment(Long appointmentId) {\r\n        Optional<Appointment> optionalAppointment = appointmentRepository.findById(appointmentId);\r\n        if (optionalAppointment.isEmpty()) {\r\n            throw new AppointmentNotFoundException(String.format(\"Failed to find the appointment with id %d\", appointmentId));\r\n        }\r\n        Appointment appointment = optionalAppointment.get();\r\n        appointmentRepository.delete(appointment);\r\n        return appointment;\r\n    }\r\n\r\n    // get appointments by date\r\n    public List<AppointmentDto> getAppointmentsByDate(LocalDate date) {\r\n        List<Appointment> appointment = appointmentRepository.findByDate(date);\r\n        return appointment.stream().map(appointmentMapper::toDto).toList();\r\n    }\r\n\r\n    // get appointments by doctor\r\n    @Cacheable(value = \"appointmentsByDoctor\", key = \"#doctorId\")\r\n    public List<AppointmentDto> getAppointmentByDoctor(Long doctorId) {\r\n        if (doctorId == null || doctorId <= 0) {\r\n            throw new IllegalArgumentException(\"Doctor ID must be valid and positive\");\r\n        }\r\n        List<Appointment> appointments = appointmentRepository.findByDoctorDoctorIdOrderByDateDesc(doctorId);\r\n        return appointments.stream().map(appointmentMapper::toDto).toList();\r\n    }\r\n\r\n    // get appointments by patient\r\n    @Cacheable(value = \"appointmentsByPatient\", key = \"#patientId\")\r\n    public List<AppointmentDto> getAppointmentByPatient(Long patientId) {\r\n        if (patientId == null || patientId <= 0) {\r\n            throw new IllegalArgumentException(\"Patient ID must be valid and positive\");\r\n        }\r\n        List<Appointment> appointment = appointmentRepository.findByPatientPatientId(patientId);\r\n        return appointment.stream().map(appointmentMapper::toDto).toList();\r\n    }\r\n\r\n    // get appointments by status\r\n    public List<AppointmentDto> getAppointmentByStatus(AppointmentStatus status) {\r\n        if (status == null) {\r\n            throw new IllegalArgumentException(\"Appointment Status can't be null\");\r\n        }\r\n        List<Appointment> appointment = appointmentRepository.findByStatus(status);\r\n        return appointment.stream().map(appointmentMapper::toDto).toList();\r\n    }\r\n}\r\n",
+        "annotations": [
+          {
+            "id": 11386,
+            "targetType": "CLASS",
+            "category": "COMPONENT",
+            "annotationName": "Service",
+            "attributes": "@Service"
+          }
+        ],
+        "methods": [
+          {
+            "id": 18859,
+            "classQualifiedName": "com.example.HMS.service.AppointmentService",
+            "methodName": "updateAppointmentById",
+            "returnType": "AppointmentDto",
+            "parameters": [
+              {
+                "name": "appointmentId",
+                "type": "Long"
+              },
+              {
+                "name": "dto",
+                "type": "AppointmentDto"
+              }
+            ],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "@Caching(\r\n            put = {\r\n                    @CachePut(value = \"appointments\", key = \"#appointmentId\")\r\n            },\r\n            evict = {\r\n                    @CacheEvict(value = \"appointmentsByDoctor\", allEntries = true),\r\n                    @CacheEvict(value = \"appointmentsByPatient\", allEntries = true)\r\n            }\r\n    )\r\n    @Auditable(action = \"UPDATE_APPOINTMENT\")\r\n    public AppointmentDto updateAppointmentById(Long appointmentId,AppointmentDto dto )\r\n    {\r\n        Optional<Appointment> optionalAppointment = appointmentRepository.findById(appointmentId);\r\n\r\n        if (optionalAppointment.isEmpty()){\r\n            throw new AppointmentNotFoundException(String.format(\"Failed to find the appointment with id %d\" , appointmentId));\r\n        }\r\n\r\n        Appointment appointment = optionalAppointment.get();\r\n\r\n        if (dto.getDoctorId() != null) {\r\n            Doctor doctor = doctorRepository.findById(dto.getDoctorId())\r\n                    .orElseThrow(() -> new DoctorNotFoundException(\r\n                            \"Doctor not found with id: \" + dto.getDoctorId()));\r\n            appointment.setDoctor(doctor);\r\n        }\r\n\r\n        if (dto.getPatientId() != null) {\r\n            Patient patient = patientRepository.findById(dto.getPatientId())\r\n                    .orElseThrow(() -> new PatientNotFoundException(\r\n                            \"Patient not found with id: \" + dto.getPatientId()));\r\n            appointment.setPatient(patient);\r\n        }\r\n\r\n        if (dto.getTime() != null) { appointment.setTime(dto.getTime()); }\r\n\r\n        if (dto.getDate() != null) { appointment.setDate(dto.getDate()); }\r\n\r\n        if (dto.getStatus() != null) { appointment.setStatus(dto.getStatus()); }\r\n\r\n        if (dto.getEmail() != null) { appointment.setPatientEmail(dto.getEmail()); }\r\n\r\n        Appointment savedAppointment = appointmentRepository.save(appointment);\r\n\r\n        return appointmentMapper.toDto(savedAppointment);\r\n    }",
+            "lineStart": 92,
+            "lineEnd": 137,
+            "annotations": [],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 104,
+                "lineEnd": 104
+              },
+              {
+                "branchId": "IF-1-TRUE",
+                "kind": "IF",
+                "outcome": "TRUE",
+                "condition": "optionalAppointment.isEmpty()",
+                "lineStart": 107,
+                "lineEnd": 107
+              },
+              {
+                "branchId": "IF-1-FALSE",
+                "kind": "IF",
+                "outcome": "FALSE",
+                "condition": "optionalAppointment.isEmpty()",
+                "lineStart": 106,
+                "lineEnd": 106
+              },
+              {
+                "branchId": "STMT-2",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 110,
+                "lineEnd": 110
+              },
+              {
+                "branchId": "IF-2-TRUE",
+                "kind": "IF",
+                "outcome": "TRUE",
+                "condition": "dto.getDoctorId() != null",
+                "lineStart": 113,
+                "lineEnd": 116
+              },
+              {
+                "branchId": "IF-2-FALSE",
+                "kind": "IF",
+                "outcome": "FALSE",
+                "condition": "dto.getDoctorId() != null",
+                "lineStart": 112,
+                "lineEnd": 112
+              },
+              {
+                "branchId": "IF-3-TRUE",
+                "kind": "IF",
+                "outcome": "TRUE",
+                "condition": "dto.getPatientId() != null",
+                "lineStart": 120,
+                "lineEnd": 123
+              },
+              {
+                "branchId": "IF-3-FALSE",
+                "kind": "IF",
+                "outcome": "FALSE",
+                "condition": "dto.getPatientId() != null",
+                "lineStart": 119,
+                "lineEnd": 119
+              },
+              {
+                "branchId": "IF-4-TRUE",
+                "kind": "IF",
+                "outcome": "TRUE",
+                "condition": "dto.getTime() != null",
+                "lineStart": 126,
+                "lineEnd": 126
+              },
+              {
+                "branchId": "IF-4-FALSE",
+                "kind": "IF",
+                "outcome": "FALSE",
+                "condition": "dto.getTime() != null",
+                "lineStart": 126,
+                "lineEnd": 126
+              },
+              {
+                "branchId": "IF-5-TRUE",
+                "kind": "IF",
+                "outcome": "TRUE",
+                "condition": "dto.getDate() != null",
+                "lineStart": 128,
+                "lineEnd": 128
+              },
+              {
+                "branchId": "IF-5-FALSE",
+                "kind": "IF",
+                "outcome": "FALSE",
+                "condition": "dto.getDate() != null",
+                "lineStart": 128,
+                "lineEnd": 128
+              },
+              {
+                "branchId": "IF-6-TRUE",
+                "kind": "IF",
+                "outcome": "TRUE",
+                "condition": "dto.getStatus() != null",
+                "lineStart": 130,
+                "lineEnd": 130
+              },
+              {
+                "branchId": "IF-6-FALSE",
+                "kind": "IF",
+                "outcome": "FALSE",
+                "condition": "dto.getStatus() != null",
+                "lineStart": 130,
+                "lineEnd": 130
+              },
+              {
+                "branchId": "IF-7-TRUE",
+                "kind": "IF",
+                "outcome": "TRUE",
+                "condition": "dto.getEmail() != null",
+                "lineStart": 132,
+                "lineEnd": 132
+              },
+              {
+                "branchId": "IF-7-FALSE",
+                "kind": "IF",
+                "outcome": "FALSE",
+                "condition": "dto.getEmail() != null",
+                "lineStart": 132,
+                "lineEnd": 132
+              },
+              {
+                "branchId": "STMT-3",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 134,
+                "lineEnd": 134
+              },
+              {
+                "branchId": "STMT-4",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 136,
+                "lineEnd": 136
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": 8926,
+        "packageName": "com.example.HMS.dto",
+        "className": "AppointmentDto",
+        "qualifiedName": "com.example.HMS.dto.AppointmentDto",
+        "classType": "OTHER",
+        "filePath": "Hospital-Management-System/HMS/src/main/java/com/example/HMS/dto/AppointmentDto.java",
+        "sourceCode": "package com.example.HMS.dto;\r\n\r\nimport com.example.HMS.enums.AppointmentStatus;\r\nimport jakarta.persistence.EnumType;\r\nimport jakarta.persistence.Enumerated;\r\nimport lombok.AllArgsConstructor;\r\nimport lombok.Getter;\r\nimport lombok.NoArgsConstructor;\r\nimport lombok.Setter;\r\nimport java.time.LocalDate;\r\nimport java.time.LocalTime;\r\n\r\n@AllArgsConstructor\r\n@NoArgsConstructor\r\n@Getter\r\n@Setter\r\npublic class AppointmentDto {\r\n\r\n    private Long appointmentId;\r\n\r\n    private Long doctorId;\r\n\r\n    private Long patientId;\r\n\r\n    private LocalTime time;\r\n\r\n    private LocalDate date;\r\n\r\n    @Enumerated(EnumType.STRING)\r\n    private AppointmentStatus status;\r\n\r\n    private String email;\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8927,
+        "packageName": "com.example.HMS.dto",
+        "className": "AppointmentMapper",
+        "qualifiedName": "com.example.HMS.dto.AppointmentMapper",
+        "classType": "OTHER",
+        "filePath": "Hospital-Management-System/HMS/src/main/java/com/example/HMS/dto/AppointmentMapper.java",
+        "sourceCode": "package com.example.HMS.dto;\r\n\r\nimport com.example.HMS.entity.Appointment;\r\nimport org.springframework.stereotype.Component;\r\n\r\n@Component\r\npublic class AppointmentMapper {\r\n\r\n    // Dto ---> Entity\r\n    public Appointment toEntity(AppointmentDto dto) {\r\n        if (dto == null) {\r\n            return null;\r\n        }\r\n        Appointment appointment = new Appointment();\r\n        appointment.setTime(dto.getTime());\r\n        appointment.setDate(dto.getDate());\r\n        appointment.setStatus(dto.getStatus());\r\n        appointment.setPatientEmail(dto.getEmail());\r\n        return appointment;\r\n    }\r\n\r\n    // Entity ---> Dto\r\n    public AppointmentDto toDto(Appointment appointment) {\r\n        if (appointment == null) {\r\n            return null;\r\n        }\r\n        AppointmentDto dto = new AppointmentDto();\r\n        dto.setAppointmentId(appointment.getAppointmentId());\r\n        dto.setTime(appointment.getTime());\r\n        dto.setDate(appointment.getDate());\r\n        dto.setStatus(appointment.getStatus());\r\n        dto.setEmail(appointment.getPatientEmail());\r\n        // Safe null check + ID extraction\r\n        if (appointment.getDoctor() != null) {\r\n            dto.setDoctorId(appointment.getDoctor().getDoctorId());\r\n        }\r\n        if (appointment.getPatient() != null) {\r\n            dto.setPatientId(appointment.getPatient().getPatientId());\r\n        }\r\n        return dto;\r\n    }\r\n}\r\n",
+        "annotations": [
+          {
+            "id": 11343,
+            "targetType": "CLASS",
+            "category": "COMPONENT",
+            "annotationName": "Component",
+            "attributes": "@Component"
+          }
+        ],
+        "methods": []
+      },
+      {
+        "id": 8940,
+        "packageName": "com.example.HMS.entity",
+        "className": "Appointment",
+        "qualifiedName": "com.example.HMS.entity.Appointment",
+        "classType": "ENTITY",
+        "filePath": "Hospital-Management-System/HMS/src/main/java/com/example/HMS/entity/Appointment.java",
+        "sourceCode": "package com.example.HMS.entity;\r\n\r\nimport com.example.HMS.enums.AppointmentStatus;\r\nimport jakarta.persistence.*;\r\nimport lombok.*;\r\nimport java.time.LocalDate;\r\nimport java.time.LocalTime;\r\n\r\n@Entity\r\n@Builder\r\n@AllArgsConstructor\r\n@NoArgsConstructor\r\n@Getter\r\n@Setter\r\npublic class Appointment {\r\n\r\n    @Id\r\n    @GeneratedValue(strategy = GenerationType.IDENTITY)\r\n    private Long appointmentId;\r\n\r\n    private LocalDate date;\r\n\r\n    private LocalTime time;\r\n\r\n    private String patientEmail;\r\n\r\n    @Enumerated(EnumType.STRING)\r\n    private AppointmentStatus status;\r\n\r\n    @ManyToOne(fetch = FetchType.LAZY)\r\n    @JoinColumn(name = \"doctor_id\")\r\n    private Doctor doctor;\r\n\r\n    @ManyToOne(fetch = FetchType.LAZY)\r\n    @JoinColumn(name = \"patient_id\")\r\n    private Patient patient;\r\n\r\n    @OneToOne(mappedBy = \"appointment\", cascade = CascadeType.ALL, orphanRemoval = true)\r\n    private MedicalRecord medicalRecord;\r\n\r\n    @OneToOne(mappedBy = \"appointment\", cascade = CascadeType.ALL)\r\n    private Bill bill;\r\n}\r\n",
+        "annotations": [
+          {
+            "id": 11350,
+            "targetType": "CLASS",
+            "category": "PERSISTENCE",
+            "annotationName": "Entity",
+            "attributes": "@Entity"
+          }
+        ],
+        "methods": []
+      },
+      {
+        "id": 8943,
+        "packageName": "com.example.HMS.entity",
+        "className": "Doctor",
+        "qualifiedName": "com.example.HMS.entity.Doctor",
+        "classType": "ENTITY",
+        "filePath": "Hospital-Management-System/HMS/src/main/java/com/example/HMS/entity/Doctor.java",
+        "sourceCode": "package com.example.HMS.entity;\r\n\r\nimport jakarta.persistence.*;\r\nimport lombok.*;\r\nimport java.util.List;\r\n\r\n@Entity\r\n@Builder\r\n@AllArgsConstructor\r\n@NoArgsConstructor\r\n@Getter\r\n@Setter\r\npublic class Doctor {\r\n\r\n    @Id\r\n    @GeneratedValue(strategy = GenerationType.IDENTITY)\r\n    private Long doctorId;\r\n\r\n    @Column(nullable = false)\r\n    private String doctorName;\r\n\r\n    @Column(nullable = false)\r\n    private String specialization;\r\n\r\n    private Boolean doctorAvailable;\r\n\r\n    @ManyToOne(fetch = FetchType.LAZY)\r\n    @JoinColumn(name = \"department_id\")\r\n    private Department department;\r\n\r\n    @OneToMany(mappedBy = \"doctor\", cascade = CascadeType.ALL)\r\n    private List<MedicalRecord> medicalRecords;\r\n\r\n    @OneToMany(mappedBy = \"doctor\", cascade = CascadeType.ALL)\r\n    private List<Appointment> appointments;\r\n}\r\n",
+        "annotations": [
+          {
+            "id": 11353,
+            "targetType": "CLASS",
+            "category": "PERSISTENCE",
+            "annotationName": "Entity",
+            "attributes": "@Entity"
+          }
+        ],
+        "methods": []
+      },
+      {
+        "id": 8946,
+        "packageName": "com.example.HMS.entity",
+        "className": "Patient",
+        "qualifiedName": "com.example.HMS.entity.Patient",
+        "classType": "ENTITY",
+        "filePath": "Hospital-Management-System/HMS/src/main/java/com/example/HMS/entity/Patient.java",
+        "sourceCode": "package com.example.HMS.entity;\r\n\r\nimport com.example.HMS.enums.Gender;\r\nimport jakarta.persistence.*;\r\nimport lombok.*;\r\nimport java.util.List;\r\n\r\n@Entity\r\n@Builder\r\n@AllArgsConstructor\r\n@NoArgsConstructor\r\n@Getter\r\n@Setter\r\npublic class Patient {\r\n\r\n    @Id\r\n    @GeneratedValue(strategy = GenerationType.IDENTITY)\r\n    private Long patientId;\r\n\r\n    private String patientName;\r\n\r\n    private Integer patientAge;\r\n\r\n    private String patientPhone;\r\n\r\n    private String patientEmail;\r\n\r\n    @Enumerated(EnumType.STRING)\r\n    private Gender gender;\r\n\r\n    @OneToMany(mappedBy = \"patient\", cascade = CascadeType.ALL)\r\n    private List<Appointment> appointments;\r\n\r\n    @OneToMany(mappedBy = \"patient\", cascade = CascadeType.ALL)\r\n    private List<MedicalRecord> medicalRecords;\r\n\r\n    @OneToMany(mappedBy = \"patient\", cascade = CascadeType.ALL)\r\n    private List<Bill> bills;\r\n}\r\n",
+        "annotations": [
+          {
+            "id": 11357,
+            "targetType": "CLASS",
+            "category": "PERSISTENCE",
+            "annotationName": "Entity",
+            "attributes": "@Entity"
+          }
+        ],
+        "methods": []
+      },
+      {
+        "id": 8948,
+        "packageName": "com.example.HMS.enums",
+        "className": "AppointmentStatus",
+        "qualifiedName": "com.example.HMS.enums.AppointmentStatus",
+        "classType": "ENUM",
+        "filePath": "Hospital-Management-System/HMS/src/main/java/com/example/HMS/enums/AppointmentStatus.java",
+        "sourceCode": "package com.example.HMS.enums;\r\n\r\npublic enum AppointmentStatus {\r\n\r\n    APPOINTMENT_SCHEDULED(\"Appointment scheduled\"),\r\n    APPOINTMENT_UPDATED(\"Appointment updated\"),\r\n    APPOINTMENT_COMPLETED(\"Appointment completed\"),\r\n    APPOINTMENT_CANCELLED(\"Appointment cancelled\"),\r\n    APPOINTMENT_RESCHEDULED(\"Appointment rescheduled\"),\r\n    APPOINTMENT_NO_SHOW(\"Patient did not show up\");\r\n\r\n    private final String description;\r\n\r\n    AppointmentStatus(String description) {\r\n        this.description = description;\r\n    }\r\n\r\n    public String getDescription() {\r\n        return description;\r\n    }\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8953,
+        "packageName": "com.example.HMS.exception",
+        "className": "AppointmentNotFoundException",
+        "qualifiedName": "com.example.HMS.exception.AppointmentNotFoundException",
+        "classType": "OTHER",
+        "filePath": "Hospital-Management-System/HMS/src/main/java/com/example/HMS/exception/AppointmentNotFoundException.java",
+        "sourceCode": "package com.example.HMS.exception;\r\n\r\npublic class AppointmentNotFoundException extends RuntimeException {\r\n\r\n    public AppointmentNotFoundException(String message) {\r\n        super(message);\r\n    }\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8956,
+        "packageName": "com.example.HMS.exception",
+        "className": "DoctorNotFoundException",
+        "qualifiedName": "com.example.HMS.exception.DoctorNotFoundException",
+        "classType": "OTHER",
+        "filePath": "Hospital-Management-System/HMS/src/main/java/com/example/HMS/exception/DoctorNotFoundException.java",
+        "sourceCode": "package com.example.HMS.exception;\r\n\r\npublic class DoctorNotFoundException extends RuntimeException {\r\n\r\n    public DoctorNotFoundException(String message) {\r\n        super(message);\r\n    }\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8959,
+        "packageName": "com.example.HMS.exception",
+        "className": "PatientNotFoundException",
+        "qualifiedName": "com.example.HMS.exception.PatientNotFoundException",
+        "classType": "OTHER",
+        "filePath": "Hospital-Management-System/HMS/src/main/java/com/example/HMS/exception/PatientNotFoundException.java",
+        "sourceCode": "package com.example.HMS.exception;\r\n\r\npublic class PatientNotFoundException extends RuntimeException {\r\n\r\n    public PatientNotFoundException(String message) {\r\n        super(message);\r\n    }\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8962,
+        "packageName": "com.example.HMS.repository",
+        "className": "AppointmentRepository",
+        "qualifiedName": "com.example.HMS.repository.AppointmentRepository",
+        "classType": "REPOSITORY",
+        "filePath": "Hospital-Management-System/HMS/src/main/java/com/example/HMS/repository/AppointmentRepository.java",
+        "sourceCode": "package com.example.HMS.repository;\r\n\r\nimport com.example.HMS.entity.Appointment;\r\nimport com.example.HMS.enums.AppointmentStatus;\r\nimport org.springframework.data.jpa.repository.JpaRepository;\r\nimport org.springframework.stereotype.Repository;\r\nimport java.time.LocalDate;\r\nimport java.util.List;\r\n\r\n@Repository\r\npublic interface AppointmentRepository extends JpaRepository<Appointment, Long> {\r\n\r\n    List<Appointment> findByStatus(AppointmentStatus status);\r\n\r\n    List<Appointment> findByDate(LocalDate appointmentDate);\r\n\r\n    List<Appointment> findByDoctorDoctorIdOrderByDateDesc(Long doctorId);\r\n\r\n    List<Appointment> findByPatientPatientId(Long patientId);\r\n}\r\n",
+        "annotations": [
+          {
+            "id": 11367,
+            "targetType": "CLASS",
+            "category": "COMPONENT",
+            "annotationName": "Repository",
+            "attributes": "@Repository"
+          }
+        ],
+        "methods": []
+      },
+      {
+        "id": 8966,
+        "packageName": "com.example.HMS.repository",
+        "className": "DoctorRepository",
+        "qualifiedName": "com.example.HMS.repository.DoctorRepository",
+        "classType": "REPOSITORY",
+        "filePath": "Hospital-Management-System/HMS/src/main/java/com/example/HMS/repository/DoctorRepository.java",
+        "sourceCode": "package com.example.HMS.repository;\r\n\r\nimport com.example.HMS.entity.Department;\r\nimport com.example.HMS.entity.Doctor;\r\nimport org.springframework.data.jpa.repository.JpaRepository;\r\nimport org.springframework.data.jpa.repository.Query;\r\nimport org.springframework.data.repository.query.Param;\r\nimport org.springframework.stereotype.Repository;\r\nimport java.util.List;\r\n\r\n@Repository\r\npublic interface DoctorRepository extends JpaRepository<Doctor, Long> {\r\n\r\n    @Query(\"SELECT d FROM Doctor d WHERE LOWER(d.specialization) = LOWER(:specialization)\")\r\n    List<Doctor> fetchDoctorsBySpecialization(@Param(\"specialization\") String specialization);\r\n\r\n    @Query(\"SELECT d FROM Doctor d WHERE LOWER(d.department.departmentName) = LOWER(:deptName)\")\r\n    List<Doctor> fetchDoctorsByDepartmentName(@Param(\"deptName\") String deptName);\r\n\r\n    @Query(\"SELECT DISTINCT d FROM Doctor d \" + \"JOIN d.appointments a \" + \"WHERE a.patient.patientId = :patientId\")\r\n    List<Doctor> findDoctorsByPatientId(@Param(\"patientId\") Long patientId);\r\n}\r\n",
+        "annotations": [
+          {
+            "id": 11376,
+            "targetType": "CLASS",
+            "category": "COMPONENT",
+            "annotationName": "Repository",
+            "attributes": "@Repository"
+          }
+        ],
+        "methods": []
+      },
+      {
+        "id": 8969,
+        "packageName": "com.example.HMS.repository",
+        "className": "PatientRepository",
+        "qualifiedName": "com.example.HMS.repository.PatientRepository",
+        "classType": "REPOSITORY",
+        "filePath": "Hospital-Management-System/HMS/src/main/java/com/example/HMS/repository/PatientRepository.java",
+        "sourceCode": "package com.example.HMS.repository;\r\n\r\nimport com.example.HMS.entity.Patient;\r\nimport org.springframework.data.jpa.repository.JpaRepository;\r\nimport org.springframework.stereotype.Repository;\r\nimport java.util.List;\r\n\r\n@Repository\r\npublic interface PatientRepository extends JpaRepository<Patient, Long> {\r\n\r\n    List<Patient> findByPatientAgeGreaterThan(Integer patientAge);\r\n}\r\n",
+        "annotations": [
+          {
+            "id": 11383,
+            "targetType": "CLASS",
+            "category": "COMPONENT",
+            "annotationName": "Repository",
+            "attributes": "@Repository"
+          }
+        ],
+        "methods": []
+      },
+      {
+        "id": 8941,
+        "packageName": "com.example.HMS.entity",
+        "className": "Bill",
+        "qualifiedName": "com.example.HMS.entity.Bill",
+        "classType": "ENTITY",
+        "filePath": "Hospital-Management-System/HMS/src/main/java/com/example/HMS/entity/Bill.java",
+        "sourceCode": "package com.example.HMS.entity;\r\n\r\nimport com.example.HMS.enums.PaymentMethod;\r\nimport com.example.HMS.enums.PaymentStatus;\r\nimport jakarta.persistence.*;\r\nimport lombok.*;\r\nimport org.hibernate.annotations.Fetch;\r\nimport java.time.LocalDate;\r\n\r\n@Entity\r\n@Builder\r\n@AllArgsConstructor\r\n@NoArgsConstructor\r\n@Getter\r\n@Setter\r\npublic class Bill {\r\n\r\n    @Id\r\n    @GeneratedValue(strategy = GenerationType.IDENTITY)\r\n    private Long billId;\r\n\r\n    private Double amount;\r\n\r\n    private LocalDate billDate;\r\n\r\n    @Enumerated(EnumType.STRING)\r\n    private PaymentStatus status;\r\n\r\n    @Enumerated(EnumType.STRING)\r\n    private PaymentMethod paymentMethod;\r\n\r\n    @ManyToOne(fetch = FetchType.LAZY)\r\n    @JoinColumn(name = \"patient_id\")\r\n    private Patient patient;\r\n\r\n    @OneToOne\r\n    @JoinColumn(name = \"appointment_id\")\r\n    private Appointment appointment;\r\n}\r\n",
+        "annotations": [
+          {
+            "id": 11351,
+            "targetType": "CLASS",
+            "category": "PERSISTENCE",
+            "annotationName": "Entity",
+            "attributes": "@Entity"
+          }
+        ],
+        "methods": []
+      },
+      {
+        "id": 8944,
+        "packageName": "com.example.HMS.entity",
+        "className": "MedicalRecord",
+        "qualifiedName": "com.example.HMS.entity.MedicalRecord",
+        "classType": "ENTITY",
+        "filePath": "Hospital-Management-System/HMS/src/main/java/com/example/HMS/entity/MedicalRecord.java",
+        "sourceCode": "package com.example.HMS.entity;\r\n\r\nimport jakarta.persistence.*;\r\nimport lombok.*;\r\nimport java.time.LocalDate;\r\n\r\n@Entity\r\n@Builder\r\n@AllArgsConstructor\r\n@NoArgsConstructor\r\n@Getter\r\n@Setter\r\npublic class MedicalRecord {\r\n\r\n    @Id\r\n    @GeneratedValue(strategy = GenerationType.IDENTITY)\r\n    private Long recordId;\r\n\r\n    private String diagnosis;\r\n\r\n    private String treatment;\r\n\r\n    private LocalDate visitDate;\r\n\r\n    @ManyToOne(fetch = FetchType.LAZY)\r\n    @JoinColumn(name = \"appointment_id\")\r\n    private Appointment appointment;\r\n\r\n    @ManyToOne(fetch = FetchType.LAZY)\r\n    @JoinColumn(name = \"doctor_id\")\r\n    private Doctor doctor;\r\n\r\n    @ManyToOne(fetch = FetchType.LAZY)\r\n    @JoinColumn(name = \"patient_id\")\r\n    private Patient patient;\r\n\r\n    @OneToOne(cascade = CascadeType.ALL, orphanRemoval = true)\r\n    @JoinColumn(name = \"prescription_id\")\r\n    private Prescription prescription;\r\n}\r\n",
+        "annotations": [
+          {
+            "id": 11354,
+            "targetType": "CLASS",
+            "category": "PERSISTENCE",
+            "annotationName": "Entity",
+            "attributes": "@Entity"
+          }
+        ],
+        "methods": []
+      },
+      {
+        "id": 8942,
+        "packageName": "com.example.HMS.entity",
+        "className": "Department",
+        "qualifiedName": "com.example.HMS.entity.Department",
+        "classType": "ENTITY",
+        "filePath": "Hospital-Management-System/HMS/src/main/java/com/example/HMS/entity/Department.java",
+        "sourceCode": "package com.example.HMS.entity;\r\n\r\nimport com.fasterxml.jackson.annotation.JsonIgnore;\r\nimport jakarta.persistence.*;\r\nimport lombok.*;\r\nimport java.util.List;\r\n\r\n@Entity\r\n@Builder\r\n@AllArgsConstructor\r\n@NoArgsConstructor\r\n@Getter\r\n@Setter\r\npublic class Department {\r\n\r\n    @Id\r\n    @GeneratedValue(strategy = GenerationType.IDENTITY)\r\n    private Long departmentId;\r\n\r\n    @Column(nullable = false)\r\n    private String departmentName;\r\n\r\n    @OneToMany(mappedBy = \"department\", cascade = CascadeType.ALL)\r\n    @JsonIgnore\r\n    private List<Doctor> doctors;\r\n}\r\n",
+        "annotations": [
+          {
+            "id": 11352,
+            "targetType": "CLASS",
+            "category": "PERSISTENCE",
+            "annotationName": "Entity",
+            "attributes": "@Entity"
+          }
+        ],
+        "methods": []
+      },
+      {
+        "id": 8950,
+        "packageName": "com.example.HMS.enums",
+        "className": "Gender",
+        "qualifiedName": "com.example.HMS.enums.Gender",
+        "classType": "ENUM",
+        "filePath": "Hospital-Management-System/HMS/src/main/java/com/example/HMS/enums/Gender.java",
+        "sourceCode": "package com.example.HMS.enums;\r\n\r\nimport lombok.Getter;\r\n\r\npublic enum Gender {\r\n\r\n    MALE(\"Male\"), FEMALE(\"Female\"), OTHER(\"Other\");\r\n\r\n    private final String description;\r\n\r\n    Gender(String description) {\r\n        this.description = description;\r\n    }\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8951,
+        "packageName": "com.example.HMS.enums",
+        "className": "PaymentMethod",
+        "qualifiedName": "com.example.HMS.enums.PaymentMethod",
+        "classType": "ENUM",
+        "filePath": "Hospital-Management-System/HMS/src/main/java/com/example/HMS/enums/PaymentMethod.java",
+        "sourceCode": "package com.example.HMS.enums;\r\n\r\npublic enum PaymentMethod {\r\n\r\n    CASH(\"Cash payment\"), CARD(\"Credit/Debit card\"), UPI(\"UPI transfer\"), NET_BANKING(\"Net banking\"), INSURANCE(\"Insurance claim\");\r\n\r\n    private final String description;\r\n\r\n    PaymentMethod(String description) {\r\n        this.description = description;\r\n    }\r\n\r\n    public String getDescription() {\r\n        return description;\r\n    }\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8952,
+        "packageName": "com.example.HMS.enums",
+        "className": "PaymentStatus",
+        "qualifiedName": "com.example.HMS.enums.PaymentStatus",
+        "classType": "ENUM",
+        "filePath": "Hospital-Management-System/HMS/src/main/java/com/example/HMS/enums/PaymentStatus.java",
+        "sourceCode": "package com.example.HMS.enums;\r\n\r\npublic enum PaymentStatus {\r\n\r\n    PAID(\"Payment completed\"), UNPAID(\"Payment pending\"), PARTIAL(\"Partially paid\"), REFUNDED(\"Payment refunded\"), CANCELLED(\"Payment cancelled\");\r\n\r\n    private final String description;\r\n\r\n    PaymentStatus(String description) {\r\n        this.description = description;\r\n    }\r\n\r\n    public String getDescription() {\r\n        return description;\r\n    }\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8947,
+        "packageName": "com.example.HMS.entity",
+        "className": "Prescription",
+        "qualifiedName": "com.example.HMS.entity.Prescription",
+        "classType": "ENTITY",
+        "filePath": "Hospital-Management-System/HMS/src/main/java/com/example/HMS/entity/Prescription.java",
+        "sourceCode": "package com.example.HMS.entity;\r\n\r\nimport jakarta.persistence.*;\r\nimport lombok.*;\r\n\r\n@Entity\r\n@Builder\r\n@AllArgsConstructor\r\n@NoArgsConstructor\r\n@Getter\r\n@Setter\r\npublic class Prescription {\r\n\r\n    @Id\r\n    @GeneratedValue(strategy = GenerationType.IDENTITY)\r\n    private Long prescriptionId;\r\n\r\n    private String medicine;\r\n\r\n    private String dosage;\r\n\r\n    private String instructions;\r\n\r\n    @OneToOne(mappedBy = \"prescription\", orphanRemoval = true)\r\n    private MedicalRecord medicalRecord;\r\n}\r\n",
+        "annotations": [
+          {
+            "id": 11359,
+            "targetType": "CLASS",
+            "category": "PERSISTENCE",
+            "annotationName": "Entity",
+            "attributes": "@Entity"
+          }
+        ],
+        "methods": []
+      }
+    ],
+    "approvedBusinessRules": [
+      {
+        "id": 4736,
+        "methodId": 18859,
+        "ruleCode": "BR-001",
+        "description": "Khi không tìm thấy lịch hẹn theo appointmentId, service ném AppointmentNotFoundException với thông điệp \"Failed to find the appointment with id %d\" được định dạng bằng appointmentId.",
+        "reviewNote": "SOURCE_BRANCH:IF-1\nAI category: VALIDATION. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "IF-1"
+      },
+      {
+        "id": 4737,
+        "methodId": 18859,
+        "ruleCode": "BR-002",
+        "description": "Khi doctorId trong dto khác null, service tìm bác sĩ theo doctorId; nếu không tìm thấy thì ném DoctorNotFoundException với thông điệp \"Doctor not found with id: \" nối với doctorId, còn nếu tìm thấy thì gán bác sĩ đó cho lịch hẹn.",
+        "reviewNote": "SOURCE_BRANCH:IF-2\nAI category: BUSINESS_LOGIC. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "IF-2"
+      },
+      {
+        "id": 4738,
+        "methodId": 18859,
+        "ruleCode": "BR-003",
+        "description": "Khi patientId trong dto khác null, service tìm bệnh nhân theo patientId; nếu không tìm thấy thì ném PatientNotFoundException với thông điệp \"Patient not found with id: \" nối với patientId, còn nếu tìm thấy thì gán bệnh nhân đó cho lịch hẹn.",
+        "reviewNote": "SOURCE_BRANCH:IF-3\nAI category: BUSINESS_LOGIC. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "IF-3"
+      },
+      {
+        "id": 4739,
+        "methodId": 18859,
+        "ruleCode": "BR-004",
+        "description": "Khi time trong dto khác null, service cập nhật thời gian của lịch hẹn bằng giá trị đó.",
+        "reviewNote": "SOURCE_BRANCH:IF-4\nAI category: BUSINESS_LOGIC. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "IF-4"
+      },
+      {
+        "id": 4740,
+        "methodId": 18859,
+        "ruleCode": "BR-005",
+        "description": "Khi date trong dto khác null, service cập nhật ngày của lịch hẹn bằng giá trị đó.",
+        "reviewNote": "SOURCE_BRANCH:IF-5\nAI category: BUSINESS_LOGIC. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "IF-5"
+      },
+      {
+        "id": 4741,
+        "methodId": 18859,
+        "ruleCode": "BR-006",
+        "description": "Khi status trong dto khác null, service cập nhật trạng thái của lịch hẹn bằng giá trị đó.",
+        "reviewNote": "SOURCE_BRANCH:IF-6\nAI category: BUSINESS_LOGIC. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "IF-6"
+      }
+    ],
+    "approvedTestPlans": [
+      {
+        "id": 2464,
+        "businessRuleId": 4736,
+        "coveredRuleIds": [
+          4736
+        ],
+        "planCode": "TP-001",
+        "title": "Không tìm thấy lịch hẹn khi cập nhật",
+        "description": "Kiểm tra service ném AppointmentNotFoundException với thông điệp chứa appointmentId khi không tìm thấy lịch hẹn.",
+        "testType": "EXCEPTION",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2465,
+        "businessRuleId": 4737,
+        "coveredRuleIds": [
+          4737
+        ],
+        "planCode": "TP-002",
+        "title": "Cập nhật bác sĩ của lịch hẹn",
+        "description": "Kiểm tra tìm bác sĩ theo doctorId, gán bác sĩ tìm được hoặc ném DoctorNotFoundException với thông điệp tương ứng nếu không tìm thấy.",
+        "testType": "HAPPY_PATH",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2466,
+        "businessRuleId": 4738,
+        "coveredRuleIds": [
+          4738
+        ],
+        "planCode": "TP-003",
+        "title": "Cập nhật bệnh nhân của lịch hẹn",
+        "description": "Kiểm tra tìm bệnh nhân theo patientId, gán bệnh nhân tìm được hoặc ném PatientNotFoundException với thông điệp tương ứng nếu không tìm thấy.",
+        "testType": "HAPPY_PATH",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2467,
+        "businessRuleId": 4739,
+        "coveredRuleIds": [
+          4739
+        ],
+        "planCode": "TP-004",
+        "title": "Cập nhật thời gian lịch hẹn",
+        "description": "Kiểm tra time khác null được áp dụng cho lịch hẹn.",
+        "testType": "HAPPY_PATH",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2468,
+        "businessRuleId": 4740,
+        "coveredRuleIds": [
+          4740
+        ],
+        "planCode": "TP-005",
+        "title": "Cập nhật ngày lịch hẹn",
+        "description": "Kiểm tra date khác null được áp dụng cho lịch hẹn.",
+        "testType": "HAPPY_PATH",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2469,
+        "businessRuleId": 4741,
+        "coveredRuleIds": [
+          4741
+        ],
+        "planCode": "TP-006",
+        "title": "Cập nhật trạng thái lịch hẹn",
+        "description": "Kiểm tra status khác null được áp dụng cho lịch hẹn.",
+        "testType": "HAPPY_PATH",
+        "status": "APPROVED",
+        "isModified": false
+      }
+    ],
+    "approvedTestCases": [
+      {
+        "id": 3048,
+        "testPlanId": 2464,
+        "caseCode": "TC-1552",
+        "testType": "EXCEPTION",
+        "description": "Không tìm thấy lịch hẹn khi cập nhật",
+        "preconditions": "appointmentRepository.findById(1001) trả về Optional.empty(). Không cần cấu hình các dependency chạy sau bước tìm lịch hẹn vì method ném ngoại lệ trước khi gọi chúng.",
+        "testData": {
+          "input": {
+            "dto": {
+              "date": null,
+              "time": null,
+              "email": null,
+              "status": null,
+              "doctorId": null,
+              "patientId": null,
+              "appointmentId": null
+            },
+            "appointmentId": 1001
+          },
+          "mocks": {
+            "appointmentRepository.findById(1001): Optional<Appointment>": "Optional.empty()"
+          }
+        },
+        "expectedResult": "Ném AppointmentNotFoundException với thông điệp \"Failed to find the appointment with id 1001\".",
+        "priority": "HIGH",
+        "traceSource": "BR-001 [IF-1] -> TP-001 -> IF-1-TRUE",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 3049,
+        "testPlanId": 2465,
+        "caseCode": "TC-1553",
+        "testType": "HAPPY_PATH",
+        "description": "Cập nhật bác sĩ của lịch hẹn khi tìm thấy bác sĩ",
+        "preconditions": "appointmentRepository.findById(1001) trả về lịch hẹn có appointmentId 1001. doctorRepository.findById(2001) trả về bác sĩ có doctorId 2001. appointmentRepository.save trả về chính lịch hẹn sau khi cập nhật; mapper thật chuyển lịch hẹn này thành AppointmentDto.",
+        "testData": {
+          "input": {
+            "dto": {
+              "date": null,
+              "time": null,
+              "email": null,
+              "status": null,
+              "doctorId": 2001,
+              "patientId": null,
+              "appointmentId": null
+            },
+            "appointmentId": 1001
+          },
+          "mocks": {
+            "appointmentRepository.save(Appointment)": "Trả về chính thực thể Appointment được truyền vào, giữ appointmentId=1001 và các trường hiện có, với doctor được gán Doctor(doctorId=2001)",
+            "doctorRepository.findById(2001): Optional<Doctor>": "Optional.of(Doctor(doctorId=2001))",
+            "appointmentRepository.findById(1001): Optional<Appointment>": "Optional.of(Appointment(appointmentId=1001, doctor=null, patient=null, time=09:00, date=2030-04-15, status=APPOINTMENT_SCHEDULED, patientEmail=\"old@example.test\"))"
+          }
+        },
+        "expectedResult": "Trả về AppointmentDto phản ánh lịch hẹn đã lưu: appointmentId=1001, doctorId=2001, patientId=null, time=09:00, date=2030-04-15, status=APPOINTMENT_SCHEDULED và email=\"old@example.test\".",
+        "priority": "HIGH",
+        "traceSource": "BR-002 [IF-2] -> TP-002 -> IF-1-FALSE, IF-2-TRUE, IF-3-FALSE, IF-4-FALSE, IF-5-FALSE, IF-6-FALSE, IF-7-FALSE, STMT-3, STMT-4",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 3050,
+        "testPlanId": 2465,
+        "caseCode": "TC-1554",
+        "testType": "EXCEPTION",
+        "description": "Không tìm thấy bác sĩ cần gán cho lịch hẹn",
+        "preconditions": "appointmentRepository.findById(1001) trả về lịch hẹn có appointmentId 1001. doctorRepository.findById(2001) trả về Optional.empty().",
+        "testData": {
+          "input": {
+            "dto": {
+              "date": null,
+              "time": null,
+              "email": null,
+              "status": null,
+              "doctorId": 2001,
+              "patientId": null,
+              "appointmentId": null
+            },
+            "appointmentId": 1001
+          },
+          "mocks": {
+            "doctorRepository.findById(2001): Optional<Doctor>": "Optional.empty()",
+            "appointmentRepository.findById(1001): Optional<Appointment>": "Optional.of(Appointment(appointmentId=1001, doctor=null, patient=null, time=09:00, date=2030-04-15, status=APPOINTMENT_SCHEDULED, patientEmail=\"old@example.test\"))"
+          }
+        },
+        "expectedResult": "Ném DoctorNotFoundException với thông điệp \"Doctor not found with id: 2001\". Không gọi tìm bệnh nhân, lưu lịch hẹn hoặc chuyển kết quả thành DTO sau ngoại lệ này.",
+        "priority": "HIGH",
+        "traceSource": "BR-002 [IF-2] -> TP-002 -> IF-1-FALSE, IF-2-TRUE",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 3051,
+        "testPlanId": 2466,
+        "caseCode": "TC-1555",
+        "testType": "HAPPY_PATH",
+        "description": "Cập nhật bệnh nhân của lịch hẹn khi tìm thấy bệnh nhân",
+        "preconditions": "appointmentRepository.findById(1001) trả về lịch hẹn có appointmentId 1001. patientRepository.findById(3001) trả về bệnh nhân có patientId 3001. appointmentRepository.save trả về chính lịch hẹn sau khi cập nhật; mapper thật chuyển lịch hẹn này thành AppointmentDto.",
+        "testData": {
+          "input": {
+            "dto": {
+              "date": null,
+              "time": null,
+              "email": null,
+              "status": null,
+              "doctorId": null,
+              "patientId": 3001,
+              "appointmentId": null
+            },
+            "appointmentId": 1001
+          },
+          "mocks": {
+            "appointmentRepository.save(Appointment)": "Trả về chính thực thể Appointment được truyền vào, giữ appointmentId=1001 và các trường hiện có, với patient được gán Patient(patientId=3001)",
+            "patientRepository.findById(3001): Optional<Patient>": "Optional.of(Patient(patientId=3001))",
+            "appointmentRepository.findById(1001): Optional<Appointment>": "Optional.of(Appointment(appointmentId=1001, doctor=null, patient=null, time=09:00, date=2030-04-15, status=APPOINTMENT_SCHEDULED, patientEmail=\"old@example.test\"))"
+          }
+        },
+        "expectedResult": "Trả về AppointmentDto phản ánh lịch hẹn đã lưu: appointmentId=1001, doctorId=null, patientId=3001, time=09:00, date=2030-04-15, status=APPOINTMENT_SCHEDULED và email=\"old@example.test\".",
+        "priority": "HIGH",
+        "traceSource": "BR-003 [IF-3] -> TP-003 -> IF-1-FALSE, IF-2-FALSE, IF-3-TRUE, IF-4-FALSE, IF-5-FALSE, IF-6-FALSE, IF-7-FALSE, STMT-3, STMT-4",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 3052,
+        "testPlanId": 2466,
+        "caseCode": "TC-1556",
+        "testType": "EXCEPTION",
+        "description": "Không tìm thấy bệnh nhân cần gán cho lịch hẹn",
+        "preconditions": "appointmentRepository.findById(1001) trả về lịch hẹn có appointmentId 1001. patientRepository.findById(3001) trả về Optional.empty().",
+        "testData": {
+          "input": {
+            "dto": {
+              "date": null,
+              "time": null,
+              "email": null,
+              "status": null,
+              "doctorId": null,
+              "patientId": 3001,
+              "appointmentId": null
+            },
+            "appointmentId": 1001
+          },
+          "mocks": {
+            "patientRepository.findById(3001): Optional<Patient>": "Optional.empty()",
+            "appointmentRepository.findById(1001): Optional<Appointment>": "Optional.of(Appointment(appointmentId=1001, doctor=null, patient=null, time=09:00, date=2030-04-15, status=APPOINTMENT_SCHEDULED, patientEmail=\"old@example.test\"))"
+          }
+        },
+        "expectedResult": "Ném PatientNotFoundException với thông điệp \"Patient not found with id: 3001\". Không gọi lưu lịch hẹn hoặc chuyển kết quả thành DTO sau ngoại lệ này.",
+        "priority": "HIGH",
+        "traceSource": "BR-003 [IF-3] -> TP-003 -> IF-1-FALSE, IF-2-FALSE, IF-3-TRUE",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 3053,
+        "testPlanId": 2467,
+        "caseCode": "TC-1557",
+        "testType": "HAPPY_PATH",
+        "description": "Cập nhật thời gian lịch hẹn khi time khác null",
+        "preconditions": "appointmentRepository.findById(1001) trả về lịch hẹn có appointmentId 1001. Repository lưu trả về chính thực thể đã cập nhật; mapper thật chuyển thực thể thành AppointmentDto.",
+        "testData": {
+          "input": {
+            "dto": {
+              "date": null,
+              "time": "10:30",
+              "email": null,
+              "status": null,
+              "doctorId": null,
+              "patientId": null,
+              "appointmentId": null
+            },
+            "appointmentId": 1001
+          },
+          "mocks": {
+            "appointmentRepository.save(Appointment)": "Trả về chính thực thể Appointment được truyền vào, giữ appointmentId=1001 và các trường hiện có, với time=10:30",
+            "appointmentRepository.findById(1001): Optional<Appointment>": "Optional.of(Appointment(appointmentId=1001, doctor=null, patient=null, time=09:00, date=2030-04-15, status=APPOINTMENT_SCHEDULED, patientEmail=\"old@example.test\"))"
+          }
+        },
+        "expectedResult": "Trả về AppointmentDto có time=10:30 và giữ các trường không được cập nhật: appointmentId=1001, doctorId=null, patientId=null, date=2030-04-15, status=APPOINTMENT_SCHEDULED, email=\"old@example.test\".",
+        "priority": "HIGH",
+        "traceSource": "BR-004 [IF-4] -> TP-004 -> IF-1-FALSE, IF-2-FALSE, IF-3-FALSE, IF-4-TRUE, IF-5-FALSE, IF-6-FALSE, IF-7-FALSE, STMT-3, STMT-4",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 3054,
+        "testPlanId": 2468,
+        "caseCode": "TC-1558",
+        "testType": "HAPPY_PATH",
+        "description": "Cập nhật ngày lịch hẹn khi date khác null",
+        "preconditions": "appointmentRepository.findById(1001) trả về lịch hẹn có appointmentId 1001. Repository lưu trả về chính thực thể đã cập nhật; mapper thật chuyển thực thể thành AppointmentDto.",
+        "testData": {
+          "input": {
+            "dto": {
+              "date": "2030-04-16",
+              "time": null,
+              "email": null,
+              "status": null,
+              "doctorId": null,
+              "patientId": null,
+              "appointmentId": null
+            },
+            "appointmentId": 1001
+          },
+          "mocks": {
+            "appointmentRepository.save(Appointment)": "Trả về chính thực thể Appointment được truyền vào, giữ appointmentId=1001 và các trường hiện có, với date=2030-04-16",
+            "appointmentRepository.findById(1001): Optional<Appointment>": "Optional.of(Appointment(appointmentId=1001, doctor=null, patient=null, time=09:00, date=2030-04-15, status=APPOINTMENT_SCHEDULED, patientEmail=\"old@example.test\"))"
+          }
+        },
+        "expectedResult": "Trả về AppointmentDto có date=2030-04-16 và giữ các trường không được cập nhật: appointmentId=1001, doctorId=null, patientId=null, time=09:00, status=APPOINTMENT_SCHEDULED, email=\"old@example.test\".",
+        "priority": "HIGH",
+        "traceSource": "BR-005 [IF-5] -> TP-005 -> IF-1-FALSE, IF-2-FALSE, IF-3-FALSE, IF-4-FALSE, IF-5-TRUE, IF-6-FALSE, IF-7-FALSE, STMT-3, STMT-4",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 3055,
+        "testPlanId": 2469,
+        "caseCode": "TC-1559",
+        "testType": "HAPPY_PATH",
+        "description": "Cập nhật trạng thái lịch hẹn khi status khác null",
+        "preconditions": "appointmentRepository.findById(1001) trả về lịch hẹn có appointmentId 1001. Repository lưu trả về chính thực thể đã cập nhật; mapper thật chuyển thực thể thành AppointmentDto.",
+        "testData": {
+          "input": {
+            "dto": {
+              "date": null,
+              "time": null,
+              "email": null,
+              "status": "APPOINTMENT_COMPLETED",
+              "doctorId": null,
+              "patientId": null,
+              "appointmentId": null
+            },
+            "appointmentId": 1001
+          },
+          "mocks": {
+            "appointmentRepository.save(Appointment)": "Trả về chính thực thể Appointment được truyền vào, giữ appointmentId=1001 và các trường hiện có, với status=APPOINTMENT_COMPLETED",
+            "appointmentRepository.findById(1001): Optional<Appointment>": "Optional.of(Appointment(appointmentId=1001, doctor=null, patient=null, time=09:00, date=2030-04-15, status=APPOINTMENT_SCHEDULED, patientEmail=\"old@example.test\"))"
+          }
+        },
+        "expectedResult": "Trả về AppointmentDto có status=APPOINTMENT_COMPLETED và giữ các trường không được cập nhật: appointmentId=1001, doctorId=null, patientId=null, time=09:00, date=2030-04-15, email=\"old@example.test\".",
+        "priority": "HIGH",
+        "traceSource": "BR-006 [IF-6] -> TP-006 -> IF-1-FALSE, IF-2-FALSE, IF-3-FALSE, IF-4-FALSE, IF-5-FALSE, IF-6-TRUE, IF-7-FALSE, STMT-3, STMT-4",
+        "status": "APPROVED",
+        "isModified": false
+      }
+    ],
+    "existingApprovedTestCases": [],
+    "previousGeneratedUnitTests": [],
+    "existingTests": [],
+    "supportingResources": [],
+    "contextWarnings": []
+  },
+  "test": {
+    "case_id": 3055,
+    "test_class_name": "AppointmentServiceTest",
+    "test_method_name": "updateAppointmentById_updatesStatusAndPreservesOtherFields",
+    "package_name": "com.example.HMS.service",
+    "generation_type": "NEW_TEST",
+    "source_code": "// GREYTEST_SOURCE_V1 104ca246dece7aa75fc7a053f82070deb224d7a6e43ca069e65eae26adb93c45 SG9zcGl0YWwtTWFuYWdlbWVudC1TeXN0ZW0vSE1TL3NyYy9tYWluL2phdmEvY29tL2V4YW1wbGUvSE1TL3NlcnZpY2UvQXBwb2ludG1lbnRTZXJ2aWNlLmphdmE=\n// GREYTEST_SOURCE_V1 7b76490221c6860679867276c89fdc13790407ddd24b3ab55456f20bbcf5090e SG9zcGl0YWwtTWFuYWdlbWVudC1TeXN0ZW0vSE1TL3NyYy9tYWluL2phdmEvY29tL2V4YW1wbGUvSE1TL2R0by9BcHBvaW50bWVudER0by5qYXZh\n// GREYTEST_SOURCE_V1 a4d77561d13952343c2e967bd29fd3e7bcf8f471ab80bd0cc05b7fecd8b44ee7 SG9zcGl0YWwtTWFuYWdlbWVudC1TeXN0ZW0vSE1TL3NyYy9tYWluL2phdmEvY29tL2V4YW1wbGUvSE1TL2R0by9BcHBvaW50bWVudE1hcHBlci5qYXZh\n// GREYTEST_SOURCE_V1 6b4c5293ac5474ad53a452229b5e1aad9b66a61e27e925ee1eba46c67bfd9418 SG9zcGl0YWwtTWFuYWdlbWVudC1TeXN0ZW0vSE1TL3NyYy9tYWluL2phdmEvY29tL2V4YW1wbGUvSE1TL2VudGl0eS9BcHBvaW50bWVudC5qYXZh\n// GREYTEST_SOURCE_V1 9680734317ecff63f6d6d3ef800310096f691d69591c8cfb7acd53da1dc5d470 SG9zcGl0YWwtTWFuYWdlbWVudC1TeXN0ZW0vSE1TL3NyYy9tYWluL2phdmEvY29tL2V4YW1wbGUvSE1TL2VudGl0eS9Eb2N0b3IuamF2YQ==\n// GREYTEST_SOURCE_V1 c45445a21046f004e15b8bcfe93d4f6bec1d7832180cddba8ca8201ff70c0ea9 SG9zcGl0YWwtTWFuYWdlbWVudC1TeXN0ZW0vSE1TL3NyYy9tYWluL2phdmEvY29tL2V4YW1wbGUvSE1TL2VudGl0eS9QYXRpZW50LmphdmE=\n// GREYTEST_SOURCE_V1 c856dad1b64669fcc2e1365b03e885686bc89f2486dc623897569a4fcedb9920 SG9zcGl0YWwtTWFuYWdlbWVudC1TeXN0ZW0vSE1TL3NyYy9tYWluL2phdmEvY29tL2V4YW1wbGUvSE1TL2VudW1zL0FwcG9pbnRtZW50U3RhdHVzLmphdmE=\n// GREYTEST_SOURCE_V1 8e79d08a7b0b4dfbf60c27957c434c541ce90f7bac5ab035e988d0deb1787f21 SG9zcGl0YWwtTWFuYWdlbWVudC1TeXN0ZW0vSE1TL3NyYy9tYWluL2phdmEvY29tL2V4YW1wbGUvSE1TL2V4Y2VwdGlvbi9BcHBvaW50bWVudE5vdEZvdW5kRXhjZXB0aW9uLmphdmE=\n// GREYTEST_SOURCE_V1 57e0a8f503e47c9e162c29c14680d7b4fb972e1a7991d46875e166512ef3536f SG9zcGl0YWwtTWFuYWdlbWVudC1TeXN0ZW0vSE1TL3NyYy9tYWluL2phdmEvY29tL2V4YW1wbGUvSE1TL2V4Y2VwdGlvbi9Eb2N0b3JOb3RGb3VuZEV4Y2VwdGlvbi5qYXZh\n// GREYTEST_SOURCE_V1 015111398873411f2d442555c73cc964903dc494c36141b412b0effd3572e3df SG9zcGl0YWwtTWFuYWdlbWVudC1TeXN0ZW0vSE1TL3NyYy9tYWluL2phdmEvY29tL2V4YW1wbGUvSE1TL2V4Y2VwdGlvbi9QYXRpZW50Tm90Rm91bmRFeGNlcHRpb24uamF2YQ==\n// GREYTEST_SOURCE_V1 329a11ef076f134dc5dde1dea962588e9034ddc366d235821c550d203b357dfa SG9zcGl0YWwtTWFuYWdlbWVudC1TeXN0ZW0vSE1TL3NyYy9tYWluL2phdmEvY29tL2V4YW1wbGUvSE1TL3JlcG9zaXRvcnkvQXBwb2ludG1lbnRSZXBvc2l0b3J5LmphdmE=\n// GREYTEST_SOURCE_V1 3654f1bd4686acf6498dbd28030d0d33b0a861cf6c20938de375f82d7a1b3884 SG9zcGl0YWwtTWFuYWdlbWVudC1TeXN0ZW0vSE1TL3NyYy9tYWluL2phdmEvY29tL2V4YW1wbGUvSE1TL3JlcG9zaXRvcnkvRG9jdG9yUmVwb3NpdG9yeS5qYXZh\n// GREYTEST_SOURCE_V1 1d40b8ad58e2f105b8acdce75799bd18e3b906066427444aaec906aa78d831f8 SG9zcGl0YWwtTWFuYWdlbWVudC1TeXN0ZW0vSE1TL3NyYy9tYWluL2phdmEvY29tL2V4YW1wbGUvSE1TL3JlcG9zaXRvcnkvUGF0aWVudFJlcG9zaXRvcnkuamF2YQ==\n// GREYTEST_SOURCE_V1 97371b45231bd14291987614c60ecc2417ac151bde85674b3fad2588e84b646f SG9zcGl0YWwtTWFuYWdlbWVudC1TeXN0ZW0vSE1TL3NyYy9tYWluL2phdmEvY29tL2V4YW1wbGUvSE1TL2VudGl0eS9CaWxsLmphdmE=\n// GREYTEST_SOURCE_V1 215742b9fd9922a199a6841e1bf91b128cdd906266cd63c21b9fee7146eed34b SG9zcGl0YWwtTWFuYWdlbWVudC1TeXN0ZW0vSE1TL3NyYy9tYWluL2phdmEvY29tL2V4YW1wbGUvSE1TL2VudGl0eS9NZWRpY2FsUmVjb3JkLmphdmE=\n// GREYTEST_SOURCE_V1 efab8517d38311ca4b096ab08980a82c219e2aeefee554a439b1c4235002ce14 SG9zcGl0YWwtTWFuYWdlbWVudC1TeXN0ZW0vSE1TL3NyYy9tYWluL2phdmEvY29tL2V4YW1wbGUvSE1TL2VudGl0eS9EZXBhcnRtZW50LmphdmE=\n// GREYTEST_SOURCE_V1 2e33a8c4b841d84acbfd0037ece31402986b77d41c626ed6ee354136578c8cb3 SG9zcGl0YWwtTWFuYWdlbWVudC1TeXN0ZW0vSE1TL3NyYy9tYWluL2phdmEvY29tL2V4YW1wbGUvSE1TL2VudW1zL0dlbmRlci5qYXZh\n// GREYTEST_SOURCE_V1 ce57bc14b5fd747abdb6f909dd6b394050f9659fe72c8e198b175192a9f02281 SG9zcGl0YWwtTWFuYWdlbWVudC1TeXN0ZW0vSE1TL3NyYy9tYWluL2phdmEvY29tL2V4YW1wbGUvSE1TL2VudW1zL1BheW1lbnRNZXRob2QuamF2YQ==\n// GREYTEST_SOURCE_V1 f8e8370851ac66e2bcca20690f3eea084666cfbac213c4e61a3ffb6f7e47d4cf SG9zcGl0YWwtTWFuYWdlbWVudC1TeXN0ZW0vSE1TL3NyYy9tYWluL2phdmEvY29tL2V4YW1wbGUvSE1TL2VudW1zL1BheW1lbnRTdGF0dXMuamF2YQ==\n// GREYTEST_SOURCE_V1 b6e2ab9e26bd040c1b70120b1c21ed5ae2de11a74e403104e6aa3aa667a0d53e SG9zcGl0YWwtTWFuYWdlbWVudC1TeXN0ZW0vSE1TL3NyYy9tYWluL2phdmEvY29tL2V4YW1wbGUvSE1TL2VudGl0eS9QcmVzY3JpcHRpb24uamF2YQ==\npackage com.example.HMS.service;\n\nimport com.example.HMS.dto.AppointmentDto;\nimport com.example.HMS.dto.AppointmentMapper;\nimport com.example.HMS.entity.Appointment;\nimport com.example.HMS.enums.AppointmentStatus;\nimport com.example.HMS.repository.AppointmentRepository;\nimport com.example.HMS.repository.DoctorRepository;\nimport com.example.HMS.repository.PatientRepository;\nimport org.junit.jupiter.api.Test;\nimport org.junit.jupiter.api.extension.ExtendWith;\nimport org.mockito.InjectMocks;\nimport org.mockito.Mock;\nimport org.mockito.junit.jupiter.MockitoExtension;\n\nimport java.time.LocalDate;\nimport java.time.LocalTime;\nimport java.util.Optional;\n\nimport static org.junit.jupiter.api.Assertions.assertEquals;\nimport static org.mockito.ArgumentMatchers.any;\nimport static org.mockito.Mockito.verify;\nimport static org.mockito.Mockito.when;\n\n@ExtendWith(MockitoExtension.class)\nclass AppointmentServiceTest {\n    @Mock private AppointmentRepository appointmentRepository;\n    @Mock private DoctorRepository doctorRepository;\n    @Mock private PatientRepository patientRepository;\n    @Mock private AppointmentMapper appointmentMapper;\n    @InjectMocks private AppointmentService sut;\n\n    @Test\n    // GreyTest trace: updateAppointmentById | non-null status is applied | BR-006 -> TP-006 -> TC-1559\n    void updateAppointmentById_updatesStatusAndPreservesOtherFields() {\n        // Arrange\n        Appointment appointment = new Appointment();\n        appointment.setAppointmentId(1001L);\n        appointment.setTime(LocalTime.of(9, 0));\n        appointment.setDate(LocalDate.of(2030, 4, 15));\n        appointment.setStatus(AppointmentStatus.APPOINTMENT_SCHEDULED);\n        appointment.setPatientEmail(\"old@example.test\");\n        AppointmentDto dto = new AppointmentDto();\n        dto.setStatus(AppointmentStatus.APPOINTMENT_COMPLETED);\n        when(appointmentRepository.findById(1001L)).thenReturn(Optional.of(appointment));\n        when(appointmentRepository.save(any(Appointment.class))).thenAnswer(invocation -> invocation.getArgument(0));\n\n        // Act\n        AppointmentDto result = sut.updateAppointmentById(1001L, dto);\n\n        // Assert\n        assertEquals(AppointmentStatus.APPOINTMENT_COMPLETED, result.getStatus());\n        assertEquals(1001L, result.getAppointmentId());\n        assertEquals(null, result.getDoctorId());\n        assertEquals(null, result.getPatientId());\n        assertEquals(LocalTime.of(9, 0), result.getTime());\n        assertEquals(LocalDate.of(2030, 4, 15), result.getDate());\n        assertEquals(\"old@example.test\", result.getEmail());\n        verify(appointmentRepository).findById(1001L);\n        verify(appointmentRepository).save(appointment);\n    }\n}"
+  }
+}

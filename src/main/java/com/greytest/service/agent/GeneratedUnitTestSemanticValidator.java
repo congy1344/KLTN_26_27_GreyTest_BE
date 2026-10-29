@@ -22,6 +22,7 @@ import com.github.javaparser.ast.body.Parameter;
 import com.greytest.dto.agent.GenerationContextDtos.ClassContextDto;
 import com.github.javaparser.ast.body.VariableDeclarator;
 import com.github.javaparser.ast.expr.Expression;
+import com.github.javaparser.ast.expr.AssignExpr;
 import com.github.javaparser.ast.expr.AnnotationExpr;
 import com.github.javaparser.ast.expr.BinaryExpr;
 import com.github.javaparser.ast.expr.FieldAccessExpr;
@@ -43,6 +44,7 @@ import com.greytest.dto.agent.GenerationContextDtos.UnitTestContextDto;
 import com.greytest.dto.agent.GenerationResponseDtos.GeneratedUnitTestDto;
 import com.greytest.dto.agent.GenerationResponseDtos.UnitTestResponseDto;
 import com.greytest.service.agent.ProjectJavaVersionDetector.TestFramework;
+import com.greytest.service.agent.ProjectJavaVersionDetector.MockitoVersionInfo;
 
 /**
  * Kiểm tra tính hợp lệ kỹ thuật của test; không dùng hành vi source làm kỳ vọng nghiệp vụ.
@@ -60,6 +62,11 @@ public final class GeneratedUnitTestSemanticValidator {
             UnitTestContextDto context,
             UnitTestResponseDto response,
             TestFramework framework) {
+        return validate(context, response, framework, null);
+    }
+
+    public static Optional<String> validate(UnitTestContextDto context, UnitTestResponseDto response,
+            TestFramework framework, MockitoVersionInfo mockitoVersion) {
         if (context == null || response == null) return Optional.empty();
         Map<Long, MethodContextDto> methodsByCaseId = methodsByCaseId(context);
         List<String> problems = new ArrayList<>();
@@ -74,8 +81,12 @@ public final class GeneratedUnitTestSemanticValidator {
                 problems.add("Test case " + test.caseId() + " must contain valid Java test source.");
                 continue;
             }
-            if (parseCompilationUnit(test.sourceCode()).isEmpty()) {
-                problems.add("Test case " + test.caseId() + " must contain valid Java test source.");
+            var parsedSource = javaParser().parse(test.sourceCode());
+            if (!parsedSource.isSuccessful() || parsedSource.getResult().isEmpty()) {
+                String detail = parsedSource.getProblems().stream().limit(2)
+                        .map(problem -> problem.getVerboseMessage()).collect(java.util.stream.Collectors.joining("; "));
+                problems.add("Test case " + test.caseId() + " must contain valid Java test source. "
+                        + detail.substring(0, Math.min(detail.length(), 1_000)));
                 continue;
             }
             MethodContextDto productionMethod = methodsByCaseId.get(test.caseId());
@@ -86,13 +97,31 @@ public final class GeneratedUnitTestSemanticValidator {
             validateDateTimeMethods(context, test, problems);
             validateUnsupportedTestInfrastructure(test, problems);
             validateNoLenientStubbing(test, problems);
-            validateRemovedMockitoApis(test, problems);
+            validateUnusedFixtureStubs(context, productionMethod, test, problems);
+            validateRemovedMockitoApis(test, mockitoVersion, problems);
             validateMockitoRunnerOrExtension(test, framework, problems);
             validateJUnit5AssertionOrder(test, framework, problems);
+            parseCompilationUnit(test.sourceCode()).ifPresent(source ->
+                    problems.addAll(GeneratedMockitoImportValidator.validate(source)));
+            validateAssertionImports(test, framework, problems);
             validateMockitoVerifyNoInteractions(test, problems);
+            validateApprovedNegativeInteractions(context, test, parsedSource.getResult().orElseThrow(), problems);
             validateMockitoMatcherConsistency(test, problems);
             validateRepositorySaveMatcherType(test, problems);
             validateMockitoSettingsSyntax(test, problems);
+            parseCompilationUnit(test.sourceCode()).ifPresent(source ->
+                    problems.addAll(GeneratedTestApiValidator.validate(context, source, test.caseId())));
+            parseCompilationUnit(test.sourceCode()).ifPresent(source ->
+                    problems.addAll(GeneratedFixtureMutationValidator.validate(context, productionMethod, source)));
+            parseCompilationUnit(test.sourceCode()).ifPresent(source ->
+                    problems.addAll(GeneratedStreamInvocationValidator.validate(context, productionMethod, test.caseId(), source)));
+            parseCompilationUnit(test.sourceCode()).ifPresent(source ->
+                    problems.addAll(GeneratedRepositoryFixtureValidator.validate(context, productionMethod, test.caseId(), source)));
+            parseCompilationUnit(test.sourceCode()).ifPresent(source ->
+                    problems.addAll(GeneratedFixtureContractValidator.validate(context, productionMethod, test.caseId(), source)));
+            if (productionMethod != null) parseCompilationUnit(test.sourceCode()).ifPresent(source ->
+                    problems.addAll(GeneratedBooleanAssertionValidator.validate(context,
+                            productionMethod.classQualifiedName(), productionMethod.methodName(), source)));
             validateImportsFromContext(context, productionMethod, test, problems);
             validateMockedEnums(context, test, problems);
             validateEnumReferences(context, test, problems);
@@ -104,6 +133,7 @@ public final class GeneratedUnitTestSemanticValidator {
             validateAnonymousSutSubclassOverrides(productionMethod, test, problems);
             validateContentCast(test, problems);
             validateTransactionTemplateStubbing(productionMethod, test, problems);
+            validateExceptionVerificationPlacement(productionMethod, test, problems);
         }
         return problems.isEmpty() ? Optional.empty() : Optional.of(String.join(" ", problems));
     }
@@ -198,6 +228,37 @@ public final class GeneratedUnitTestSemanticValidator {
         }
     }
 
+    private static void validateAssertionImports(GeneratedUnitTestDto test, TestFramework framework, List<String> problems) {
+        if (framework == null) return;
+        parseCompilationUnit(test.sourceCode()).ifPresent(source -> {
+            Set<String> assertions = Set.of("assertTrue", "assertFalse", "assertEquals", "assertNotEquals", "assertNull", "assertNotNull",
+                    "assertSame", "assertNotSame", "assertArrayEquals", "assertThrows", "assertThrowsExactly", "assertDoesNotThrow",
+                    "assertInstanceOf", "assertIterableEquals", "assertLinesMatch", "assertAll", "assertTimeout", "assertTimeoutPreemptively", "fail");
+            Set<String> missing = new java.util.TreeSet<>();
+            for (MethodCallExpr call : source.findAll(MethodCallExpr.class)) {
+                String name = call.getNameAsString();
+                if (call.getScope().isPresent() || !assertions.contains(name)) continue;
+                boolean imported = source.getImports().stream().anyMatch(item -> item.isStatic()
+                        && (item.isAsterisk() || item.getName().getIdentifier().equals(name)));
+                if (imported) continue;
+                Node node = call;
+                boolean locallyAvailable = false;
+                while (node.getParentNode().isPresent()) {
+                    node = node.getParentNode().get();
+                    if (node instanceof ClassOrInterfaceDeclaration owner
+                            && (!owner.getMethodsByName(name).isEmpty() || !owner.getExtendedTypes().isEmpty())) {
+                        locallyAvailable = true;
+                        break;
+                    }
+                }
+                // Không đoán API kế thừa hoặc wildcard thư viện; chỉ chặn lời gọi chắc chắn chưa có binding.
+                if (!locallyAvailable) missing.add(name);
+            }
+            missing.forEach(name -> problems.add("Unqualified assertion '" + name + "' has no static import or declared/inherited helper. "
+                    + "Add its correct static import or use a qualified API supported by the detected " + framework + " version; preserve the expected result."));
+        });
+    }
+
     private static void validateDateTimeMethods(
             UnitTestContextDto context, GeneratedUnitTestDto test, List<String> problems) {
         parseCompilationUnit(test.sourceCode()).ifPresent(source -> source.findAll(MethodCallExpr.class).stream()
@@ -266,6 +327,78 @@ public final class GeneratedUnitTestSemanticValidator {
                 .orElse(false);
     }
 
+    /** Chỉ kiểm tra vị trí verify trong test; không dùng interaction của source làm oracle. */
+    private static void validateExceptionVerificationPlacement(MethodContextDto target, GeneratedUnitTestDto test, List<String> problems) {
+        if (target == null) return;
+        var source = parseCompilationUnit(test.sourceCode());
+        if (source.isEmpty()) return;
+        findTestMethod(source.get(), test.testMethodName()).ifPresent(method -> {
+            for (MethodCallExpr act : method.findAll(MethodCallExpr.class)) {
+                if (!target.methodName().equals(act.getNameAsString()) || !isProductionReceiver(method, act, target.classQualifiedName())) continue;
+                boolean expectedAnnotation = method.getAnnotations().stream().filter(NormalAnnotationExpr.class::isInstance)
+                        .map(NormalAnnotationExpr.class::cast).filter(a -> a.getName().getIdentifier().equals("Test"))
+                        .flatMap(a -> a.getPairs().stream()).anyMatch(pair -> pair.getNameAsString().equals("expected"));
+                boolean assertion = act.findAncestor(LambdaExpr.class).flatMap(lambda -> lambda.findAncestor(MethodCallExpr.class))
+                        .map(call -> Set.of("assertThrows", "assertThrowsExactly").contains(call.getNameAsString())).orElse(false);
+                boolean caught = act.findAncestor(com.github.javaparser.ast.stmt.TryStmt.class)
+                        .filter(statement -> statement.getTryBlock().isAncestorOf(act) && !statement.getCatchClauses().isEmpty())
+                        .map(statement -> statement.getTryBlock().findAll(MethodCallExpr.class).stream()
+                                .anyMatch(call -> endsBefore(act, call) && isJUnitFailCall(call, source.get()))).orElse(false);
+                if (!expectedAnnotation && !assertion && !caught) continue;
+                for (var verification : method.findAll(MethodCallExpr.class)) {
+                    var verify = verification.getScope().filter(Expression::isMethodCallExpr).map(Expression::asMethodCallExpr).orElse(null);
+                    boolean chained = verify != null && isMockitoApiCall(verify, "verify", source.get());
+                    boolean standalone = Set.of("verifyNoInteractions", "verifyZeroInteractions", "verifyNoMoreInteractions")
+                            .contains(verification.getNameAsString())
+                            && isMockitoApiCall(verification, verification.getNameAsString(), source.get());
+                    if ((!chained && !standalone) || !endsBefore(act, verification)) continue;
+                    if (!exceptionVerificationIsReachable(act, verification, method, expectedAnnotation)) {
+                        problems.add("Verification " + verification + " cannot run after the expected exception; put the approved verify "
+                                + "after assertThrows, in catch, or in a reachable finally block.");
+                    }
+                }
+            }
+        });
+    }
+
+    private static boolean isJUnitFailCall(MethodCallExpr call, CompilationUnit source) {
+        if (!"fail".equals(call.getNameAsString())) return false;
+        Set<String> owners = Set.of("org.junit.Assert", "org.junit.jupiter.api.Assertions");
+        if (call.getScope().isPresent()) {
+            String scope = call.getScope().get().toString();
+            return owners.contains(scope) || source.getImports().stream().anyMatch(imported -> !imported.isStatic()
+                    && owners.contains(imported.getNameAsString()) && imported.getName().getIdentifier().equals(scope));
+        }
+        return source.getImports().stream().anyMatch(imported -> imported.isStatic()
+                && (owners.contains(imported.getNameAsString()) && imported.isAsterisk()
+                    || owners.stream().anyMatch(owner -> (owner + ".fail").equals(imported.getNameAsString()))));
+    }
+
+    private static boolean exceptionVerificationIsReachable(MethodCallExpr act, MethodCallExpr verification,
+            MethodDeclaration method, boolean expectedAnnotation) {
+        if (verification.findAncestor(LambdaExpr.class).isPresent()) return false;
+        var assertion = act.findAncestor(LambdaExpr.class).flatMap(lambda -> lambda.findAncestor(MethodCallExpr.class))
+                .filter(call -> Set.of("assertThrows", "assertThrowsExactly").contains(call.getNameAsString()));
+        if (assertion.isPresent()) return topLevelStatement(verification, method).isPresent()
+                && endsBefore(assertion.get(), verification);
+        var attempt = act.findAncestor(com.github.javaparser.ast.stmt.TryStmt.class)
+                .filter(statement -> statement.getTryBlock().isAncestorOf(act));
+        if (attempt.isEmpty()) return false;
+        var statement = attempt.get();
+        if (statement.getFinallyBlock().filter(block -> block.isAncestorOf(verification)
+                && verification.findAncestor(BlockStmt.class).filter(block::equals).isPresent()).isPresent()) return true;
+        if (expectedAnnotation) return false;
+        return statement.getCatchClauses().stream().anyMatch(clause -> clause.getBody().isAncestorOf(verification)
+                && verification.findAncestor(BlockStmt.class).filter(clause.getBody()::equals).isPresent())
+                || topLevelStatement(verification, method).isPresent() && endsBefore(statement, verification);
+    }
+
+    private static boolean endsBefore(Node first, Node second) {
+        return first.getRange().flatMap(firstRange -> second.getRange().map(secondRange ->
+                firstRange.end.isBefore(secondRange.begin))).orElse(false);
+    }
+
+    /** Chỉ xác nhận lookup không có nhánh/side effect chưa biết đứng trước; không suy diễn luồng thiếu bằng chứng. */
     private static void validateUnsupportedTestInfrastructure(
             GeneratedUnitTestDto generatedTest,
             List<String> problems) {
@@ -468,9 +601,21 @@ public final class GeneratedUnitTestSemanticValidator {
     }
 
     private static void validateRemovedMockitoApis(
-            GeneratedUnitTestDto generatedTest, List<String> problems) {
-        if (generatedTest.sourceCode().matches("(?s).*\\bverifyZeroInteractions\\s*\\(.*")) {
-            problems.add("Mockito removed verifyZeroInteractions; use verifyNoInteractions instead.");
+            GeneratedUnitTestDto generatedTest, MockitoVersionInfo mockitoVersion, List<String> problems) {
+        CompilationUnit source = parseCompilationUnit(generatedTest.sourceCode()).orElseThrow();
+        for (String api : List.of("verifyNoInteractions", "verifyZeroInteractions")) {
+            boolean used = source.findAll(MethodCallExpr.class).stream().anyMatch(call -> api.equals(call.getNameAsString()))
+                    || source.getImports().stream().anyMatch(value -> value.isStatic()
+                            && value.getNameAsString().equals("org.mockito.Mockito." + api));
+            if (!used) continue;
+            if (api.equals("verifyNoInteractions") && (mockitoVersion == null || !mockitoVersion.supportsNoInteractions())) {
+                problems.add("verifyNoInteractions requires confirmed Mockito 3.0.1+. For Mockito 2 / 3.0.0 use verifyZeroInteractions "
+                        + "with its matching static import, or use portable verifyNoMoreInteractions.");
+            }
+            if (api.equals("verifyZeroInteractions") && (mockitoVersion == null || mockitoVersion.major() >= 4)) {
+                problems.add("verifyZeroInteractions is unavailable in Mockito 4+. Use verifyNoInteractions only with "
+                        + "confirmed Mockito 3+, or portable verifyNoMoreInteractions when the version is unknown.");
+            }
         }
     }
 
@@ -523,6 +668,11 @@ public final class GeneratedUnitTestSemanticValidator {
                             for (MethodDeclaration helper : helpers) {
                                 if (helper.getBody().isEmpty()) continue;
                                 var statements = helper.getBody().get().getStatements();
+                                if (nullPlaceholderStubbing(call, statements, owner)) {
+                                    problems.add("Test case " + test.caseId() + " uses placeholder helper '" + helper.getNameAsString()
+                                            + "' returning null inside Mockito.when. Stub a real @Mock collaborator and implement the approved Act/assertions instead of a test-local placeholder.");
+                                    continue;
+                                }
                                 if (statements.size() != 1 || !statements.get(0).isThrowStmt()) continue;
                                 Expression thrown = statements.get(0).asThrowStmt().getExpression();
                                 if (thrown.isObjectCreationExpr() && "UnsupportedOperationException".equals(
@@ -535,6 +685,16 @@ public final class GeneratedUnitTestSemanticValidator {
                         }
                     });
                 });
+    }
+
+    private static boolean nullPlaceholderStubbing(MethodCallExpr call,
+            List<? extends com.github.javaparser.ast.stmt.Statement> statements, ClassOrInterfaceDeclaration owner) {
+        if (statements.size() != 1 || !statements.get(0).isReturnStmt()
+                || statements.get(0).asReturnStmt().getExpression().filter(Expression::isNullLiteralExpr).isEmpty()) return false;
+        var parent = call.getParentNode().filter(MethodCallExpr.class::isInstance).map(MethodCallExpr.class::cast);
+        if (parent.isEmpty() || parent.get().getArguments().size() != 1 || parent.get().getArgument(0) != call) return false;
+        if (parent.get().getScope().isEmpty() && (!owner.getExtendedTypes().isEmpty() || !owner.getImplementedTypes().isEmpty())) return false;
+        return GeneratedFixtureMutationValidator.isMockitoCall(parent.get(), "when", owner.findCompilationUnit().orElseThrow());
     }
 
     private static boolean isTestMethodAnnotation(String annotationName) {
@@ -579,6 +739,188 @@ public final class GeneratedUnitTestSemanticValidator {
         if (usesLenientStubbing || disablesStrictStubbing || usesNonStrictness) {
             problems.add("Do not use lenient or non-STRICT_STUBS Mockito settings; keep strict stubbing enabled.");
         }
+    }
+
+    /** Chỉ chặn stub fixture khi lookup null chứng minh method trả về trước khi đọc tham số đó. */
+    private static void validateUnusedFixtureStubs(UnitTestContextDto context, MethodContextDto target,
+            GeneratedUnitTestDto test, List<String> problems) {
+        if (target == null) return;
+        var source = context.classes().stream().filter(c -> target.classQualifiedName().equals(c.qualifiedName()))
+                .findFirst().flatMap(GeneratedUnitTestSemanticValidator::serviceDeclaration);
+        var parsed = parseCompilationUnit(test.sourceCode());
+        if (source.isEmpty() || parsed.isEmpty()) return;
+        var methods = source.get().getMethodsByName(target.methodName());
+        if (methods.size() != 1 || !source.get().getConstructors().isEmpty()
+                || source.get().getAnnotationByName("AllArgsConstructor").isEmpty()) return;
+        var production = methods.get(0);
+        var lookup = nullGuardLookup(production);
+        var method = findTestMethod(parsed.get(), test.testMethodName());
+        if (lookup == null || method.isEmpty() || method.get().getBody().isEmpty()
+                || method.get().findAll(LambdaExpr.class).size() > 0) return;
+        var testMethod = method.get();
+        var owner = testMethod.findAncestor(ClassOrInterfaceDeclaration.class).orElseThrow();
+        var acts = testMethod.findAll(MethodCallExpr.class).stream()
+                .filter(call -> target.methodName().equals(call.getNameAsString())
+                        && isProductionReceiver(testMethod, call, target.classQualifiedName())).toList();
+        if (acts.size() != 1) return;
+        var act = acts.get(0);
+        if (topLevelStatement(act, testMethod).isEmpty() || act.getArguments().size() != production.getParameters().size()
+                || act.getArguments().stream().anyMatch(argument -> !argument.isNameExpr() && !argument.isLiteralExpr())
+                || act.getScope().filter(Expression::isNameExpr).isEmpty()) return;
+        String sut = act.getScope().orElseThrow().toString();
+        String dependency = lookup.getScope().orElseThrow().toString();
+        if (sut.equals(dependency) || production.getParameters().stream()
+                .anyMatch(parameter -> parameter.getNameAsString().equals(dependency))) return;
+        if (!hasFixtureLookupBinding(source.get(), owner, testMethod, target.classQualifiedName(), sut, dependency)) return;
+        var stubs = confirmedNullLookupStubs(production, testMethod, act, lookup, parsed.get());
+        addUnusedFixtureProblems(production, testMethod, act, stubs, test.caseId(), problems);
+    }
+
+    private static boolean hasFixtureLookupBinding(ClassOrInterfaceDeclaration source, ClassOrInterfaceDeclaration owner,
+            MethodDeclaration testMethod, String qualifiedName, String sut, String dependency) {
+        var injected = owner.getFields().stream().filter(field -> field.getAnnotationByName("InjectMocks").isPresent())
+                .flatMap(field -> field.getVariables().stream()).filter(variable -> variable.getNameAsString().equals(sut)
+                        && variable.getInitializer().isEmpty()
+                        && qualifiedName.equals(qualifiedFixtureType(variable))).toList();
+        if (injected.size() != 1 || testMethod.findAll(VariableDeclarator.class).stream()
+                .anyMatch(variable -> Set.of(sut, dependency).contains(variable.getNameAsString()))
+                || owner.findAll(com.github.javaparser.ast.expr.AssignExpr.class).stream()
+                .anyMatch(assignment -> Set.of(sut, dependency, "this." + sut, "this." + dependency)
+                        .contains(assignment.getTarget().toString()))) return false;
+        var productionFields = source.getFields().stream().flatMap(field -> field.getVariables().stream()).toList();
+        var dependencyField = productionFields.stream().filter(field -> field.getNameAsString().equals(dependency)).findFirst();
+        if (dependencyField.isEmpty() || dependencyField.get().getInitializer().isPresent()
+                || dependencyField.get().findAncestor(FieldDeclaration.class).filter(FieldDeclaration::isStatic).isPresent()) return false;
+        String dependencyType = qualifiedFixtureType(dependencyField.get());
+        var mocks = owner.getFields().stream().filter(field -> field.getAnnotationByName("Mock").isPresent())
+                .flatMap(field -> field.getVariables().stream()).filter(field -> dependencyType != null
+                        && dependencyType.equals(qualifiedFixtureType(field))).toList();
+        return mocks.size() == 1 && mocks.get(0).getNameAsString().equals(dependency);
+    }
+
+    private static List<MethodCallExpr> confirmedNullLookupStubs(MethodDeclaration production, MethodDeclaration testMethod,
+            MethodCallExpr act, MethodCallExpr lookup, CompilationUnit parsed) {
+        String dependency = lookup.getScope().orElseThrow().toString();
+        var stubs = testMethod.findAll(MethodCallExpr.class).stream()
+                .filter(call -> call.getNameAsString().equals("thenReturn") && call.getArguments().size() == 1
+                        && call.getParentNode().filter(MethodCallExpr.class::isInstance).isEmpty()
+                        && topLevelStatement(call, testMethod).filter(statement -> statement.getExpression() == call).isPresent()
+                        && appearsBefore(call, act)
+                        && call.getScope().filter(Expression::isMethodCallExpr).isPresent())
+                .filter(call -> isMockitoWhenCall(call.getScope().orElseThrow().asMethodCallExpr(), parsed))
+                .filter(call -> call.getScope().orElseThrow().asMethodCallExpr().getArguments().size() == 1
+                        && call.getScope().orElseThrow().asMethodCallExpr().getArgument(0).isMethodCallExpr()).toList();
+        var nullStubs = stubs.stream().filter(stub -> stub.getArgument(0).isNullLiteralExpr())
+                .map(stub -> stub.getScope().orElseThrow().asMethodCallExpr().getArgument(0).asMethodCallExpr())
+                .filter(call -> call.getScope().map(Object::toString).filter(dependency::equals).isPresent()
+                        && call.getNameAsString().equals(lookup.getNameAsString())
+                        && call.getArguments().size() == lookup.getArguments().size())
+                .filter(call -> sameLookupArguments(lookup, call, production, act)).toList();
+        if (nullStubs.size() != 1) return List.of();
+        var nullStatement = topLevelStatement(nullStubs.get(0), testMethod);
+        var actStatement = topLevelStatement(act, testMethod);
+        if (nullStatement.isEmpty() || actStatement.isEmpty()) return List.of();
+        var statements = testMethod.getBody().orElseThrow().getStatements();
+        if (statements.indexOf(nullStatement.get()) + 1 != statements.indexOf(actStatement.get())) return List.of();
+        var actExpression = actStatement.get().getExpression();
+        if (actExpression != act && !(actExpression.isVariableDeclarationExpr()
+                && actExpression.asVariableDeclarationExpr().getVariables().size() == 1
+                && actExpression.asVariableDeclarationExpr().getVariable(0).getInitializer().filter(value -> value == act).isPresent())) return List.of();
+        if (stubs.stream().map(stub -> stub.getScope().orElseThrow().asMethodCallExpr().getArgument(0).asMethodCallExpr())
+                .filter(call -> call.getScope().map(Object::toString).filter(dependency::equals).isPresent()
+                        && call.getNameAsString().equals(lookup.getNameAsString())).count() != 1) return List.of();
+        return stubs;
+    }
+
+    private static void addUnusedFixtureProblems(MethodDeclaration production, MethodDeclaration testMethod,
+            MethodCallExpr act, List<MethodCallExpr> stubs, Long caseId, List<String> problems) {
+        // shortcut: Chỉ chứng minh null guard với một Act đơn giản; mở rộng khi có lỗi thực tế từ helper/lifecycle.
+        var parsed = testMethod.findCompilationUnit().orElseThrow();
+        for (var stub : stubs) {
+            if (!stub.getArgument(0).isLiteralExpr()) continue;
+            var invocation = stub.getScope().orElseThrow().asMethodCallExpr().getArgument(0).asMethodCallExpr();
+            if (invocation.getScope().filter(Expression::isNameExpr).isEmpty()) continue;
+            String fixture = invocation.getScope().orElseThrow().toString();
+            var locals = testMethod.findAll(VariableDeclarator.class).stream()
+                    .filter(variable -> variable.getNameAsString().equals(fixture)).toList();
+            if (locals.size() != 1 || locals.get(0).getInitializer().filter(Expression::isMethodCallExpr)
+                    .map(Expression::asMethodCallExpr).filter(call -> isMockitoApiCall(call, "mock", parsed)).isEmpty()) continue;
+            for (int index = 0; index < production.getParameters().size(); index++) {
+                if (!act.getArgument(index).toString().equals(fixture)) continue;
+                Expression fixtureArgument = act.getArgument(index);
+                String parameter = production.getParameter(index).getNameAsString();
+                var body = production.getBody().orElseThrow();
+                var branch = body.getStatement(1).asIfStmt();
+                boolean readBeforeReturn = List.<Node>of(body.getStatement(0), branch.getCondition(), branch.getThenStmt()).stream()
+                        .anyMatch(statement -> statement.findAll(com.github.javaparser.ast.expr.NameExpr.class).stream()
+                                .anyMatch(name -> name.getNameAsString().equals(parameter)));
+                if (readBeforeReturn) continue;
+                boolean escapes = testMethod.findAll(com.github.javaparser.ast.expr.NameExpr.class).stream()
+                        .filter(name -> name.getNameAsString().equals(fixture))
+                        .anyMatch(name -> !stub.isAncestorOf(name) && name != fixtureArgument);
+                if (!escapes) problems.add("Test case " + caseId + ": UnnecessaryStubbingException: stub "
+                        + invocation + " is unused on the confirmed null-lookup early return in " + production.getNameAsString()
+                        + ". Remove only this stub; keep the non-null fixture, approved scenario, assertions and STRICT_STUBS. "
+                        + "Do not add dummy getter calls, lenient(), or change the input to null to consume/bypass the stub.");
+            }
+        }
+    }
+
+    private static MethodCallExpr nullGuardLookup(MethodDeclaration method) {
+        if (method.getBody().isEmpty() || method.getBody().get().getStatements().size() < 2) return null;
+        var first = method.getBody().get().getStatement(0);
+        var second = method.getBody().get().getStatement(1);
+        if (!first.isExpressionStmt() || !first.asExpressionStmt().getExpression().isVariableDeclarationExpr()
+                || !second.isIfStmt()) return null;
+        var variables = first.asExpressionStmt().getExpression().asVariableDeclarationExpr().getVariables();
+        if (variables.size() != 1 || variables.get(0).getInitializer().filter(Expression::isMethodCallExpr).isEmpty()) return null;
+        var variable = variables.get(0);
+        var lookup = variable.getInitializer().orElseThrow().asMethodCallExpr();
+        if (lookup.getScope().filter(Expression::isNameExpr).isEmpty()
+                || lookup.getArguments().stream().anyMatch(arg -> !arg.isNameExpr() && !arg.isLiteralExpr())) return null;
+        var branch = second.asIfStmt();
+        if (!branch.getCondition().isBinaryExpr()) return null;
+        var condition = branch.getCondition().asBinaryExpr();
+        if (condition.getOperator() != BinaryExpr.Operator.EQUALS
+                || !(condition.getLeft().toString().equals(variable.getNameAsString()) && condition.getRight().isNullLiteralExpr()
+                || condition.getRight().toString().equals(variable.getNameAsString()) && condition.getLeft().isNullLiteralExpr())) return null;
+        var returned = branch.getThenStmt();
+        if (returned.isBlockStmt() && returned.asBlockStmt().getStatements().size() == 1)
+            returned = returned.asBlockStmt().getStatement(0);
+        return returned.isReturnStmt() ? lookup : null;
+    }
+
+    private static boolean sameLookupArguments(MethodCallExpr lookup, MethodCallExpr stub,
+            MethodDeclaration production, MethodCallExpr act) {
+        for (int index = 0; index < lookup.getArguments().size(); index++) {
+            var expected = lookup.getArgument(index);
+            if (expected.isNameExpr()) {
+                int parameter = parameterIndex(production, expected.toString());
+                if (parameter < 0) return false;
+                expected = act.getArgument(parameter);
+            }
+            if (!expected.isLiteralExpr() || !expected.equals(stub.getArgument(index))) return false;
+        }
+        return true;
+    }
+
+    private static int parameterIndex(MethodDeclaration method, String selector) {
+        for (int index = 0; index < method.getParameters().size(); index++) {
+            if (method.getParameter(index).getNameAsString().equals(selector)) return index;
+        }
+        return -1;
+    }
+
+    private static String qualifiedFixtureType(VariableDeclarator field) {
+        if (!field.getType().isClassOrInterfaceType()) return null;
+        String type = field.getType().asClassOrInterfaceType().getNameWithScope();
+        if (type.contains(".")) return type;
+        var unit = field.findCompilationUnit().orElseThrow();
+        var imports = unit.getImports().stream().filter(i -> !i.isStatic() && !i.isAsterisk()
+                && i.getName().getIdentifier().equals(type)).toList();
+        if (imports.size() == 1) return imports.get(0).getNameAsString();
+        if (!imports.isEmpty() || unit.getImports().stream().anyMatch(i -> !i.isStatic() && i.isAsterisk())) return null;
+        return unit.getPackageDeclaration().map(p -> p.getNameAsString() + "." + type).orElse(type);
     }
 
     private static boolean isMockitoScope(Expression scope) {
@@ -710,13 +1052,17 @@ public final class GeneratedUnitTestSemanticValidator {
         CompilationUnit testSource = parsed.get();
         Map<String, String> enumNames = new HashMap<>();
         Map<String, Set<String>> enumConstants = new HashMap<>();
+        Map<String, String> enumPackages = new HashMap<>();
         for (ClassContextDto javaClass : context.classes()) {
             if (!"ENUM".equalsIgnoreCase(javaClass.classType()) || javaClass.qualifiedName() == null
                     || javaClass.validationSourceCode() == null) continue;
             parseCompilationUnit(javaClass.validationSourceCode()).ifPresent(source -> source.findAll(EnumDeclaration.class)
-                    .stream().filter(declaration -> declaration.getNameAsString().equals(javaClass.className()))
+                    .stream().filter(declaration -> declaration.getFullyQualifiedName()
+                            .filter(javaClass.qualifiedName()::equals).isPresent())
                     .findFirst().ifPresent(declaration -> {
                         enumNames.put(javaClass.className(), javaClass.qualifiedName());
+                        enumPackages.put(javaClass.qualifiedName(), source.getPackageDeclaration()
+                                .map(declarationPackage -> declarationPackage.getNameAsString()).orElse(""));
                         enumConstants.put(javaClass.qualifiedName(), declaration.getEntries().stream()
                                 .map(entry -> entry.getNameAsString()).collect(java.util.stream.Collectors.toSet()));
                     }));
@@ -739,8 +1085,7 @@ public final class GeneratedUnitTestSemanticValidator {
         for (ClassOrInterfaceType type : testSource.findAll(ClassOrInterfaceType.class)) {
             String expected = enumNames.get(type.getNameAsString());
             if (expected != null && !type.getNameWithScope().equals(type.getNameAsString())
-                    && !type.getNameWithScope().equals(expected)
-                    && !enumConstants.containsKey(type.getNameWithScope())) {
+                    && resolveEnumReference(type.getNameWithScope(), testSource, enumConstants, enumPackages) == null) {
                 problems.add("Enum type '" + type.getNameWithScope() + "' is not declared in context; use "
                         + expected + ".");
             }
@@ -749,10 +1094,10 @@ public final class GeneratedUnitTestSemanticValidator {
             String scope = access.getScope().toString();
             int dot = scope.lastIndexOf('.');
             String simple = scope.substring(dot + 1);
-            String expected = enumNames.get(simple);
+            String resolved = resolveEnumReference(scope, testSource, enumConstants, enumPackages);
+            String expected = resolved == null ? enumNames.get(simple) : resolved;
             if (expected == null) continue;
-            if (enumConstants.containsKey(scope)) expected = scope;
-            if (dot >= 0 && !scope.equals(expected)) {
+            if (dot >= 0 && resolved == null) {
                 problems.add("Enum type '" + scope + "' is not declared in context; use " + expected + ".");
             }
             if (enumConstants.containsKey(expected)
@@ -764,9 +1109,9 @@ public final class GeneratedUnitTestSemanticValidator {
             if (!"valueOf".equals(call.getNameAsString()) || call.getArguments().size() != 1
                     || !call.getArgument(0).isStringLiteralExpr() || call.getScope().isEmpty()) continue;
             String scope = call.getScope().get().toString();
-            String expected = enumNames.get(scope.substring(scope.lastIndexOf('.') + 1));
-            if (enumConstants.containsKey(scope)) expected = scope;
-            if (expected != null && scope.contains(".") && !scope.equals(expected)) {
+            String resolved = resolveEnumReference(scope, testSource, enumConstants, enumPackages);
+            String expected = resolved == null ? enumNames.get(scope.substring(scope.lastIndexOf('.') + 1)) : resolved;
+            if (expected != null && scope.contains(".") && resolved == null) {
                 problems.add("Enum type '" + scope + "' is not declared in context; use " + expected + ".");
             }
             if (expected != null && enumConstants.containsKey(expected)
@@ -786,16 +1131,30 @@ public final class GeneratedUnitTestSemanticValidator {
                 .flatMap(call -> call.getScope().stream()).filter(Expression::isNameExpr)
                 .map(scope -> scope.asNameExpr().getNameAsString()).forEach(simpleReferences::add);
         for (String name : simpleReferences) {
+            if (resolveEnumReference(name, testSource, enumConstants, enumPackages) != null) continue;
             String expected = enumNames.get(name);
             if (expected == null || !enumConstants.containsKey(expected)) continue;
-            boolean samePackage = testSource.getPackageDeclaration()
-                    .map(declaration -> declaration.getNameAsString().equals(packageName(expected))).orElse(false);
-            boolean imported = testSource.getImports().stream()
-                    .anyMatch(declaration -> !declaration.isStatic() && declaration.getNameAsString().equals(expected));
-            if (!samePackage && !imported) {
-                problems.add("Enum " + name + " requires import " + expected + ".");
-            }
+            problems.add("Enum " + name + " requires import " + expected + ".");
         }
+    }
+
+    private static String resolveEnumReference(String reference, CompilationUnit testSource,
+            Map<String, Set<String>> enumConstants, Map<String, String> enumPackages) {
+        if (enumConstants.containsKey(reference)) return reference;
+        int dot = reference.indexOf('.');
+        String root = dot < 0 ? reference : reference.substring(0, dot);
+        String suffix = dot < 0 ? "" : reference.substring(dot);
+        // Import class ngoài cho phép dùng Outer.Enum; import tường minh ưu tiên hơn kiểu cùng package.
+        List<String> imports = testSource.getImports().stream().filter(imported -> !imported.isAsterisk())
+                .filter(imported -> imported.getName().getIdentifier().equals(root))
+                .map(imported -> imported.getNameAsString() + suffix).distinct().toList();
+        if (!imports.isEmpty()) {
+            return imports.size() == 1 && enumConstants.containsKey(imports.get(0)) ? imports.get(0) : null;
+        }
+        String testPackage = testSource.getPackageDeclaration().map(declaration -> declaration.getNameAsString()).orElse("");
+        String samePackage = testPackage.isEmpty() ? reference : testPackage + "." + reference;
+        if (enumConstants.containsKey(samePackage) && testPackage.equals(enumPackages.get(samePackage))) return samePackage;
+        return null;
     }
 
     private static void validateEnumFixtureValues(
@@ -840,9 +1199,30 @@ public final class GeneratedUnitTestSemanticValidator {
                 }
             });
         }
+        Set<String> declaredFixtureTypes = context.classes().stream()
+                .map(ClassContextDto::qualifiedName).collect(java.util.stream.Collectors.toSet());
+        source.findAll(com.github.javaparser.ast.body.TypeDeclaration.class).forEach(raw -> {
+            com.github.javaparser.ast.body.TypeDeclaration<?> type = raw;
+            type.getFullyQualifiedName().ifPresent(declaredFixtureTypes::add);
+        });
+        for (var fixture : fixtures) {
+            if (!fixture.isFieldAccessExpr()) continue;
+            String scope = fixture.asFieldAccessExpr().getScope().toString();
+            String root = scope.split("\\.", 2)[0];
+            for (var imported : source.getImports()) if (!imported.isStatic() && !imported.isAsterisk()
+                    && imported.getName().getIdentifier().equals(root)) {
+                scope = imported.getNameAsString() + scope.substring(root.length()); break;
+            }
+            String resolved = scope;
+            if (microserviceRoot(productionMethod).filter(prefix -> resolved.startsWith(prefix + ".")).isPresent()
+                    && !declaredFixtureTypes.contains(resolved)) {
+                problems.add("Enum fixture type '" + resolved + "' is not declared in the supplied source. Use a verified enum constant; "
+                        + "when the raw Enum contract only consumes name(), declare a local test-fixture enum preserving the approved name, not a production type.");
+            }
+        }
         // Giá trị Enum trả về từ SUT/getter vẫn hợp lệ để kiểm tra kết quả.
         Set<String> forbiddenFactories = Set.of("assertThrows", "assertThrowsExactly", "forName",
-                "getEnumConstants", "getField", "getDeclaredField");
+                "getEnumConstants", "getField", "getDeclaredField", "valueOf");
         if (fixtures.stream().flatMap(fixture -> fixture.findAll(MethodCallExpr.class).stream())
                 .anyMatch(call -> forbiddenFactories.contains(call.getNameAsString()))) {
             problems.add("Enum fixtures and arguments must use a declared project enum constant or null; "
@@ -984,6 +1364,89 @@ public final class GeneratedUnitTestSemanticValidator {
         };
     }
 
+    /** Giữ yêu cầu không gọi collaborator của TC; không suy diễn từ hành vi implementation. */
+    private static void validateApprovedNegativeInteractions(UnitTestContextDto context, GeneratedUnitTestDto test,
+            CompilationUnit source, List<String> problems) {
+        String expected = context.approvedTestCases().stream().filter(c -> java.util.Objects.equals(c.id(), test.caseId()))
+                .map(c -> c.expectedResult()).filter(java.util.Objects::nonNull).findFirst().orElse("");
+        if (expected.isEmpty()) return;
+        findTestMethod(source, test.testMethodName()).ifPresent(method -> {
+            for (var call : method.findAll(MethodCallExpr.class)) {
+                if (call.findAncestor(MethodDeclaration.class).filter(method::equals).isEmpty() || topLevelStatement(call, method).isEmpty()) continue;
+                var verify = call.getScope().filter(Expression::isMethodCallExpr).map(Expression::asMethodCallExpr).orElse(null);
+                if (verify == null || !verify.getNameAsString().equals("verify") || !isUnshadowedMockitoCall(verify, source)
+                        || verify.getArguments().isEmpty()) continue;
+                if (verify.getScope().isEmpty() && method.findAncestor(ClassOrInterfaceDeclaration.class)
+                        .map(c -> !c.getMethodsByName("verify").isEmpty() || !c.getExtendedTypes().isEmpty()).orElse(false)) continue;
+                var mock = mockReference(verify.getArgument(0));
+                if (mock.isEmpty()) continue;
+                String interaction = mock.get() + "." + call.getNameAsString();
+                String quoted = java.util.regex.Pattern.quote(interaction);
+                String identifier = "(?:`" + quoted + "`|\"" + quoted + "\"|“" + quoted + "”|" + quoted + ")(?![\\p{javaJavaIdentifierPart}]|\\s*\\()";
+                String sentence = "(?:^|[.;\\n])\\s*";
+                // Chỉ cấm gọi toàn method; đối số, điều kiện và giới hạn số lần cần chứng cứ riêng.
+                String end = "(?:\\s*(?:\\.(?![\\p{javaJavaIdentifierPart}])|$)|\\s+(?iuU:vì|because)\\s+)";
+                String postfix = sentence + identifier + "\\s+(?iuU:không\\s+(?:được\\s+)?gọi|(?:is|must|should)\\s+(?:not|never)\\s+(?:be\\s+)?(?:called|invoked))" + end;
+                String prefix = sentence + "(?iuU:do\\s+not\\s+call|never\\s+call|không\\s+(?:được\\s+)?gọi)\\s+" + identifier + end;
+                String repository = mock.get().replaceFirst("^this\\.", "");
+                String entity = repository.replaceFirst("(?:Repository|Repo)$", "");
+                boolean forbiddenSave = call.getNameAsString().equals("save") && !entity.isBlank() && !entity.equals(repository)
+                        && java.util.regex.Pattern.compile("(?iuU)" + sentence + "(?:không\\s+lưu|do\\s+not\\s+save|never\\s+save)\\s+"
+                                + java.util.regex.Pattern.quote(entity) + "(?=\\s*(?:\\.(?![\\p{javaJavaIdentifierPart}])|$)|\\s+(?:và|and)\\s+(?:không|not|never|do\\s+not)\\b)").matcher(expected).find();
+                boolean unqualified = !java.util.regex.Pattern.compile("(?iuU)\\b(?:if|when|unless|except|nếu|khi|trừ|với\\s+(?!thông\\s+điệp\\b))\\b").matcher(expected).find()
+                        && !java.util.regex.Pattern.compile("[\"“”'`]").matcher(expected).find();
+                boolean exactBan = unqualified && java.util.regex.Pattern.compile("(?iuU)\\b(?:không\\s+gọi|do\\s+not\\s+call|never\\s+call)\\s+"
+                        + identifier + end).matcher(expected).find();
+                boolean forbidden = forbiddenSave || exactBan || java.util.regex.Pattern.compile(postfix).matcher(expected).find()
+                        || java.util.regex.Pattern.compile(prefix).matcher(expected).find();
+                if (forbidden && isPositiveVerification(verify, source)) {
+                    problems.add("Approved negative interaction for case " + test.caseId() + ": " + interaction
+                            + " must not be called, but " + verify + " requires a positive call. Use the approved never()/times(0) verification; do not drop or reverse the business assertion.");
+                }
+                if (forbidden && verify.getArguments().size() == 2 && verify.getArgument(1).isMethodCallExpr()) {
+                    var mode = verify.getArgument(1).asMethodCallExpr();
+                    boolean zero = isUnshadowedMockitoCall(mode, source) && (mode.getNameAsString().equals("never") && mode.getArguments().isEmpty()
+                            || mode.getNameAsString().equals("times") && mode.getArguments().size() == 1 && mode.getArgument(0).toString().equals("0"));
+                    if (zero && call.getArguments().stream().anyMatch(a -> nullExcludingReferenceMatcher(a, source))) {
+                        problems.add("Null-inclusive verification required for " + interaction + ": this approved ban covers every argument, including null. "
+                                + "Use ArgumentMatchers.any() with no Class argument, or verifyNoInteractions when all calls are forbidden; preserve the approved negative assertion.");
+                    }
+                }
+            }
+        });
+    }
+
+    private static boolean nullExcludingReferenceMatcher(Expression argument, CompilationUnit source) {
+        if (!argument.isMethodCallExpr()) return false;
+        var matcher = argument.asMethodCallExpr();
+        boolean reference = Set.of("anyString", "anyList", "anySet", "anyMap", "anyCollection", "anyIterable").contains(matcher.getNameAsString())
+                && matcher.getArguments().isEmpty();
+        if (matcher.getNameAsString().equals("any") && matcher.getArguments().size() == 1 && matcher.getArgument(0).isClassExpr()) {
+            var type = matcher.getArgument(0).asClassExpr().getType();
+            reference = type.isClassOrInterfaceType() && !Set.of("Boolean", "Byte", "Character", "Double", "Float", "Integer", "Long", "Short")
+                    .contains(type.asClassOrInterfaceType().getNameAsString());
+        }
+        if (!reference) return false;
+        Set<String> owners = Set.of("org.mockito.ArgumentMatchers", "org.mockito.Matchers", "org.mockito.Mockito");
+        if (matcher.getScope().isPresent()) {
+            String name = matcher.getScope().get().toString();
+            var roots = matcher.getScope().get().findAll(com.github.javaparser.ast.expr.NameExpr.class).stream()
+                    .map(n -> n.getNameAsString()).collect(java.util.stream.Collectors.toSet());
+            if (source.findAll(VariableDeclarator.class).stream().anyMatch(v -> roots.contains(v.getNameAsString()))
+                    || source.findAll(Parameter.class).stream().anyMatch(p -> roots.contains(p.getNameAsString()))
+                    || source.findAll(com.github.javaparser.ast.body.TypeDeclaration.class).stream().anyMatch(t -> roots.contains(t.getNameAsString()))) return false;
+            return owners.contains(name) || source.getImports().stream().anyMatch(i -> !i.isStatic() && !i.isAsterisk()
+                    && owners.contains(i.getNameAsString()) && i.getName().getIdentifier().equals(name));
+        }
+        if (source.findAll(MethodDeclaration.class).stream().anyMatch(m -> m.getNameAsString().equals(matcher.getNameAsString()))
+                || source.findAll(ClassOrInterfaceDeclaration.class).stream().anyMatch(c -> !c.getExtendedTypes().isEmpty())) return false;
+        var explicit = source.getImports().stream().filter(i -> i.isStatic() && !i.isAsterisk()
+                && i.getName().getIdentifier().equals(matcher.getNameAsString())).toList();
+        if (explicit.stream().anyMatch(i -> !owners.contains(i.getName().getQualifier().map(Object::toString).orElse("")))) return false;
+        return source.getImports().stream().anyMatch(i -> i.isStatic() && (i.isAsterisk() && owners.contains(i.getNameAsString())
+                || !i.isAsterisk() && explicit.contains(i)));
+    }
+
     private static void validateMockitoVerifyNoInteractions(
             GeneratedUnitTestDto generatedTest,
             List<String> problems) {
@@ -997,8 +1460,14 @@ public final class GeneratedUnitTestSemanticValidator {
             Map<String, List<ExpressionStmt>> noInteractionsByMock = new HashMap<>();
             for (MethodCallExpr call : testMethod.findAll(MethodCallExpr.class)) {
                 String name = call.getNameAsString();
+                if ("toString".equals(name) && call.getScope().filter(Expression::isMethodCallExpr)
+                        .map(Expression::asMethodCallExpr).filter(scope -> isUnshadowedMockitoCall(scope, parsed.get())
+                                && scope.getNameAsString().equals("verify")).isPresent()) {
+                    problems.add("Mockito cannot verify toString(). Verify the actual dependency method required by the approved case, "
+                            + "using never() or times(0) for a forbidden call; do not add a dummy Object-method interaction.");
+                }
                 Optional<ExpressionStmt> statement = topLevelStatement(call, testMethod);
-                if ("verify".equals(name) && isPositiveVerification(call)) {
+                if ("verify".equals(name) && isPositiveVerification(call, parsed.get())) {
                     mockReference(call.getArgument(0)).ifPresent(mock -> statement.ifPresent(value -> interactionsByMock
                             .computeIfAbsent(mock, ignored -> new ArrayList<>()).add(value)));
                 } else if ("clearInvocations".equals(name) || "reset".equals(name)) {
@@ -1434,13 +1903,14 @@ public final class GeneratedUnitTestSemanticValidator {
                 .orElse(false);
     }
 
-    private static boolean isPositiveVerification(MethodCallExpr verifyCall) {
+    private static boolean isPositiveVerification(MethodCallExpr verifyCall, CompilationUnit source) {
         if (verifyCall.getArguments().isEmpty()) return false;
         if (verifyCall.getArguments().size() == 1) return true;
         Expression mode = verifyCall.getArgument(1);
         if (!mode.isMethodCallExpr()) return false;
         MethodCallExpr modeCall = mode.asMethodCallExpr();
-        if ("atLeastOnce".equals(modeCall.getNameAsString())) return true;
+        if (!isUnshadowedMockitoCall(modeCall, source)) return false;
+        if (Set.of("atLeastOnce", "only").contains(modeCall.getNameAsString()) && modeCall.getArguments().isEmpty()) return true;
         if (("times".equals(modeCall.getNameAsString()) || "atLeast".equals(modeCall.getNameAsString()))
                 && modeCall.getArguments().size() == 1 && modeCall.getArgument(0).isIntegerLiteralExpr()) {
             try {
@@ -1450,6 +1920,23 @@ public final class GeneratedUnitTestSemanticValidator {
             }
         }
         return false;
+    }
+
+    private static boolean isUnshadowedMockitoCall(MethodCallExpr call, CompilationUnit source) {
+        if (!isMockitoApiCall(call, call.getNameAsString(), source)) return false;
+        if (call.getScope().isPresent()) {
+            var scope = call.getScope().get();
+            var names = scope.findAll(com.github.javaparser.ast.expr.NameExpr.class).stream()
+                    .map(n -> n.getNameAsString()).collect(java.util.stream.Collectors.toSet());
+            if (source.findAll(VariableDeclarator.class).stream().anyMatch(v -> names.contains(v.getNameAsString()))
+                    || source.findAll(Parameter.class).stream().anyMatch(p -> names.contains(p.getNameAsString()))
+                    || source.findAll(com.github.javaparser.ast.body.TypeDeclaration.class).stream().anyMatch(t -> names.contains(t.getNameAsString()))) return false;
+            if (scope.isNameExpr() && source.getImports().stream().noneMatch(i -> !i.isStatic()
+                    && (i.isAsterisk() && i.getNameAsString().equals("org.mockito")
+                        || i.getNameAsString().equals("org.mockito." + scope)))) return false;
+        }
+        return call.getScope().isPresent() || call.findAncestor(ClassOrInterfaceDeclaration.class)
+                .map(c -> c.getMethodsByName(call.getNameAsString()).isEmpty() && c.getExtendedTypes().isEmpty()).orElse(false);
     }
 
     private static Optional<ExpressionStmt> topLevelStatement(
@@ -1485,6 +1972,12 @@ public final class GeneratedUnitTestSemanticValidator {
         Optional<CompilationUnit> parsed = parseCompilationUnit(generatedTest.sourceCode());
         if (parsed.isEmpty()) return;
 
+        Set<String> knownProjectPackages = context.classes().stream()
+                .map(ClassContextDto::qualifiedName)
+                .map(GeneratedUnitTestSemanticValidator::packageName)
+                .filter(java.util.Objects::nonNull)
+                .collect(java.util.stream.Collectors.toSet());
+        microserviceRoot(productionMethod).ifPresent(knownProjectPackages::add);
         Map<String, Set<String>> knownQualifiedNames = new HashMap<>();
         Set<String> knownStaticImports = new HashSet<>();
         for (ClassContextDto clazz : context.classes()) {
@@ -1500,7 +1993,7 @@ public final class GeneratedUnitTestSemanticValidator {
                     } else if (!imported.isAsterisk()) {
                         String importedFqn = imported.getNameAsString();
                         int dot = importedFqn.lastIndexOf('.');
-                        if (dot > 0) {
+                        if (dot > 0 && isProjectPackage(importedFqn.substring(0, dot), knownProjectPackages)) {
                             String simple = importedFqn.substring(dot + 1);
                             knownQualifiedNames.computeIfAbsent(simple, ignored -> new HashSet<>())
                                     .add(importedFqn);
@@ -1509,13 +2002,6 @@ public final class GeneratedUnitTestSemanticValidator {
                 }));
             }
         }
-
-        Set<String> knownProjectPackages = context.classes().stream()
-                .map(ClassContextDto::qualifiedName)
-                .map(GeneratedUnitTestSemanticValidator::packageName)
-                .filter(java.util.Objects::nonNull)
-                .collect(java.util.stream.Collectors.toSet());
-        microserviceRoot(productionMethod).ifPresent(knownProjectPackages::add);
 
         for (var importDecl : parsed.get().getImports()) {
             if (importDecl.isStatic()) {
@@ -1591,7 +2077,7 @@ public final class GeneratedUnitTestSemanticValidator {
                 }
                 if (importedFqn.startsWith(organizationRoot + ".")
                         && !importedFqn.startsWith(serviceRoot + ".")
-                        && !usedByTarget) {
+                        && !usedByTarget && !isDeclaredInTargetModule(context, productionMethod, importedFqn)) {
                     problems.add("Import '" + importedFqn + "' belongs to another microservice. "
                             + "Only import DTOs and models under " + serviceRoot
                             + ", except clients declared under " + serviceRoot + ".client.");
@@ -1656,59 +2142,171 @@ public final class GeneratedUnitTestSemanticValidator {
                 .filter(field -> field.getAnnotationByName("InjectMocks").isPresent())
                 .anyMatch(field -> simpleType(field.getElementType().asString()).equals(sut.className()));
         if (!hasSutInjectMocks) return;
+        if (explicitSutConstructionBeforeAct(context, productionMethod, generatedTest, parsedTest.get())) return;
 
         List<String> requiredDependencies = injectedDependencyTypes(sut);
         if (requiredDependencies.isEmpty()) return;
 
         Map<String, Integer> mockCounts = new HashMap<>();
+        Set<String> uncertainSpyTypes = new HashSet<>();
         for (FieldDeclaration field : parsedTest.get().findAll(FieldDeclaration.class)) {
-            if (!field.getAnnotationByName("Mock").isPresent()) continue;
             String type = simpleType(field.getElementType().asString());
-            mockCounts.merge(type, field.getVariables().size(), Integer::sum);
+            Boolean injectable = field.getAnnotationByName("Mock").isPresent() ? Boolean.TRUE
+                    : isMockitoSpyDependency(field, parsedTest.get());
+            if (Boolean.FALSE.equals(injectable)) continue;
+            Set<String> suppliedTypes = requiredDependencies.contains(type) ? Set.of(type)
+                    : sourceAssignableDependencyTypes(field, parsedTest.get(), context, sut);
+            if (injectable == null) { uncertainSpyTypes.addAll(suppliedTypes); continue; }
+            suppliedTypes.forEach(supplied -> mockCounts.merge(supplied, field.getVariables().size(), Integer::sum));
         }
         Map<String, Integer> requiredCounts = new HashMap<>();
         requiredDependencies.forEach(type -> requiredCounts.merge(type, 1, Integer::sum));
         List<String> missing = requiredCounts.entrySet().stream()
-                .filter(entry -> mockCounts.getOrDefault(entry.getKey(), 0) < entry.getValue())
+                .filter(entry -> mockCounts.getOrDefault(entry.getKey(), 0) < entry.getValue() && !uncertainSpyTypes.contains(entry.getKey()))
                 .map(Map.Entry::getKey)
                 .sorted()
                 .toList();
         if (!missing.isEmpty()) {
-            problems.add("The Service constructor or injected fields require @Mock dependencies: "
+            problems.add("The Service constructor or injected fields require @Mock or @Spy dependencies: "
                     + String.join(", ", missing)
-                    + ". Declare every dependency as a class-level @Mock so @InjectMocks does not receive null.");
+                    + ". Declare each dependency as a class-level @Mock or a source-supported real @Spy, or construct the SUT explicitly, so @InjectMocks does not receive null.");
         }
 
+    }
+
+    /** Constructor trực tiếp trước Act thay thế đối tượng do InjectMocks khởi tạo. */
+    private static boolean explicitSutConstructionBeforeAct(UnitTestContextDto context, MethodContextDto production,
+            GeneratedUnitTestDto generated, CompilationUnit test) {
+        var api = new GeneratedTestApiValidator(context);
+        var owner = api.declaration(production.classQualifiedName());
+        // Constructor không chứng minh field/setter injection đã được khởi tạo.
+        if (owner == null || !owner.getExtendedTypes().isEmpty() || owner.findAll(com.github.javaparser.ast.expr.AnnotationExpr.class).stream()
+                .anyMatch(a -> Set.of("Autowired", "Inject", "Resource").contains(a.getName().getIdentifier()))) return false;
+        var fields = test.findAll(FieldDeclaration.class).stream().filter(f -> f.getAnnotationByName("InjectMocks").isPresent()
+                && f.getElementType().isClassOrInterfaceType()
+                && production.classQualifiedName().equals(api.qualifiedType(f.getElementType().asClassOrInterfaceType(), test))).toList();
+        var method = findTestMethod(test, generated.testMethodName()).orElse(null);
+        if (fields.size() != 1 || fields.get(0).getVariables().size() != 1 || method == null || method.getBody().isEmpty()) return false;
+        var field = fields.get(0).getVariable(0);
+        var assignments = method.findAll(AssignExpr.class).stream()
+                .filter(a -> api.expressionType(a.getTarget(), test) == field.getType()).toList();
+        if (assignments.size() != 1) return false;
+        var assignment = assignments.get(0);
+        if (assignment.getOperator() != AssignExpr.Operator.ASSIGN || !assignment.getValue().isObjectCreationExpr()
+                || !isSutCreation(assignment.getValue().asObjectCreationExpr(), test, production.classQualifiedName())
+                || assignment.findAncestor(ExpressionStmt.class).filter(s -> s.getExpression() == assignment
+                        && s.getParentNode().filter(method.getBody().get()::equals).isPresent()).isEmpty()) return false;
+        var calls = method.findAll(MethodCallExpr.class).stream().filter(c -> c.getScope().isPresent()
+                && api.expressionType(c.getScope().get(), test) == field.getType()).toList();
+        return calls.stream().anyMatch(c -> c.getNameAsString().equals(production.methodName()))
+                && assignment.getRange().isPresent() && calls.stream().allMatch(c -> c.getRange().isPresent()
+                        && assignment.getRange().get().end.isBefore(c.getRange().get().begin));
+    }
+
+    /** Chỉ tính kiểu cha khi source chứng minh được quan hệ; không đoán từ hậu tố Impl. */
+    private static Set<String> sourceAssignableDependencyTypes(
+            FieldDeclaration field, CompilationUnit test, UnitTestContextDto context, ClassContextDto sut) {
+        Set<String> supplied = new HashSet<>();
+        if (!field.getElementType().isClassOrInterfaceType()) return supplied;
+        supplied.add(simpleType(field.getElementType().asString()));
+        var declarations = new ArrayList<>(test.findAll(ClassOrInterfaceDeclaration.class));
+        context.classes().forEach(type -> serviceDeclaration(type).ifPresent(declarations::add));
+        var service = serviceDeclaration(sut);
+        if (service.isEmpty()) return supplied;
+        Map<String, Set<String>> requiredBindings = new HashMap<>();
+        injectedDependencyReferences(service.get()).forEach(reference -> {
+            String identity = dependencyTypeIdentity(reference, declarations);
+            if (identity != null) requiredBindings.computeIfAbsent(reference.getNameAsString(), ignored -> new HashSet<>()).add(identity);
+        });
+        List<ClassOrInterfaceType> pending = new ArrayList<>();
+        pending.add(field.getElementType().asClassOrInterfaceType());
+        Set<String> visited = new HashSet<>();
+        for (int index = 0; index < pending.size(); index++) {
+            var reference = pending.get(index);
+            String identity = dependencyTypeIdentity(reference, declarations);
+            if (identity == null || !visited.add(identity)) continue;
+            // Hai interface trùng tên ở package khác nhau không thể thay thế cho nhau.
+            if (requiredBindings.getOrDefault(reference.getNameAsString(), Set.of()).equals(Set.of(identity))) {
+                supplied.add(reference.getNameAsString());
+            }
+            var candidates = declarations.stream().filter(d -> d.getFullyQualifiedName().filter(identity::equals).isPresent()).toList();
+            if (candidates.size() != 1) continue;
+            pending.addAll(candidates.get(0).getExtendedTypes());
+            pending.addAll(candidates.get(0).getImplementedTypes());
+        }
+        return supplied;
+    }
+
+    private static String dependencyTypeIdentity(ClassOrInterfaceType reference, List<ClassOrInterfaceDeclaration> declarations) {
+        var unit = reference.findCompilationUnit().orElse(null);
+        if (unit == null) return null;
+        String name = reference.getNameWithScope();
+        if (reference.getScope().isPresent()) return name;
+        var local = unit.findAll(ClassOrInterfaceDeclaration.class).stream()
+                .filter(type -> type.getNameAsString().equals(name))
+                .flatMap(type -> type.getFullyQualifiedName().stream()).distinct().toList();
+        if (!local.isEmpty()) return local.size() == 1 ? local.get(0) : null;
+        var imports = unit.getImports().stream().filter(i -> !i.isStatic() && !i.isAsterisk()
+                && i.getName().getIdentifier().equals(name)).map(i -> i.getNameAsString()).distinct().toList();
+        if (!imports.isEmpty()) return imports.size() == 1 ? imports.get(0) : null;
+        String packagePrefix = unit.getPackageDeclaration().map(p -> p.getNameAsString() + ".").orElse("");
+        if (declarations.stream().flatMap(type -> type.getFullyQualifiedName().stream())
+                .anyMatch(fqn -> fqn.equals(packagePrefix + name))) return packagePrefix + name;
+        var candidates = declarations.stream().flatMap(type -> type.getFullyQualifiedName().stream())
+                .filter(fqn -> unit.getImports().stream().anyMatch(i -> !i.isStatic()
+                        && i.isAsterisk() && fqn.equals(i.getNameAsString() + "." + name))).distinct().toList();
+        return candidates.size() == 1 ? candidates.get(0) : null;
+    }
+
+    /** null khi binding còn phụ thuộc type kế thừa; không suy thành dependency bị thiếu. */
+    static Boolean isMockitoSpyDependency(FieldDeclaration field, CompilationUnit unit) {
+        if (field.getAnnotations().stream().anyMatch(a -> a.getNameAsString().equals("org.mockito.Spy"))) return true;
+        if (field.getAnnotations().stream().noneMatch(a -> a.getNameAsString().equals("Spy"))) return false;
+        boolean shadowed = field.stream(Node.TreeTraversal.PARENTS)
+                .filter(n -> n instanceof com.github.javaparser.ast.body.TypeDeclaration<?>)
+                .map(n -> (com.github.javaparser.ast.body.TypeDeclaration<?>) n)
+                .anyMatch(owner -> owner.getMembers().stream().anyMatch(member ->
+                        member instanceof com.github.javaparser.ast.body.TypeDeclaration<?> type && type.getNameAsString().equals("Spy"))
+                        );
+        boolean imported = unit.getImports().stream().anyMatch(i -> !i.isStatic()
+                && (i.getNameAsString().equals("org.mockito.Spy") || i.isAsterisk() && i.getNameAsString().equals("org.mockito")))
+                && unit.getImports().stream().noneMatch(i -> !i.isStatic() && !i.isAsterisk()
+                        && i.getName().getIdentifier().equals("Spy") && !i.getNameAsString().equals("org.mockito.Spy"));
+        if (!imported || shadowed) return false;
+        boolean inherited = field.stream(Node.TreeTraversal.PARENTS).filter(ClassOrInterfaceDeclaration.class::isInstance)
+                .map(ClassOrInterfaceDeclaration.class::cast)
+                .anyMatch(type -> !type.getExtendedTypes().isEmpty() || !type.getImplementedTypes().isEmpty());
+        return inherited ? null : Boolean.TRUE;
     }
 
     private static List<String> injectedDependencyTypes(ClassContextDto sut) {
         Optional<ClassOrInterfaceDeclaration> declaration = serviceDeclaration(sut);
         if (declaration.isEmpty()) return List.of();
-        java.util.LinkedHashSet<String> dependencies = new java.util.LinkedHashSet<>();
-        List<ConstructorDeclaration> constructors = declaration.get().getConstructors();
-        constructors.stream()
+        return injectedDependencyReferences(declaration.get()).stream().map(reference -> simpleType(reference.asString()))
+                .filter(type -> !isConfigurationType(type)).distinct().toList();
+    }
+
+    private static List<ClassOrInterfaceType> injectedDependencyReferences(ClassOrInterfaceDeclaration declaration) {
+        List<ClassOrInterfaceType> dependencies = new ArrayList<>();
+        declaration.getConstructors().stream()
                 .max(java.util.Comparator.comparingInt(constructor -> constructor.getParameters().size()))
                 .ifPresent(constructor -> constructor.getParameters().stream()
                         .filter(parameter -> parameter.getAnnotationByName("Value").isEmpty())
-                        .forEach(parameter -> addMockableDependency(
-                                dependencies, simpleType(parameter.getType().asString()))));
+                        .map(Parameter::getType).filter(type -> type.isClassOrInterfaceType())
+                        .forEach(type -> dependencies.add(type.asClassOrInterfaceType())));
 
-        boolean usesRequiredArgsConstructor = declaration.get().getAnnotationByName("RequiredArgsConstructor").isPresent();
-        for (FieldDeclaration field : declaration.get().getFields()) {
+        boolean usesRequiredArgsConstructor = declaration.getAnnotationByName("RequiredArgsConstructor").isPresent();
+        for (FieldDeclaration field : declaration.getFields()) {
             boolean requiredByLombok = usesRequiredArgsConstructor
                     && (field.isFinal() || field.getAnnotationByName("NonNull").isPresent());
             if (field.isStatic() || field.getAnnotationByName("Value").isPresent()
                     || !(field.getAnnotationByName("Autowired").isPresent() || requiredByLombok)) continue;
             for (VariableDeclarator variable : field.getVariables()) {
                 if (requiredByLombok && variable.getInitializer().isPresent()) continue;
-                addMockableDependency(dependencies, simpleType(field.getElementType().asString()));
+                if (field.getElementType().isClassOrInterfaceType()) dependencies.add(field.getElementType().asClassOrInterfaceType());
             }
         }
         return List.copyOf(dependencies);
-    }
-
-    private static void addMockableDependency(java.util.Set<String> dependencies, String type) {
-        if (!isConfigurationType(type)) dependencies.add(type);
     }
 
     private static boolean isConfigurationType(String type) {
@@ -1726,6 +2324,23 @@ public final class GeneratedUnitTestSemanticValidator {
                 .map(ClassContextDto::validationSourceCode)
                 .filter(java.util.Objects::nonNull)
                 .anyMatch(source -> sourceContainsExactQualifiedName(source, importedFqn));
+    }
+
+    private static boolean isDeclaredInTargetModule(UnitTestContextDto context, MethodContextDto method, String fqn) {
+        var owners = context.classes().stream().filter(c -> method.classQualifiedName().equals(c.qualifiedName())).toList();
+        var declarations = context.classes().stream().filter(c -> fqn.equals(c.qualifiedName())).toList();
+        if (owners.size() != 1 || declarations.size() != 1) return false;
+        var owner = owners.get(0);
+        var declaration = declarations.get(0);
+        if (owner.filePath() == null || declaration.filePath() == null
+                || !owner.filePath().replace('\\', '/').contains("src/main/java/")
+                || !declaration.filePath().replace('\\', '/').contains("src/main/java/")) return false;
+        // Package con không phải ranh giới microservice; chỉ chấp nhận declaration đã kiểm chứng cùng module.
+        return com.greytest.service.ServiceScopeResolver.modulePath(owner.filePath()).equals(
+                com.greytest.service.ServiceScopeResolver.modulePath(declaration.filePath()))
+                && parseCompilationUnit(declaration.validationSourceCode()).stream()
+                        .flatMap(unit -> unit.findAll(com.github.javaparser.ast.body.TypeDeclaration.class).stream())
+                        .anyMatch(type -> type.getFullyQualifiedName().filter(fqn::equals).isPresent());
     }
 
     private static boolean sourceContainsExactQualifiedName(String source, String qualifiedName) {

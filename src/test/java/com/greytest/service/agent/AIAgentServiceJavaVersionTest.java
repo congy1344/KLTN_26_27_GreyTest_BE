@@ -43,6 +43,9 @@ class AIAgentServiceJavaVersionTest {
                 <project><properties><java.version>17</java.version></properties><dependencies>
                 <dependency><groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter</artifactId></dependency></dependencies></project>
                 """);
+        Path candidateSource = candidate.resolve("src/main/java/demo/GeneratedService.java");
+        java.nio.file.Files.createDirectories(candidateSource.getParent());
+        java.nio.file.Files.writeString(candidateSource, context().classes().get(0).sourceCode());
         var projects = mock(com.greytest.repository.ProjectRepository.class);
         var project = new com.greytest.entity.Project();
         project.setStoragePath(baseline.toString());
@@ -62,6 +65,7 @@ class AIAgentServiceJavaVersionTest {
         var result = agent.generateSnapshotUnitTests(1L, java.util.Set.of(1L), candidate);
 
         assertThat(result.unitTests()).hasSize(1);
+        assertThat(result.unitTests().get(0).sourceCode()).startsWith("// GREYTEST_SOURCE_V1 ");
         assertThat(prompt.get()).contains("declares Java 17", "JUnit 5 only").doesNotContain("declares Java 8", "JUnit 4 only");
     }
 

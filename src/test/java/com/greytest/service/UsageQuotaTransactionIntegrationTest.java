@@ -15,6 +15,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import com.greytest.entity.AuthUser;
 import com.greytest.entity.enums.UserRole;
+import com.greytest.entity.enums.UserTier;
 import com.greytest.repository.AuthUserRepository;
 import com.greytest.repository.UsageQuotaRepository;
 import com.greytest.repository.UserActivityLogRepository;
@@ -23,6 +24,7 @@ import com.greytest.repository.UserActivityLogRepository;
 class UsageQuotaTransactionIntegrationTest {
 
     @Autowired private UsageQuotaService service;
+    @Autowired private UserService userService;
     @Autowired private UsageQuotaRepository quotas;
     @Autowired private UserActivityLogRepository activities;
     @Autowired private AuthUserRepository users;
@@ -56,5 +58,22 @@ class UsageQuotaTransactionIntegrationTest {
 
         assertThat(quotas.findByUserId(user.getId())).get().extracting("quotaUsed").isEqualTo(1);
         assertThat(activities.countByUserId(user.getId())).isEqualTo(1);
+    }
+
+    @Test
+    void cancellationPersistsFreeTierQuotaAndAuditTogether() {
+        user.setTier(UserTier.PLUS);
+        users.save(user);
+        service.upgradeToPlus(user.getId());
+        service.consumeLlmCall(user.getId(), null, 25, Map.of());
+
+        var result = userService.cancelSubscription(user);
+
+        assertThat(result.tier()).isEqualTo(UserTier.FREE);
+        assertThat(result.used()).isEqualTo(25);
+        assertThat(users.findById(user.getId())).get().extracting("tier").isEqualTo(UserTier.FREE);
+        assertThat(userService.currentQuota(user).used()).isEqualTo(25);
+        assertThat(quotas.findByUserId(user.getId())).get().extracting("quotaUsed").isEqualTo(25);
+        assertThat(activities.countByUserId(user.getId())).isEqualTo(2);
     }
 }

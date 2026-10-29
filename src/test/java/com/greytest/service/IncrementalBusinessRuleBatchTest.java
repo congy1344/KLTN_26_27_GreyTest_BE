@@ -78,7 +78,8 @@ class IncrementalBusinessRuleBatchTest {
         JavaMethodRepository methods = mock(JavaMethodRepository.class);
         AnalysisService analysis = mock(AnalysisService.class);
         AIAgentService agent = mock(AIAgentService.class);
-        GenerationContextBuilder contexts = new GenerationContextBuilder(analysis, null, null, null, null, null, null, null);
+        GenerationContextBuilder contexts = new GenerationContextBuilder(analysis, null,
+                mock(com.greytest.service.analysis.ExistingTestService.class), null, null, null, null, null, projects);
         Project project = new Project();
         project.setId(248L);
         when(projects.findById(248L)).thenReturn(Optional.of(project));

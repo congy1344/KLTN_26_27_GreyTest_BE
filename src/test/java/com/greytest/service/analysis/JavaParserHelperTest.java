@@ -108,7 +108,7 @@ class JavaParserHelperTest {
     void testParseDirectory_NoJavaFiles_ThrowsSourceAnalysisException(@TempDir Path sourceDir) {
         assertThatThrownBy(() -> parser.parseDirectory(sourceDir))
                 .isInstanceOf(SourceAnalysisException.class)
-                .hasMessageContaining("Khong tim thay file .java");
+                .hasMessageContaining("Không tìm thấy file .java");
     }
 
     @Test
@@ -269,7 +269,7 @@ class JavaParserHelperTest {
 
         assertThatThrownBy(() -> JavaParserHelper.cleanMethodSource(method))
                 .isInstanceOf(SourceAnalysisException.class)
-                .hasMessageContaining("Khong the doc source");
+                .hasMessageContaining("Không thể đọc source");
     }
 
     @Test

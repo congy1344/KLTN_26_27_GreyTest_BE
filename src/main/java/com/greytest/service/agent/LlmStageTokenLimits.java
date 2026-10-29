@@ -39,7 +39,7 @@ public class LlmStageTokenLimits {
     }
 
     private static int positive(int value, String name) {
-        if (value <= 0) throw new IllegalArgumentException("Gioi han token " + name + " phai lon hon 0.");
+        if (value <= 0) throw new IllegalArgumentException("Giới hạn token " + name + " phải lớn hơn 0.");
         return value;
     }
 }

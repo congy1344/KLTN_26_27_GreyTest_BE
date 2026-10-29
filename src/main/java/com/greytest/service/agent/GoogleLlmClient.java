@@ -136,7 +136,7 @@ public class GoogleLlmClient implements LlmClient {
     @Override
     public String complete(String prompt) {
         if (apiKeys.isEmpty()) {
-            throw new LlmResponseException("LLM_API_KEY hoac LLM_API_KEY1 chua duoc cau hinh.");
+            throw new LlmResponseException("LLM_API_KEY hoặc LLM_API_KEY1 chưa được cấu hình.");
         }
         String body = requestBody(prompt);
         // Mỗi worker giữ một điểm bắt đầu khác nhau để không dồn request đồng thời vào cùng key.
@@ -159,7 +159,7 @@ public class GoogleLlmClient implements LlmClient {
                     .build();
             try {
                 long startedAt = System.nanoTime();
-                HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+                HttpResponse<String> response = LlmHttpTransport.send(httpClient, request, timeout);
                 int status = response.statusCode();
                 if (status >= 200 && status < 300) {
                     JsonNode root = responseRoot(response.body());
@@ -184,10 +184,10 @@ public class GoogleLlmClient implements LlmClient {
                     earliestCooldown = Math.min(earliestCooldown, appliedDeadline);
                     continue;
                 }
-                throw new LlmResponseException("Google Gemini API loi HTTP "
+                throw new LlmResponseException("Google Gemini API lỗi HTTP "
                         + status + ": " + snippet(response.body()), status == 429 || status >= 500);
             } catch (IOException exception) {
-                throw new LlmResponseException("Khong goi duoc Google Gemini API.", exception, true);
+                throw new LlmResponseException("Không gọi được Google Gemini API.", exception, true);
             } catch (InterruptedException exception) {
                 Thread.currentThread().interrupt();
                 throw new LlmResponseException("Bi gian doan khi goi Google Gemini API.", exception);
@@ -196,12 +196,12 @@ public class GoogleLlmClient implements LlmClient {
         if (lastQuotaResponse != null || earliestCooldown != Long.MAX_VALUE) {
             long remainingCooldown = Math.max(earliestCooldown - System.currentTimeMillis(), 0);
             throw new LlmResponseException(
-                    "Google Gemini API loi HTTP 429: "
-                            + (lastQuotaResponse == null ? "Tat ca API key dang trong thoi gian cho quota." : snippet(lastQuotaResponse)),
+                    "Google Gemini API lỗi HTTP 429: "
+                            + (lastQuotaResponse == null ? "Tất cả API key đang trong thời gian chờ quota." : snippet(lastQuotaResponse)),
                     true,
                     remainingCooldown);
         }
-        throw new LlmResponseException("Khong co Google Gemini API key kha dung.");
+        throw new LlmResponseException("Không có Google Gemini API key khả dụng.");
     }
 
     private long retryAfterMillis(HttpResponse<String> response) {
@@ -237,7 +237,7 @@ public class GoogleLlmClient implements LlmClient {
         try {
             return objectMapper.writeValueAsString(root);
         } catch (JsonProcessingException exception) {
-            throw new LlmResponseException("Khong tao duoc request Google Gemini.", exception);
+            throw new LlmResponseException("Không tạo được request Google Gemini.", exception);
         }
     }
 
@@ -375,7 +375,7 @@ public class GoogleLlmClient implements LlmClient {
         try {
             return objectMapper.readTree(responseBody);
         } catch (JsonProcessingException exception) {
-            throw new LlmResponseException("Google Gemini response khong phai JSON hop le.", exception);
+            throw new LlmResponseException("Google Gemini response không phải JSON hợp lệ.", exception, true);
         }
     }
 
@@ -398,9 +398,9 @@ public class GoogleLlmClient implements LlmClient {
             if (!outputText.isBlank()) {
                 return outputText;
             }
-            throw new LlmResponseException("Google Gemini response khong co text output: " + snippet(responseBody));
+            throw new LlmResponseException("Google Gemini response không có text output: " + snippet(responseBody), true);
         } catch (JsonProcessingException exception) {
-            throw new LlmResponseException("Google Gemini response khong phai JSON hop le.", exception);
+            throw new LlmResponseException("Google Gemini response không phải JSON hợp lệ.", exception, true);
         }
     }
 

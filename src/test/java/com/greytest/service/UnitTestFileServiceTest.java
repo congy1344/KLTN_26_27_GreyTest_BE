@@ -21,6 +21,20 @@ class UnitTestFileServiceTest {
 
     private final UnitTestFileService service = new UnitTestFileService();
 
+    @Test
+    void mergePreservesSourceVersionsFromEveryRecord() {
+        String first = "// GREYTEST_SOURCE_V1 " + "a".repeat(64) + " c3JjL21haW4vamF2YS9BLmphdmE=\n"
+                + "package com.example; class UserServiceTest { void first() {} }";
+        String second = "// GREYTEST_SOURCE_V1 " + "b".repeat(64) + " c3JjL21haW4vamF2YS9CLmphdmE=\n"
+                + "package com.example; class UserServiceTest { void second() {} }";
+
+        String merged = service.mergeByClass(List.of(test(1L, "first", first), test(2L, "second", second)))
+                .get(0).sourceCode();
+
+        assertThat(merged).contains("GREYTEST_SOURCE_V1 " + "a".repeat(64),
+                "GREYTEST_SOURCE_V1 " + "b".repeat(64));
+    }
+
     private UnitTest test(Long caseId, String methodName, String source) {
         UnitTest unitTest = new UnitTest();
         unitTest.setTestCaseId(caseId);
@@ -85,7 +99,7 @@ class UnitTestFileServiceTest {
                 test(1L, "a", "khong phai java {{{"),
                 test(2L, "b", "cung khong phai java"))))
                 .isInstanceOf(com.greytest.exception.StorageException.class)
-                .hasMessageContaining("Khong gop duoc Unit Test");
+                .hasMessageContaining("Không gộp được Unit Test");
     }
 
     @Test
@@ -211,27 +225,30 @@ class UnitTestFileServiceTest {
     }
 
     @Test
-    void rejectsConflictingStaticImports() {
+    void separatesConflictingStaticImportsWithoutChangingTheirBindings() {
         String source1 = "package com.example; import static a.Assertions.assertThat; "
                 + "class UserServiceTest { void first(){ assertThat(true); } }";
         String source2 = "package com.example; import static b.Assertions.assertThat; "
                 + "class UserServiceTest { void second(){ assertThat(true); } }";
 
-        org.assertj.core.api.Assertions.assertThatThrownBy(() -> service.mergeByClass(List.of(
-                test(1L, "first", source1), test(2L, "second", source2))))
-                .isInstanceOf(com.greytest.exception.StorageException.class)
-                .hasMessageContaining("static");
+        var files = service.mergeByClass(List.of(test(1L, "first", source1), test(2L, "second", source2)));
+        assertThat(files).hasSize(2);
+        assertThat(files.get(0).sourceCode()).contains("import static a.Assertions.assertThat;")
+                .doesNotContain("import static b.Assertions.assertThat;");
+        assertThat(files.get(1).sourceCode()).contains("import static b.Assertions.assertThat;")
+                .doesNotContain("import static a.Assertions.assertThat;");
     }
 
     @Test
-    void giuLaiHelperMethodOverloadKhacSignature() {
+    void preservesHelperOverloadsInSeparateFixtureFiles() {
         String source1 = "package com.example; class UserServiceTest { Object build(){return null;} void first(){} }";
         String source2 = "package com.example; class UserServiceTest { Object build(String id){return null;} void second(){} }";
 
-        var source = service.mergeByClass(List.of(
-                test(1L, "first", source1), test(2L, "second", source2))).get(0).sourceCode();
+        var files = service.mergeByClass(List.of(test(1L, "first", source1), test(2L, "second", source2)));
 
-        assertThat(source).contains("build()", "build(String id)", "void second()");
+        assertThat(files).hasSize(2);
+        assertThat(files.get(0).sourceCode()).contains("build()", "void first()").doesNotContain("build(String id)");
+        assertThat(files.get(1).sourceCode()).contains("build(String id)", "void second()").doesNotContain("void first()");
     }
 
     @Test
@@ -290,20 +307,18 @@ class UnitTestFileServiceTest {
 
         assertThat(entries).containsKeys(
                 "src/test/java/com/example/UserServiceTest.java",
-                "src/test/resources/mockito-extensions/org.mockito.plugins.MockMaker",
                 "run-greytest-coverage.cmd",
                 "run-greytest-coverage.sh",
                 "README-GREYTEST.txt");
-        assertThat(entries.get("src/test/resources/mockito-extensions/org.mockito.plugins.MockMaker"))
-                .isEqualTo("mock-maker-subclass\n");
+        assertThat(entries).doesNotContainKey("src/test/resources/mockito-extensions/org.mockito.plugins.MockMaker");
         assertThat(entries.get("run-greytest-coverage.cmd"))
                 .contains("jacoco-maven-plugin:0.8.15:prepare-agent")
                 .contains("jacoco-maven-plugin:0.8.15:report")
-                .contains("cd /d \"%~dp0\"", "call %MAVEN_COMMAND%", "%*")
+                .contains("cd /d \"%~dp0\"", "call \"%MAVEN_COMMAND%\"", "%*")
                 .contains("-Djacoco.propertyName=greytestJacocoArgLine")
                 .contains("-DargLine=@{greytestJacocoArgLine} %GREYTEST_JVM_ARGS%")
                 .contains("set \"GREYTEST_JVM_ARGS=-Djdk.attach.allowAttachSelf=true -XX:+EnableDynamicAgentLoading\"")
-                .contains("Phat hien module con cua du an Maven multi-module")
+                .contains("Phát hiện module con của dự án Maven multi-module")
                 .contains("clean test-compile")
                 .contains("-DfailIfNoTests=true")
                 .contains("src\\test\\java\\*.java", "target\\test-classes\\*.class")
@@ -313,8 +328,8 @@ class UnitTestFileServiceTest {
                 .contains("--init-script", "--tests \"com.example.UserServiceTest\"")
                 .contains("clean test --tests \"com.example.UserServiceTest\" jacocoTestReport")
                 .contains("GREYTEST_JUNCTION_RUN", "New-Item -ItemType Junction")
-                .contains("co dau [vi du: mau, sua], hay dung junction ASCII")
-                .doesNotContain("co dau (vi du: mau, sua)");
+                .contains("có dấu [ví dụ: mẫu, sửa], hãy dùng junction ASCII")
+                .doesNotContain("có dấu (ví dụ: mẫu, sửa)", "co dau (vi du: mau, sua)");
         assertThat(entries.get("run-greytest-coverage.sh"))
                 .contains("jacoco-maven-plugin:0.8.15:prepare-agent")
                 .contains("-Djacoco.propertyName=greytestJacocoArgLine")
@@ -329,11 +344,89 @@ class UnitTestFileServiceTest {
                 .contains("--init-script", "--tests \"com.example.UserServiceTest\"");
         assertThat(entries.get("greytest-jacoco.init.gradle"))
                 .contains("jacoco", "jacocoTestReport", "xml.required = true",
-                        "reports/jacoco/test/jacocoTestReport.xml");
+                        "reports/jacoco/test/jacocoTestReport.xml")
+                .contains("allprojects { project ->", "project.plugins.withId('java')",
+                        "project.apply plugin: 'jacoco'", "project.plugins.withId('jacoco')",
+                        "project.tasks.named('jacocoTestReport')", "project.layout.buildDirectory.file");
+        assertThat(entries.get("run-greytest-coverage.cmd"))
+                .contains("set \"GT_JUNC_BASE=%TEMP%\\greytest-junctions\"")
+                .contains("ERROR: Could not create temporary ASCII junction")
+                .doesNotContainPattern("(?<!\\r)\\n")
+                .doesNotContain("set \"GT_JUNC_BASE=%SystemDrive%\\tmp\"");
         assertThat(entries.get("README-GREYTEST.txt"))
-                .contains("run-greytest-coverage.cmd", "src/test/java", "GREYTEST_JVM_ARGS", "mock-maker-subclass");
+                .contains("run-greytest-coverage.cmd", "src/test/java", "GREYTEST_JVM_ARGS")
+                .doesNotContain("mock-maker-subclass");
         assertThat(entries.get("run-greytest-coverage.cmd"))
                 .doesNotContain("(where pom.xml is located)");
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void windowsScriptFindsWorkspaceMavenAndPreservesItThroughJunction(boolean unicode, @org.junit.jupiter.api.io.TempDir Path workspace) throws Exception {
+        Assumptions.assumeTrue(System.getProperty("os.name").toLowerCase().contains("win"));
+        Path module = workspace.resolve(unicode ? "mẫu kiểm thử" : "sample-module");
+        Path bin = workspace.resolve(".tools/apache-maven-3.9.10/bin");
+        Files.createDirectories(bin); Files.createDirectories(module.resolve("src/test/java"));
+        var file = new com.greytest.dto.UnitTestFileDto("src/test/java/SampleTest.java", "SampleTest", "", 1,
+                List.of("TC-001"), "class SampleTest {}");
+        Files.writeString(module.resolve("src/test/java/SampleTest.java"), file.sourceCode());
+        Files.writeString(module.resolve("pom.xml"), "<project/>");
+        Files.writeString(module.resolve("run-greytest-coverage.cmd"), zipEntries(service.createCoverageArchive(List.of(file))).get("run-greytest-coverage.cmd"));
+        Files.writeString(bin.resolve("mvn.cmd"), """
+                @echo off
+                echo FAKE_LOCAL_MAVEN junction=%GREYTEST_JUNCTION_RUN%
+                if not exist target\\test-classes mkdir target\\test-classes
+                echo compiled>target\\test-classes\\SampleTest.class
+                if not exist target\\site\\jacoco mkdir target\\site\\jacoco
+                echo report>target\\site\\jacoco\\jacoco.xml
+                exit /b 0
+                """);
+        ProcessBuilder builder = new ProcessBuilder("cmd.exe", "/d", "/c", module.resolve("run-greytest-coverage.cmd").toString())
+                .redirectErrorStream(true);
+        builder.environment().remove("GREYTEST_JUNCTION_RUN");
+        String systemRoot = System.getenv("SystemRoot");
+        builder.environment().put("PATH", systemRoot + "\\System32;" + systemRoot + "\\System32\\WindowsPowerShell\\v1.0");
+        Process process = builder.start();
+        try {
+            assertThat(process.waitFor(30, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+            String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+            assertThat(process.exitValue()).withFailMessage(output).isZero();
+            assertThat(output).contains("FAKE_LOCAL_MAVEN", "SUCCESS").doesNotContain("Maven was not found", "was unexpected at this time");
+            if (unicode) assertThat(output).contains("Junction", "junction=1");
+            assertThat(module.resolve("target/site/jacoco/jacoco.xml")).exists();
+            if (unicode) {
+                Path junctions = Path.of(System.getenv("TEMP"), "greytest-junctions");
+                assertThat(output).contains(junctions.toString());
+                String junctionPath = output.lines().filter(line -> line.contains("Chuyển hướng thực thi qua Junction:"))
+                        .findFirst().orElseThrow().split("\"")[1];
+                assertThat(Path.of(junctionPath)).doesNotExist();
+            }
+        } finally { process.destroyForcibly(); }
+    }
+
+    @Test
+    void windowsScriptStopsWhenTemporaryJunctionCannotBeCreated(
+            @org.junit.jupiter.api.io.TempDir Path workspace) throws Exception {
+        Assumptions.assumeTrue(System.getProperty("os.name").toLowerCase().contains("win"));
+        Path module = Files.createDirectories(workspace.resolve("source mẫu"));
+        Path unusableTemp = workspace.resolve("not-a-directory");
+        Files.writeString(unusableTemp, "file blocks directory creation");
+        var file = new com.greytest.dto.UnitTestFileDto("src/test/java/SampleTest.java", "SampleTest", "", 1,
+                List.of("TC-001"), "class SampleTest {}");
+        Files.writeString(module.resolve("run-greytest-coverage.cmd"),
+                zipEntries(service.createCoverageArchive(List.of(file))).get("run-greytest-coverage.cmd"));
+        ProcessBuilder builder = new ProcessBuilder("cmd.exe", "/d", "/c",
+                module.resolve("run-greytest-coverage.cmd").toString()).redirectErrorStream(true);
+        builder.environment().remove("GREYTEST_JUNCTION_RUN");
+        builder.environment().put("TEMP", unusableTemp.toString());
+        Process process = builder.start();
+        try {
+            assertThat(process.waitFor(30, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+            String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+            assertThat(process.exitValue()).withFailMessage(output).isNotZero();
+            assertThat(output).contains("ERROR: Could not create temporary ASCII junction")
+                    .doesNotContain("Running Gradle", "Running tests", "No pom.xml");
+        } finally { process.destroyForcibly(); }
     }
 
     @Test
@@ -352,7 +445,7 @@ class UnitTestFileServiceTest {
     void archiveRongBiTuChoiDeKhongTaiZipChacChanChayThatBai() {
         org.assertj.core.api.Assertions.assertThatThrownBy(() -> service.createCoverageArchive(List.of()))
                 .isInstanceOf(com.greytest.exception.StorageException.class)
-                .hasMessageContaining("Khong co Unit Test de dong goi");
+                .hasMessageContaining("Không có Unit Test để đóng gói");
     }
 
     @Test
@@ -372,10 +465,12 @@ class UnitTestFileServiceTest {
         assertThat(output).doesNotContain("was unexpected at this time");
     }
 
-    @Test
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
     void windowsScriptReportsGradleFailureWithoutBatchParserError(
-            @org.junit.jupiter.api.io.TempDir Path module) throws Exception {
+            boolean unicode, @org.junit.jupiter.api.io.TempDir Path workspace) throws Exception {
         Assumptions.assumeTrue(System.getProperty("os.name").toLowerCase().contains("win"));
+        Path module = Files.createDirectories(workspace.resolve(unicode ? "source mẫu" : "source"));
         var file = new com.greytest.dto.UnitTestFileDto(
                 "src/test/java/UserServiceTest.java", "UserServiceTest", "", 1,
                 List.of("TC-001"), "class UserServiceTest {}");
@@ -388,14 +483,19 @@ class UnitTestFileServiceTest {
                 .get("run-greytest-coverage.cmd"));
         ProcessBuilder builder = new ProcessBuilder("cmd.exe", "/d", "/c", script.toString())
                 .redirectErrorStream(true);
-        builder.environment().put("GREYTEST_JUNCTION_RUN", "1");
+        builder.environment().remove("GREYTEST_JUNCTION_RUN");
         Process process = builder.start();
         try {
             assertThat(process.waitFor(15, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
             String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
             assertThat(process.exitValue()).isEqualTo(1);
-            assertThat(output).contains("Gradle project or generated tests", "co dau [vi du: mau, sua]")
+            assertThat(output).contains("Gradle project or generated tests", "có dấu [ví dụ: mẫu, sửa]")
                     .doesNotContain("was unexpected at this time");
+            if (unicode) {
+                String junctionPath = output.lines().filter(line -> line.contains("Chuyển hướng thực thi qua Junction:"))
+                        .findFirst().orElseThrow().split("\"")[1];
+                assertThat(Path.of(junctionPath)).doesNotExist();
+            }
         } finally {
             process.destroyForcibly();
         }
@@ -408,7 +508,7 @@ class UnitTestFileServiceTest {
 
         org.assertj.core.api.Assertions.assertThatThrownBy(
                 () -> service.createCoverageArchive(List.of(mergedFile)))
-                .hasMessageContaining("Duong dan Unit Test khong hop le");
+                .hasMessageContaining("Đường dẫn Unit Test không hợp lệ");
     }
 
     @Test

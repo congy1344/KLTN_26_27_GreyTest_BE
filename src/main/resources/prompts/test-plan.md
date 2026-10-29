@@ -19,6 +19,8 @@ Rules:
 - rule_id is the anchor Business Rule id: use the smallest id in covered_rule_ids.
 - Do not create one plan per Business Rule when one scenario can cover several rules.
 - Do not invent method_id or rule_id. Do not create redundant plans.
+- Read the complete production class, including dependency declarations. Plans describe observable business behavior, not a mandatory mocking technique. Do not require mocking internally created final/static collaborators, a fixed salted/random hash, or private logger interactions merely because those implementation details appear in the method. Preserve real logging requirements only when they are explicitly part of the approved business rule and observable with the confirmed tooling.
+- Follow reached helpers and declared return/field types before choosing outcomes. Primitive fields cannot retain null: a missing Map key unboxed into a primitive throws unless the actual source provides a fallback. Do not promise null or an invented default value in a plan.
 - Keep title under 60 characters and description under 140 characters.
 - Use test_type: HAPPY_PATH, BOUNDARY, EXCEPTION, EDGE.
 

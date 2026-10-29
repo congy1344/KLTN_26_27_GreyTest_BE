@@ -11,12 +11,35 @@ import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import com.greytest.dto.ErrorResponse;
 import com.greytest.service.agent.LlmResponseException;
+import com.greytest.service.LlmBatchExecutor;
+import com.greytest.service.generation.GenerationConflictException;
 
 import lombok.extern.slf4j.Slf4j;
 
 @Slf4j
 @RestControllerAdvice
 public class GlobalExceptionHandler {
+
+    @ExceptionHandler(org.springframework.web.server.ResponseStatusException.class)
+    public ResponseEntity<ErrorResponse> handleStatus(org.springframework.web.server.ResponseStatusException e) {
+        String code = e.getStatusCode().value() == 409 ? "CONFLICT" : "REQUEST_ERROR";
+        return ResponseEntity.status(e.getStatusCode())
+                .body(new ErrorResponse(code, e.getReason() == null ? "Request failed" : e.getReason()));
+    }
+
+    @ExceptionHandler(GenerationConflictException.class)
+    public ResponseEntity<ErrorResponse> handleGenerationConflict(GenerationConflictException e) {
+        return ResponseEntity.status(HttpStatus.CONFLICT)
+                .body(new ErrorResponse("GENERATION_CONFLICT", e.getMessage()));
+    }
+
+    @ExceptionHandler(LlmBatchExecutor.BatchExecutionException.class)
+    public ResponseEntity<ErrorResponse> handleBatchFailure(LlmBatchExecutor.BatchExecutionException e) {
+        var cause = LlmBatchExecutor.originalFailure(e);
+        if (cause instanceof GenerationConflictException conflict) return handleGenerationConflict(conflict);
+        if (cause instanceof LlmResponseException provider) return handleLlmResponse(provider);
+        return handleAll(e);
+    }
 
     @ExceptionHandler(ProjectNotFoundException.class)
     public ResponseEntity<ErrorResponse> handleNotFound(ProjectNotFoundException e) {
@@ -50,16 +73,16 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ErrorResponse> handleMissingHeader(MissingRequestHeaderException e) {
         if ("Authorization".equalsIgnoreCase(e.getHeaderName())) {
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
-                    .body(new ErrorResponse("AUTH_ERROR", "Token dang nhap la bat buoc"));
+                    .body(new ErrorResponse("AUTH_ERROR", "Token đăng nhập là bắt buộc"));
         }
         return ResponseEntity.status(HttpStatus.BAD_REQUEST)
-                .body(new ErrorResponse("BAD_REQUEST", "Thieu header bat buoc: " + e.getHeaderName()));
+                .body(new ErrorResponse("BAD_REQUEST", "Thiếu header bắt buộc: " + e.getHeaderName()));
     }
 
     @ExceptionHandler(NoResourceFoundException.class)
     public ResponseEntity<ErrorResponse> handleNoResource(NoResourceFoundException e) {
         return ResponseEntity.status(HttpStatus.NOT_FOUND)
-                .body(new ErrorResponse("NOT_FOUND", "Endpoint khong ton tai"));
+                .body(new ErrorResponse("NOT_FOUND", "Endpoint không tồn tại"));
     }
 
     @ExceptionHandler(IllegalArgumentException.class)

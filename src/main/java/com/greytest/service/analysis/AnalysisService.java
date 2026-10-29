@@ -122,6 +122,7 @@ public class AnalysisService {
 
         SourceScanResult sourceScan = parserHelper.scanProject(sourceDir);
         List<ParsedFile> parsedFiles = sourceScan.productionFiles();
+        var classTypes = parserHelper.determineClassTypes(parsedFiles);
         log.info("Đã parse {} production file .java, loại {} existing test files",
                 parsedFiles.size(), sourceScan.existingTestFileCount());
         project.setTotalProductionFiles(sourceScan.totalProductionFileCount());
@@ -148,7 +149,7 @@ public class AnalysisService {
             List<TypeDeclaration<?>> typeDecls = parserHelper.findTypes(pf.compilationUnit());
 
             for (TypeDeclaration<?> typeDecl : typeDecls) {
-                ClassType classType = parserHelper.determineClassType(typeDecl);
+                ClassType classType = classTypes.get(typeDecl);
                 String qualifiedName = qualifiedTypeName(packageName, typeDecl);
 
                 // Lưu Java type (class/interface/enum/record)
@@ -250,7 +251,7 @@ public class AnalysisService {
         for (ParsedFile pf : parsedFiles) {
             List<ClassOrInterfaceDeclaration> classDecls = parserHelper.findClasses(pf.compilationUnit());
             for (ClassOrInterfaceDeclaration classDecl : classDecls) {
-                ClassType classType = parserHelper.determineClassType(classDecl);
+                ClassType classType = classTypes.get(classDecl);
                 if (classType != ClassType.SERVICE) continue;
 
                 String packageName = parserHelper.getPackageName(pf.compilationUnit());
@@ -329,13 +330,13 @@ public class AnalysisService {
     private Path resolveSourceDir(Project project) {
         if (project.getStoragePath() == null || project.getStoragePath().isBlank()) {
             throw new InvalidProjectSourceException(
-                    "Project khong con duong dan source. Hay upload ZIP hoac clone GitHub lai de phan tich.");
+                    "Project không còn đường dẫn source. Hãy upload ZIP hoặc clone GitHub lại để phân tích.");
         }
         Path sourceDir = Path.of(project.getStoragePath());
         if (!Files.isDirectory(sourceDir)) {
             throw new InvalidProjectSourceException(
-                    "Thu muc source khong con ton tai: " + sourceDir
-                            + ". Hay upload ZIP hoac clone GitHub lai de phan tich lai.");
+                    "Thư mục source không còn tồn tại: " + sourceDir
+                            + ". Hãy upload ZIP hoặc clone GitHub lại để phân tích lại.");
         }
         return sourceDir;
     }
@@ -353,7 +354,7 @@ public class AnalysisService {
         }
         Path sourceDir = Path.of(project.getStoragePath());
         if (!Files.isDirectory(sourceDir)) {
-            log.warn("Bo qua dem existing tests vi khong con thu muc source cua project {} tai {}",
+            log.warn("Bỏ qua đếm existing tests vì không còn thư mục source của project {} tại {}",
                     project.getId(), sourceDir);
             return 0;
         }

@@ -14,7 +14,7 @@ import com.greytest.entity.enums.UserTier;
 import com.greytest.repository.AuthUserRepository;
 
 /**
- * Service xử lý các nghiệp vụ tài khoản người dùng: nâng cấp gói Tier (Free -> Pro), xem hạn mức quota.
+ * Quản lý nâng cấp, hủy gói và hạn mức AI của tài khoản người dùng.
  */
 @Service
 public class UserService {
@@ -66,6 +66,22 @@ public class UserService {
         AuthUser user = users.findById(currentUser.getId()).orElse(currentUser);
         UsageQuota quota = quotaService.current(user.getId());
         return toQuotaResponse(user.getTier(), quota);
+    }
+
+    /** Hủy Plus/Pro về Free; yêu cầu lặp lại không cấp lại quota hoặc ghi thêm thay đổi. */
+    @Transactional
+    public UserQuotaResponse cancelSubscription(AuthUser currentUser) {
+        AuthUser user = users.findById(currentUser.getId()).orElse(currentUser);
+        UserTier previousTier = user.getTier() != null ? user.getTier() : UserTier.FREE;
+        if (previousTier == UserTier.FREE) {
+            return toQuotaResponse(UserTier.FREE, quotaService.current(user.getId()));
+        }
+        user.setTier(UserTier.FREE);
+        users.save(user);
+        UsageQuota quota = quotaService.downgradeToFree(user.getId());
+        activityService.record(user.getId(), ActivityAction.USER_CANCEL_TIER, null,
+                Map.of("previousTier", previousTier.name(), "newTier", UserTier.FREE.name()));
+        return toQuotaResponse(UserTier.FREE, quota);
     }
 
     private UserQuotaResponse toQuotaResponse(UserTier tier, UsageQuota quota) {

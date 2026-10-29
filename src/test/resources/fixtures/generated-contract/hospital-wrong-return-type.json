@@ -1,0 +1,726 @@
+{
+  "context": {
+    "project": {
+      "id": 870,
+      "name": "hospital-management-demo-main",
+      "status": "CASE_APPROVED"
+    },
+    "analysis": {
+      "totalClasses": 64,
+      "totalMethods": 163,
+      "totalEndpoints": 38,
+      "totalRelations": 4,
+      "totalControllerServiceRelations": 35,
+      "existingTestFiles": 0,
+      "totalProductionFiles": 57,
+      "parsedProductionFiles": 57,
+      "failedParseFiles": 0,
+      "failedParseFilePaths": []
+    },
+    "classes": [
+      {
+        "id": 8903,
+        "packageName": "com.hospital.doctor.service",
+        "className": "DoctorService",
+        "qualifiedName": "com.hospital.doctor.service.DoctorService",
+        "classType": "SERVICE",
+        "filePath": "hospital-management-demo-main/backend/doctor-service/src/main/java/com/hospital/doctor/service/DoctorService.java",
+        "sourceCode": "package com.hospital.doctor.service;\n\nimport com.hospital.common.exception.ResourceNotFoundException;\nimport com.hospital.doctor.dto.DoctorRequestDto;\nimport com.hospital.doctor.dto.DoctorResponseDto;\nimport com.hospital.doctor.model.Doctor;\nimport com.hospital.doctor.repository.DoctorRepository;\nimport lombok.RequiredArgsConstructor;\nimport lombok.extern.slf4j.Slf4j;\nimport org.springframework.cache.annotation.CacheEvict;\nimport org.springframework.cache.annotation.CachePut;\nimport org.springframework.cache.annotation.Cacheable;\nimport org.springframework.stereotype.Service;\nimport org.springframework.transaction.annotation.Transactional;\nimport java.time.LocalDateTime;\nimport java.util.List;\nimport java.util.stream.Collectors;\n\n@Service\n@RequiredArgsConstructor\n@Slf4j\npublic class DoctorService {\n\n    private final DoctorRepository doctorRepository;\n\n    @Transactional\n    @CachePut(value = \"doctors\", key = \"#result.id\")\n    public DoctorResponseDto createDoctor(DoctorRequestDto requestDto) {\n        log.info(\"Creating new doctor: {} {}\", requestDto.getFirstName(), requestDto.getLastName());\n        // Check for duplicate email\n        doctorRepository.findByEmail(requestDto.getEmail()).ifPresent(d -> {\n            throw new IllegalArgumentException(\"Doctor with email \" + requestDto.getEmail() + \" already exists\");\n        });\n        // Check for duplicate license number\n        doctorRepository.findByLicenseNumber(requestDto.getLicenseNumber()).ifPresent(d -> {\n            throw new IllegalArgumentException(\"Doctor with license number \" + requestDto.getLicenseNumber() + \" already exists\");\n        });\n        Doctor doctor = new Doctor();\n        mapDtoToEntity(requestDto, doctor);\n        Doctor savedDoctor = doctorRepository.save(doctor);\n        log.info(\"Doctor created successfully with ID: {}\", savedDoctor.getId());\n        return new DoctorResponseDto(savedDoctor);\n    }\n\n    @Transactional(readOnly = true)\n    public // Removed @Cacheable to avoid lazy initialization issues with availableDays collection\n    DoctorResponseDto getDoctorById(Long id) {\n        log.debug(\"Fetching doctor with ID: {}\", id);\n        Doctor doctor = doctorRepository.findActiveById(id).orElseThrow(() -> new ResourceNotFoundException(\"Doctor\", \"id\", id));\n        return new DoctorResponseDto(doctor);\n    }\n\n    @Transactional(readOnly = true)\n    public List<DoctorResponseDto> getAllDoctors() {\n        log.debug(\"Fetching all active doctors\");\n        return doctorRepository.findAllActive().stream().map(DoctorResponseDto::new).collect(Collectors.toList());\n    }\n\n    @Transactional(readOnly = true)\n    public List<DoctorResponseDto> getDoctorsBySpecialization(String specialization) {\n        log.debug(\"Fetching doctors with specialization: {}\", specialization);\n        return doctorRepository.findBySpecialization(specialization).stream().map(DoctorResponseDto::new).collect(Collectors.toList());\n    }\n\n    @Transactional(readOnly = true)\n    public List<DoctorResponseDto> getDoctorsByDepartment(String department) {\n        log.debug(\"Fetching doctors in department: {}\", department);\n        return doctorRepository.findByDepartment(department).stream().map(DoctorResponseDto::new).collect(Collectors.toList());\n    }\n\n    @Transactional(readOnly = true)\n    public List<DoctorResponseDto> getAvailableDoctors() {\n        log.debug(\"Fetching available doctors\");\n        return doctorRepository.findAvailableDoctors().stream().map(DoctorResponseDto::new).collect(Collectors.toList());\n    }\n\n    @Transactional\n    @CachePut(value = \"doctors\", key = \"#id\")\n    public DoctorResponseDto updateDoctor(Long id, DoctorRequestDto requestDto) {\n        log.info(\"Updating doctor with ID: {}\", id);\n        Doctor doctor = doctorRepository.findActiveById(id).orElseThrow(() -> new ResourceNotFoundException(\"Doctor\", \"id\", id));\n        // Check for duplicate email (excluding current doctor)\n        doctorRepository.findByEmail(requestDto.getEmail()).ifPresent(d -> {\n            if (!d.getId().equals(id)) {\n                throw new IllegalArgumentException(\"Doctor with email \" + requestDto.getEmail() + \" already exists\");\n            }\n        });\n        // Check for duplicate license number (excluding current doctor)\n        doctorRepository.findByLicenseNumber(requestDto.getLicenseNumber()).ifPresent(d -> {\n            if (!d.getId().equals(id)) {\n                throw new IllegalArgumentException(\"Doctor with license number \" + requestDto.getLicenseNumber() + \" already exists\");\n            }\n        });\n        mapDtoToEntity(requestDto, doctor);\n        Doctor updatedDoctor = doctorRepository.save(doctor);\n        log.info(\"Doctor updated successfully with ID: {}\", id);\n        return new DoctorResponseDto(updatedDoctor);\n    }\n\n    @Transactional\n    @CacheEvict(value = \"doctors\", key = \"#id\")\n    public void deleteDoctor(Long id) {\n        log.info(\"Soft deleting doctor with ID: {}\", id);\n        Doctor doctor = doctorRepository.findActiveById(id).orElseThrow(() -> new ResourceNotFoundException(\"Doctor\", \"id\", id));\n        doctor.setDeletedAt(LocalDateTime.now());\n        doctor.setIsAvailable(false);\n        doctorRepository.save(doctor);\n        log.info(\"Doctor soft deleted successfully with ID: {}\", id);\n    }\n\n    @Transactional\n    @CachePut(value = \"doctors\", key = \"#id\")\n    public DoctorResponseDto updateAvailability(Long id, Boolean isAvailable) {\n        log.info(\"Updating availability for doctor with ID: {} to {}\", id, isAvailable);\n        Doctor doctor = doctorRepository.findActiveById(id).orElseThrow(() -> new ResourceNotFoundException(\"Doctor\", \"id\", id));\n        doctor.setIsAvailable(isAvailable);\n        Doctor updatedDoctor = doctorRepository.save(doctor);\n        log.info(\"Doctor availability updated successfully\");\n        return new DoctorResponseDto(updatedDoctor);\n    }\n\n    @Transactional(readOnly = true)\n    public List<DoctorResponseDto> searchDoctors(String search) {\n        log.debug(\"Searching doctors with query: {}\", search);\n        return doctorRepository.searchDoctors(search).stream().map(DoctorResponseDto::new).collect(Collectors.toList());\n    }\n\n    private void mapDtoToEntity(DoctorRequestDto dto, Doctor doctor) {\n        doctor.setFirstName(dto.getFirstName());\n        doctor.setLastName(dto.getLastName());\n        doctor.setEmail(dto.getEmail());\n        doctor.setPhone(dto.getPhone());\n        doctor.setLicenseNumber(dto.getLicenseNumber());\n        doctor.setSpecialization(dto.getSpecialization());\n        doctor.setQualification(dto.getQualification());\n        doctor.setExperienceYears(dto.getExperienceYears());\n        doctor.setConsultationFee(dto.getConsultationFee());\n        doctor.setDepartment(dto.getDepartment());\n        doctor.setRoomNumber(dto.getRoomNumber());\n        doctor.setAvailableDays(dto.getAvailableDays());\n        doctor.setStartTime(dto.getStartTime());\n        doctor.setEndTime(dto.getEndTime());\n        doctor.setIsAvailable(dto.getIsAvailable());\n    }\n}\n",
+        "annotations": [
+          {
+            "id": 11239,
+            "targetType": "CLASS",
+            "category": "COMPONENT",
+            "annotationName": "Service",
+            "attributes": "@Service"
+          },
+          {
+            "id": 11240,
+            "targetType": "METHOD",
+            "category": "TRANSACTION",
+            "annotationName": "Transactional",
+            "attributes": "@Transactional"
+          },
+          {
+            "id": 11241,
+            "targetType": "METHOD",
+            "category": "TRANSACTION",
+            "annotationName": "Transactional",
+            "attributes": "@Transactional(readOnly = true)"
+          },
+          {
+            "id": 11242,
+            "targetType": "METHOD",
+            "category": "TRANSACTION",
+            "annotationName": "Transactional",
+            "attributes": "@Transactional(readOnly = true)"
+          },
+          {
+            "id": 11243,
+            "targetType": "METHOD",
+            "category": "TRANSACTION",
+            "annotationName": "Transactional",
+            "attributes": "@Transactional(readOnly = true)"
+          },
+          {
+            "id": 11244,
+            "targetType": "METHOD",
+            "category": "TRANSACTION",
+            "annotationName": "Transactional",
+            "attributes": "@Transactional(readOnly = true)"
+          },
+          {
+            "id": 11245,
+            "targetType": "METHOD",
+            "category": "TRANSACTION",
+            "annotationName": "Transactional",
+            "attributes": "@Transactional(readOnly = true)"
+          },
+          {
+            "id": 11246,
+            "targetType": "METHOD",
+            "category": "TRANSACTION",
+            "annotationName": "Transactional",
+            "attributes": "@Transactional"
+          },
+          {
+            "id": 11247,
+            "targetType": "METHOD",
+            "category": "TRANSACTION",
+            "annotationName": "Transactional",
+            "attributes": "@Transactional"
+          },
+          {
+            "id": 11248,
+            "targetType": "METHOD",
+            "category": "TRANSACTION",
+            "annotationName": "Transactional",
+            "attributes": "@Transactional"
+          },
+          {
+            "id": 11249,
+            "targetType": "METHOD",
+            "category": "TRANSACTION",
+            "annotationName": "Transactional",
+            "attributes": "@Transactional(readOnly = true)"
+          }
+        ],
+        "methods": [
+          {
+            "id": 18709,
+            "classQualifiedName": "com.hospital.doctor.service.DoctorService",
+            "methodName": "getDoctorById",
+            "returnType": "DoctorResponseDto",
+            "parameters": [
+              {
+                "name": "id",
+                "type": "Long"
+              }
+            ],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "@Transactional(readOnly = true)\n                                                                                           \n    public DoctorResponseDto getDoctorById(Long id) {\n        log.debug(\"Fetching doctor with ID: {}\", id);\n        Doctor doctor = doctorRepository.findActiveById(id)\n                .orElseThrow(() -> new ResourceNotFoundException(\"Doctor\", \"id\", id));\n        return new DoctorResponseDto(doctor);\n    }",
+            "lineStart": 51,
+            "lineEnd": 58,
+            "annotations": [
+              {
+                "id": 11241,
+                "targetType": "METHOD",
+                "category": "TRANSACTION",
+                "annotationName": "Transactional",
+                "attributes": "@Transactional(readOnly = true)"
+              }
+            ],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 54,
+                "lineEnd": 54
+              },
+              {
+                "branchId": "STMT-2",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 55,
+                "lineEnd": 56
+              },
+              {
+                "branchId": "STMT-3",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 57,
+                "lineEnd": 57
+              }
+            ]
+          },
+          {
+            "id": 18710,
+            "classQualifiedName": "com.hospital.doctor.service.DoctorService",
+            "methodName": "getAllDoctors",
+            "returnType": "List<DoctorResponseDto>",
+            "parameters": [],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "@Transactional(readOnly = true)\n    public List<DoctorResponseDto> getAllDoctors() {\n        log.debug(\"Fetching all active doctors\");\n        return doctorRepository.findAllActive().stream()\n                .map(DoctorResponseDto::new)\n                .collect(Collectors.toList());\n    }",
+            "lineStart": 60,
+            "lineEnd": 66,
+            "annotations": [
+              {
+                "id": 11242,
+                "targetType": "METHOD",
+                "category": "TRANSACTION",
+                "annotationName": "Transactional",
+                "attributes": "@Transactional(readOnly = true)"
+              }
+            ],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 62,
+                "lineEnd": 62
+              },
+              {
+                "branchId": "STMT-2",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 63,
+                "lineEnd": 65
+              }
+            ]
+          },
+          {
+            "id": 18714,
+            "classQualifiedName": "com.hospital.doctor.service.DoctorService",
+            "methodName": "updateDoctor",
+            "returnType": "DoctorResponseDto",
+            "parameters": [
+              {
+                "name": "id",
+                "type": "Long"
+              },
+              {
+                "name": "requestDto",
+                "type": "DoctorRequestDto"
+              }
+            ],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "@Transactional\n    @CachePut(value = \"doctors\", key = \"#id\")\n    public DoctorResponseDto updateDoctor(Long id, DoctorRequestDto requestDto) {\n        log.info(\"Updating doctor with ID: {}\", id);\n        \n        Doctor doctor = doctorRepository.findActiveById(id)\n                .orElseThrow(() -> new ResourceNotFoundException(\"Doctor\", \"id\", id));\n        \n                                                               \n        doctorRepository.findByEmail(requestDto.getEmail()).ifPresent(d -> {\n            if (!d.getId().equals(id)) {\n                throw new IllegalArgumentException(\"Doctor with email \" + requestDto.getEmail() + \" already exists\");\n            }\n        });\n        \n                                                                        \n        doctorRepository.findByLicenseNumber(requestDto.getLicenseNumber()).ifPresent(d -> {\n            if (!d.getId().equals(id)) {\n                throw new IllegalArgumentException(\"Doctor with license number \" + requestDto.getLicenseNumber() + \" already exists\");\n            }\n        });\n        \n        mapDtoToEntity(requestDto, doctor);\n        Doctor updatedDoctor = doctorRepository.save(doctor);\n        \n        log.info(\"Doctor updated successfully with ID: {}\", id);\n        return new DoctorResponseDto(updatedDoctor);\n    }",
+            "lineStart": 92,
+            "lineEnd": 119,
+            "annotations": [
+              {
+                "id": 11246,
+                "targetType": "METHOD",
+                "category": "TRANSACTION",
+                "annotationName": "Transactional",
+                "attributes": "@Transactional"
+              }
+            ],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 95,
+                "lineEnd": 95
+              },
+              {
+                "branchId": "STMT-2",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 97,
+                "lineEnd": 98
+              },
+              {
+                "branchId": "STMT-3",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 101,
+                "lineEnd": 105
+              },
+              {
+                "branchId": "IF-1-TRUE",
+                "kind": "IF",
+                "outcome": "TRUE",
+                "condition": "!d.getId().equals(id)",
+                "lineStart": 103,
+                "lineEnd": 103
+              },
+              {
+                "branchId": "IF-1-FALSE",
+                "kind": "IF",
+                "outcome": "FALSE",
+                "condition": "!d.getId().equals(id)",
+                "lineStart": 102,
+                "lineEnd": 102
+              },
+              {
+                "branchId": "STMT-4",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 108,
+                "lineEnd": 112
+              },
+              {
+                "branchId": "IF-2-TRUE",
+                "kind": "IF",
+                "outcome": "TRUE",
+                "condition": "!d.getId().equals(id)",
+                "lineStart": 110,
+                "lineEnd": 110
+              },
+              {
+                "branchId": "IF-2-FALSE",
+                "kind": "IF",
+                "outcome": "FALSE",
+                "condition": "!d.getId().equals(id)",
+                "lineStart": 109,
+                "lineEnd": 109
+              },
+              {
+                "branchId": "STMT-5",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 114,
+                "lineEnd": 114
+              },
+              {
+                "branchId": "STMT-6",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 115,
+                "lineEnd": 115
+              },
+              {
+                "branchId": "STMT-7",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 117,
+                "lineEnd": 117
+              },
+              {
+                "branchId": "STMT-8",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 118,
+                "lineEnd": 118
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": 8894,
+        "packageName": "com.hospital.common.exception",
+        "className": "ResourceNotFoundException",
+        "qualifiedName": "com.hospital.common.exception.ResourceNotFoundException",
+        "classType": "OTHER",
+        "filePath": "hospital-management-demo-main/backend/common-lib/src/main/java/com/hospital/common/exception/ResourceNotFoundException.java",
+        "sourceCode": "package com.hospital.common.exception;\n\npublic class ResourceNotFoundException extends RuntimeException {\n\n    public ResourceNotFoundException(String message) {\n        super(message);\n    }\n\n    public ResourceNotFoundException(String resourceName, String fieldName, Object fieldValue) {\n        super(String.format(\"%s not found with %s: '%s'\", resourceName, fieldName, fieldValue));\n    }\n}\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8898,
+        "packageName": "com.hospital.doctor.dto",
+        "className": "DoctorRequestDto",
+        "qualifiedName": "com.hospital.doctor.dto.DoctorRequestDto",
+        "classType": "OTHER",
+        "filePath": "hospital-management-demo-main/backend/doctor-service/src/main/java/com/hospital/doctor/dto/DoctorRequestDto.java",
+        "sourceCode": "package com.hospital.doctor.dto;\n\nimport jakarta.validation.constraints.*;\nimport lombok.AllArgsConstructor;\nimport lombok.Data;\nimport lombok.NoArgsConstructor;\nimport java.util.Set;\n\n@Data\n@NoArgsConstructor\n@AllArgsConstructor\npublic class DoctorRequestDto {\n\n    @NotBlank(message = \"First name is required\")\n    @Size(min = 2, max = 50, message = \"First name must be between 2 and 50 characters\")\n    private String firstName;\n\n    @NotBlank(message = \"Last name is required\")\n    @Size(min = 2, max = 50, message = \"Last name must be between 2 and 50 characters\")\n    private String lastName;\n\n    @NotBlank(message = \"Email is required\")\n    @Email(message = \"Email must be valid\")\n    private String email;\n\n    @NotBlank(message = \"Phone is required\")\n    @Pattern(regexp = \"^[0-9]{10,15}$\", message = \"Phone must be 10-15 digits\")\n    private String phone;\n\n    @NotBlank(message = \"License number is required\")\n    @Size(min = 5, max = 50, message = \"License number must be between 5 and 50 characters\")\n    private String licenseNumber;\n\n    @NotBlank(message = \"Specialization is required\")\n    @Size(max = 100, message = \"Specialization must not exceed 100 characters\")\n    private String specialization;\n\n    private String qualification;\n\n    @Min(value = 0, message = \"Experience years cannot be negative\")\n    @Max(value = 60, message = \"Experience years cannot exceed 60\")\n    private Integer experienceYears;\n\n    @DecimalMin(value = \"0.0\", message = \"Consultation fee must be positive\")\n    private Double consultationFee;\n\n    private String department;\n\n    private String roomNumber;\n\n    private Set<String> availableDays;\n\n    @Pattern(regexp = \"^([01]?[0-9]|2[0-3]):[0-5][0-9]$\", message = \"Start time must be in HH:mm format\")\n    private String startTime;\n\n    @Pattern(regexp = \"^([01]?[0-9]|2[0-3]):[0-5][0-9]$\", message = \"End time must be in HH:mm format\")\n    private String endTime;\n\n    private Boolean isAvailable = true;\n}\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8899,
+        "packageName": "com.hospital.doctor.dto",
+        "className": "DoctorResponseDto",
+        "qualifiedName": "com.hospital.doctor.dto.DoctorResponseDto",
+        "classType": "OTHER",
+        "filePath": "hospital-management-demo-main/backend/doctor-service/src/main/java/com/hospital/doctor/dto/DoctorResponseDto.java",
+        "sourceCode": "package com.hospital.doctor.dto;\n\nimport com.hospital.doctor.model.Doctor;\nimport lombok.AllArgsConstructor;\nimport lombok.Data;\nimport lombok.NoArgsConstructor;\nimport java.time.LocalDateTime;\nimport java.util.Set;\n\n@Data\n@NoArgsConstructor\n@AllArgsConstructor\npublic class DoctorResponseDto {\n\n    private Long id;\n\n    private String firstName;\n\n    private String lastName;\n\n    private String email;\n\n    private String phone;\n\n    private String licenseNumber;\n\n    private String specialization;\n\n    private String qualification;\n\n    private Integer experienceYears;\n\n    private Double consultationFee;\n\n    private String department;\n\n    private String roomNumber;\n\n    private Set<String> availableDays;\n\n    private String startTime;\n\n    private String endTime;\n\n    private Boolean isAvailable;\n\n    private LocalDateTime createdAt;\n\n    private LocalDateTime updatedAt;\n\n    public DoctorResponseDto(Doctor doctor) {\n        this.id = doctor.getId();\n        this.firstName = doctor.getFirstName();\n        this.lastName = doctor.getLastName();\n        this.email = doctor.getEmail();\n        this.phone = doctor.getPhone();\n        this.licenseNumber = doctor.getLicenseNumber();\n        this.specialization = doctor.getSpecialization();\n        this.qualification = doctor.getQualification();\n        this.experienceYears = doctor.getExperienceYears();\n        this.consultationFee = doctor.getConsultationFee();\n        this.department = doctor.getDepartment();\n        this.roomNumber = doctor.getRoomNumber();\n        this.availableDays = doctor.getAvailableDays();\n        this.startTime = doctor.getStartTime();\n        this.endTime = doctor.getEndTime();\n        this.isAvailable = doctor.getIsAvailable();\n        this.createdAt = doctor.getCreatedAt();\n        this.updatedAt = doctor.getUpdatedAt();\n    }\n}\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8901,
+        "packageName": "com.hospital.doctor.model",
+        "className": "Doctor",
+        "qualifiedName": "com.hospital.doctor.model.Doctor",
+        "classType": "ENTITY",
+        "filePath": "hospital-management-demo-main/backend/doctor-service/src/main/java/com/hospital/doctor/model/Doctor.java",
+        "sourceCode": "package com.hospital.doctor.model;\n\nimport jakarta.persistence.*;\nimport lombok.AllArgsConstructor;\nimport lombok.Data;\nimport lombok.NoArgsConstructor;\nimport org.hibernate.annotations.CreationTimestamp;\nimport org.hibernate.annotations.UpdateTimestamp;\nimport java.time.LocalDateTime;\nimport java.util.HashSet;\nimport java.util.Set;\n\n@Entity\n@Table(name = \"doctors\")\n@Data\n@NoArgsConstructor\n@AllArgsConstructor\npublic class Doctor {\n\n    @Id\n    @GeneratedValue(strategy = GenerationType.IDENTITY)\n    private Long id;\n\n    @Column(name = \"first_name\", nullable = false, length = 50)\n    private String firstName;\n\n    @Column(name = \"last_name\", nullable = false, length = 50)\n    private String lastName;\n\n    @Column(name = \"email\", unique = true, nullable = false, length = 100)\n    private String email;\n\n    @Column(name = \"phone\", nullable = false, length = 15)\n    private String phone;\n\n    @Column(name = \"license_number\", unique = true, nullable = false, length = 50)\n    private String licenseNumber;\n\n    @Column(name = \"specialization\", nullable = false, length = 100)\n    private String specialization;\n\n    @Column(name = \"qualification\", columnDefinition = \"TEXT\")\n    private String qualification;\n\n    @Column(name = \"experience_years\")\n    private Integer experienceYears;\n\n    @Column(name = \"consultation_fee\")\n    private Double consultationFee;\n\n    @Column(name = \"department\", length = 100)\n    private String department;\n\n    @Column(name = \"room_number\", length = 20)\n    private String roomNumber;\n\n    @ElementCollection(fetch = FetchType.EAGER)\n    @CollectionTable(name = \"doctor_availability\", joinColumns = @JoinColumn(name = \"doctor_id\"))\n    @Column(name = \"day_of_week\")\n    private Set<String> availableDays = new HashSet<>();\n\n    @Column(name = \"start_time\", length = 10)\n    private String // Format: \"09:00\"\n    startTime;\n\n    @Column(name = \"end_time\", length = 10)\n    private String // Format: \"17:00\"\n    endTime;\n\n    @Column(name = \"is_available\")\n    private Boolean isAvailable = true;\n\n    @CreationTimestamp\n    @Column(name = \"created_at\", updatable = false)\n    private LocalDateTime createdAt;\n\n    @UpdateTimestamp\n    @Column(name = \"updated_at\")\n    private LocalDateTime updatedAt;\n\n    @Column(name = \"deleted_at\")\n    private LocalDateTime deletedAt;\n}\n",
+        "annotations": [
+          {
+            "id": 11236,
+            "targetType": "CLASS",
+            "category": "PERSISTENCE",
+            "annotationName": "Entity",
+            "attributes": "@Entity"
+          },
+          {
+            "id": 11237,
+            "targetType": "CLASS",
+            "category": "PERSISTENCE",
+            "annotationName": "Table",
+            "attributes": "@Table(name = \"doctors\")"
+          }
+        ],
+        "methods": []
+      },
+      {
+        "id": 8902,
+        "packageName": "com.hospital.doctor.repository",
+        "className": "DoctorRepository",
+        "qualifiedName": "com.hospital.doctor.repository.DoctorRepository",
+        "classType": "REPOSITORY",
+        "filePath": "hospital-management-demo-main/backend/doctor-service/src/main/java/com/hospital/doctor/repository/DoctorRepository.java",
+        "sourceCode": "package com.hospital.doctor.repository;\n\nimport com.hospital.doctor.model.Doctor;\nimport org.springframework.data.jpa.repository.JpaRepository;\nimport org.springframework.data.jpa.repository.Query;\nimport org.springframework.data.repository.query.Param;\nimport org.springframework.stereotype.Repository;\nimport java.util.List;\nimport java.util.Optional;\n\n@Repository\npublic interface DoctorRepository extends JpaRepository<Doctor, Long> {\n\n    @Query(\"SELECT d FROM Doctor d WHERE d.deletedAt IS NULL\")\n    List<Doctor> findAllActive();\n\n    @Query(\"SELECT d FROM Doctor d WHERE d.id = :id AND d.deletedAt IS NULL\")\n    Optional<Doctor> findActiveById(Long id);\n\n    @Query(\"SELECT d FROM Doctor d WHERE d.email = :email AND d.deletedAt IS NULL\")\n    Optional<Doctor> findByEmail(String email);\n\n    @Query(\"SELECT d FROM Doctor d WHERE d.licenseNumber = :licenseNumber AND d.deletedAt IS NULL\")\n    Optional<Doctor> findByLicenseNumber(String licenseNumber);\n\n    @Query(\"SELECT d FROM Doctor d WHERE d.specialization = :specialization AND d.deletedAt IS NULL\")\n    List<Doctor> findBySpecialization(@Param(\"specialization\") String specialization);\n\n    @Query(\"SELECT d FROM Doctor d WHERE d.department = :department AND d.deletedAt IS NULL\")\n    List<Doctor> findByDepartment(@Param(\"department\") String department);\n\n    @Query(\"SELECT d FROM Doctor d WHERE d.isAvailable = true AND d.deletedAt IS NULL\")\n    List<Doctor> findAvailableDoctors();\n\n    @Query(\"SELECT d FROM Doctor d WHERE \" + \"(LOWER(d.firstName) LIKE LOWER(CONCAT('%', :search, '%')) OR \" + \"LOWER(d.lastName) LIKE LOWER(CONCAT('%', :search, '%')) OR \" + \"LOWER(d.email) LIKE LOWER(CONCAT('%', :search, '%')) OR \" + \"LOWER(d.specialization) LIKE LOWER(CONCAT('%', :search, '%')) OR \" + \"LOWER(d.department) LIKE LOWER(CONCAT('%', :search, '%'))) AND \" + \"d.deletedAt IS NULL\")\n    List<Doctor> searchDoctors(@Param(\"search\") String search);\n}\n",
+        "annotations": [
+          {
+            "id": 11238,
+            "targetType": "CLASS",
+            "category": "COMPONENT",
+            "annotationName": "Repository",
+            "attributes": "@Repository"
+          }
+        ],
+        "methods": []
+      }
+    ],
+    "approvedBusinessRules": [
+      {
+        "id": 5020,
+        "methodId": 18709,
+        "ruleCode": "BR-069",
+        "description": "Khi tìm thấy bác sĩ đang hoạt động, service trả về DoctorResponseDto được tạo từ bác sĩ đó.",
+        "reviewNote": "SOURCE_BRANCH:STMT-3\nAI category: BUSINESS_LOGIC. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-3"
+      },
+      {
+        "id": 5021,
+        "methodId": 18710,
+        "ruleCode": "BR-070",
+        "description": "Khi được gọi, service truy vấn danh sách bác sĩ đang hoạt động và trả về danh sách DoctorResponseDto tương ứng.",
+        "reviewNote": "SOURCE_BRANCH:STMT-2\nAI category: BUSINESS_LOGIC. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-2"
+      },
+      {
+        "id": 5022,
+        "methodId": 18714,
+        "ruleCode": "BR-071",
+        "description": "Khi không tìm thấy bác sĩ đang hoạt động theo id, service ném ResourceNotFoundException với thông điệp \"Doctor not found with id: '<id>'\".",
+        "reviewNote": "SOURCE_BRANCH:STMT-2\nAI category: VALIDATION. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-2"
+      },
+      {
+        "id": 5023,
+        "methodId": 18714,
+        "ruleCode": "BR-072",
+        "description": "Khi email đã thuộc về bác sĩ khác, service ném IllegalArgumentException với thông điệp \"Doctor with email \" + requestDto.getEmail() + \" already exists\"; nếu email thuộc về bác sĩ hiện tại hoặc không tìm thấy email, service không ném ngoại lệ này.",
+        "reviewNote": "SOURCE_BRANCH:IF-1\nAI category: VALIDATION. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "IF-1"
+      },
+      {
+        "id": 5024,
+        "methodId": 18714,
+        "ruleCode": "BR-073",
+        "description": "Khi số giấy phép đã thuộc về bác sĩ khác, service ném IllegalArgumentException với thông điệp \"Doctor with license number \" + requestDto.getLicenseNumber() + \" already exists\"; nếu số giấy phép thuộc về bác sĩ hiện tại hoặc không tìm thấy số giấy phép, service không ném ngoại lệ này.",
+        "reviewNote": "SOURCE_BRANCH:IF-2\nAI category: VALIDATION. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "IF-2"
+      }
+    ],
+    "approvedTestPlans": [
+      {
+        "id": 2640,
+        "businessRuleId": 5020,
+        "coveredRuleIds": [
+          5020
+        ],
+        "planCode": "TP-056",
+        "title": "Lấy bác sĩ đang hoạt động theo ID",
+        "description": "Khi tìm thấy bác sĩ đang hoạt động, kiểm tra kết quả là DoctorResponseDto được tạo từ bác sĩ đó.",
+        "testType": "HAPPY_PATH",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2641,
+        "businessRuleId": 5021,
+        "coveredRuleIds": [
+          5021
+        ],
+        "planCode": "TP-057",
+        "title": "Lấy danh sách bác sĩ đang hoạt động",
+        "description": "Kiểm tra service truy vấn danh sách bác sĩ đang hoạt động và trả về DoctorResponseDto tương ứng cho từng kết quả.",
+        "testType": "HAPPY_PATH",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2642,
+        "businessRuleId": 5022,
+        "coveredRuleIds": [
+          5022
+        ],
+        "planCode": "TP-058",
+        "title": "Cập nhật bác sĩ không tồn tại",
+        "description": "Khi không tìm thấy bác sĩ đang hoạt động theo ID, kiểm tra ResourceNotFoundException và thông điệp chính xác.\n[GreyTest testability: UNKNOWN] UNRESOLVED_HELPER_PATH @ hospital-management-demo-main/backend/doctor-service/src/main/java/com/hospital/doctor/service/DoctorService.java:94 updateDoctor — Lời gọi helper nội bộ chưa được phân tích đường đi trong MVP: mapDtoToEntity. | Kiểm tra đường đi qua helper trước khi kết luận có thể điều khiển nhánh; không thay kết quả helper bằng giả định.",
+        "testType": "EXCEPTION",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2643,
+        "businessRuleId": 5023,
+        "coveredRuleIds": [
+          5023
+        ],
+        "planCode": "TP-059",
+        "title": "Kiểm tra xung đột email khi cập nhật",
+        "description": "Kiểm tra email của bác sĩ khác gây IllegalArgumentException với thông báo chính xác; email thuộc bác sĩ hiện tại hoặc không tìm thấy thì không ném ngoại lệ này.\n[GreyTest testability: UNKNOWN] UNRESOLVED_HELPER_PATH @ hospital-management-demo-main/backend/doctor-service/src/main/java/com/hospital/doctor/service/DoctorService.java:94 updateDoctor — Lời gọi helper nội bộ chưa được phân tích đường đi trong MVP: mapDtoToEntity. | Kiểm tra đường đi qua helper trước khi kết luận có thể điều khiển nhánh; không thay kết quả helper bằng giả định.",
+        "testType": "BOUNDARY",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2644,
+        "businessRuleId": 5024,
+        "coveredRuleIds": [
+          5024
+        ],
+        "planCode": "TP-060",
+        "title": "Kiểm tra xung đột giấy phép khi cập nhật",
+        "description": "Kiểm tra giấy phép của bác sĩ khác gây IllegalArgumentException với thông báo chính xác; giấy phép thuộc bác sĩ hiện tại hoặc không tìm thấy thì không ném ngoại lệ này.\n[GreyTest testability: UNKNOWN] UNRESOLVED_HELPER_PATH @ hospital-management-demo-main/backend/doctor-service/src/main/java/com/hospital/doctor/service/DoctorService.java:94 updateDoctor — Lời gọi helper nội bộ chưa được phân tích đường đi trong MVP: mapDtoToEntity. | Kiểm tra đường đi qua helper trước khi kết luận có thể điều khiển nhánh; không thay kết quả helper bằng giả định.",
+        "testType": "BOUNDARY",
+        "status": "APPROVED",
+        "isModified": false
+      }
+    ],
+    "approvedTestCases": [
+      {
+        "id": 3341,
+        "testPlanId": 2640,
+        "caseCode": "TC-1776",
+        "testType": "HAPPY_PATH",
+        "description": "Trả về DTO của bác sĩ đang hoạt động theo ID.",
+        "preconditions": "DoctorRepository được inject vào DoctorService và findActiveById trả về Doctor có id 101 cùng các trường dữ liệu đã thiết lập.",
+        "testData": {
+          "input": {
+            "id": 101
+          },
+          "mocks": {
+            "doctorRepository.findActiveById(101)": "Optional.of(Doctor id 101, firstName An, lastName Nguyen, email an.nguyen@example.com, phone 0123456789, licenseNumber LIC-10001, specialization Cardiology, qualification MD, experienceYears 10, consultationFee 100.0, department Cardiology, roomNumber R-101, availableDays [Monday], startTime 09:00, endTime 17:00, isAvailable true, createdAt 2025-01-01T09:00:00, updatedAt 2025-01-01T09:00:00)"
+          }
+        },
+        "expectedResult": "Service trả về DoctorResponseDto được tạo từ Doctor đã tìm thấy, gồm id 101 và các trường tương ứng với Doctor trả về từ repository. Source không mâu thuẫn với kỳ vọng này.",
+        "priority": "HIGH",
+        "traceSource": "BR-069 [STMT-3] -> TP-056 -> STMT-3",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 3342,
+        "testPlanId": 2641,
+        "caseCode": "TC-1777",
+        "testType": "HAPPY_PATH",
+        "description": "Trả về DTO tương ứng với từng bác sĩ đang hoạt động.",
+        "preconditions": "DoctorRepository được inject vào DoctorService và findAllActive trả về hai Doctor có id lần lượt là 101 và 102, với các trường dữ liệu đã thiết lập.",
+        "testData": {
+          "input": {},
+          "mocks": {
+            "doctorRepository.findAllActive()": "Danh sách [Doctor id 101, firstName An, lastName Nguyen, email an.nguyen@example.com, phone 0123456789, licenseNumber LIC-10001, specialization Cardiology, isAvailable true; Doctor id 102, firstName Binh, lastName Tran, email binh.tran@example.com, phone 0987654321, licenseNumber LIC-10002, specialization Neurology, isAvailable false]"
+          }
+        },
+        "expectedResult": "Service trả về danh sách gồm hai DoctorResponseDto tương ứng, giữ đúng id và các trường của từng Doctor trong danh sách repository. Source không mâu thuẫn với kỳ vọng này.",
+        "priority": "HIGH",
+        "traceSource": "BR-070 [STMT-2] -> TP-057 -> STMT-2",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 3343,
+        "testPlanId": 2642,
+        "caseCode": "TC-1778",
+        "testType": "EXCEPTION",
+        "description": "Báo lỗi khi cập nhật bác sĩ không tồn tại hoặc không còn hoạt động.",
+        "preconditions": "DoctorRepository được inject vào DoctorService và findActiveById trả về Optional rỗng cho ID đã cung cấp. Nhánh này dừng trước các kiểm tra email, giấy phép, ánh xạ request và save.\n[GreyTest testability: UNKNOWN] UNRESOLVED_HELPER_PATH @ hospital-management-demo-main/backend/doctor-service/src/main/java/com/hospital/doctor/service/DoctorService.java:94 updateDoctor — Lời gọi helper nội bộ chưa được phân tích đường đi trong MVP: mapDtoToEntity. | Kiểm tra đường đi qua helper trước khi kết luận có thể điều khiển nhánh; không thay kết quả helper bằng giả định.",
+        "testData": {
+          "input": {
+            "id": 101,
+            "requestDto": {
+              "email": "an.nguyen@example.com",
+              "phone": "0123456789",
+              "endTime": "17:00",
+              "lastName": "Nguyen",
+              "firstName": "An",
+              "startTime": "09:00",
+              "department": "Cardiology",
+              "roomNumber": "R-101",
+              "isAvailable": true,
+              "availableDays": [
+                "Monday"
+              ],
+              "licenseNumber": "LIC-10001",
+              "qualification": "MD",
+              "specialization": "Cardiology",
+              "consultationFee": 100.0,
+              "experienceYears": 10
+            }
+          },
+          "mocks": {
+            "doctorRepository.findActiveById(101)": "Optional.empty()"
+          }
+        },
+        "expectedResult": "Service ném ResourceNotFoundException với thông báo chính xác \"Doctor not found with id: '101'\". Source không mâu thuẫn với kỳ vọng này.",
+        "priority": "HIGH",
+        "traceSource": "BR-071 [STMT-2] -> TP-058 -> STMT-2",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 3344,
+        "testPlanId": 2643,
+        "caseCode": "TC-1779",
+        "testType": "EXCEPTION",
+        "description": "Từ chối email thuộc bác sĩ khác và chấp nhận email của bác sĩ hiện tại hoặc email không tìm thấy.",
+        "preconditions": "DoctorRepository được inject vào DoctorService. Doctor đang cập nhật có id 101. Dùng request hợp lệ với email new.email@example.com và licenseNumber LIC-NEW-01. Với kiểm tra giấy phép, findByLicenseNumber trả về Optional rỗng. Ba tình huống email cần được chạy độc lập: email thuộc Doctor id 202; email thuộc Doctor id 101; email không tìm thấy.\n[GreyTest testability: UNKNOWN] UNRESOLVED_HELPER_PATH @ hospital-management-demo-main/backend/doctor-service/src/main/java/com/hospital/doctor/service/DoctorService.java:94 updateDoctor — Lời gọi helper nội bộ chưa được phân tích đường đi trong MVP: mapDtoToEntity. | Kiểm tra đường đi qua helper trước khi kết luận có thể điều khiển nhánh; không thay kết quả helper bằng giả định.",
+        "testData": {
+          "input": {
+            "id": 101,
+            "requestDto": {
+              "email": "new.email@example.com",
+              "phone": "0123456789",
+              "endTime": "17:00",
+              "lastName": "Nguyen",
+              "firstName": "An",
+              "startTime": "09:00",
+              "department": "Cardiology",
+              "roomNumber": "R-101",
+              "isAvailable": true,
+              "availableDays": [
+                "Monday"
+              ],
+              "licenseNumber": "LIC-NEW-01",
+              "qualification": "MD",
+              "specialization": "Cardiology",
+              "consultationFee": 100.0,
+              "experienceYears": 10
+            },
+            "situations": [
+              "findByEmail trả về Optional.of(Doctor id 202)",
+              "findByEmail trả về Optional.of(Doctor id 101)",
+              "findByEmail trả về Optional.empty()"
+            ]
+          },
+          "mocks": {
+            "doctorRepository.findActiveById(101)": "Trong mỗi tình huống, trả về cùng Doctor đang cập nhật có id 101",
+            "doctorRepository.findByLicenseNumber(\"LIC-NEW-01\")": "Trong hai tình huống không ném lỗi email, trả về Optional.empty()",
+            "doctorRepository.findByEmail(\"new.email@example.com\")": "Lần lượt trả về Optional.of(Doctor id 202), Optional.of(Doctor id 101), và Optional.empty() theo tình huống"
+          }
+        },
+        "expectedResult": "Khi email thuộc Doctor id 202, service ném IllegalArgumentException với thông báo chính xác \"Doctor with email new.email@example.com already exists\" trước khi kiểm tra giấy phép, ánh xạ request hoặc gọi save. Khi email thuộc Doctor id 101 hoặc không tìm thấy, service không ném ngoại lệ trùng email; với kết quả kiểm tra giấy phép đã nêu, service tiếp tục cập nhật và lưu Doctor. Nhánh IF-1-FALSE bao gồm trường hợp email không tìm thấy vì không có Doctor để kiểm tra điều kiện. Source không mâu thuẫn với kỳ vọng này.",
+        "priority": "HIGH",
+        "traceSource": "BR-072 [IF-1] -> TP-059 -> IF-1-TRUE -> IF-1-FALSE",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 3345,
+        "testPlanId": 2644,
+        "caseCode": "TC-1780",
+        "testType": "EXCEPTION",
+        "description": "Từ chối số giấy phép thuộc bác sĩ khác và chấp nhận số giấy phép của bác sĩ hiện tại hoặc số giấy phép không tìm thấy.",
+        "preconditions": "DoctorRepository được inject vào DoctorService. Doctor đang cập nhật có id 101. Dùng request hợp lệ với email new.email@example.com và licenseNumber LIC-NEW-01. findByEmail trả về Optional rỗng. Ba tình huống giấy phép cần được chạy độc lập: giấy phép thuộc Doctor id 202; giấy phép thuộc Doctor id 101; giấy phép không tìm thấy.\n[GreyTest testability: UNKNOWN] UNRESOLVED_HELPER_PATH @ hospital-management-demo-main/backend/doctor-service/src/main/java/com/hospital/doctor/service/DoctorService.java:94 updateDoctor — Lời gọi helper nội bộ chưa được phân tích đường đi trong MVP: mapDtoToEntity. | Kiểm tra đường đi qua helper trước khi kết luận có thể điều khiển nhánh; không thay kết quả helper bằng giả định.",
+        "testData": {
+          "input": {
+            "id": 101,
+            "requestDto": {
+              "email": "new.email@example.com",
+              "phone": "0123456789",
+              "endTime": "17:00",
+              "lastName": "Nguyen",
+              "firstName": "An",
+              "startTime": "09:00",
+              "department": "Cardiology",
+              "roomNumber": "R-101",
+              "isAvailable": true,
+              "availableDays": [
+                "Monday"
+              ],
+              "licenseNumber": "LIC-NEW-01",
+              "qualification": "MD",
+              "specialization": "Cardiology",
+              "consultationFee": 100.0,
+              "experienceYears": 10
+            },
+            "situations": [
+              "findByLicenseNumber trả về Optional.of(Doctor id 202)",
+              "findByLicenseNumber trả về Optional.of(Doctor id 101)",
+              "findByLicenseNumber trả về Optional.empty()"
+            ]
+          },
+          "mocks": {
+            "doctorRepository.findActiveById(101)": "Trong mỗi tình huống, trả về cùng Doctor đang cập nhật có id 101",
+            "doctorRepository.findByLicenseNumber(\"LIC-NEW-01\")": "Lần lượt trả về Optional.of(Doctor id 202), Optional.of(Doctor id 101), và Optional.empty() theo tình huống",
+            "doctorRepository.findByEmail(\"new.email@example.com\")": "Optional.empty()"
+          }
+        },
+        "expectedResult": "Khi số giấy phép thuộc Doctor id 202, service ném IllegalArgumentException với thông báo chính xác \"Doctor with license number LIC-NEW-01 already exists\" trước khi ánh xạ request hoặc gọi save. Khi số giấy phép thuộc Doctor id 101 hoặc không tìm thấy, service không ném ngoại lệ trùng giấy phép và tiếp tục cập nhật, lưu Doctor. Nhánh IF-2-FALSE bao gồm trường hợp giấy phép không tìm thấy vì không có Doctor để kiểm tra điều kiện. Source không mâu thuẫn với kỳ vọng này.",
+        "priority": "HIGH",
+        "traceSource": "BR-073 [IF-2] -> TP-060 -> IF-2-TRUE -> IF-2-FALSE",
+        "status": "APPROVED",
+        "isModified": false
+      }
+    ],
+    "existingApprovedTestCases": [],
+    "previousGeneratedUnitTests": [],
+    "existingTests": [],
+    "supportingResources": [],
+    "contextWarnings": []
+  },
+  "test": {
+    "case_id": 3344,
+    "test_class_name": "DoctorServiceTest",
+    "test_method_name": "updateDoctor_emailConflictAndNonConflictCases",
+    "package_name": "com.hospital.doctor.service",
+    "generation_type": "NEW_TEST",
+    "source_code": "// GREYTEST_SOURCE_V1 37fd374eb541e29a0793acceae1127848a49f8ff546946caae0c889c2dd6ccfd aG9zcGl0YWwtbWFuYWdlbWVudC1kZW1vLW1haW4vYmFja2VuZC9kb2N0b3Itc2VydmljZS9zcmMvbWFpbi9qYXZhL2NvbS9ob3NwaXRhbC9kb2N0b3Ivc2VydmljZS9Eb2N0b3JTZXJ2aWNlLmphdmE=\n// GREYTEST_SOURCE_V1 f6d3c6d64f87b0bc6972ebd0a06ede53ef7d80a7b79752fb5e50033326d43880 aG9zcGl0YWwtbWFuYWdlbWVudC1kZW1vLW1haW4vYmFja2VuZC9jb21tb24tbGliL3NyYy9tYWluL2phdmEvY29tL2hvc3BpdGFsL2NvbW1vbi9leGNlcHRpb24vUmVzb3VyY2VOb3RGb3VuZEV4Y2VwdGlvbi5qYXZh\n// GREYTEST_SOURCE_V1 4c6f90a805703d7912c0855bbd650c0d453021407bd4432ba0a7a4f0b3bc5830 aG9zcGl0YWwtbWFuYWdlbWVudC1kZW1vLW1haW4vYmFja2VuZC9kb2N0b3Itc2VydmljZS9zcmMvbWFpbi9qYXZhL2NvbS9ob3NwaXRhbC9kb2N0b3IvZHRvL0RvY3RvclJlcXVlc3REdG8uamF2YQ==\n// GREYTEST_SOURCE_V1 c6040e77ebf06ccf08386f3ee9fec8edb4bc3d6eef49f0870a48c4a9fb6e3435 aG9zcGl0YWwtbWFuYWdlbWVudC1kZW1vLW1haW4vYmFja2VuZC9kb2N0b3Itc2VydmljZS9zcmMvbWFpbi9qYXZhL2NvbS9ob3NwaXRhbC9kb2N0b3IvZHRvL0RvY3RvclJlc3BvbnNlRHRvLmphdmE=\n// GREYTEST_SOURCE_V1 e87954a87acbcc6d59ed3da18f19573808362156846267a6508ef65f4e85a9c6 aG9zcGl0YWwtbWFuYWdlbWVudC1kZW1vLW1haW4vYmFja2VuZC9kb2N0b3Itc2VydmljZS9zcmMvbWFpbi9qYXZhL2NvbS9ob3NwaXRhbC9kb2N0b3IvbW9kZWwvRG9jdG9yLmphdmE=\n// GREYTEST_SOURCE_V1 048c54c3feee6e608c33180c9407dd448c8f68c7ca876e21663df449cefa5646 aG9zcGl0YWwtbWFuYWdlbWVudC1kZW1vLW1haW4vYmFja2VuZC9kb2N0b3Itc2VydmljZS9zcmMvbWFpbi9qYXZhL2NvbS9ob3NwaXRhbC9kb2N0b3IvcmVwb3NpdG9yeS9Eb2N0b3JSZXBvc2l0b3J5LmphdmE=\npackage com.hospital.doctor.service;\n\nimport com.hospital.doctor.dto.DoctorRequestDto;\nimport com.hospital.doctor.model.Doctor;\nimport com.hospital.doctor.repository.DoctorRepository;\nimport org.junit.jupiter.api.Test;\nimport org.junit.jupiter.api.extension.ExtendWith;\nimport org.mockito.InjectMocks;\nimport org.mockito.Mock;\nimport org.mockito.junit.jupiter.MockitoExtension;\n\nimport java.util.Optional;\nimport java.util.Set;\n\nimport static org.junit.jupiter.api.Assertions.assertEquals;\nimport static org.junit.jupiter.api.Assertions.assertThrows;\nimport static org.mockito.Mockito.times;\nimport static org.mockito.Mockito.verify;\nimport static org.mockito.Mockito.when;\n\n@ExtendWith(MockitoExtension.class)\nclass DoctorServiceTest {\n\n    @Mock\n    private DoctorRepository doctorRepository;\n\n    @InjectMocks\n    private DoctorService doctorService;\n\n    private DoctorRequestDto validRequest() {\n        DoctorRequestDto request = new DoctorRequestDto();\n        request.setFirstName(\"An\");\n        request.setLastName(\"Nguyen\");\n        request.setEmail(\"new.email@example.com\");\n        request.setPhone(\"0123456789\");\n        request.setLicenseNumber(\"LIC-NEW-01\");\n        request.setSpecialization(\"Cardiology\");\n        request.setQualification(\"MD\");\n        request.setExperienceYears(10);\n        request.setConsultationFee(100.0);\n        request.setDepartment(\"Cardiology\");\n        request.setRoomNumber(\"R-101\");\n        request.setAvailableDays(Set.of(\"Monday\"));\n        request.setStartTime(\"09:00\");\n        request.setEndTime(\"17:00\");\n        request.setIsAvailable(true);\n        return request;\n    }\n\n    private Doctor activeDoctor() {\n        Doctor doctor = new Doctor();\n        doctor.setId(101L);\n        doctor.setFirstName(\"An\");\n        doctor.setLastName(\"Nguyen\");\n        doctor.setEmail(\"old.email@example.com\");\n        doctor.setPhone(\"0123456789\");\n        doctor.setLicenseNumber(\"LIC-OLD-01\");\n        doctor.setSpecialization(\"Cardiology\");\n        return doctor;\n    }\n\n    @Test\n    // GreyTest trace: updateDoctor | email trùng bác sĩ khác, thuộc bác sĩ hiện tại hoặc không tìm thấy | BR-072 -> TP-059 -> TC-1779\n    void updateDoctor_emailConflictAndNonConflictCases() {\n        // Arrange\n        DoctorRequestDto request = validRequest();\n        Doctor activeForConflict = activeDoctor();\n        Doctor otherDoctor = new Doctor();\n        otherDoctor.setId(202L);\n        when(doctorRepository.findActiveById(101L)).thenReturn(Optional.of(activeForConflict));\n        when(doctorRepository.findByEmail(\"new.email@example.com\")).thenReturn(Optional.of(otherDoctor));\n\n        // Act\n        IllegalArgumentException exception = assertThrows(\n                IllegalArgumentException.class,\n                () -> doctorService.updateDoctor(101L, request));\n\n        // Assert\n        assertEquals(\"Doctor with email new.email@example.com already exists\", exception.getMessage());\n        verify(doctorRepository).findActiveById(101L);\n        verify(doctorRepository).findByEmail(\"new.email@example.com\");\n        verify(doctorRepository, times(0)).findByLicenseNumber(\"LIC-NEW-01\");\n        verify(doctorRepository, times(0)).save(org.mockito.ArgumentMatchers.any(Doctor.class));\n\n        // Arrange and Act: email của bác sĩ hiện tại.\n        Doctor activeForOwnEmail = activeDoctor();\n        when(doctorRepository.findActiveById(101L)).thenReturn(Optional.of(activeForOwnEmail));\n        when(doctorRepository.findByEmail(\"new.email@example.com\")).thenReturn(Optional.of(activeForOwnEmail));\n        when(doctorRepository.findByLicenseNumber(\"LIC-NEW-01\")).thenReturn(Optional.empty());\n        when(doctorRepository.save(org.mockito.ArgumentMatchers.any(Doctor.class)))\n                .thenAnswer(invocation -> invocation.getArgument(0));\n        Doctor ownEmailResult = doctorService.updateDoctor(101L, request);\n\n        // Assert\n        assertEquals(101L, ownEmailResult.getId());\n        assertEquals(\"new.email@example.com\", ownEmailResult.getEmail());\n\n        // Arrange and Act: email không tìm thấy.\n        Doctor activeForMissingEmail = activeDoctor();\n        when(doctorRepository.findActiveById(101L)).thenReturn(Optional.of(activeForMissingEmail));\n        when(doctorRepository.findByEmail(\"new.email@example.com\")).thenReturn(Optional.empty());\n        when(doctorRepository.findByLicenseNumber(\"LIC-NEW-01\")).thenReturn(Optional.empty());\n        Doctor missingEmailResult = doctorService.updateDoctor(101L, request);\n\n        // Assert\n        assertEquals(101L, missingEmailResult.getId());\n        assertEquals(\"new.email@example.com\", missingEmailResult.getEmail());\n        verify(doctorRepository, times(3)).findActiveById(101L);\n        verify(doctorRepository, times(3)).findByEmail(\"new.email@example.com\");\n        verify(doctorRepository, times(2)).findByLicenseNumber(\"LIC-NEW-01\");\n        verify(doctorRepository, times(2)).save(org.mockito.ArgumentMatchers.any(Doctor.class));\n    }\n}"
+  }
+}

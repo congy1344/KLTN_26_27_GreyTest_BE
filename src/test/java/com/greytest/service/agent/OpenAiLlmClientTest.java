@@ -22,6 +22,36 @@ class OpenAiLlmClientTest {
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Test
+    void timesOutWhenHeadersArriveButTheResponseBodyStalls() throws Exception {
+        var releaseBody = new java.util.concurrent.CountDownLatch(1);
+        var headersSent = new java.util.concurrent.CountDownLatch(1);
+        HttpServer server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
+        server.createContext("/", exchange -> {
+            exchange.getRequestBody().readAllBytes();
+            exchange.sendResponseHeaders(200, 1000);
+            exchange.getResponseBody().write('{');
+            exchange.getResponseBody().flush();
+            headersSent.countDown();
+            try { releaseBody.await(10, java.util.concurrent.TimeUnit.SECONDS); }
+            catch (InterruptedException error) { Thread.currentThread().interrupt(); }
+            finally { exchange.close(); }
+        });
+        server.start();
+        try {
+            var client = new OpenAiLlmClient(objectMapper, HttpClient.newHttpClient(), "test-key", "test-model", 0.3,
+                    512, Duration.ofMillis(300), URI.create("http://127.0.0.1:" + server.getAddress().getPort()));
+            org.junit.jupiter.api.Assertions.assertTimeoutPreemptively(Duration.ofSeconds(2), () ->
+                    assertThatThrownBy(() -> client.complete("local stalled-body regression"))
+                            .isInstanceOfSatisfying(LlmResponseException.class, error -> assertThat(error.isRetryable()).isTrue())
+                            .hasCauseInstanceOf(java.net.http.HttpTimeoutException.class));
+            assertThat(headersSent.getCount()).isZero();
+        } finally {
+            releaseBody.countDown();
+            server.stop(0);
+        }
+    }
+
+    @Test
     void callsChatCompletionsApiAndReturnsMessageContent() throws Exception {
         HttpServer server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
         AtomicReference<String> authorization = new AtomicReference<>();

@@ -1,0 +1,940 @@
+{
+  "context": {
+    "project": {
+      "id": 849,
+      "name": "ecommerce-microservice-backend-app",
+      "status": "CASE_APPROVED"
+    },
+    "analysis": {
+      "totalClasses": 237,
+      "totalMethods": 444,
+      "totalEndpoints": 143,
+      "totalRelations": 11,
+      "totalControllerServiceRelations": 71,
+      "existingTestFiles": 11,
+      "totalProductionFiles": 227,
+      "parsedProductionFiles": 227,
+      "failedParseFiles": 0,
+      "failedParseFilePaths": []
+    },
+    "classes": [
+      {
+        "id": 8657,
+        "packageName": "com.selimhorri.app.business.auth.service.impl",
+        "className": "AuthenticationServiceImpl",
+        "qualifiedName": "com.selimhorri.app.business.auth.service.impl.AuthenticationServiceImpl",
+        "classType": "SERVICE",
+        "filePath": "ecommerce-microservice-backend-app/proxy-client/src/main/java/com/selimhorri/app/business/auth/service/impl/AuthenticationServiceImpl.java",
+        "sourceCode": "package com.selimhorri.app.business.auth.service.impl;\r\n\r\nimport org.springframework.security.authentication.AuthenticationManager;\r\nimport org.springframework.security.authentication.BadCredentialsException;\r\nimport org.springframework.security.authentication.UsernamePasswordAuthenticationToken;\r\nimport org.springframework.security.core.userdetails.UserDetailsService;\r\nimport org.springframework.stereotype.Service;\r\nimport com.selimhorri.app.business.auth.model.request.AuthenticationRequest;\r\nimport com.selimhorri.app.business.auth.model.response.AuthenticationResponse;\r\nimport com.selimhorri.app.business.auth.service.AuthenticationService;\r\nimport com.selimhorri.app.exception.wrapper.IllegalAuthenticationCredentialsException;\r\nimport com.selimhorri.app.jwt.service.JwtService;\r\nimport lombok.RequiredArgsConstructor;\r\nimport lombok.extern.slf4j.Slf4j;\r\n\r\n@Service\r\n@Slf4j\r\n@RequiredArgsConstructor\r\npublic class AuthenticationServiceImpl implements AuthenticationService {\r\n\r\n    private final AuthenticationManager authenticationManager;\r\n\r\n    private final UserDetailsService userDetailsService;\r\n\r\n    private final JwtService jwtService;\r\n\r\n    @Override\r\n    public AuthenticationResponse authenticate(final AuthenticationRequest authenticationRequest) {\r\n        log.info(\"** AuthenticationResponse, authenticate user service*\\n\");\r\n        try {\r\n            this.authenticationManager.authenticate(new UsernamePasswordAuthenticationToken(authenticationRequest.getUsername(), authenticationRequest.getPassword()));\r\n        } catch (BadCredentialsException e) {\r\n            throw new IllegalAuthenticationCredentialsException(\"#### Bad credentials! ####\");\r\n        }\r\n        return new AuthenticationResponse(this.jwtService.generateToken(this.userDetailsService.loadUserByUsername(authenticationRequest.getUsername())));\r\n    }\r\n\r\n    @Override\r\n    public Boolean authenticate(final String jwt) {\r\n        return null;\r\n    }\r\n}\r\n",
+        "annotations": [
+          {
+            "id": 10731,
+            "targetType": "CLASS",
+            "category": "COMPONENT",
+            "annotationName": "Service",
+            "attributes": "@Service"
+          }
+        ],
+        "methods": [
+          {
+            "id": 18224,
+            "classQualifiedName": "com.selimhorri.app.business.auth.service.impl.AuthenticationServiceImpl",
+            "methodName": "authenticate",
+            "returnType": "AuthenticationResponse",
+            "parameters": [
+              {
+                "name": "authenticationRequest",
+                "type": "AuthenticationRequest"
+              }
+            ],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "@Override\r\n\tpublic AuthenticationResponse authenticate(final AuthenticationRequest authenticationRequest) {\r\n\t\t\r\n\t\tlog.info(\"** AuthenticationResponse, authenticate user service*\\n\");\r\n\t\t\r\n\t\ttry {\r\n\t\t\tthis.authenticationManager.authenticate(new UsernamePasswordAuthenticationToken(\r\n\t\t\t\t\tauthenticationRequest.getUsername(), authenticationRequest.getPassword()));\r\n\t\t}\r\n\t\tcatch (BadCredentialsException e) {\r\n\t\t\tthrow new IllegalAuthenticationCredentialsException(\"#### Bad credentials! ####\");\r\n\t\t}\r\n\t\t\r\n\t\treturn new AuthenticationResponse(this.jwtService.generateToken(this.userDetailsService\r\n\t\t\t\t.loadUserByUsername(authenticationRequest.getUsername())));\r\n\t}",
+            "lineStart": 27,
+            "lineEnd": 42,
+            "annotations": [],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 30,
+                "lineEnd": 30
+              },
+              {
+                "branchId": "STMT-2",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 32,
+                "lineEnd": 38
+              },
+              {
+                "branchId": "STMT-3",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 40,
+                "lineEnd": 41
+              }
+            ]
+          },
+          {
+            "id": 18225,
+            "classQualifiedName": "com.selimhorri.app.business.auth.service.impl.AuthenticationServiceImpl",
+            "methodName": "authenticate",
+            "returnType": "Boolean",
+            "parameters": [
+              {
+                "name": "jwt",
+                "type": "String"
+              }
+            ],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "@Override\r\n\tpublic Boolean authenticate(final String jwt) {\r\n\t\treturn null;\r\n\t}",
+            "lineStart": 44,
+            "lineEnd": 47,
+            "annotations": [],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 46,
+                "lineEnd": 46
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": 8658,
+        "packageName": "com.selimhorri.app.business.auth.service.impl",
+        "className": "UserDetailsServiceImpl",
+        "qualifiedName": "com.selimhorri.app.business.auth.service.impl.UserDetailsServiceImpl",
+        "classType": "SERVICE",
+        "filePath": "ecommerce-microservice-backend-app/proxy-client/src/main/java/com/selimhorri/app/business/auth/service/impl/UserDetailsServiceImpl.java",
+        "sourceCode": "package com.selimhorri.app.business.auth.service.impl;\r\n\r\nimport org.springframework.security.core.userdetails.UserDetails;\r\nimport org.springframework.security.core.userdetails.UserDetailsService;\r\nimport org.springframework.security.core.userdetails.UsernameNotFoundException;\r\nimport org.springframework.stereotype.Service;\r\nimport org.springframework.web.client.RestTemplate;\r\nimport com.selimhorri.app.business.user.model.CredentialDto;\r\nimport com.selimhorri.app.business.user.model.UserDetailsImpl;\r\nimport com.selimhorri.app.constant.AppConstant;\r\nimport lombok.RequiredArgsConstructor;\r\nimport lombok.extern.slf4j.Slf4j;\r\n\r\n@Service\r\n@Slf4j\r\n@RequiredArgsConstructor\r\npublic class UserDetailsServiceImpl implements UserDetailsService {\r\n\r\n    private static final String API_URL = AppConstant.DiscoveredDomainsApi.USER_SERVICE_HOST + \"/api/credentials\";\r\n\r\n    private final RestTemplate restTemplate;\r\n\r\n    @Override\r\n    public UserDetails loadUserByUsername(final String username) throws UsernameNotFoundException {\r\n        log.info(\"**UserDetails, load user by username*\\n\");\r\n        return new UserDetailsImpl(this.restTemplate.getForObject(API_URL + \"/username/\" + username, CredentialDto.class));\r\n    }\r\n}\r\n",
+        "annotations": [
+          {
+            "id": 10732,
+            "targetType": "CLASS",
+            "category": "COMPONENT",
+            "annotationName": "Service",
+            "attributes": "@Service"
+          }
+        ],
+        "methods": [
+          {
+            "id": 18226,
+            "classQualifiedName": "com.selimhorri.app.business.auth.service.impl.UserDetailsServiceImpl",
+            "methodName": "loadUserByUsername",
+            "returnType": "UserDetails",
+            "parameters": [
+              {
+                "name": "username",
+                "type": "String"
+              }
+            ],
+            "throwsList": [
+              "UsernameNotFoundException"
+            ],
+            "visibility": "PUBLIC",
+            "sourceCode": "@Override\r\n\tpublic UserDetails loadUserByUsername(final String username) throws UsernameNotFoundException {\r\n\t\tlog.info(\"**UserDetails, load user by username*\\n\");\r\n\t\treturn new UserDetailsImpl(this.restTemplate.getForObject(API_URL + \"/username/\" + username, CredentialDto.class));\r\n\t}",
+            "lineStart": 24,
+            "lineEnd": 28,
+            "annotations": [],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 26,
+                "lineEnd": 26
+              },
+              {
+                "branchId": "STMT-2",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 27,
+                "lineEnd": 27
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": 8726,
+        "packageName": "com.selimhorri.app.jwt.service.impl",
+        "className": "JwtServiceImpl",
+        "qualifiedName": "com.selimhorri.app.jwt.service.impl.JwtServiceImpl",
+        "classType": "SERVICE",
+        "filePath": "ecommerce-microservice-backend-app/proxy-client/src/main/java/com/selimhorri/app/jwt/service/impl/JwtServiceImpl.java",
+        "sourceCode": "package com.selimhorri.app.jwt.service.impl;\r\n\r\nimport java.util.Date;\r\nimport java.util.function.Function;\r\nimport org.springframework.security.core.userdetails.UserDetails;\r\nimport org.springframework.stereotype.Service;\r\nimport com.selimhorri.app.jwt.service.JwtService;\r\nimport com.selimhorri.app.jwt.util.JwtUtil;\r\nimport io.jsonwebtoken.Claims;\r\nimport lombok.RequiredArgsConstructor;\r\nimport lombok.extern.slf4j.Slf4j;\r\n\r\n@Service\r\n@Slf4j\r\n@RequiredArgsConstructor\r\npublic class JwtServiceImpl implements JwtService {\r\n\r\n    private final JwtUtil jwtUtil;\r\n\r\n    @Override\r\n    public String extractUsername(final String token) {\r\n        log.info(\"**String, jwt service extract username from given token!*\");\r\n        return this.jwtUtil.extractUsername(token);\r\n    }\r\n\r\n    @Override\r\n    public Date extractExpiration(final String token) {\r\n        log.info(\"**Date, jwt service extract expiration from given token!*\");\r\n        return this.jwtUtil.extractExpiration(token);\r\n    }\r\n\r\n    @Override\r\n    public <T> T extractClaims(final String token, final Function<Claims, T> claimsResolver) {\r\n        log.info(\"**T, jwt service extract claims from given token and claimResolver Function!*\");\r\n        return this.jwtUtil.extractClaims(token, claimsResolver);\r\n    }\r\n\r\n    @Override\r\n    public String generateToken(final UserDetails userDetails) {\r\n        log.info(\"**String, jwt service generate token from given userDetails!*\");\r\n        return this.jwtUtil.generateToken(userDetails);\r\n    }\r\n\r\n    @Override\r\n    public Boolean validateToken(final String token, final UserDetails userDetails) {\r\n        log.info(\"**Boolean, jwt service validate token from given token and userDetails!*\");\r\n        return this.jwtUtil.validateToken(token, userDetails);\r\n    }\r\n}\r\n",
+        "annotations": [
+          {
+            "id": 11018,
+            "targetType": "CLASS",
+            "category": "COMPONENT",
+            "annotationName": "Service",
+            "attributes": "@Service"
+          }
+        ],
+        "methods": [
+          {
+            "id": 18378,
+            "classQualifiedName": "com.selimhorri.app.jwt.service.impl.JwtServiceImpl",
+            "methodName": "extractUsername",
+            "returnType": "String",
+            "parameters": [
+              {
+                "name": "token",
+                "type": "String"
+              }
+            ],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "@Override\r\n\tpublic String extractUsername(final String token) {\r\n\t\tlog.info(\"**String, jwt service extract username from given token!*\");\r\n\t\treturn this.jwtUtil.extractUsername(token);\r\n\t}",
+            "lineStart": 23,
+            "lineEnd": 27,
+            "annotations": [],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 25,
+                "lineEnd": 25
+              },
+              {
+                "branchId": "STMT-2",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 26,
+                "lineEnd": 26
+              }
+            ]
+          },
+          {
+            "id": 18379,
+            "classQualifiedName": "com.selimhorri.app.jwt.service.impl.JwtServiceImpl",
+            "methodName": "extractExpiration",
+            "returnType": "Date",
+            "parameters": [
+              {
+                "name": "token",
+                "type": "String"
+              }
+            ],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "@Override\r\n\tpublic Date extractExpiration(final String token) {\r\n\t\tlog.info(\"**Date, jwt service extract expiration from given token!*\");\r\n\t\treturn this.jwtUtil.extractExpiration(token);\r\n\t}",
+            "lineStart": 29,
+            "lineEnd": 33,
+            "annotations": [],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 31,
+                "lineEnd": 31
+              },
+              {
+                "branchId": "STMT-2",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 32,
+                "lineEnd": 32
+              }
+            ]
+          },
+          {
+            "id": 18380,
+            "classQualifiedName": "com.selimhorri.app.jwt.service.impl.JwtServiceImpl",
+            "methodName": "extractClaims",
+            "returnType": "T",
+            "parameters": [
+              {
+                "name": "token",
+                "type": "String"
+              },
+              {
+                "name": "claimsResolver",
+                "type": "Function<Claims,T>"
+              }
+            ],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "@Override\r\n\tpublic <T> T extractClaims(final String token, final Function<Claims, T> claimsResolver) {\r\n\t\tlog.info(\"**T, jwt service extract claims from given token and claimResolver Function!*\");\r\n\t\treturn this.jwtUtil.extractClaims(token, claimsResolver);\r\n\t}",
+            "lineStart": 35,
+            "lineEnd": 39,
+            "annotations": [],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 37,
+                "lineEnd": 37
+              },
+              {
+                "branchId": "STMT-2",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 38,
+                "lineEnd": 38
+              }
+            ]
+          },
+          {
+            "id": 18382,
+            "classQualifiedName": "com.selimhorri.app.jwt.service.impl.JwtServiceImpl",
+            "methodName": "validateToken",
+            "returnType": "Boolean",
+            "parameters": [
+              {
+                "name": "token",
+                "type": "String"
+              },
+              {
+                "name": "userDetails",
+                "type": "UserDetails"
+              }
+            ],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "@Override\r\n\tpublic Boolean validateToken(final String token, final UserDetails userDetails) {\r\n\t\tlog.info(\"**Boolean, jwt service validate token from given token and userDetails!*\");\r\n\t\treturn this.jwtUtil.validateToken(token, userDetails);\r\n\t}",
+            "lineStart": 47,
+            "lineEnd": 51,
+            "annotations": [],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 49,
+                "lineEnd": 49
+              },
+              {
+                "branchId": "STMT-2",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 50,
+                "lineEnd": 50
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": 8654,
+        "packageName": "com.selimhorri.app.business.auth.model.request",
+        "className": "AuthenticationRequest",
+        "qualifiedName": "com.selimhorri.app.business.auth.model.request.AuthenticationRequest",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/proxy-client/src/main/java/com/selimhorri/app/business/auth/model/request/AuthenticationRequest.java",
+        "sourceCode": "package com.selimhorri.app.business.auth.model.request;\r\n\r\nimport java.io.Serializable;\r\nimport javax.validation.constraints.NotBlank;\r\nimport javax.validation.constraints.NotNull;\r\nimport lombok.AllArgsConstructor;\r\nimport lombok.Builder;\r\nimport lombok.Data;\r\nimport lombok.NoArgsConstructor;\r\n\r\n@NoArgsConstructor\r\n@AllArgsConstructor\r\n@Data\r\n@Builder\r\npublic class AuthenticationRequest implements Serializable {\r\n\r\n    private static final long serialVersionUID = 1L;\r\n\r\n    @NotBlank(message = \"*Username must not be empty!**\")\r\n    private String username;\r\n\r\n    @NotNull(message = \"*Password must not be null!**\")\r\n    private String password;\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8655,
+        "packageName": "com.selimhorri.app.business.auth.model.response",
+        "className": "AuthenticationResponse",
+        "qualifiedName": "com.selimhorri.app.business.auth.model.response.AuthenticationResponse",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/proxy-client/src/main/java/com/selimhorri/app/business/auth/model/response/AuthenticationResponse.java",
+        "sourceCode": "package com.selimhorri.app.business.auth.model.response;\r\n\r\nimport java.io.Serializable;\r\nimport lombok.AllArgsConstructor;\r\nimport lombok.Builder;\r\nimport lombok.Data;\r\nimport lombok.NoArgsConstructor;\r\n\r\n@NoArgsConstructor\r\n@AllArgsConstructor\r\n@Data\r\n@Builder\r\npublic class AuthenticationResponse implements Serializable {\r\n\r\n    private static final long serialVersionUID = 1L;\r\n\r\n    private String jwtToken;\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8656,
+        "packageName": "com.selimhorri.app.business.auth.service",
+        "className": "AuthenticationService",
+        "qualifiedName": "com.selimhorri.app.business.auth.service.AuthenticationService",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/proxy-client/src/main/java/com/selimhorri/app/business/auth/service/AuthenticationService.java",
+        "sourceCode": "package com.selimhorri.app.business.auth.service;\r\n\r\nimport com.selimhorri.app.business.auth.model.request.AuthenticationRequest;\r\nimport com.selimhorri.app.business.auth.model.response.AuthenticationResponse;\r\n\r\npublic interface AuthenticationService {\r\n\r\n    AuthenticationResponse authenticate(final AuthenticationRequest authenticationRequest);\r\n\r\n    Boolean authenticate(final String jwt);\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8723,
+        "packageName": "com.selimhorri.app.exception.wrapper",
+        "className": "IllegalAuthenticationCredentialsException",
+        "qualifiedName": "com.selimhorri.app.exception.wrapper.IllegalAuthenticationCredentialsException",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/proxy-client/src/main/java/com/selimhorri/app/exception/wrapper/IllegalAuthenticationCredentialsException.java",
+        "sourceCode": "package com.selimhorri.app.exception.wrapper;\r\n\r\npublic class IllegalAuthenticationCredentialsException extends RuntimeException {\r\n\r\n    private static final long serialVersionUID = 1L;\r\n\r\n    public IllegalAuthenticationCredentialsException() {\r\n        super();\r\n    }\r\n\r\n    public IllegalAuthenticationCredentialsException(String message, Throwable cause) {\r\n        super(message, cause);\r\n    }\r\n\r\n    public IllegalAuthenticationCredentialsException(String message) {\r\n        super(message);\r\n    }\r\n\r\n    public IllegalAuthenticationCredentialsException(Throwable cause) {\r\n        super(cause);\r\n    }\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8727,
+        "packageName": "com.selimhorri.app.jwt.service",
+        "className": "JwtService",
+        "qualifiedName": "com.selimhorri.app.jwt.service.JwtService",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/proxy-client/src/main/java/com/selimhorri/app/jwt/service/JwtService.java",
+        "sourceCode": "package com.selimhorri.app.jwt.service;\r\n\r\nimport java.util.Date;\r\nimport java.util.function.Function;\r\nimport org.springframework.security.core.userdetails.UserDetails;\r\nimport io.jsonwebtoken.Claims;\r\n\r\npublic interface JwtService {\r\n\r\n    String extractUsername(final String token);\r\n\r\n    Date extractExpiration(final String token);\r\n\r\n    <T> T extractClaims(final String token, final Function<Claims, T> claimsResolver);\r\n\r\n    String generateToken(final UserDetails userDetails);\r\n\r\n    Boolean validateToken(final String token, final UserDetails userDetails);\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8701,
+        "packageName": "com.selimhorri.app.business.user.model",
+        "className": "CredentialDto",
+        "qualifiedName": "com.selimhorri.app.business.user.model.CredentialDto",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/proxy-client/src/main/java/com/selimhorri/app/business/user/model/CredentialDto.java",
+        "sourceCode": "package com.selimhorri.app.business.user.model;\r\n\r\nimport java.util.Set;\r\nimport com.fasterxml.jackson.annotation.JsonInclude;\r\nimport com.fasterxml.jackson.annotation.JsonProperty;\r\nimport com.fasterxml.jackson.annotation.JsonInclude.Include;\r\nimport lombok.AllArgsConstructor;\r\nimport lombok.Builder;\r\nimport lombok.Data;\r\nimport lombok.NoArgsConstructor;\r\n\r\n@NoArgsConstructor\r\n@AllArgsConstructor\r\n@Data\r\n@Builder\r\npublic class CredentialDto {\r\n\r\n    private Integer credentialId;\r\n\r\n    private String username;\r\n\r\n    private String password;\r\n\r\n    private RoleBasedAuthority roleBasedAuthority;\r\n\r\n    private Boolean isEnabled;\r\n\r\n    private Boolean isAccountNonExpired;\r\n\r\n    private Boolean isAccountNonLocked;\r\n\r\n    private Boolean isCredentialsNonExpired;\r\n\r\n    @JsonProperty(\"user\")\r\n    @JsonInclude(value = Include.NON_NULL)\r\n    private UserDto userDto;\r\n\r\n    @JsonInclude(value = Include.NON_NULL)\r\n    private Set<VerificationTokenDto> verificationTokenDtos;\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8707,
+        "packageName": "com.selimhorri.app.business.user.model",
+        "className": "UserDetailsImpl",
+        "qualifiedName": "com.selimhorri.app.business.user.model.UserDetailsImpl",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/proxy-client/src/main/java/com/selimhorri/app/business/user/model/UserDetailsImpl.java",
+        "sourceCode": "package com.selimhorri.app.business.user.model;\r\n\r\nimport java.util.Collection;\r\nimport java.util.List;\r\nimport org.springframework.security.core.GrantedAuthority;\r\nimport org.springframework.security.core.authority.SimpleGrantedAuthority;\r\nimport org.springframework.security.core.userdetails.UserDetails;\r\nimport lombok.RequiredArgsConstructor;\r\n\r\n@RequiredArgsConstructor\r\npublic class UserDetailsImpl implements UserDetails {\r\n\r\n    private static final long serialVersionUID = 1L;\r\n\r\n    private final CredentialDto credential;\r\n\r\n    @Override\r\n    public Collection<? extends GrantedAuthority> getAuthorities() {\r\n        return List.of(new SimpleGrantedAuthority(this.credential.getRoleBasedAuthority().name()));\r\n    }\r\n\r\n    @Override\r\n    public String getUsername() {\r\n        return this.credential.getUsername();\r\n    }\r\n\r\n    @Override\r\n    public String getPassword() {\r\n        return this.credential.getPassword();\r\n    }\r\n\r\n    @Override\r\n    public boolean isEnabled() {\r\n        return this.credential.getIsEnabled();\r\n    }\r\n\r\n    @Override\r\n    public boolean isAccountNonExpired() {\r\n        return this.credential.getIsAccountNonExpired();\r\n    }\r\n\r\n    @Override\r\n    public boolean isAccountNonLocked() {\r\n        return this.credential.getIsAccountNonLocked();\r\n    }\r\n\r\n    @Override\r\n    public boolean isCredentialsNonExpired() {\r\n        return this.credential.getIsCredentialsNonExpired();\r\n    }\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8717,
+        "packageName": "com.selimhorri.app.constant",
+        "className": "AppConstant",
+        "qualifiedName": "com.selimhorri.app.constant.AppConstant",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/proxy-client/src/main/java/com/selimhorri/app/constant/AppConstant.java",
+        "sourceCode": "package com.selimhorri.app.constant;\r\n\r\nimport lombok.AccessLevel;\r\nimport lombok.NoArgsConstructor;\r\n\r\n@NoArgsConstructor(access = AccessLevel.PRIVATE)\r\npublic abstract class AppConstant {\r\n\r\n    public static final String LOCAL_DATE_FORMAT = \"dd-MM-yyyy\";\r\n\r\n    public static final String LOCAL_DATE_TIME_FORMAT = \"dd-MM-yyyy__HH:mm:ss:SSSSSS\";\r\n\r\n    public static final String ZONED_DATE_TIME_FORMAT = \"dd-MM-yyyy__HH:mm:ss:SSSSSS\";\r\n\r\n    public static final String INSTANT_FORMAT = \"dd-MM-yyyy__HH:mm:ss:SSSSSS\";\r\n\r\n    @NoArgsConstructor(access = AccessLevel.PRIVATE)\r\n    public abstract class DiscoveredDomainsApi {\r\n\r\n        public static final String USER_SERVICE_HOST = \"http://USER-SERVICE/user-service\";\r\n\r\n        public static final String USER_SERVICE_API_URL = \"http://USER-SERVICE/user-service/api/users\";\r\n\r\n        public static final String PRODUCT_SERVICE_HOST = \"http://PRODUCT-SERVICE/product-service\";\r\n\r\n        public static final String PRODUCT_SERVICE_API_URL = \"http://PRODUCT-SERVICE/product-service/api/products\";\r\n\r\n        public static final String ORDER_SERVICE_HOST = \"http://ORDER-SERVICE/order-service\";\r\n\r\n        public static final String ORDER_SERVICE_API_URL = \"http://ORDER-SERVICE/order-service/api/orders\";\r\n\r\n        public static final String FAVOURITE_SERVICE_HOST = \"http://FAVOURITE-SERVICE/favourite-service\";\r\n\r\n        public static final String FAVOURITE_SERVICE_API_URL = \"http://FAVOURITE-SERVICE/favourite-service/api/favourites\";\r\n\r\n        public static final String PAYMENT_SERVICE_HOST = \"http://PAYMENT-SERVICE/payment-service\";\r\n\r\n        public static final String PAYMENT_SERVICE_API_URL = \"http://PAYMENT-SERVICE/payment-service/api/payments\";\r\n\r\n        public static final String SHIPPING_SERVICE_HOST = \"http://SHIPPING-SERVICE/shipping-service\";\r\n\r\n        public static final String SHIPPING_SERVICE_API_URL = \"http://SHIPPING-SERVICE/shipping-service/api/shippings\";\r\n    }\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8729,
+        "packageName": "com.selimhorri.app.jwt.util",
+        "className": "JwtUtil",
+        "qualifiedName": "com.selimhorri.app.jwt.util.JwtUtil",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/proxy-client/src/main/java/com/selimhorri/app/jwt/util/JwtUtil.java",
+        "sourceCode": "package com.selimhorri.app.jwt.util;\r\n\r\nimport java.util.Date;\r\nimport java.util.function.Function;\r\nimport org.springframework.security.core.userdetails.UserDetails;\r\nimport io.jsonwebtoken.Claims;\r\n\r\npublic interface JwtUtil {\r\n\r\n    String extractUsername(final String token);\r\n\r\n    Date extractExpiration(final String token);\r\n\r\n    <T> T extractClaims(final String token, final Function<Claims, T> claimsResolver);\r\n\r\n    String generateToken(final UserDetails userDetails);\r\n\r\n    Boolean validateToken(final String token, final UserDetails userDetails);\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8706,
+        "packageName": "com.selimhorri.app.business.user.model",
+        "className": "RoleBasedAuthority",
+        "qualifiedName": "com.selimhorri.app.business.user.model.RoleBasedAuthority",
+        "classType": "ENUM",
+        "filePath": "ecommerce-microservice-backend-app/proxy-client/src/main/java/com/selimhorri/app/business/user/model/RoleBasedAuthority.java",
+        "sourceCode": "package com.selimhorri.app.business.user.model;\r\n\r\nimport lombok.Getter;\r\nimport lombok.RequiredArgsConstructor;\r\n\r\n@RequiredArgsConstructor\r\n@Getter\r\npublic enum RoleBasedAuthority {\r\n\r\n    ROLE_USER(\"USER\"), ROLE_ADMIN(\"ADMIN\");\r\n\r\n    private final String role;\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8708,
+        "packageName": "com.selimhorri.app.business.user.model",
+        "className": "UserDto",
+        "qualifiedName": "com.selimhorri.app.business.user.model.UserDto",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/proxy-client/src/main/java/com/selimhorri/app/business/user/model/UserDto.java",
+        "sourceCode": "package com.selimhorri.app.business.user.model;\r\n\r\nimport java.util.Set;\r\nimport com.fasterxml.jackson.annotation.JsonInclude;\r\nimport com.fasterxml.jackson.annotation.JsonProperty;\r\nimport com.fasterxml.jackson.annotation.JsonInclude.Include;\r\nimport lombok.AllArgsConstructor;\r\nimport lombok.Builder;\r\nimport lombok.Data;\r\nimport lombok.NoArgsConstructor;\r\n\r\n@NoArgsConstructor\r\n@AllArgsConstructor\r\n@Data\r\n@Builder\r\npublic class UserDto {\r\n\r\n    private Integer userId;\r\n\r\n    private String firstName;\r\n\r\n    private String lastName;\r\n\r\n    private String imageUrl;\r\n\r\n    private String email;\r\n\r\n    private String phone;\r\n\r\n    @JsonInclude(value = Include.NON_NULL)\r\n    private Set<AddressDto> addressDtos;\r\n\r\n    @JsonProperty(\"credential\")\r\n    @JsonInclude(value = Include.NON_NULL)\r\n    private CredentialDto credentialDto;\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8709,
+        "packageName": "com.selimhorri.app.business.user.model",
+        "className": "VerificationTokenDto",
+        "qualifiedName": "com.selimhorri.app.business.user.model.VerificationTokenDto",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/proxy-client/src/main/java/com/selimhorri/app/business/user/model/VerificationTokenDto.java",
+        "sourceCode": "package com.selimhorri.app.business.user.model;\r\n\r\nimport java.time.LocalDate;\r\nimport org.springframework.format.annotation.DateTimeFormat;\r\nimport com.fasterxml.jackson.annotation.JsonFormat;\r\nimport com.fasterxml.jackson.annotation.JsonFormat.Shape;\r\nimport com.fasterxml.jackson.annotation.JsonInclude;\r\nimport com.fasterxml.jackson.annotation.JsonProperty;\r\nimport com.fasterxml.jackson.annotation.JsonInclude.Include;\r\nimport com.selimhorri.app.constant.AppConstant;\r\nimport lombok.AllArgsConstructor;\r\nimport lombok.Builder;\r\nimport lombok.Data;\r\nimport lombok.NoArgsConstructor;\r\n\r\n@NoArgsConstructor\r\n@AllArgsConstructor\r\n@Data\r\n@Builder\r\npublic class VerificationTokenDto {\r\n\r\n    private Integer verificationTokenId;\r\n\r\n    private String token;\r\n\r\n    @JsonFormat(pattern = AppConstant.LOCAL_DATE_FORMAT, shape = Shape.STRING)\r\n    @DateTimeFormat(pattern = AppConstant.LOCAL_DATE_FORMAT)\r\n    private LocalDate expireDate;\r\n\r\n    @JsonProperty(\"credential\")\r\n    @JsonInclude(value = Include.NON_NULL)\r\n    private CredentialDto credentialDto;\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8700,
+        "packageName": "com.selimhorri.app.business.user.model",
+        "className": "AddressDto",
+        "qualifiedName": "com.selimhorri.app.business.user.model.AddressDto",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/proxy-client/src/main/java/com/selimhorri/app/business/user/model/AddressDto.java",
+        "sourceCode": "package com.selimhorri.app.business.user.model;\r\n\r\nimport java.io.Serializable;\r\nimport com.fasterxml.jackson.annotation.JsonInclude;\r\nimport com.fasterxml.jackson.annotation.JsonProperty;\r\nimport com.fasterxml.jackson.annotation.JsonInclude.Include;\r\nimport lombok.AllArgsConstructor;\r\nimport lombok.Builder;\r\nimport lombok.Data;\r\nimport lombok.NoArgsConstructor;\r\n\r\n@NoArgsConstructor\r\n@AllArgsConstructor\r\n@Data\r\n@Builder\r\npublic class AddressDto implements Serializable {\r\n\r\n    private static final long serialVersionUID = 1L;\r\n\r\n    private Integer addressId;\r\n\r\n    private String fullAddress;\r\n\r\n    private String postalCode;\r\n\r\n    private String city;\r\n\r\n    @JsonProperty(\"user\")\r\n    @JsonInclude(value = Include.NON_NULL)\r\n    private UserDto userDto;\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      }
+    ],
+    "approvedBusinessRules": [
+      {
+        "id": 4578,
+        "methodId": 18224,
+        "ruleCode": "BR-040",
+        "description": "Khi xác thực thông tin đăng nhập thất bại với BadCredentialsException, service ném IllegalAuthenticationCredentialsException với thông điệp \"#### Bad credentials! ####\".",
+        "reviewNote": "SOURCE_BRANCH:STMT-2\nAI category: VALIDATION. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-2"
+      },
+      {
+        "id": 4579,
+        "methodId": 18224,
+        "ruleCode": "BR-041",
+        "description": "Khi xử lý yêu cầu xác thực, service gọi authenticate trên authenticationManager với username và password từ yêu cầu.",
+        "reviewNote": "SOURCE_BRANCH:STMT-2\nAI category: INTEGRATION. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-2"
+      },
+      {
+        "id": 4580,
+        "methodId": 18224,
+        "ruleCode": "BR-042",
+        "description": "Khi xử lý yêu cầu xác thực thành công, service gọi loadUserByUsername trên userDetailsService với username từ yêu cầu.",
+        "reviewNote": "SOURCE_BRANCH:STMT-3\nAI category: INTEGRATION. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-3"
+      },
+      {
+        "id": 4581,
+        "methodId": 18224,
+        "ruleCode": "BR-043",
+        "description": "Khi xử lý yêu cầu xác thực thành công, service gọi generateToken trên jwtService với thông tin người dùng được tải và trả về AuthenticationResponse chứa token đó.",
+        "reviewNote": "SOURCE_BRANCH:STMT-3\nAI category: INTEGRATION. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-3"
+      },
+      {
+        "id": 4582,
+        "methodId": 18225,
+        "ruleCode": "BR-044",
+        "description": "Khi được gọi với jwt, service trả về null.",
+        "reviewNote": "SOURCE_BRANCH:STMT-1\nAI category: BUSINESS_LOGIC. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-1"
+      },
+      {
+        "id": 4583,
+        "methodId": 18226,
+        "ruleCode": "BR-045",
+        "description": "Khi tải thông tin người dùng theo tên đăng nhập, service gọi `getForObject` để lấy `CredentialDto` từ đường dẫn `/api/credentials/username/` nối với tên đăng nhập và tạo `UserDetailsImpl` từ kết quả đó.",
+        "reviewNote": "SOURCE_BRANCH:STMT-2\nAI category: INTEGRATION. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-2"
+      },
+      {
+        "id": 4584,
+        "methodId": 18378,
+        "ruleCode": "BR-046",
+        "description": "Khi service được gọi để trích xuất tên người dùng, service chuyển tiếp token đến method extractUsername của jwtUtil và trả về kết quả nhận được.",
+        "reviewNote": "SOURCE_BRANCH:STMT-2\nAI category: INTEGRATION. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-2"
+      },
+      {
+        "id": 4585,
+        "methodId": 18379,
+        "ruleCode": "BR-047",
+        "description": "Khi service được gọi để trích xuất thời điểm hết hạn, service chuyển tiếp token đến method extractExpiration của jwtUtil và trả về kết quả nhận được.",
+        "reviewNote": "SOURCE_BRANCH:STMT-2\nAI category: INTEGRATION. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-2"
+      },
+      {
+        "id": 4586,
+        "methodId": 18380,
+        "ruleCode": "BR-048",
+        "description": "Khi service được gọi để trích xuất claim, service chuyển tiếp token và claimsResolver đến method extractClaims của jwtUtil và trả về kết quả nhận được.",
+        "reviewNote": "SOURCE_BRANCH:STMT-2\nAI category: INTEGRATION. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-2"
+      },
+      {
+        "id": 4588,
+        "methodId": 18382,
+        "ruleCode": "BR-050",
+        "description": "Khi được gọi với token và userDetails, service gọi jwtUtil.validateToken và trả về kết quả của lời gọi đó.",
+        "reviewNote": "SOURCE_BRANCH:STMT-2\nAI category: INTEGRATION. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-2"
+      }
+    ],
+    "approvedTestPlans": [
+      {
+        "id": 2309,
+        "businessRuleId": 4578,
+        "coveredRuleIds": [
+          4578,
+          4579
+        ],
+        "planCode": "TP-031",
+        "title": "Xử lý xác thực thất bại",
+        "description": "Kiểm tra service chuyển username và password đến authenticationManager; khi thông tin không hợp lệ, ném IllegalAuthenticationCredentialsException với đúng thông điệp.",
+        "testType": "EXCEPTION",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2310,
+        "businessRuleId": 4580,
+        "coveredRuleIds": [
+          4580,
+          4581
+        ],
+        "planCode": "TP-032",
+        "title": "Xác thực thành công và tạo token",
+        "description": "Kiểm tra service tải người dùng theo username sau xác thực thành công, tạo token từ thông tin người dùng đó và trả về AuthenticationResponse chứa token.",
+        "testType": "HAPPY_PATH",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2311,
+        "businessRuleId": 4582,
+        "coveredRuleIds": [
+          4582
+        ],
+        "planCode": "TP-033",
+        "title": "Trả về null khi xác thực JWT",
+        "description": "Kiểm tra method authenticate nhận JWT và trả về null.",
+        "testType": "HAPPY_PATH",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2312,
+        "businessRuleId": 4583,
+        "coveredRuleIds": [
+          4583
+        ],
+        "planCode": "TP-034",
+        "title": "Tải thông tin người dùng theo username",
+        "description": "Kiểm tra service gọi getForObject với đường dẫn credentials/username/{username}, nhận CredentialDto và tạo UserDetailsImpl từ kết quả.\n[GreyTest testability: READY] INTERNAL_FINAL_COLLABORATOR @ ecommerce-microservice-backend-app/proxy-client/src/main/java/com/selimhorri/app/business/auth/service/impl/UserDetailsServiceImpl.java:19 loadUserByUsername — Collaborator final được tạo bên trong class: API_URL. | Dùng collaborator/collection thật và kiểm tra trạng thái qua API có sẵn; không giả định @InjectMocks thay được field final đã khởi tạo.",
+        "testType": "HAPPY_PATH",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2313,
+        "businessRuleId": 4584,
+        "coveredRuleIds": [
+          4584
+        ],
+        "planCode": "TP-035",
+        "title": "Trích xuất username từ token",
+        "description": "Kiểm tra service chuyển tiếp token đến jwtUtil.extractUsername và trả về kết quả nhận được.",
+        "testType": "HAPPY_PATH",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2314,
+        "businessRuleId": 4585,
+        "coveredRuleIds": [
+          4585
+        ],
+        "planCode": "TP-036",
+        "title": "Trích xuất thời điểm hết hạn",
+        "description": "Kiểm tra service chuyển tiếp token đến jwtUtil.extractExpiration và trả về kết quả nhận được.",
+        "testType": "HAPPY_PATH",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2315,
+        "businessRuleId": 4586,
+        "coveredRuleIds": [
+          4586
+        ],
+        "planCode": "TP-037",
+        "title": "Trích xuất claim từ token",
+        "description": "Kiểm tra service chuyển tiếp token và claimsResolver đến jwtUtil.extractClaims, rồi trả về kết quả nhận được.",
+        "testType": "HAPPY_PATH",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2317,
+        "businessRuleId": 4588,
+        "coveredRuleIds": [
+          4588
+        ],
+        "planCode": "TP-039",
+        "title": "Kiểm tra tính hợp lệ của token",
+        "description": "Kiểm tra service chuyển token và userDetails đến jwtUtil.validateToken, rồi trả về kết quả nhận được.",
+        "testType": "HAPPY_PATH",
+        "status": "APPROVED",
+        "isModified": false
+      }
+    ],
+    "approvedTestCases": [
+      {
+        "id": 2919,
+        "testPlanId": 2317,
+        "caseCode": "TC-1449",
+        "testType": "HAPPY_PATH",
+        "description": "Chuyển token và userDetails đến jwtUtil.validateToken rồi trả về kết quả true nhận được.",
+        "preconditions": "Tạo JwtServiceImpl với JwtUtil là mock được truyền qua constructor bắt buộc; chuẩn bị UserDetails hợp lệ và cấu hình mock trả về true.",
+        "testData": {
+          "input": {
+            "token": "token-hop-le",
+            "userDetails": "UserDetails đã chuẩn bị"
+          },
+          "mocks": {
+            "jwtUtil.validateToken(token, userDetails)": "true"
+          }
+        },
+        "expectedResult": "Service gọi jwtUtil.validateToken với đúng token và cùng đối tượng userDetails đã nhận, sau đó trả về true.",
+        "priority": "HIGH",
+        "traceSource": "BR-050 [STMT-2] -> TP-039 -> STMT-2-EXECUTABLE",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2920,
+        "testPlanId": 2309,
+        "caseCode": "TC-1450",
+        "testType": "EXCEPTION",
+        "description": "Xác thực thất bại với thông tin đăng nhập không hợp lệ",
+        "preconditions": "Khởi tạo AuthenticationServiceImpl bằng các dependency authenticationManager, userDetailsService và jwtService dạng mock. Cấu hình authenticationManager.authenticate ném BadCredentialsException khi nhận yêu cầu xác thực.",
+        "testData": {
+          "input": {
+            "authenticationRequest": {
+              "password": "wrong-password",
+              "username": "alice"
+            }
+          },
+          "mocks": {
+            "authenticationManager.authenticate": {
+              "result": "Ném BadCredentialsException",
+              "argument": "UsernamePasswordAuthenticationToken với principal alice và credentials wrong-password"
+            }
+          }
+        },
+        "expectedResult": "Service ném IllegalAuthenticationCredentialsException với thông điệp \"#### Bad credentials! ####\" sau khi chuyển username và password từ yêu cầu đến authenticationManager. Không gọi userDetailsService.loadUserByUsername hoặc jwtService.generateToken vì xử lý dừng tại ngoại lệ xác thực.",
+        "priority": "HIGH",
+        "traceSource": "BR-040 [STMT-2], BR-041 [STMT-2] -> TP-031 -> STMT-2-EXCEPTION",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2921,
+        "testPlanId": 2310,
+        "caseCode": "TC-1451",
+        "testType": "HAPPY_PATH",
+        "description": "Xác thực thành công, tải thông tin người dùng và trả về token",
+        "preconditions": "Khởi tạo AuthenticationServiceImpl bằng các dependency authenticationManager, userDetailsService và jwtService dạng mock. authenticationManager.authenticate hoàn tất bình thường; userDetailsService trả về đối tượng UserDetails đã chuẩn bị; jwtService trả về token đã chuẩn bị khi nhận đúng đối tượng UserDetails đó.",
+        "testData": {
+          "input": {
+            "authenticationRequest": {
+              "password": "correct-password",
+              "username": "alice"
+            }
+          },
+          "mocks": {
+            "jwtService.generateToken": {
+              "result": "jwt-token-123",
+              "argument": "Cùng đối tượng UserDetails do userDetailsService trả về"
+            },
+            "authenticationManager.authenticate": {
+              "result": "Hoàn tất bình thường",
+              "argument": "UsernamePasswordAuthenticationToken với principal alice và credentials correct-password"
+            },
+            "userDetailsService.loadUserByUsername": {
+              "result": "Đối tượng UserDetails đã chuẩn bị",
+              "argument": "alice"
+            }
+          }
+        },
+        "expectedResult": "Service gọi authenticationManager.authenticate với username và password từ yêu cầu, sau đó gọi userDetailsService.loadUserByUsername với username alice. Service gọi jwtService.generateToken với UserDetails được tải và trả về AuthenticationResponse có jwtToken là \"jwt-token-123\".",
+        "priority": "HIGH",
+        "traceSource": "BR-041 [STMT-2], BR-042 [STMT-3], BR-043 [STMT-3] -> TP-032 -> STMT-2-NORMAL -> STMT-3",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2922,
+        "testPlanId": 2311,
+        "caseCode": "TC-1452",
+        "testType": "HAPPY_PATH",
+        "description": "Method authenticate nhận JWT và trả về null",
+        "preconditions": "Tạo AuthenticationServiceImpl; method authenticate nhận String và không cần gọi dependency nào.",
+        "testData": {
+          "input": {
+            "jwt": "jwt-token-123"
+          },
+          "mocks": {}
+        },
+        "expectedResult": "Service trả về null.",
+        "priority": "MEDIUM",
+        "traceSource": "BR-044 [STMT-1] -> TP-033 -> STMT-1",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2923,
+        "testPlanId": 2312,
+        "caseCode": "TC-1453",
+        "testType": "HAPPY_PATH",
+        "description": "Tải thông tin người dùng theo username từ credentials service",
+        "preconditions": "Khởi tạo UserDetailsServiceImpl với RestTemplate mock qua constructor. Đường dẫn API được class cố định là \"http://USER-SERVICE/user-service/api/credentials\". Chuẩn bị CredentialDto có username alice, password hợp lệ, roleBasedAuthority ROLE_USER và các cờ isEnabled, isAccountNonExpired, isAccountNonLocked, isCredentialsNonExpired đều là true để có thể đọc thông tin UserDetails.\n[GreyTest testability: READY] INTERNAL_FINAL_COLLABORATOR @ ecommerce-microservice-backend-app/proxy-client/src/main/java/com/selimhorri/app/business/auth/service/impl/UserDetailsServiceImpl.java:19 loadUserByUsername — Collaborator final được tạo bên trong class: API_URL. | Dùng collaborator/collection thật và kiểm tra trạng thái qua API có sẵn; không giả định @InjectMocks thay được field final đã khởi tạo.",
+        "testData": {
+          "input": {
+            "username": "alice"
+          },
+          "mocks": {
+            "restTemplate.getForObject": {
+              "result": "CredentialDto đã chuẩn bị với credentialId 1001, username alice, password valid-password, roleBasedAuthority ROLE_USER, isEnabled true, isAccountNonExpired true, isAccountNonLocked true, isCredentialsNonExpired true, userDto null và verificationTokenDtos null",
+              "arguments": [
+                "http://USER-SERVICE/user-service/api/credentials/username/alice",
+                "CredentialDto.class"
+              ]
+            }
+          }
+        },
+        "expectedResult": "Service gọi RestTemplate.getForObject với URL credentials/username/alice và kiểu trả về CredentialDto.class, rồi trả về UserDetailsImpl được tạo từ CredentialDto nhận được. UserDetailsImpl trả về username alice, password valid-password, quyền ROLE_USER và các trạng thái enabled, account non-expired, account non-locked, credentials non-expired đều true. Không có kiểm tra xác thực username hoặc xử lý riêng kết quả null được quy định trong rule này.",
+        "priority": "HIGH",
+        "traceSource": "BR-045 [STMT-2] -> TP-034 -> STMT-1 -> STMT-2",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2924,
+        "testPlanId": 2313,
+        "caseCode": "TC-1454",
+        "testType": "HAPPY_PATH",
+        "description": "Chuyển tiếp token để trích xuất username",
+        "preconditions": "Khởi tạo JwtServiceImpl với JwtUtil mock qua constructor.",
+        "testData": {
+          "input": {
+            "token": "jwt-token-123"
+          },
+          "mocks": {
+            "jwtUtil.extractUsername": {
+              "result": "alice",
+              "arguments": [
+                "jwt-token-123"
+              ]
+            }
+          }
+        },
+        "expectedResult": "Service gọi jwtUtil.extractUsername với token \"jwt-token-123\" và trả về kết quả \"alice\".",
+        "priority": "MEDIUM",
+        "traceSource": "BR-046 [STMT-2] -> TP-035 -> STMT-1 -> STMT-2",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2925,
+        "testPlanId": 2314,
+        "caseCode": "TC-1455",
+        "testType": "HAPPY_PATH",
+        "description": "Chuyển tiếp token để trích xuất thời điểm hết hạn",
+        "preconditions": "Khởi tạo JwtServiceImpl với JwtUtil mock qua constructor. Chuẩn bị một đối tượng Date để làm kết quả trả về của dependency.",
+        "testData": {
+          "input": {
+            "token": "jwt-token-123"
+          },
+          "mocks": {
+            "jwtUtil.extractExpiration": {
+              "result": "Đối tượng Date đã chuẩn bị",
+              "arguments": [
+                "jwt-token-123"
+              ]
+            }
+          }
+        },
+        "expectedResult": "Service gọi jwtUtil.extractExpiration với token \"jwt-token-123\" và trả về đúng đối tượng Date nhận được từ dependency.",
+        "priority": "MEDIUM",
+        "traceSource": "BR-047 [STMT-2] -> TP-036 -> STMT-1 -> STMT-2",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2926,
+        "testPlanId": 2315,
+        "caseCode": "TC-1456",
+        "testType": "HAPPY_PATH",
+        "description": "Chuyển tiếp token và claimsResolver để trích xuất claim",
+        "preconditions": "Khởi tạo JwtServiceImpl với JwtUtil mock qua constructor. Chuẩn bị một claimsResolver có kiểu Function<Claims, String> và trả về giá trị claim đã định trước khi được áp dụng.",
+        "testData": {
+          "input": {
+            "token": "jwt-token-123",
+            "claimsResolver": "Function<Claims, String> đã chuẩn bị"
+          },
+          "mocks": {
+            "jwtUtil.extractClaims": {
+              "result": "alice",
+              "arguments": [
+                "jwt-token-123",
+                "Cùng đối tượng claimsResolver đã truyền vào"
+              ]
+            }
+          }
+        },
+        "expectedResult": "Service gọi jwtUtil.extractClaims với token \"jwt-token-123\" và cùng đối tượng claimsResolver, sau đó trả về kết quả \"alice\".",
+        "priority": "MEDIUM",
+        "traceSource": "BR-048 [STMT-2] -> TP-037 -> STMT-1 -> STMT-2",
+        "status": "APPROVED",
+        "isModified": false
+      }
+    ],
+    "existingApprovedTestCases": [],
+    "previousGeneratedUnitTests": [],
+    "existingTests": [],
+    "supportingResources": [],
+    "contextWarnings": []
+  },
+  "test": {
+    "case_id": 2923,
+    "test_class_name": "UserDetailsServiceImplTest",
+    "test_method_name": "loadUserByUsername_FetchesCredentialAndBuildsUserDetails",
+    "package_name": "com.selimhorri.app.business.auth.service.impl",
+    "generation_type": "NEW_TEST",
+    "source_code": "package com.selimhorri.app.business.auth.service.impl;\n\nimport static org.junit.jupiter.api.Assertions.assertEquals;\nimport static org.junit.jupiter.api.Assertions.assertTrue;\nimport static org.mockito.Mockito.verify;\nimport static org.mockito.Mockito.when;\n\nimport org.junit.jupiter.api.Test;\nimport org.junit.jupiter.api.extension.ExtendWith;\nimport org.mockito.InjectMocks;\nimport org.mockito.Mock;\nimport org.mockito.junit.jupiter.MockitoExtension;\nimport org.springframework.web.client.RestTemplate;\nimport com.selimhorri.app.business.user.model.CredentialDto;\nimport com.selimhorri.app.business.user.model.RoleBasedAuthority;\nimport com.selimhorri.app.business.user.model.UserDetailsImpl;\n\n@ExtendWith(MockitoExtension.class)\nclass UserDetailsServiceImplTest {\n\n    @Mock\n    private RestTemplate restTemplate;\n\n    @InjectMocks\n    private UserDetailsServiceImpl service;\n\n    // GreyTest trace: loadUserByUsername | credential fetch and UserDetailsImpl construction | BR-045 -> TP-034 -> TC-1453\n    @Test\n    void loadUserByUsername_FetchesCredentialAndBuildsUserDetails() {\n        // Arrange\n        String username = \"alice\";\n        String url = \"http://USER-SERVICE/user-service/api/credentials/username/alice\";\n        CredentialDto credential = new CredentialDto();\n        credential.setCredentialId(1001);\n        credential.setUsername(\"alice\");\n        credential.setPassword(\"valid-password\");\n        credential.setRoleBasedAuthority(RoleBasedAuthority.ROLE_USER);\n        credential.setIsEnabled(true);\n        credential.setIsAccountNonExpired(true);\n        credential.setIsAccountNonLocked(true);\n        credential.setIsCredentialsNonExpired(true);\n        when(restTemplate.getForObject(url, CredentialDto.class)).thenReturn(credential);\n\n        // Act\n        UserDetailsImpl result = (UserDetailsImpl) service.loadUserByUsername(username);\n\n        // Assert\n        assertEquals(\"alice\", result.getUsername());\n        assertEquals(\"valid-password\", result.getPassword());\n        assertEquals(\"ROLE_USER\", result.getAuthorities().iterator().next().getAuthority());\n        assertTrue(result.isEnabled());\n        assertTrue(result.isAccountNonExpired());\n        assertTrue(result.isAccountNonLocked());\n        assertTrue(result.isCredentialsNonExpired());\n        verify(restTemplate).getForObject(url, CredentialDto.class);\n    }\n}\n"
+  }
+}

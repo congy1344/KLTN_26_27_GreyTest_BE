@@ -77,7 +77,7 @@ public class ExportService {
             var scope = scopeResolver.resolve(projectId, servicePath);
             ProjectStatus status = scopedStatuses.status(projectId, scope);
             if (status != ProjectStatus.COVERAGE_ANALYZED && status != ProjectStatus.COMPLETED) {
-                throw new InvalidProjectStatusException("Chi xuat bao cao sau khi service da phan tich coverage.");
+                throw new InvalidProjectStatusException("Chỉ xuất báo cáo sau khi service đã phân tích coverage.");
             }
         } else if (project.getStatus() != ProjectStatus.COVERAGE_ANALYZED && project.getStatus() != ProjectStatus.COMPLETED) {
             throw new InvalidProjectStatusException("Chỉ xuất báo cáo sau khi đã phân tích coverage.");

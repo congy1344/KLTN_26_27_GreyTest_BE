@@ -15,5 +15,13 @@ public record SourceUpdateDto(
         String impactSummary,
         List<SourceUpdateItemDto> items,
         LocalDateTime createdAt,
-        LocalDateTime updatedAt) {
+        LocalDateTime updatedAt,
+        Long version,
+        GenerationSummaryDto generationSummary) {
+    public SourceUpdateDto(Long id, Long projectId, Long baseRevisionId, Long candidateRevisionId,
+            SourceUpdateStatus status, Integer totalChangedMethods, String impactSummary,
+            List<SourceUpdateItemDto> items, LocalDateTime createdAt, LocalDateTime updatedAt) {
+        this(id, projectId, baseRevisionId, candidateRevisionId, status, totalChangedMethods, impactSummary,
+                items, createdAt, updatedAt, null, null);
+    }
 }

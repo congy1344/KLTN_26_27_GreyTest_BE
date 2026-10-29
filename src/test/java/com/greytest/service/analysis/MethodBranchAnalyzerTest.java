@@ -202,7 +202,7 @@ class MethodBranchAnalyzerTest {
         assertThatThrownBy(() -> MethodBranchAnalyzer.analyze(
                 "public void broken() { if (", 10))
                 .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("Khong parse duoc source method");
+                .hasMessageContaining("Không parse được source method");
     }
 
     private List<SourceBranchDto> decisionBranches(List<SourceBranchDto> branches) {

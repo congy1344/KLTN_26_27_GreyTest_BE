@@ -6,12 +6,12 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 
 public record UpdateTestPlanRequest(
-        @NotNull(message = "Business Rule la bat buoc")
+        @NotNull(message = "Business Rule là bắt buộc")
         Long businessRuleId,
-        @NotBlank(message = "Tieu de Test Plan la bat buoc")
+        @NotBlank(message = "Tiêu đề Test Plan là bắt buộc")
         String title,
-        @NotBlank(message = "Mo ta Test Plan la bat buoc")
+        @NotBlank(message = "Mô tả Test Plan là bắt buộc")
         String description,
-        @NotNull(message = "Loai Test Plan la bat buoc")
+        @NotNull(message = "Loại Test Plan là bắt buộc")
         TestType testType) {
 }

@@ -152,7 +152,7 @@ public class TestPlanService {
     @Transactional(readOnly = true)
     public Long projectIdForPlan(Long planId) {
         return testPlanRepository.findById(planId)
-                .orElseThrow(() -> new IllegalArgumentException("Khong tim thay Test Plan " + planId))
+                .orElseThrow(() -> new IllegalArgumentException("Không tìm thấy Test Plan " + planId))
                 .getProjectId();
     }
 
@@ -189,7 +189,7 @@ public class TestPlanService {
                 .filter(rule -> rule.getStatus() == ReviewStatus.APPROVED)
                 .filter(rule -> scopedMethodIds == null || (rule.getMethodId() != null && scopedMethodIds.contains(rule.getMethodId()))).toList();
         if (allApprovedRules.isEmpty()) {
-            throw new InvalidProjectStatusException("Can co it nhat mot Business Rule APPROVED truoc khi sinh Test Plan.");
+            throw new InvalidProjectStatusException("Cần có ít nhất một Business Rule APPROVED trước khi sinh Test Plan.");
         }
 
         List<TestPlan> existingPlans = testPlanRepository.findByProjectId(projectId);
@@ -210,7 +210,7 @@ public class TestPlanService {
 
         if (targetRules.isEmpty()) {
             generationProgressService.log(projectId, GenerationProgressStage.TEST_PLAN,
-                    "Tat ca Business Rule da duoc bao phu boi Test Plan.");
+                    "Tất cả Business Rule đã được bao phủ bởi Test Plan.");
             transactions.executeWithoutResult(status -> {
                 Project currentProject = projectRepository.findById(projectId)
                         .orElseThrow(() -> new ProjectNotFoundException(projectId));
@@ -218,7 +218,7 @@ public class TestPlanService {
                 projectRepository.save(currentProject);
             });
             generationProgressService.completeAfterCommit(projectId, GenerationProgressStage.TEST_PLAN,
-                    "Hoan tat: tat ca Business Rule da duoc bao phu boi Test Plan.");
+                    "Hoàn tất: tất cả Business Rule đã được bao phủ bởi Test Plan.");
             return existingPlans.stream().map(this::toDto).toList();
         }
 
@@ -438,7 +438,7 @@ public class TestPlanService {
                             projectId, batchRuleIds, lastValidationError.getMessage());
             try {
                 if (response == null || response.plans() == null) {
-                    throw new LlmResponseException("AI khong tra ve danh sach Test Plan hop le.");
+                    throw new LlmResponseException("AI không trả về danh sách Test Plan hợp lệ.");
                 }
                 ensureBatchMatchesMethods(response.plans(), expectedRulesByMethod);
                 return response;
@@ -448,7 +448,7 @@ public class TestPlanService {
                     throw exception;
                 }
                 GenerationJobContext.log(
-                        "AI chua cover du Business Rule cho batch hien tai. Dang tu sinh lai batch (lan 2/2).");
+                        "AI chưa cover đủ Business Rule cho batch hiện tại. Đang tự sinh lại batch (lần 2/2).");
             }
         }
         throw lastValidationError;
@@ -459,9 +459,9 @@ public class TestPlanService {
     public TestPlanDto create(Long projectId, String servicePath, CreateTestPlanRequest request) {
         Set<Long> methodIds = scopeResolver.resolve(projectId, servicePath).methodIds();
         BusinessRule rule = businessRuleRepository.findById(request.businessRuleId())
-                .orElseThrow(() -> new IllegalArgumentException("Khong tim thay Business Rule"));
+                .orElseThrow(() -> new IllegalArgumentException("Không tìm thấy Business Rule"));
         if (rule.getMethodId() == null || !methodIds.contains(rule.getMethodId())) {
-            throw new IllegalArgumentException("Business Rule khong thuoc servicePath da chon.");
+            throw new IllegalArgumentException("Business Rule không thuộc servicePath đã chọn.");
         }
         return create(projectId, request);
     }
@@ -491,7 +491,7 @@ public class TestPlanService {
     @Transactional
     public TestPlanDto update(Long planId, UpdateTestPlanRequest request) {
         TestPlan plan = testPlanRepository.findById(planId)
-                .orElseThrow(() -> new IllegalArgumentException("Khong tim thay Test Plan " + planId));
+                .orElseThrow(() -> new IllegalArgumentException("Không tìm thấy Test Plan " + planId));
         Project project = ensureProjectExists(plan.getProjectId());
         ensurePlanEditable(project);
         BusinessRule rule = ensureApprovedRule(plan.getProjectId(), request.businessRuleId());
@@ -515,7 +515,7 @@ public class TestPlanService {
     @Transactional
     public void delete(Long planId) {
         TestPlan plan = testPlanRepository.findById(planId)
-                .orElseThrow(() -> new IllegalArgumentException("Khong tim thay Test Plan " + planId));
+                .orElseThrow(() -> new IllegalArgumentException("Không tìm thấy Test Plan " + planId));
         Project project = ensureProjectExists(plan.getProjectId());
         ensurePlanEditable(project);
         testPlanRepository.delete(plan);
@@ -536,7 +536,7 @@ public class TestPlanService {
     private List<TestPlanDto> approve(Long projectId, Set<Long> scopedMethodIds) {
         Project project = ensureProjectExists(projectId);
         if (scopedMethodIds == null && project.getStatus() != ProjectStatus.PLAN_PENDING_REVIEW) {
-            throw new InvalidProjectStatusException("Chi co the approve Test Plan dang cho review.");
+            throw new InvalidProjectStatusException("Chỉ có thể approve Test Plan đang chờ review.");
         }
         List<TestPlan> projectPlans = testPlanRepository.findByProjectId(projectId);
         List<TestPlan> plans;
@@ -549,7 +549,7 @@ public class TestPlanService {
             plans = projectPlans.stream().filter(plan -> ruleIds.contains(plan.getBusinessRuleId())).toList();
         }
         if (plans.isEmpty()) {
-            throw new InvalidProjectStatusException("Can co it nhat mot Test Plan truoc khi approve.");
+            throw new InvalidProjectStatusException("Cần có ít nhất một Test Plan trước khi approve.");
         }
         for (TestPlan plan : plans) {
             plan.setStatus(ReviewStatus.APPROVED);
@@ -645,7 +645,7 @@ public class TestPlanService {
         Map<Long, Set<Long>> result = new LinkedHashMap<>();
         for (BusinessRule rule : sortedRules) {
             if (rule.getMethodId() == null) {
-                throw new LlmResponseException("Business Rule chua lien ket method: " + rule.getId());
+                throw new LlmResponseException("Business Rule chưa liên kết method: " + rule.getId());
             }
             result.computeIfAbsent(rule.getMethodId(), ignored -> new TreeSet<>()).add(rule.getId());
         }
@@ -664,14 +664,14 @@ public class TestPlanService {
         List<String> errors = new ArrayList<>();
         for (GeneratedTestPlanDto plan : plans) {
             if (plan == null || plan.methodId() == null || !expectedRulesByMethod.containsKey(plan.methodId())) {
-                errors.add("AI tra ve Test Plan nam ngoai batch method: method_id="
+                errors.add("AI trả về Test Plan nằm ngoài batch method: method_id="
                         + (plan == null ? null : plan.methodId()) + "; expected=" + expectedRulesByMethod.keySet());
                 continue;
             }
             Set<Long> expectedRuleIds = expectedRulesByMethod.get(plan.methodId());
             if (plan.coveredRuleIds() == null
                     || plan.coveredRuleIds().stream().anyMatch(java.util.Objects::isNull)) {
-                errors.add("AI tra ve covered_rule_ids co gia tri null cho method " + plan.methodId() + ".");
+                errors.add("AI trả về covered_rule_ids có giá trị null cho method " + plan.methodId() + ".");
                 continue;
             }
             Set<Long> coveredRuleIds = new TreeSet<>(plan.coveredRuleIds());
@@ -680,12 +680,12 @@ public class TestPlanService {
             if (plan.coveredRuleIds().size() != coveredRuleIds.size()
                     || coveredRuleIds.isEmpty()
                     || !unexpectedRuleIds.isEmpty()) {
-                errors.add("AI tra ve covered_rule_ids rong, trung lap hoac nam ngoai method "
+                errors.add("AI trả về covered_rule_ids rỗng, trùng lặp hoặc nằm ngoài method "
                         + plan.methodId() + ": expected=" + expectedRuleIds
                         + "; actual=" + plan.coveredRuleIds() + "; unexpected=" + unexpectedRuleIds);
             }
             if (plan.ruleId() == null || !coveredRuleIds.contains(plan.ruleId())) {
-                errors.add("AI tra ve anchor rule_id khong thuoc covered_rule_ids: method_id="
+                errors.add("AI trả về anchor rule_id không thuộc covered_rule_ids: method_id="
                         + plan.methodId() + "; rule_id=" + plan.ruleId() + "; covered_rule_ids=" + coveredRuleIds);
             }
             returnedRulesByMethod.computeIfAbsent(plan.methodId(), ignored -> new TreeSet<>()).addAll(coveredRuleIds);
@@ -693,20 +693,20 @@ public class TestPlanService {
         Set<Long> missingMethodIds = new TreeSet<>(expectedRulesByMethod.keySet());
         missingMethodIds.removeAll(returnedRulesByMethod.keySet());
         if (!missingMethodIds.isEmpty()) {
-            errors.add("AI chua sinh Test Plan cho method: " + missingMethodIds);
+            errors.add("AI chưa sinh Test Plan cho method: " + missingMethodIds);
         }
         for (Map.Entry<Long, Set<Long>> entry : expectedRulesByMethod.entrySet()) {
             Set<Long> actualRuleIds = returnedRulesByMethod.getOrDefault(entry.getKey(), Set.of());
             Set<Long> missingRuleIds = new TreeSet<>(entry.getValue());
             missingRuleIds.removeAll(actualRuleIds);
             if (!missingRuleIds.isEmpty()) {
-                errors.add("AI chua cover dung Business Rule cho method "
+                errors.add("AI chưa cover đúng Business Rule cho method "
                         + entry.getKey() + ": expected=" + entry.getValue()
                         + "; actual=" + actualRuleIds + "; missing=" + missingRuleIds);
             }
         }
         if (!errors.isEmpty()) {
-            throw new LlmResponseException(String.join("\n", errors));
+            throw new LlmResponseException(String.join("\n", errors), true);
         }
     }
 
@@ -747,9 +747,9 @@ public class TestPlanService {
 
     private BusinessRule ensureApprovedRule(Long projectId, Long ruleId) {
         BusinessRule rule = businessRuleRepository.findById(ruleId)
-                .orElseThrow(() -> new IllegalArgumentException("Khong tim thay Business Rule " + ruleId));
+                .orElseThrow(() -> new IllegalArgumentException("Không tìm thấy Business Rule " + ruleId));
         if (!projectId.equals(rule.getProjectId()) || (rule.getStatus() != ReviewStatus.APPROVED && rule.getStatus() != ReviewStatus.PENDING_REVIEW)) {
-            throw new IllegalArgumentException("Business Rule phai thuoc project hien tai.");
+            throw new IllegalArgumentException("Business Rule phải thuộc project hiện tại.");
         }
         return rule;
     }
@@ -769,14 +769,14 @@ public class TestPlanService {
     private void ensureCanGenerate(Project project) {
         if (!PLAN_EDITABLE_STATUSES.contains(project.getStatus())) {
             throw new InvalidProjectStatusException(
-                    "Chi co the sinh Test Plan sau khi Business Rule da APPROVED.");
+                    "Chỉ có thể sinh Test Plan sau khi Business Rule đã APPROVED.");
         }
     }
 
     private void ensurePlanEditable(Project project) {
         if (!PLAN_EDITABLE_STATUSES.contains(project.getStatus())) {
             throw new InvalidProjectStatusException(
-                    "Chi co the thao tac Test Plan sau khi Business Rule da APPROVED.");
+                    "Chỉ có thể thao tác Test Plan sau khi Business Rule đã APPROVED.");
         }
     }
 

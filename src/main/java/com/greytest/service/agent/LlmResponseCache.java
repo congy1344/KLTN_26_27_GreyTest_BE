@@ -71,7 +71,7 @@ public class LlmResponseCache {
             byte[] bytes = digest.digest((modelIdentity + "\n" + prompt).getBytes(StandardCharsets.UTF_8));
             return HexFormat.of().formatHex(bytes);
         } catch (NoSuchAlgorithmException exception) {
-            throw new IllegalStateException("JVM khong ho tro SHA-256.", exception);
+            throw new IllegalStateException("JVM không hỗ trợ SHA-256.", exception);
         }
     }
 

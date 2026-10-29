@@ -48,7 +48,7 @@ public class AuthService {
             AuthUserRepository userRepository,
             @Value("${greytest.auth.token-secret}") String tokenSecret) {
         if (tokenSecret == null || tokenSecret.getBytes(StandardCharsets.UTF_8).length < 32) {
-            throw new IllegalStateException("GREYTEST_AUTH_TOKEN_SECRET phai co it nhat 32 bytes");
+            throw new IllegalStateException("GREYTEST_AUTH_TOKEN_SECRET phải có ít nhất 32 bytes");
         }
         this.userRepository = userRepository;
         this.tokenSecret = tokenSecret.getBytes(StandardCharsets.UTF_8);
@@ -58,7 +58,7 @@ public class AuthService {
     public LoginResponse register(RegisterRequest request) {
         String email = normalizeEmail(request.email());
         if (userRepository.findByEmailIgnoreCase(email).isPresent()) {
-            throw new AuthException("EMAIL_EXISTS", "Email da duoc su dung", HttpStatus.CONFLICT);
+            throw new AuthException("EMAIL_EXISTS", "Email đã được sử dụng", HttpStatus.CONFLICT);
         }
 
         AuthUser user = new AuthUser();
@@ -76,7 +76,7 @@ public class AuthService {
         AuthUser user = authenticate(request);
         if (user.getRole() == UserRole.ADMIN) {
             throw new AuthException("ADMIN_LOGIN_REQUIRED",
-                    "Tai khoan quan tri phai dang nhap tai cong dang nhap Admin",
+                    "Tài khoản quản trị phải đăng nhập tại cổng đăng nhập Admin",
                     HttpStatus.FORBIDDEN);
         }
         return new LoginResponse(issueToken(user), toDto(user));
@@ -87,7 +87,7 @@ public class AuthService {
         AuthUser user = authenticate(request);
         // Luồng quản trị chỉ cấp phiên sau khi xác nhận đúng role ADMIN.
         if (user.getRole() != UserRole.ADMIN) {
-            throw new AuthException("ADMIN_ACCESS_DENIED", "Tai khoan khong co quyen quan tri", HttpStatus.FORBIDDEN);
+            throw new AuthException("ADMIN_ACCESS_DENIED", "Tài khoản không có quyền quản trị", HttpStatus.FORBIDDEN);
         }
         return new LoginResponse(issueToken(user), toDto(user));
     }
@@ -95,9 +95,9 @@ public class AuthService {
     @Transactional(readOnly = true)
     public AuthUser currentUser(String authorizationHeader) {
         Long userId = parseBearerToken(authorizationHeader)
-                .orElseThrow(() -> unauthorized("Token khong hop le hoac da het han"));
+                .orElseThrow(() -> unauthorized("Token không hợp lệ hoặc đã hết hạn"));
         AuthUser user = userRepository.findById(userId)
-                .orElseThrow(() -> unauthorized("Nguoi dung khong ton tai"));
+                .orElseThrow(() -> unauthorized("Người dùng không tồn tại"));
         if (!Boolean.TRUE.equals(user.getEnabled())) {
             throw new AuthException("ACCOUNT_DISABLED", "Tài khoản của bạn đã bị vô hiệu hóa", HttpStatus.FORBIDDEN);
         }
@@ -170,9 +170,9 @@ public class AuthService {
 
     private AuthUser authenticate(LoginRequest request) {
         AuthUser user = userRepository.findByEmailIgnoreCase(normalizeEmail(request.email()))
-                .orElseThrow(() -> unauthorized("Email hoac mat khau khong dung"));
+                .orElseThrow(() -> unauthorized("Email hoặc mật khẩu không đúng"));
         if (!passwordEncoder.matches(request.password(), user.getPasswordHash())) {
-            throw unauthorized("Email hoac mat khau khong dung");
+            throw unauthorized("Email hoặc mật khẩu không đúng");
         }
         if (!Boolean.TRUE.equals(user.getEnabled())) {
             throw new AuthException("ACCOUNT_DISABLED", "Tài khoản của bạn đã bị vô hiệu hóa", HttpStatus.FORBIDDEN);

@@ -40,22 +40,23 @@ greytest:
     default-monthly-llm-quota: ${GREYTEST_DEFAULT_MONTHLY_LLM_QUOTA:100}
     plus-weekly-llm-quota: ${GREYTEST_PLUS_WEEKLY_LLM_QUOTA:200}
     pro-monthly-llm-quota: ${GREYTEST_PRO_MONTHLY_LLM_QUOTA:300}
+  llm-cache:
+    max-entries: ${GREYTEST_LLM_CACHE_MAX_ENTRIES:500}
+  llm-batch:
+    # Trần chung của provider; mỗi tác vụ chạy tối đa FREE=2, PLUS=3, PRO=4 batch đồng thời.
+    concurrency: ${GREYTEST_LLM_BATCH_CONCURRENCY:4}
+    retry-attempts: ${GREYTEST_LLM_BATCH_RETRY_ATTEMPTS:2}
+    retry-delay-millis: ${GREYTEST_LLM_BATCH_RETRY_DELAY_MILLIS:500}
+  ai-context-log-path: ${GREYTEST_AI_CONTEXT_LOG_PATH:../log}
+  ai-context-log-enabled: ${GREYTEST_AI_CONTEXT_LOG_ENABLED:false}
+  ai-context-log-console-enabled: ${GREYTEST_AI_CONTEXT_LOG_CONSOLE_ENABLED:false}
 
 # Cổng thanh toán VNPay Sandbox
 vnpay:
   tmn-code: ${VNPAY_TMN_CODE:CGXZLS0Z}
   hash-secret: ${VNPAY_HASH_SECRET:XNBCJFAKAZQSGTARRLGCHVZWCIOIGSHN}
   pay-url: ${VNPAY_PAY_URL:https://sandbox.vnpayment.vn/paymentv2/vpcpay.html}
-  return-url: ${VNPAY_RETURN_URL:http://localhost:5173/payment/vnpay-return}
-
-  llm-cache:
-    max-entries: ${GREYTEST_LLM_CACHE_MAX_ENTRIES:500}
-  llm-batch:
-    # Chạy 3 batch đồng thời kết hợp batch size lớn hơn để tăng tốc độ sinh
-    concurrency: ${GREYTEST_LLM_BATCH_CONCURRENCY:3}
-  ai-context-log-path: ${GREYTEST_AI_CONTEXT_LOG_PATH:../log}
-  ai-context-log-enabled: ${GREYTEST_AI_CONTEXT_LOG_ENABLED:false}
-  ai-context-log-console-enabled: ${GREYTEST_AI_CONTEXT_LOG_CONSOLE_ENABLED:false}
+  return-url: ${VNPAY_RETURN_URL:http://localhost:3000/payment/vnpay-return}
 
 # API key LLM lấy từ env, KHÔNG commit (xem .env.example)
 llm:

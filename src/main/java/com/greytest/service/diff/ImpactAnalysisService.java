@@ -2,7 +2,9 @@ package com.greytest.service.diff;
 
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.Objects;
 import java.util.stream.Collectors;
@@ -74,7 +76,9 @@ public class ImpactAnalysisService {
 
         // Chỉ giữ lại các phương thức thuộc tầng Service
         // Nếu có chọn service cụ thể, chỉ giữ lại các phương thức thuộc service đó
-        List<MethodDiffItem> changedMethods = diffItems.stream()
+        List<MethodDiffItem> scopedItems = normalizedScope == null ? diffItems : alignModulePaths(projectId, diffItems);
+        List<MethodDiffItem> effectiveItems = includeResolvedServiceCallers(scopedItems);
+        List<MethodDiffItem> changedMethods = effectiveItems.stream()
                 .filter(d -> d.diffType() != MethodDiffType.UNCHANGED)
                 .filter(MethodDiffItem::isServiceMethod)
                 .filter(d -> matchesServiceScope(projectId, d, normalizedScope))
@@ -89,10 +93,6 @@ public class ImpactAnalysisService {
         for (MethodDiffItem item : changedMethods) {
             if (item.isServiceMethod()) {
                 affectedServiceMethods.add(item.methodKey());
-            }
-            // Thêm các caller là service methods
-            if (item.callerMethods() != null) {
-                affectedServiceMethods.addAll(item.callerMethods());
             }
         }
 
@@ -155,6 +155,63 @@ public class ImpactAnalysisService {
         );
     }
 
+    private List<MethodDiffItem> includeResolvedServiceCallers(List<MethodDiffItem> items) {
+        Map<String, MethodDiffItem> methods = new java.util.LinkedHashMap<>();
+        for (MethodDiffItem item : items) methods.put(scopedKey(item), item);
+        for (MethodDiffItem changed : items) {
+            if (changed.diffType() == MethodDiffType.UNCHANGED || changed.callerMethods() == null) continue;
+            for (String callerKey : changed.callerMethods()) {
+                for (MethodDiffItem caller : items) {
+                    if (!caller.isServiceMethod() || !caller.methodKey().equals(callerKey)) continue;
+                    // callerMethods của diff chỉ chứa caller cùng module; cross-module được diff dependency riêng.
+                    if (!Objects.equals(changed.servicePath(), caller.servicePath())) continue;
+                    if (caller.diffType() != MethodDiffType.UNCHANGED) continue;
+                    methods.put(scopedKey(caller), new MethodDiffItem(caller.className(), caller.qualifiedClassName(),
+                            caller.methodName(), caller.signature(), caller.methodKey(), MethodDiffType.MODIFIED,
+                            "Resolved source dependency đã thay đổi", caller.beforeSource(), caller.afterSource(),
+                            caller.callerMethods(), true, caller.servicePath()));
+                }
+            }
+        }
+        return new ArrayList<>(methods.values());
+    }
+
+    private String scopedKey(MethodDiffItem item) {
+        return Objects.toString(item.servicePath(), "") + ":" + item.methodKey();
+    }
+
+    /** Giữ scope module hiện hành khi ZIP mới chỉ thêm/bớt thư mục bọc ngoài. */
+    private List<MethodDiffItem> alignModulePaths(Long projectId, List<MethodDiffItem> diffItems) {
+        Map<String, Set<String>> baselineModules = new HashMap<>();
+        for (JavaClass javaClass : javaClassRepository.findByProjectId(projectId)) {
+            if (javaClass.getQualifiedName() == null || javaClass.getFilePath() == null) continue;
+            baselineModules.computeIfAbsent(javaClass.getQualifiedName(), ignored -> new HashSet<>())
+                    .add(ServiceScopeResolver.modulePath(javaClass.getFilePath()));
+        }
+        Map<String, Set<String>> aliases = new HashMap<>();
+        // Dùng cả class không đổi làm mốc để method/class mới trong cùng module không bị lọc mất.
+        for (MethodDiffItem item : diffItems) {
+            if (item.servicePath() == null || item.diffType() == MethodDiffType.DELETED) continue;
+            String candidate = ServiceScopeResolver.normalizeServicePath(item.servicePath());
+            for (String baseline : baselineModules.getOrDefault(item.qualifiedClassName(), Set.of())) {
+                if (candidate.equals(baseline) || candidate.equals(".") || baseline.equals(".")
+                        || candidate.endsWith("/" + baseline) || baseline.endsWith("/" + candidate)) {
+                    aliases.computeIfAbsent(candidate, ignored -> new HashSet<>()).add(baseline);
+                }
+            }
+        }
+        return diffItems.stream().map(item -> {
+            if (item.servicePath() == null || item.diffType() == MethodDiffType.DELETED) return item;
+            Set<String> matches = aliases.getOrDefault(ServiceScopeResolver.normalizeServicePath(item.servicePath()), Set.of());
+            // Không đoán module nếu cùng đường dẫn ứng viên khớp nhiều module baseline.
+            if (matches.size() != 1) return item;
+            String servicePath = matches.iterator().next();
+            return new MethodDiffItem(item.className(), item.qualifiedClassName(), item.methodName(), item.signature(),
+                    item.methodKey(), item.diffType(), item.reason(), item.beforeSource(), item.afterSource(),
+                    item.callerMethods(), item.isServiceMethod(), servicePath);
+        }).toList();
+    }
+
     private boolean matchesChangedMethod(JavaMethod method, MethodDiffItem changed) {
         if (!Objects.equals(method.getMethodName(), changed.methodName())) return false;
         JavaClass javaClass = method.getClassId() == null
@@ -163,6 +220,8 @@ public class ImpactAnalysisService {
         if (javaClass == null || !Objects.equals(javaClass.getQualifiedName(), changed.qualifiedClassName())) {
             return false;
         }
+        if (changed.servicePath() != null && !Objects.equals(
+                ServiceScopeResolver.modulePath(javaClass.getFilePath()), changed.servicePath())) return false;
         String parameterTypes = method.getParameters() == null
                 ? ""
                 : method.getParameters().stream().map(param -> param.type()).collect(Collectors.joining(","));

@@ -12,6 +12,7 @@ public enum ActivityAction {
     ADMIN_ROLE_CHANGE,
     ADMIN_QUOTA_CHANGE,
     USER_UPGRADE_TIER,
+    USER_CANCEL_TIER,
     ADMIN_TIER_CHANGE
 }
 

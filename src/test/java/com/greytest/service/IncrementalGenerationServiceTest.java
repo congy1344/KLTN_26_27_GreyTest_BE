@@ -26,12 +26,14 @@ import com.greytest.dto.agent.GenerationResponseDtos.BusinessRuleResponseDto;
 import com.greytest.dto.agent.GenerationResponseDtos.GeneratedBusinessRuleDto;
 import com.greytest.dto.agent.GenerationResponseDtos.GeneratedUnitTestDto;
 import com.greytest.dto.agent.GenerationResponseDtos.UnitTestResponseDto;
+import com.greytest.dto.agent.GenerationResponseDtos.TestCaseResponseDto;
 import com.greytest.entity.AuthUser;
 import com.greytest.entity.JavaClass;
 import com.greytest.entity.JavaMethod;
 import com.greytest.entity.Project;
 import com.greytest.entity.SourceUpdate;
 import com.greytest.entity.SourceUpdateItem;
+import com.greytest.entity.TestCase;
 import com.greytest.entity.UnitTest;
 import com.greytest.entity.enums.SourceType;
 import com.greytest.entity.enums.SourceUpdateStatus;
@@ -44,6 +46,7 @@ import com.greytest.repository.ProjectRepository;
 import com.greytest.repository.SourceUpdateItemRepository;
 import com.greytest.repository.SourceUpdateRepository;
 import com.greytest.repository.UnitTestRepository;
+import com.greytest.repository.TestCaseRepository;
 import com.greytest.service.agent.AIAgentService;
 import com.greytest.entity.BusinessRule;
 import com.greytest.entity.TestCase;
@@ -61,6 +64,190 @@ import java.util.Map;
 
 @ExtendWith(MockitoExtension.class)
 class IncrementalGenerationServiceTest {
+    @Test void proposesUnitTestRemovalWhenAnExistingCaseIsRemoved() {
+        useArtifactRepositories();
+        AuthUser user = prepareUpdate("{\"affectedTestPlanIds\":[601]}");
+        SourceUpdate update = sourceUpdateRepository.findByIdAndProjectId(200L, 10L).orElseThrow();
+        var snapshot = java.nio.file.Path.of("candidate");
+        when(sourceUpdateService.getCandidateSourcePath(update)).thenReturn(snapshot);
+        TestCase stale = new TestCase(); stale.setId(701L); stale.setTestPlanId(601L); stale.setStatus(ReviewStatus.APPROVED);
+        when(testCaseRepository.findByTestPlanId(601L)).thenReturn(List.of(stale));
+        UnitTest child = new UnitTest(); child.setId(801L); child.setTestCaseId(701L);
+        when(unitTestRepository.findByTestCaseIdIn(List.of(701L))).thenReturn(List.of(child));
+        SourceUpdateItem childDraft = proposal(SourceUpdateTargetType.UNIT_TEST, 801L);
+        when(sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(200L)).thenReturn(List.of(childDraft));
+        when(sourceUpdateItemRepository.findBySourceUpdateIdAndTargetTypeAndTargetId(200L, SourceUpdateTargetType.UNIT_TEST, 801L))
+                .thenReturn(Optional.of(childDraft));
+        when(aiAgentService.generateSnapshotTestCases(10L, Set.of(601L), snapshot)).thenReturn(new TestCaseResponseDto(List.of()));
+        service.generateIncrementalStage(10L, 200L, GenerationProgressStage.TEST_CASE, user);
+        assertThat(childDraft.getAction()).isEqualTo(SourceUpdateAction.REMOVE);
+        assertThat(childDraft.getAfterData()).isNull();
+        verify(unitTestRepository, org.mockito.Mockito.never()).delete(any());
+    }
+    @Test
+    void regeneratesRetainedTestsWithStaleSourceMetadataWithoutChangingTheirOracle(
+            @org.junit.jupiter.api.io.TempDir java.nio.file.Path candidate) throws Exception {
+        useArtifactRepositories();
+        AuthUser user = prepareUpdate("{\"affectedTestCaseIds\":[401]}");
+        SourceUpdate update = sourceUpdateRepository.findByIdAndProjectId(200L, 10L).orElseThrow();
+        when(sourceUpdateService.getCandidateSourcePath(update)).thenReturn(candidate);
+        java.nio.file.Files.writeString(candidate.resolve("Service.java"),
+                "class Service { int changed() { return 2; } int stable() { return 3; } }");
+        String other = "class Other { int value() { return 4; } }";
+        java.nio.file.Files.writeString(candidate.resolve("Other.java"), other);
+        List<TestCase> approved = java.util.stream.LongStream.rangeClosed(401, 404).mapToObj(id -> {
+            TestCase testCase = new TestCase(); testCase.setId(id); testCase.setStatus(ReviewStatus.APPROVED);
+            testCase.setTestPlanId(601L);
+            testCase.setExpectedResult("Unchanged approved expectation"); return testCase;
+        }).toList();
+        org.mockito.Mockito.lenient().when(testCaseRepository.findByProjectId(10L)).thenReturn(approved);
+        var plan = new com.greytest.entity.TestPlan(); plan.setId(601L); plan.setStatus(ReviewStatus.APPROVED);
+        org.mockito.Mockito.lenient().when(testPlanRepository.findByProjectId(10L)).thenReturn(List.of(plan));
+        UnitTest stale = sourceStampedUnit(502L, 402L, "Service.java", "class Service { int changed() { return 1; } int stable() { return 3; } }");
+        UnitTest aligned = sourceStampedUnit(503L, 403L, "Other.java", other);
+        UnitTest removed = sourceStampedUnit(504L, 404L, "Service.java", "class Service {} ");
+        org.mockito.Mockito.lenient().when(unitTestRepository.findByTestCaseIdIn(any()))
+                .thenReturn(List.of(stale, aligned, removed));
+        SourceUpdateItem deletion = proposal(SourceUpdateTargetType.TEST_CASE, 404L);
+        deletion.setAction(SourceUpdateAction.REMOVE); deletion.setReviewStatus(SourceUpdateReviewStatus.ACCEPTED);
+        when(sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(200L)).thenReturn(List.of(deletion));
+        when(aiAgentService.generateSnapshotUnitTests(eq(10L), any(), eq(candidate)))
+                .thenReturn(new UnitTestResponseDto(List.of()));
+
+        service.generateIncrementalStage(10L, 200L, GenerationProgressStage.UNIT_TEST, user);
+
+        org.mockito.ArgumentCaptor<Set<Long>> targets = org.mockito.ArgumentCaptor.captor();
+        verify(aiAgentService).generateSnapshotUnitTests(eq(10L), targets.capture(), eq(candidate));
+        assertThat(targets.getValue()).containsExactlyInAnyOrder(401L, 402L);
+        assertThat(approved).allSatisfy(testCase -> assertThat(testCase.getExpectedResult())
+                .isEqualTo("Unchanged approved expectation"));
+        verify(testCaseRepository, org.mockito.Mockito.never()).save(any());
+        verify(unitTestRepository, org.mockito.Mockito.never()).save(any());
+    }
+
+    private UnitTest sourceStampedUnit(Long id, Long caseId, String path, String productionSource) {
+        UnitTest test = new UnitTest(); test.setId(id); test.setTestCaseId(caseId);
+        String encoded = java.util.Base64.getEncoder().encodeToString(path.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        test.setSourceCode(com.greytest.service.agent.GenerationSourceFingerprint.PREFIX
+                + com.greytest.service.agent.GenerationSourceFingerprint.hash(productionSource) + " " + encoded
+                + "\nclass ServiceTest { void testValue() {} }");
+        return test;
+    }
+
+    @Test void unauthorizedGenerationDoesNotClaimOrChangeAnotherProjectsLease() {
+        var checkpoint=org.mockito.Mockito.mock(com.greytest.service.generation.IncrementalCheckpointCoordinator.class);
+        org.springframework.test.util.ReflectionTestUtils.setField(service,"checkpoints",checkpoint);
+        var project=new Project(); project.setId(10L);
+        var user=new AuthUser(); user.setId(9L);
+        when(projectRepository.findById(10L)).thenReturn(Optional.of(project));
+        doThrow(new AuthException("FORBIDDEN","No access",org.springframework.http.HttpStatus.FORBIDDEN))
+            .when(sourceUpdateService).checkProjectAccess(project,user);
+        assertThatThrownBy(()->service.generateAll(10L,200L,user)).isInstanceOf(AuthException.class);
+        org.mockito.Mockito.verifyNoInteractions(checkpoint,sourceUpdateRepository);
+    }
+    @Test void neverDeletesReviewedUnitChildWhenRegeneratingFewerTemporaryCases() {
+        var checkpoint=org.mockito.Mockito.mock(com.greytest.service.generation.IncrementalCheckpointCoordinator.class);
+        service=new IncrementalGenerationService(projectRepository,sourceUpdateRepository,sourceUpdateItemRepository,
+            javaClassRepository,javaMethodRepository,unitTestRepository,null,null,testCaseRepository,sourceUpdateService,aiAgentService,mapper,objectMapper,null);
+        org.springframework.test.util.ReflectionTestUtils.setField(service,"checkpoints",checkpoint);
+        var stale=new TestCase(); stale.setId(701L); stale.setTestPlanId(601L);
+        when(testCaseRepository.findByTestPlanId(601L)).thenReturn(List.of(stale));
+        var draft=new SourceUpdateItem(); draft.setId(50L); draft.setUserRevision(0L);
+        draft.setAction(com.greytest.entity.enums.SourceUpdateAction.CREATE);
+        when(sourceUpdateItemRepository.findBySourceUpdateIdAndTargetTypeAndTargetId(200L,
+            com.greytest.entity.enums.SourceUpdateTargetType.TEST_CASE,701L)).thenReturn(Optional.of(draft));
+        when(checkpoint.isRecordedOutput(draft)).thenReturn(true);
+        var child=new SourceUpdateItem(); child.setId(51L); child.setUserRevision(1L);
+        child.setAfterData("{\"case_id\":701,\"source_code\":\"user edit\"}");
+        when(sourceUpdateItemRepository.findBySourceUpdateIdAndTargetKey(200L,"case:701")).thenReturn(Optional.of(child));
+        assertThatThrownBy(()->org.springframework.test.util.ReflectionTestUtils.invokeMethod(service,"persistTestCases",10L,200L,Set.of(601L),
+            new TestCaseResponseDto(List.of()),new java.util.concurrent.atomic.AtomicInteger(1)))
+            .isInstanceOf(com.greytest.service.generation.GenerationConflictException.class)
+            .satisfies(error->assertThat(((com.greytest.service.generation.GenerationConflictException)error).itemId()).isEqualTo(51L));
+        verify(sourceUpdateItemRepository,org.mockito.Mockito.never()).delete(any());
+        verify(testCaseRepository,org.mockito.Mockito.never()).deleteById(any());
+    }
+
+    @Test
+    void preservesValidUnitTestDraftsButFailsCandidateWhenOtherCasesAreBlocked() {
+        Project project = new Project(); project.setId(10L);
+        when(projectRepository.findById(10L)).thenReturn(Optional.of(project));
+        SourceUpdate update = new SourceUpdate(); update.setId(200L); update.setProjectId(10L);
+        update.setStatus(SourceUpdateStatus.ANALYZED);
+        update.setImpactSummary("{\"affectedTestCaseIds\":[401,402]}");
+        when(sourceUpdateRepository.findByIdAndProjectId(200L, 10L)).thenReturn(Optional.of(update));
+        when(sourceUpdateRepository.save(any())).thenAnswer(call -> call.getArgument(0));
+        List<SourceUpdateItem> savedDrafts = new java.util.ArrayList<>();
+        when(sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(200L))
+                .thenAnswer(call -> List.copyOf(savedDrafts));
+        when(sourceUpdateItemRepository.save(any())).thenAnswer(call -> {
+            SourceUpdateItem item = call.getArgument(0); savedDrafts.add(item); return item;
+        });
+        var snapshot = java.nio.file.Path.of("candidate");
+        when(sourceUpdateService.getCandidateSourcePath(update)).thenReturn(snapshot);
+        when(aiAgentService.generateSnapshotUnitTests(10L, Set.of(401L, 402L), snapshot)).thenReturn(
+                new UnitTestResponseDto(List.of(new GeneratedUnitTestDto(401L, "ServiceTest", "case401", "demo",
+                        "NEW_TEST", "package demo; class ServiceTest { @org.junit.jupiter.api.Test void case401(){} }")),
+                        List.of(new com.greytest.dto.agent.GenerationResponseDtos.BlockedUnitTestDto(402L, "TC-402", "Uncontrollable Math.random branch"))));
+
+        assertThatThrownBy(() -> service.generateIncrementalStage(10L, 200L, GenerationProgressStage.UNIT_TEST, new AuthUser()))
+                .isInstanceOf(com.greytest.service.agent.TestFeasibilityBlockedException.class)
+                .hasMessageContaining("TC-402").hasMessageContaining("Math.random");
+
+        assertThat(savedDrafts).singleElement().satisfies(item -> {
+            assertThat(item.getTargetKey()).isEqualTo("case:401");
+            assertThat(item.getAfterData()).contains("case401");
+        });
+        assertThat(update.getStatus()).isEqualTo(SourceUpdateStatus.FAILED);
+        verify(unitTestRepository, org.mockito.Mockito.never()).delete(any());
+    }
+
+    @Test
+    void wrappedFeasibilityFailureKeepsCandidateFailedInsteadOfReadyWithExistingDrafts() {
+        Project project = new Project(); project.setId(10L);
+        when(projectRepository.findById(10L)).thenReturn(Optional.of(project));
+        SourceUpdate update = new SourceUpdate(); update.setId(200L); update.setProjectId(10L);
+        update.setStatus(SourceUpdateStatus.ANALYZED);
+        update.setImpactSummary("{\"affectedTestCaseIds\":[401]}");
+        when(sourceUpdateRepository.findByIdAndProjectId(200L, 10L)).thenReturn(Optional.of(update));
+        when(sourceUpdateRepository.save(any())).thenAnswer(call -> call.getArgument(0));
+        SourceUpdateItem existing = new SourceUpdateItem();
+        when(sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(200L)).thenReturn(List.of(existing));
+        var snapshot = java.nio.file.Path.of("candidate");
+        when(sourceUpdateService.getCandidateSourcePath(update)).thenReturn(snapshot);
+        when(aiAgentService.generateSnapshotUnitTests(10L, Set.of(401L), snapshot))
+                .thenThrow(new com.greytest.service.agent.TestFeasibilityBlockedException("TC-401 blocked"));
+
+        assertThatThrownBy(() -> service.generateIncrementalStage(10L, 200L, GenerationProgressStage.UNIT_TEST, new AuthUser()))
+                .isInstanceOf(com.greytest.service.agent.TestFeasibilityBlockedException.class);
+        assertThat(update.getStatus()).isEqualTo(SourceUpdateStatus.FAILED);
+    }
+
+    @Test
+    void laterBatchFailureDoesNotDiscardEarlierBlockedCasesAndUnlockApply() {
+        Project project = new Project(); project.setId(10L);
+        when(projectRepository.findById(10L)).thenReturn(Optional.of(project));
+        SourceUpdate update = new SourceUpdate(); update.setId(200L); update.setProjectId(10L);
+        update.setStatus(SourceUpdateStatus.ANALYZED);
+        update.setImpactSummary("{\"affectedTestCaseIds\":[1,2,3,4,5,6,7,8,9]}");
+        when(sourceUpdateRepository.findByIdAndProjectId(200L, 10L)).thenReturn(Optional.of(update));
+        when(sourceUpdateRepository.save(any())).thenAnswer(call -> call.getArgument(0));
+        when(sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(200L))
+                .thenReturn(List.of(new SourceUpdateItem()));
+        var snapshot = java.nio.file.Path.of("candidate");
+        when(sourceUpdateService.getCandidateSourcePath(update)).thenReturn(snapshot);
+        when(aiAgentService.generateSnapshotUnitTests(eq(10L), any(), eq(snapshot))).thenAnswer(call -> {
+            Set<Long> ids = call.getArgument(1);
+            if (ids.contains(9L)) throw new com.greytest.service.agent.LlmResponseException("Provider unavailable");
+            return new UnitTestResponseDto(List.of(), List.of(
+                    new com.greytest.dto.agent.GenerationResponseDtos.BlockedUnitTestDto(1L, "TC-001", "Math.random branch")));
+        });
+
+        assertThatThrownBy(() -> service.generateIncrementalStage(10L, 200L, GenerationProgressStage.UNIT_TEST, new AuthUser()))
+                .isInstanceOf(com.greytest.service.agent.TestFeasibilityBlockedException.class)
+                .hasMessageContaining("TC-001");
+        assertThat(update.getStatus()).isEqualTo(SourceUpdateStatus.FAILED);
+    }
 
     @Mock
     private ProjectRepository projectRepository;
@@ -75,16 +262,55 @@ class IncrementalGenerationServiceTest {
     @Mock
     private UnitTestRepository unitTestRepository;
     @Mock
+    private TestCaseRepository testCaseRepository;
+    @Mock
     private SourceUpdateService sourceUpdateService;
     @Mock
     private AIAgentService aiAgentService;
     @Mock private BusinessRuleRepository businessRuleRepository;
     @Mock private TestPlanRepository testPlanRepository;
-    @Mock private TestCaseRepository testCaseRepository;
 
     private IncrementalGenerationService service;
     private final SourceUpdateMapper mapper = new SourceUpdateMapper();
     private final ObjectMapper objectMapper = new ObjectMapper();
+
+    @Test
+    void runsIndependentBusinessRuleBatchesConcurrently() throws Exception {
+        var executor = new LlmBatchExecutor(2, 0, 0);
+        service = new IncrementalGenerationService(projectRepository, sourceUpdateRepository,
+                sourceUpdateItemRepository, javaClassRepository, javaMethodRepository, unitTestRepository,
+                null, null, null, sourceUpdateService, aiAgentService, mapper, objectMapper, null, executor);
+        Project project = new Project(); project.setId(10L);
+        when(projectRepository.findById(10L)).thenReturn(Optional.of(project));
+        SourceUpdate update = new SourceUpdate(); update.setId(200L); update.setProjectId(10L);
+        update.setStatus(SourceUpdateStatus.ANALYZED);
+        update.setImpactSummary("""
+                {"changedMethods":[
+                  {"qualifiedClassName":"demo.First","methodName":"run","signature":"run()","diffType":"MODIFIED"},
+                  {"qualifiedClassName":"demo.Second","methodName":"run","signature":"run()","diffType":"MODIFIED"}]}
+                """);
+        when(sourceUpdateRepository.findByIdAndProjectId(200L, 10L)).thenReturn(Optional.of(update));
+        when(sourceUpdateRepository.save(any())).thenAnswer(call -> call.getArgument(0));
+        JavaClass first = new JavaClass(); first.setId(1L); first.setQualifiedName("demo.First");
+        JavaClass second = new JavaClass(); second.setId(2L); second.setQualifiedName("demo.Second");
+        when(javaClassRepository.findByProjectId(10L)).thenReturn(List.of(first, second));
+        JavaMethod one = new JavaMethod(); one.setId(11L); one.setMethodName("run");
+        JavaMethod two = new JavaMethod(); two.setId(12L); two.setMethodName("run");
+        when(javaMethodRepository.findByClassId(1L)).thenReturn(List.of(one));
+        when(javaMethodRepository.findByClassId(2L)).thenReturn(List.of(two));
+        var barrier = new java.util.concurrent.CyclicBarrier(2);
+        when(aiAgentService.generateBusinessRules(eq(10L), any())).thenAnswer(call -> {
+            barrier.await(2, java.util.concurrent.TimeUnit.SECONDS);
+            return new BusinessRuleResponseDto(List.of());
+        });
+        try {
+            service.generateIncrementalStage(10L, 200L, GenerationProgressStage.BUSINESS_RULE, new AuthUser());
+            assertThat(update.getStatus()).isEqualTo(SourceUpdateStatus.READY_TO_APPLY);
+            verify(aiAgentService, org.mockito.Mockito.times(2)).generateBusinessRules(eq(10L), any());
+        } finally {
+            executor.shutdown();
+        }
+    }
 
     @BeforeEach
     void setUp() {
@@ -141,7 +367,7 @@ class IncrementalGenerationServiceTest {
         update.setProjectId(10L);
         update.setStatus(SourceUpdateStatus.ANALYZED);
         update.setImpactSummary(impactJson);
-        when(sourceUpdateRepository.findByIdAndProjectIdForUpdate(200L, 10L)).thenReturn(Optional.of(update));
+        when(sourceUpdateRepository.findByIdAndProjectId(200L, 10L)).thenReturn(Optional.of(update));
         when(sourceUpdateRepository.save(any(SourceUpdate.class))).thenAnswer(inv -> inv.getArgument(0));
 
         JavaClass jc = new JavaClass();
@@ -157,16 +383,64 @@ class IncrementalGenerationServiceTest {
         when(javaMethodRepository.findByClassId(50L)).thenReturn(List.of(jm));
 
         GeneratedBusinessRuleDto ruleDto = new GeneratedBusinessRuleDto(
-                101L, "Rule for discount", "BUSINESS_LOGIC"
+                101L, "Rule for discount", "BUSINESS_LOGIC", "IF-1"
         );
-        BusinessRuleResponseDto ruleResponse = new BusinessRuleResponseDto(List.of(ruleDto));
+        BusinessRuleResponseDto ruleResponse = new BusinessRuleResponseDto(List.of(ruleDto,
+                new GeneratedBusinessRuleDto(101L, "Record discount", "SIDE_EFFECT", "STMT-1")));
         when(aiAgentService.generateBusinessRules(eq(10L), eq(Set.of(101L)))).thenReturn(ruleResponse);
+        var rules = org.mockito.Mockito.mock(com.greytest.repository.BusinessRuleRepository.class);
+        java.util.List<com.greytest.entity.BusinessRule> stored = new java.util.ArrayList<>();
+        when(rules.findByProjectId(10L)).thenAnswer(call -> stored);
+        when(rules.save(any())).thenAnswer(call -> {
+            com.greytest.entity.BusinessRule rule = call.getArgument(0);
+            rule.setId(300L + stored.size());
+            stored.add(rule);
+            return rule;
+        });
+        service = new IncrementalGenerationService(projectRepository, sourceUpdateRepository, sourceUpdateItemRepository,
+                javaClassRepository, javaMethodRepository, unitTestRepository, rules, null, null,
+                sourceUpdateService, aiAgentService, mapper, objectMapper, null);
 
         SourceUpdateDto result = service.generateIncrementalStage(10L, 200L, GenerationProgressStage.BUSINESS_RULE, user);
 
         assertThat(result.status()).isEqualTo(SourceUpdateStatus.READY_TO_APPLY);
         verify(aiAgentService).generateBusinessRules(10L, Set.of(101L));
-        verify(sourceUpdateItemRepository).save(any(SourceUpdateItem.class));
+        verify(sourceUpdateItemRepository, org.mockito.Mockito.times(2)).save(any(SourceUpdateItem.class));
+        assertThat(stored).hasSize(2).extracting(com.greytest.entity.BusinessRule::getReviewNote)
+                .containsExactly("SOURCE_BRANCH:IF-1\n", "SOURCE_BRANCH:STMT-1\n");
+    }
+
+    @Test
+    void newlyGeneratedPlanKeepsAllCoveredRulesForTheNextStage() {
+        Project project = new Project(); project.setId(10L);
+        when(projectRepository.findById(10L)).thenReturn(Optional.of(project));
+        SourceUpdate update = new SourceUpdate(); update.setId(200L); update.setProjectId(10L);
+        update.setStatus(SourceUpdateStatus.ANALYZED);
+        update.setImpactSummary("{\"affectedBusinessRuleIds\":[301,302]}");
+        when(sourceUpdateRepository.findByIdAndProjectId(200L, 10L)).thenReturn(Optional.of(update));
+        when(sourceUpdateRepository.save(any())).thenAnswer(call -> call.getArgument(0));
+        var plans = org.mockito.Mockito.mock(com.greytest.repository.TestPlanRepository.class);
+        var coverage = org.mockito.Mockito.mock(com.greytest.repository.TestPlanCoveredRuleRepository.class);
+        when(plans.save(any())).thenAnswer(call -> {
+            com.greytest.entity.TestPlan plan = call.getArgument(0); plan.setId(401L); return plan;
+        });
+        var snapshot = java.nio.file.Path.of("candidate");
+        when(sourceUpdateService.getCandidateSourcePath(update)).thenReturn(snapshot);
+        when(aiAgentService.generateSnapshotTestPlan(10L, Set.of(301L, 302L), snapshot)).thenReturn(
+                new com.greytest.dto.agent.GenerationResponseDtos.TestPlanResponseDto(List.of(
+                        new com.greytest.dto.agent.GenerationResponseDtos.GeneratedTestPlanDto(
+                                101L, 301L, List.of(301L, 302L), "mail", "send mail", "HAPPY_PATH"))));
+        service = new IncrementalGenerationService(projectRepository, sourceUpdateRepository, sourceUpdateItemRepository,
+                javaClassRepository, javaMethodRepository, unitTestRepository, null, plans, null,
+                sourceUpdateService, aiAgentService, mapper, objectMapper, coverage);
+
+        service.generateIncrementalStage(10L, 200L, GenerationProgressStage.TEST_PLAN, new AuthUser());
+
+        var captor = org.mockito.ArgumentCaptor.forClass(com.greytest.entity.TestPlanCoveredRule.class);
+        verify(coverage, org.mockito.Mockito.times(2)).save(captor.capture());
+        assertThat(captor.getAllValues()).extracting(com.greytest.entity.TestPlanCoveredRule::getBusinessRuleId)
+                .containsExactlyInAnyOrder(301L, 302L);
+        assertThat(captor.getAllValues()).extracting(com.greytest.entity.TestPlanCoveredRule::getTestPlanId).containsOnly(401L);
     }
 
     @Test
@@ -185,7 +459,7 @@ class IncrementalGenerationServiceTest {
         update.setProjectId(10L);
         update.setStatus(SourceUpdateStatus.READY_TO_APPLY);
         update.setImpactSummary("{\"affectedBusinessRuleIds\":[]}");
-        when(sourceUpdateRepository.findByIdAndProjectIdForUpdate(200L, 10L)).thenReturn(Optional.of(update));
+        when(sourceUpdateRepository.findByIdAndProjectId(200L, 10L)).thenReturn(Optional.of(update));
         when(sourceUpdateRepository.save(any(SourceUpdate.class))).thenAnswer(inv -> inv.getArgument(0));
 
         SourceUpdateDto result = service.generateIncrementalStage(
@@ -210,7 +484,7 @@ class IncrementalGenerationServiceTest {
         update.setProjectId(10L);
         update.setStatus(SourceUpdateStatus.ANALYZED);
         update.setImpactSummary("{\"affectedTestCaseIds\":[401]}");
-        when(sourceUpdateRepository.findByIdAndProjectIdForUpdate(200L, 10L)).thenReturn(Optional.of(update));
+        when(sourceUpdateRepository.findByIdAndProjectId(200L, 10L)).thenReturn(Optional.of(update));
         when(sourceUpdateRepository.save(any(SourceUpdate.class))).thenAnswer(inv -> inv.getArgument(0));
 
         UnitTest existing = new UnitTest();
@@ -420,7 +694,7 @@ class IncrementalGenerationServiceTest {
     private void useArtifactRepositories() {
         service = new IncrementalGenerationService(projectRepository, sourceUpdateRepository, sourceUpdateItemRepository,
                 javaClassRepository, javaMethodRepository, unitTestRepository, businessRuleRepository, testPlanRepository,
-                testCaseRepository, sourceUpdateService, aiAgentService, mapper, objectMapper);
+                testCaseRepository, sourceUpdateService, aiAgentService, mapper, objectMapper, null);
     }
 
     @org.junit.jupiter.params.ParameterizedTest
@@ -431,6 +705,10 @@ class IncrementalGenerationServiceTest {
         AuthUser user = prepareUpdate("{}");
         BusinessRule current = new BusinessRule();
         current.setId(201L);
+        current.setProjectId(10L);
+        current.setMethodId(101L);
+        current.setRuleCode("BR-001");
+        current.setStatus(ReviewStatus.APPROVED);
         current.setDescription("Old approved oracle");
         when(businessRuleRepository.findByProjectId(10L)).thenReturn(List.of(current));
         SourceUpdateItem item = proposal(SourceUpdateTargetType.BUSINESS_RULE, 201L);
@@ -459,7 +737,7 @@ class IncrementalGenerationServiceTest {
         update.setProjectId(10L);
         update.setStatus(SourceUpdateStatus.ANALYZED);
         update.setImpactSummary(impact);
-        when(sourceUpdateRepository.findByIdAndProjectIdForUpdate(200L, 10L)).thenReturn(Optional.of(update));
+        when(sourceUpdateRepository.findByIdAndProjectId(200L, 10L)).thenReturn(Optional.of(update));
         when(sourceUpdateRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
         return user;
     }
@@ -471,6 +749,10 @@ class IncrementalGenerationServiceTest {
         AuthUser user = prepareUpdate("{\"affectedBusinessRuleIds\":[201]}");
         BusinessRule current = new BusinessRule();
         current.setId(201L);
+        current.setProjectId(10L);
+        current.setMethodId(101L);
+        current.setRuleCode("BR-001");
+        current.setStatus(ReviewStatus.APPROVED);
         current.setDescription("Old approved oracle");
         when(businessRuleRepository.findByProjectId(10L)).thenReturn(List.of(current));
         SourceUpdateItem item = proposal(SourceUpdateTargetType.BUSINESS_RULE, 201L);
@@ -498,6 +780,51 @@ class IncrementalGenerationServiceTest {
         pending.setAction(SourceUpdateAction.UPDATE);
         pending.setReviewStatus(SourceUpdateReviewStatus.PENDING);
         return pending;
+    }
+
+    @Test
+    void removesUnitTestProposalWhenStaleDraftTestCaseIsRemoved() {
+        AuthUser user = new AuthUser();
+        user.setId(1L);
+        Project project = new Project();
+        project.setId(10L);
+        when(projectRepository.findById(10L)).thenReturn(Optional.of(project));
+
+        SourceUpdate update = new SourceUpdate();
+        update.setId(200L);
+        update.setProjectId(10L);
+        update.setStatus(SourceUpdateStatus.ANALYZED);
+        update.setImpactSummary("{\"affectedTestPlanIds\":[601]}");
+        when(sourceUpdateRepository.findByIdAndProjectId(200L, 10L)).thenReturn(Optional.of(update));
+        when(sourceUpdateRepository.save(any(SourceUpdate.class))).thenAnswer(inv -> inv.getArgument(0));
+        when(sourceUpdateService.getCandidateSourcePath(update)).thenReturn(java.nio.file.Path.of("candidate"));
+
+        TestCase stale = new TestCase();
+        stale.setId(701L);
+        stale.setTestPlanId(601L);
+        SourceUpdateItem testCaseDraft = new SourceUpdateItem();
+        testCaseDraft.setAction(com.greytest.entity.enums.SourceUpdateAction.CREATE);
+        when(testCaseRepository.findByTestPlanId(601L)).thenReturn(List.of(stale));
+        when(sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(200L))
+                .thenReturn(List.of());
+        when(sourceUpdateItemRepository.findBySourceUpdateIdAndTargetTypeAndTargetId(
+                200L, com.greytest.entity.enums.SourceUpdateTargetType.TEST_CASE, 701L))
+                .thenReturn(Optional.of(testCaseDraft));
+        SourceUpdateItem unitTestDraft = new SourceUpdateItem();
+        when(sourceUpdateItemRepository.findBySourceUpdateIdAndTargetKey(200L, "case:701"))
+                .thenReturn(Optional.of(unitTestDraft));
+        when(aiAgentService.generateSnapshotTestCases(10L, Set.of(601L), java.nio.file.Path.of("candidate")))
+                .thenReturn(new TestCaseResponseDto(List.of()));
+
+        service = new IncrementalGenerationService(projectRepository, sourceUpdateRepository,
+                sourceUpdateItemRepository, javaClassRepository, javaMethodRepository, unitTestRepository,
+                null, null, testCaseRepository, sourceUpdateService, aiAgentService, mapper, objectMapper, null);
+
+        service.generateIncrementalStage(10L, 200L, GenerationProgressStage.TEST_CASE, user);
+
+        verify(sourceUpdateItemRepository).delete(unitTestDraft);
+        verify(sourceUpdateItemRepository).delete(testCaseDraft);
+        verify(testCaseRepository).deleteById(701L);
     }
 
     @Test
@@ -538,7 +865,7 @@ class IncrementalGenerationServiceTest {
                     "methodKey":"com.example.OrderService#calculateDiscount(int)","diffType":"MODIFIED"
                 }]}
                 """);
-        when(sourceUpdateRepository.findByIdAndProjectIdForUpdate(200L, 10L)).thenReturn(Optional.of(update));
+        when(sourceUpdateRepository.findByIdAndProjectId(200L, 10L)).thenReturn(Optional.of(update));
         when(sourceUpdateRepository.save(any(SourceUpdate.class))).thenAnswer(inv -> inv.getArgument(0));
 
         JavaClass serviceClass = new JavaClass();
@@ -586,7 +913,7 @@ class IncrementalGenerationServiceTest {
                     "afterSource":"public User createUser(String email) throws IOException { return null; }"
                 }]}
                 """);
-        when(sourceUpdateRepository.findByIdAndProjectIdForUpdate(200L, 10L)).thenReturn(Optional.of(update));
+        when(sourceUpdateRepository.findByIdAndProjectId(200L, 10L)).thenReturn(Optional.of(update));
         when(sourceUpdateRepository.save(any(SourceUpdate.class))).thenAnswer(inv -> inv.getArgument(0));
 
         JavaClass serviceClass = new JavaClass();

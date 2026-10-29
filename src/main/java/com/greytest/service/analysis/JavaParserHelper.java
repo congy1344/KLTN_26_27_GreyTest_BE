@@ -139,7 +139,7 @@ public class JavaParserHelper {
 
         for (AnnotationExpr ann : classDecl.getAnnotations()) {
             String name = ann.getNameAsString();
-            if (SERVICE_ANNOTATIONS.contains(name)) return ClassType.SERVICE;
+            if (SERVICE_ANNOTATIONS.contains(name) && !classDecl.isInterface()) return ClassType.SERVICE;
             if (CONTROLLER_ANNOTATIONS.contains(name)) return ClassType.CONTROLLER;
             if (REPOSITORY_ANNOTATIONS.contains(name)) return ClassType.REPOSITORY;
             if (ENTITY_ANNOTATIONS.contains(name)) return ClassType.ENTITY;
@@ -151,6 +151,53 @@ public class JavaParserHelper {
             if (extendsRepo) return ClassType.REPOSITORY;
         }
         return ClassType.OTHER;
+    }
+
+    /** Phân loại implementation theo đúng contract source, dùng chung cho Analyze và source snapshot. */
+    public java.util.Map<TypeDeclaration<?>, ClassType> determineClassTypes(List<ParsedFile> files) {
+        var result = new java.util.IdentityHashMap<TypeDeclaration<?>, ClassType>();
+        for (var file : files) for (var type : findTypes(file.compilationUnit())) {
+            ClassType direct = determineClassType(type);
+            if (direct == ClassType.OTHER && type instanceof ClassOrInterfaceDeclaration implementation
+                    && !implementation.isInterface() && !implementation.isAbstract()
+                    && implementation.getAnnotations().stream().anyMatch(a -> Set.of("Component",
+                            "org.springframework.stereotype.Component").contains(a.getNameAsString()))
+                    && implementation.getImplementedTypes().stream().anyMatch(parent ->
+                            implementsServiceContract(file, parent.getNameWithScope(), files))) {
+                direct = ClassType.SERVICE;
+            }
+            result.put(type, direct);
+        }
+        return result;
+    }
+
+    private boolean implementsServiceContract(ParsedFile owner, String parent, List<ParsedFile> files) {
+        var unit = owner.compilationUnit();
+        var explicit = unit.getImports().stream().filter(i -> !i.isStatic() && !i.isAsterisk()
+                && i.getNameAsString().endsWith("." + parent)).map(i -> i.getNameAsString()).toList();
+        String samePackage = getPackageName(unit).isBlank() ? parent : getPackageName(unit) + "." + parent;
+        boolean localType = files.stream().flatMap(f -> findTypes(f.compilationUnit()).stream())
+                .anyMatch(t -> t.getFullyQualifiedName().filter(samePackage::equals).isPresent());
+        var candidates = files.stream().flatMap(f -> findTypes(f.compilationUnit()).stream()
+                .filter(t -> t instanceof ClassOrInterfaceDeclaration)
+                .map(t -> (ClassOrInterfaceDeclaration) t)
+                .filter(t -> {
+                    String fqn = t.getFullyQualifiedName().orElse("");
+                    if (parent.contains(".")) return fqn.equals(parent);
+                    if (!explicit.isEmpty()) return explicit.size() == 1 && explicit.get(0).equals(fqn);
+                    if (localType) return fqn.equals(samePackage);
+                    String candidatePackage = getPackageName(f.compilationUnit());
+                    return t.getNameAsString().equals(parent) && unit.getImports().stream()
+                            .anyMatch(i -> !i.isStatic() && i.isAsterisk()
+                                    && i.getNameAsString().equals(candidatePackage));
+                }).map(t -> java.util.Map.entry(f, t))).toList();
+        String module = com.greytest.service.ServiceScopeResolver.modulePath(owner.relativePath());
+        var local = candidates.stream().filter(e -> module.equals(
+                com.greytest.service.ServiceScopeResolver.modulePath(e.getKey().relativePath()))).toList();
+        var resolved = local.isEmpty() ? candidates : local;
+        return resolved.size() == 1 && resolved.get(0).getValue().isInterface()
+                && resolved.get(0).getValue().getAnnotations().stream()
+                        .anyMatch(a -> SERVICE_ANNOTATIONS.contains(a.getNameAsString()));
     }
 
     /**
@@ -202,7 +249,7 @@ public class JavaParserHelper {
             return sourceWithoutCommentsPreservingLines(md);
         } catch (Exception exception) {
             throw new SourceAnalysisException(
-                    "Khong the doc source gốc cua method de anh xa dong nguon chinh xac.", exception);
+                    "Không thể đọc source gốc của method để ánh xạ dòng nguồn chính xác.", exception);
         }
     }
 

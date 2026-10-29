@@ -1,0 +1,172 @@
+{
+  "context": {
+    "project": {
+      "id": 4,
+      "name": "Hospital-Management-System",
+      "status": "TEST_GENERATED"
+    },
+    "analysis": {
+      "totalClasses": 61,
+      "totalMethods": 152,
+      "totalEndpoints": 55,
+      "totalRelations": 19,
+      "totalControllerServiceRelations": 62,
+      "existingTestFiles": 0,
+      "totalProductionFiles": 62,
+      "parsedProductionFiles": 62,
+      "failedParseFiles": 0,
+      "failedParseFilePaths": []
+    },
+    "classes": [
+      {
+        "id": 144,
+        "packageName": "com.example.HMS.service",
+        "className": "webhookService",
+        "qualifiedName": "com.example.HMS.service.webhookService",
+        "classType": "SERVICE",
+        "filePath": "Hospital-Management-System/HMS/src/main/java/com/example/HMS/service/webhookService.java",
+        "sourceCode": "package com.example.HMS.service;\r\n\r\nimport org.springframework.stereotype.Service;\r\nimport org.springframework.web.client.RestTemplate;\r\nimport java.util.Map;\r\n\r\n@Service\r\npublic class webhookService {\r\n\r\n    private final RestTemplate restTemplate;\r\n\r\n    public webhookService(RestTemplate restTemplate) {\r\n        this.restTemplate = restTemplate;\r\n    }\r\n\r\n    public void sendWebhook(String url, Enum eventType, Map<String, Object> payload) {\r\n        payload.put(\"event\", eventType.name());\r\n        try {\r\n            restTemplate.postForObject(url, payload, String.class);\r\n            System.out.println(\"Webhooks sent successfully to : \" + url);\r\n        } catch (Exception e) {\r\n            System.err.println(\"Failed to send webhooks : \" + e.getMessage());\r\n        }\r\n    }\r\n}\r\n",
+        "annotations": [
+          {
+            "id": 232,
+            "targetType": "CLASS",
+            "category": "COMPONENT",
+            "annotationName": "Service",
+            "attributes": "@Service"
+          }
+        ],
+        "methods": [
+          {
+            "id": 359,
+            "classQualifiedName": "com.example.HMS.service.webhookService",
+            "methodName": "sendWebhook",
+            "returnType": "void",
+            "parameters": [
+              {
+                "name": "url",
+                "type": "String"
+              },
+              {
+                "name": "eventType",
+                "type": "Enum"
+              },
+              {
+                "name": "payload",
+                "type": "Map<String,Object>"
+              }
+            ],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "public void sendWebhook(String url, Enum eventType, Map<String, Object>payload) {\r\n        payload.put(\"event\",eventType.name());\r\n\r\n        try {\r\n            restTemplate.postForObject(url, payload, String.class);\r\n            System.out.println(\"Webhooks sent successfully to : \"+url);\r\n        }\r\n        catch (Exception e) {\r\n            System.err.println(\"Failed to send webhooks : \" + e.getMessage());\r\n        }\r\n    }",
+            "lineStart": 17,
+            "lineEnd": 27,
+            "annotations": [],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 18,
+                "lineEnd": 18
+              },
+              {
+                "branchId": "STMT-2",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 20,
+                "lineEnd": 26
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": 999999,
+        "packageName": "com.example.HMS.enums",
+        "className": "AppointmentStatus",
+        "qualifiedName": "com.example.HMS.enums.AppointmentStatus",
+        "classType": "ENUM",
+        "filePath": "Hospital-Management-System/HMS/src/main/java/com/example/HMS/enums/AppointmentStatus.java",
+        "sourceCode": "package com.example.HMS.enums;\n\npublic enum AppointmentStatus {\n\n    APPOINTMENT_SCHEDULED(\"Appointment scheduled\"),\n    APPOINTMENT_UPDATED(\"Appointment updated\"),\n    APPOINTMENT_COMPLETED(\"Appointment completed\"),\n    APPOINTMENT_CANCELLED(\"Appointment cancelled\"),\n    APPOINTMENT_RESCHEDULED(\"Appointment rescheduled\"),\n    APPOINTMENT_NO_SHOW(\"Patient did not show up\");\n\n    private final String description;\n\n    AppointmentStatus(String description) {\n        this.description = description;\n    }\n\n    public String getDescription() {\n        return description;\n    }\n}\n",
+        "annotations": [],
+        "methods": []
+      }
+    ],
+    "approvedBusinessRules": [
+      {
+        "id": 257,
+        "methodId": 359,
+        "ruleCode": "BR-163",
+        "description": "Khi được gọi, service thêm tên eventType vào payload với khóa \"event\".",
+        "reviewNote": "SOURCE_BRANCH:STMT-1\nAI category: SIDE_EFFECT. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-1"
+      }
+    ],
+    "approvedTestPlans": [
+      {
+        "id": 199,
+        "businessRuleId": 257,
+        "coveredRuleIds": [
+          257
+        ],
+        "planCode": "TP-091",
+        "title": "Thêm event vào payload",
+        "description": "Xác minh service thêm tên eventType vào payload bằng khóa event.\n[GreyTest testability: READY] COLLECTION_MUTATION @ Hospital-Management-System/HMS/src/main/java/com/example/HMS/service/webhookService.java:17 sendWebhook — Method sửa trực tiếp collection fixture: payload. | Tạo collection mutable thực; lưu bản sao expected trước khi gọi method, không tính expected từ fixture đã bị sửa.",
+        "testType": "HAPPY_PATH",
+        "status": "APPROVED",
+        "isModified": false
+      }
+    ],
+    "approvedTestCases": [
+      {
+        "id": 420,
+        "testPlanId": 199,
+        "caseCode": "TC-400",
+        "testType": "HAPPY_PATH",
+        "description": "Thêm tên event vào payload",
+        "preconditions": "webhookService được tạo với mock RestTemplate. Payload là Map<String, Object> mutable; lưu bản sao nội dung ban đầu trước khi gọi method.\n[GreyTest testability: READY] COLLECTION_MUTATION @ Hospital-Management-System/HMS/src/main/java/com/example/HMS/service/webhookService.java:17 sendWebhook — Method sửa trực tiếp collection fixture: payload. | Tạo collection mutable thực; lưu bản sao expected trước khi gọi method, không tính expected từ fixture đã bị sửa.",
+        "testData": {
+          "input": {
+            "url": "https://example.test/webhook",
+            "payload": {
+              "event": "old-event",
+              "recordId": 20
+            },
+            "eventType": "APPOINTMENT_COMPLETED"
+          },
+          "mocks": {
+            "RestTemplate.postForObject": "Trả về chuỗi phản hồi bất kỳ"
+          }
+        },
+        "expectedResult": "Service sửa payload để giá trị tại khóa \"event\" là \"APPOINTMENT_COMPLETED\"; mục recordId vẫn là 20.",
+        "priority": "HIGH",
+        "traceSource": "BR-163 [STMT-1] -> TP-091 -> STMT-1",
+        "status": "APPROVED",
+        "isModified": false
+      }
+    ],
+    "existingApprovedTestCases": [],
+    "previousGeneratedUnitTests": [],
+    "existingTests": [],
+    "supportingResources": [],
+    "contextWarnings": []
+  },
+  "response": {
+    "unit_tests": [
+      {
+        "case_id": 420,
+        "test_class_name": "webhookServiceTest",
+        "test_method_name": "sendWebhook_addsEventNameToPayload",
+        "package_name": "com.example.HMS.service",
+        "generation_type": "NEW_TEST",
+        "source_code": "package com.example.HMS.service;\n\nimport org.junit.jupiter.api.Test;\nimport org.springframework.web.client.RestTemplate;\n\nimport java.util.HashMap;\nimport java.util.Map;\n\nimport static org.junit.jupiter.api.Assertions.assertEquals;\nimport static org.mockito.ArgumentMatchers.eq;\nimport static org.mockito.Mockito.mock;\nimport static org.mockito.Mockito.verify;\nimport static org.mockito.Mockito.verifyNoMoreInteractions;\n\nclass webhookServiceTest {\n\n    // GreyTest trace: sendWebhook | STMT-1 | BR-163 -> TP-091 -> TC-400\n    @Test\n    void sendWebhook_addsEventNameToPayload() {\n        // Arrange\n        RestTemplate restTemplate = mock(RestTemplate.class);\n        webhookService service = new webhookService(restTemplate);\n        String url = \"https://example.test/webhook\";\n        Map<String, Object> payload = new HashMap<>();\n        payload.put(\"event\", \"old-event\");\n        payload.put(\"recordId\", 20);\n        Map<String, Object> expectedBeforeCall = new HashMap<>(payload);\n\n        // Act\n        service.sendWebhook(url, Thread.State.valueOf(\"APPOINTMENT_COMPLETED\"), payload);\n\n        // Assert\n        assertEquals(\"APPOINTMENT_COMPLETED\", payload.get(\"event\"));\n        assertEquals(expectedBeforeCall.get(\"recordId\"), payload.get(\"recordId\"));\n        verify(restTemplate).postForObject(eq(url), eq(payload), eq(String.class));\n        verifyNoMoreInteractions(restTemplate);\n    }\n}\n"
+      }
+    ]
+  }
+}

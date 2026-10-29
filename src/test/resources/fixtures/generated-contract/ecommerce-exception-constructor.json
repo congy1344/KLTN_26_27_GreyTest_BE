@@ -1,0 +1,923 @@
+{
+  "context": {
+    "project": {
+      "id": 6,
+      "name": "ecommerce-microservice-backend-app",
+      "status": "PLAN_APPROVED"
+    },
+    "analysis": {
+      "totalClasses": 237,
+      "totalMethods": 444,
+      "totalEndpoints": 143,
+      "totalRelations": 11,
+      "totalControllerServiceRelations": 71,
+      "existingTestFiles": 11,
+      "totalProductionFiles": 227,
+      "parsedProductionFiles": 227,
+      "failedParseFiles": 0,
+      "failedParseFilePaths": []
+    },
+    "classes": [
+      {
+        "id": 472,
+        "packageName": "com.selimhorri.app.service.impl",
+        "className": "CredentialServiceImpl",
+        "qualifiedName": "com.selimhorri.app.service.impl.CredentialServiceImpl",
+        "classType": "SERVICE",
+        "filePath": "ecommerce-microservice-backend-app/user-service/src/main/java/com/selimhorri/app/service/impl/CredentialServiceImpl.java",
+        "sourceCode": "package com.selimhorri.app.service.impl;\r\n\r\nimport java.util.List;\r\nimport java.util.stream.Collectors;\r\nimport javax.transaction.Transactional;\r\nimport org.springframework.stereotype.Service;\r\nimport com.selimhorri.app.dto.CredentialDto;\r\nimport com.selimhorri.app.exception.wrapper.CredentialNotFoundException;\r\nimport com.selimhorri.app.exception.wrapper.UserObjectNotFoundException;\r\nimport com.selimhorri.app.helper.CredentialMappingHelper;\r\nimport com.selimhorri.app.repository.CredentialRepository;\r\nimport com.selimhorri.app.service.CredentialService;\r\nimport lombok.RequiredArgsConstructor;\r\nimport lombok.extern.slf4j.Slf4j;\r\n\r\n@Service\r\n@Transactional\r\n@Slf4j\r\n@RequiredArgsConstructor\r\npublic class CredentialServiceImpl implements CredentialService {\r\n\r\n    private final CredentialRepository credentialRepository;\r\n\r\n    @Override\r\n    public List<CredentialDto> findAll() {\r\n        log.info(\"*** CredentialDto List, service; fetch all credentials *\");\r\n        return this.credentialRepository.findAll().stream().map(CredentialMappingHelper::map).distinct().collect(Collectors.toUnmodifiableList());\r\n    }\r\n\r\n    @Override\r\n    public CredentialDto findById(final Integer credentialId) {\r\n        log.info(\"*** CredentialDto, service; fetch credential by ids *\");\r\n        return this.credentialRepository.findById(credentialId).map(CredentialMappingHelper::map).orElseThrow(() -> new CredentialNotFoundException(String.format(\"#### Credential with id: %d not found! ####\", credentialId)));\r\n    }\r\n\r\n    @Override\r\n    public CredentialDto save(final CredentialDto credentialDto) {\r\n        log.info(\"*** CredentialDto, service; save credential *\");\r\n        return CredentialMappingHelper.map(this.credentialRepository.save(CredentialMappingHelper.map(credentialDto)));\r\n    }\r\n\r\n    @Override\r\n    public CredentialDto update(final CredentialDto credentialDto) {\r\n        log.info(\"*** CredentialDto, service; update credential *\");\r\n        return CredentialMappingHelper.map(this.credentialRepository.save(CredentialMappingHelper.map(credentialDto)));\r\n    }\r\n\r\n    @Override\r\n    public CredentialDto update(final Integer credentialId, final CredentialDto credentialDto) {\r\n        log.info(\"*** CredentialDto, service; update credential with credentialId *\");\r\n        return CredentialMappingHelper.map(this.credentialRepository.save(CredentialMappingHelper.map(this.findById(credentialId))));\r\n    }\r\n\r\n    @Override\r\n    public void deleteById(final Integer credentialId) {\r\n        log.info(\"*** Void, service; delete credential by id *\");\r\n        this.credentialRepository.deleteById(credentialId);\r\n    }\r\n\r\n    @Override\r\n    public CredentialDto findByUsername(final String username) {\r\n        return CredentialMappingHelper.map(this.credentialRepository.findByUsername(username).orElseThrow(() -> new UserObjectNotFoundException(String.format(\"#### Credential with username: %s not found! ####\", username))));\r\n    }\r\n}\r\n",
+        "annotations": [
+          {
+            "id": 831,
+            "targetType": "CLASS",
+            "category": "COMPONENT",
+            "annotationName": "Service",
+            "attributes": "@Service"
+          },
+          {
+            "id": 832,
+            "targetType": "CLASS",
+            "category": "TRANSACTION",
+            "annotationName": "Transactional",
+            "attributes": "@Transactional"
+          }
+        ],
+        "methods": [
+          {
+            "id": 986,
+            "classQualifiedName": "com.selimhorri.app.service.impl.CredentialServiceImpl",
+            "methodName": "save",
+            "returnType": "CredentialDto",
+            "parameters": [
+              {
+                "name": "credentialDto",
+                "type": "CredentialDto"
+              }
+            ],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "@Override\r\n\tpublic CredentialDto save(final CredentialDto credentialDto) {\r\n\t\tlog.info(\"*** CredentialDto, service; save credential *\");\r\n\t\treturn CredentialMappingHelper.map(this.credentialRepository.save(CredentialMappingHelper.map(credentialDto)));\r\n\t}",
+            "lineStart": 46,
+            "lineEnd": 50,
+            "annotations": [],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 48,
+                "lineEnd": 48
+              },
+              {
+                "branchId": "STMT-2",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 49,
+                "lineEnd": 49
+              }
+            ]
+          },
+          {
+            "id": 990,
+            "classQualifiedName": "com.selimhorri.app.service.impl.CredentialServiceImpl",
+            "methodName": "findByUsername",
+            "returnType": "CredentialDto",
+            "parameters": [
+              {
+                "name": "username",
+                "type": "String"
+              }
+            ],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "@Override\r\n\tpublic CredentialDto findByUsername(final String username) {\r\n\t\treturn CredentialMappingHelper.map(this.credentialRepository.findByUsername(username)\r\n\t\t\t\t.orElseThrow(() -> new UserObjectNotFoundException(String.format(\"#### Credential with username: %s not found! ####\", username))));\r\n\t}",
+            "lineStart": 71,
+            "lineEnd": 75,
+            "annotations": [],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 73,
+                "lineEnd": 74
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": 473,
+        "packageName": "com.selimhorri.app.service.impl",
+        "className": "UserServiceImpl",
+        "qualifiedName": "com.selimhorri.app.service.impl.UserServiceImpl",
+        "classType": "SERVICE",
+        "filePath": "ecommerce-microservice-backend-app/user-service/src/main/java/com/selimhorri/app/service/impl/UserServiceImpl.java",
+        "sourceCode": "package com.selimhorri.app.service.impl;\r\n\r\nimport java.util.List;\r\nimport java.util.stream.Collectors;\r\nimport javax.transaction.Transactional;\r\nimport org.springframework.stereotype.Service;\r\nimport com.selimhorri.app.dto.UserDto;\r\nimport com.selimhorri.app.exception.wrapper.UserObjectNotFoundException;\r\nimport com.selimhorri.app.helper.UserMappingHelper;\r\nimport com.selimhorri.app.repository.UserRepository;\r\nimport com.selimhorri.app.service.UserService;\r\nimport lombok.RequiredArgsConstructor;\r\nimport lombok.extern.slf4j.Slf4j;\r\n\r\n@Service\r\n@Transactional\r\n@Slf4j\r\n@RequiredArgsConstructor\r\npublic class UserServiceImpl implements UserService {\r\n\r\n    private final UserRepository userRepository;\r\n\r\n    @Override\r\n    public List<UserDto> findAll() {\r\n        log.info(\"*** UserDto List, service; fetch all users *\");\r\n        return this.userRepository.findAll().stream().map(UserMappingHelper::map).distinct().collect(Collectors.toUnmodifiableList());\r\n    }\r\n\r\n    @Override\r\n    public UserDto findById(final Integer userId) {\r\n        log.info(\"*** UserDto, service; fetch user by id *\");\r\n        return this.userRepository.findById(userId).map(UserMappingHelper::map).orElseThrow(() -> new UserObjectNotFoundException(String.format(\"User with id: %d not found\", userId)));\r\n    }\r\n\r\n    @Override\r\n    public UserDto save(final UserDto userDto) {\r\n        log.info(\"*** UserDto, service; save user *\");\r\n        return UserMappingHelper.map(this.userRepository.save(UserMappingHelper.map(userDto)));\r\n    }\r\n\r\n    @Override\r\n    public UserDto update(final UserDto userDto) {\r\n        log.info(\"*** UserDto, service; update user *\");\r\n        return UserMappingHelper.map(this.userRepository.save(UserMappingHelper.map(userDto)));\r\n    }\r\n\r\n    @Override\r\n    public UserDto update(final Integer userId, final UserDto userDto) {\r\n        log.info(\"*** UserDto, service; update user with userId *\");\r\n        return UserMappingHelper.map(this.userRepository.save(UserMappingHelper.map(this.findById(userId))));\r\n    }\r\n\r\n    @Override\r\n    public void deleteById(final Integer userId) {\r\n        log.info(\"*** Void, service; delete user by id *\");\r\n        this.userRepository.deleteById(userId);\r\n    }\r\n\r\n    @Override\r\n    public UserDto findByUsername(final String username) {\r\n        log.info(\"*** UserDto, service; fetch user with username *\");\r\n        return UserMappingHelper.map(this.userRepository.findByCredentialUsername(username).orElseThrow(() -> new UserObjectNotFoundException(String.format(\"User with username: %s not found\", username))));\r\n    }\r\n}\r\n",
+        "annotations": [
+          {
+            "id": 833,
+            "targetType": "CLASS",
+            "category": "COMPONENT",
+            "annotationName": "Service",
+            "attributes": "@Service"
+          },
+          {
+            "id": 834,
+            "targetType": "CLASS",
+            "category": "TRANSACTION",
+            "annotationName": "Transactional",
+            "attributes": "@Transactional"
+          }
+        ],
+        "methods": [
+          {
+            "id": 993,
+            "classQualifiedName": "com.selimhorri.app.service.impl.UserServiceImpl",
+            "methodName": "save",
+            "returnType": "UserDto",
+            "parameters": [
+              {
+                "name": "userDto",
+                "type": "UserDto"
+              }
+            ],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "@Override\r\n\tpublic UserDto save(final UserDto userDto) {\r\n\t\tlog.info(\"*** UserDto, service; save user *\");\r\n\t\treturn UserMappingHelper.map(this.userRepository.save(UserMappingHelper.map(userDto)));\r\n\t}",
+            "lineStart": 45,
+            "lineEnd": 49,
+            "annotations": [],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 47,
+                "lineEnd": 47
+              },
+              {
+                "branchId": "STMT-2",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 48,
+                "lineEnd": 48
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": 474,
+        "packageName": "com.selimhorri.app.service.impl",
+        "className": "VerificationTokenServiceImpl",
+        "qualifiedName": "com.selimhorri.app.service.impl.VerificationTokenServiceImpl",
+        "classType": "SERVICE",
+        "filePath": "ecommerce-microservice-backend-app/user-service/src/main/java/com/selimhorri/app/service/impl/VerificationTokenServiceImpl.java",
+        "sourceCode": "package com.selimhorri.app.service.impl;\r\n\r\nimport java.util.List;\r\nimport java.util.stream.Collectors;\r\nimport javax.transaction.Transactional;\r\nimport org.springframework.stereotype.Service;\r\nimport com.selimhorri.app.dto.VerificationTokenDto;\r\nimport com.selimhorri.app.exception.wrapper.VerificationTokenNotFoundException;\r\nimport com.selimhorri.app.helper.VerificationTokenMappingHelper;\r\nimport com.selimhorri.app.repository.VerificationTokenRepository;\r\nimport com.selimhorri.app.service.VerificationTokenService;\r\nimport lombok.RequiredArgsConstructor;\r\nimport lombok.extern.slf4j.Slf4j;\r\n\r\n@Service\r\n@Transactional\r\n@Slf4j\r\n@RequiredArgsConstructor\r\npublic class VerificationTokenServiceImpl implements VerificationTokenService {\r\n\r\n    private final VerificationTokenRepository verificationTokenRepository;\r\n\r\n    @Override\r\n    public List<VerificationTokenDto> findAll() {\r\n        log.info(\"*** VerificationTokenDto List, service; fetch all verificationTokens *\");\r\n        return this.verificationTokenRepository.findAll().stream().map(VerificationTokenMappingHelper::map).distinct().collect(Collectors.toUnmodifiableList());\r\n    }\r\n\r\n    @Override\r\n    public VerificationTokenDto findById(final Integer verificationTokenId) {\r\n        log.info(\"*** VerificationTokenDto, service; fetch verificationToken by ids *\");\r\n        return this.verificationTokenRepository.findById(verificationTokenId).map(VerificationTokenMappingHelper::map).orElseThrow(() -> new VerificationTokenNotFoundException(String.format(\"#### VerificationToken with id: %d not found! ####\", verificationTokenId)));\r\n    }\r\n\r\n    @Override\r\n    public VerificationTokenDto save(final VerificationTokenDto verificationTokenDto) {\r\n        log.info(\"*** VerificationTokenDto, service; save verificationToken *\");\r\n        return VerificationTokenMappingHelper.map(this.verificationTokenRepository.save(VerificationTokenMappingHelper.map(verificationTokenDto)));\r\n    }\r\n\r\n    @Override\r\n    public VerificationTokenDto update(final VerificationTokenDto verificationTokenDto) {\r\n        log.info(\"*** VerificationTokenDto, service; update verificationToken *\");\r\n        return VerificationTokenMappingHelper.map(this.verificationTokenRepository.save(VerificationTokenMappingHelper.map(verificationTokenDto)));\r\n    }\r\n\r\n    @Override\r\n    public VerificationTokenDto update(final Integer verificationTokenId, final VerificationTokenDto verificationTokenDto) {\r\n        log.info(\"*** VerificationTokenDto, service; update verificationToken with verificationTokenId *\");\r\n        return VerificationTokenMappingHelper.map(this.verificationTokenRepository.save(VerificationTokenMappingHelper.map(this.findById(verificationTokenId))));\r\n    }\r\n\r\n    @Override\r\n    public void deleteById(final Integer verificationTokenId) {\r\n        log.info(\"*** Void, service; delete verificationToken by id *\");\r\n        this.verificationTokenRepository.deleteById(verificationTokenId);\r\n    }\r\n}\r\n",
+        "annotations": [
+          {
+            "id": 835,
+            "targetType": "CLASS",
+            "category": "COMPONENT",
+            "annotationName": "Service",
+            "attributes": "@Service"
+          },
+          {
+            "id": 836,
+            "targetType": "CLASS",
+            "category": "TRANSACTION",
+            "annotationName": "Transactional",
+            "attributes": "@Transactional"
+          }
+        ],
+        "methods": [
+          {
+            "id": 1002,
+            "classQualifiedName": "com.selimhorri.app.service.impl.VerificationTokenServiceImpl",
+            "methodName": "update",
+            "returnType": "VerificationTokenDto",
+            "parameters": [
+              {
+                "name": "verificationTokenId",
+                "type": "Integer"
+              },
+              {
+                "name": "verificationTokenDto",
+                "type": "VerificationTokenDto"
+              }
+            ],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "@Override\r\n\tpublic VerificationTokenDto update(final Integer verificationTokenId, final VerificationTokenDto verificationTokenDto) {\r\n\t\tlog.info(\"*** VerificationTokenDto, service; update verificationToken with verificationTokenId *\");\r\n\t\treturn VerificationTokenMappingHelper.map(this.verificationTokenRepository.save(\r\n\t\t\t\tVerificationTokenMappingHelper.map(this.findById(verificationTokenId))));\r\n\t}",
+            "lineStart": 60,
+            "lineEnd": 65,
+            "annotations": [],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 62,
+                "lineEnd": 62
+              },
+              {
+                "branchId": "STMT-2",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 63,
+                "lineEnd": 64
+              }
+            ]
+          },
+          {
+            "id": 1003,
+            "classQualifiedName": "com.selimhorri.app.service.impl.VerificationTokenServiceImpl",
+            "methodName": "deleteById",
+            "returnType": "void",
+            "parameters": [
+              {
+                "name": "verificationTokenId",
+                "type": "Integer"
+              }
+            ],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "@Override\r\n\tpublic void deleteById(final Integer verificationTokenId) {\r\n\t\tlog.info(\"*** Void, service; delete verificationToken by id *\");\r\n\t\tthis.verificationTokenRepository.deleteById(verificationTokenId);\r\n\t}",
+            "lineStart": 67,
+            "lineEnd": 71,
+            "annotations": [],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 69,
+                "lineEnd": 69
+              },
+              {
+                "branchId": "STMT-2",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 70,
+                "lineEnd": 70
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": 447,
+        "packageName": "com.selimhorri.app.dto",
+        "className": "CredentialDto",
+        "qualifiedName": "com.selimhorri.app.dto.CredentialDto",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/user-service/src/main/java/com/selimhorri/app/dto/CredentialDto.java",
+        "sourceCode": "package com.selimhorri.app.dto;\r\n\r\nimport java.io.Serializable;\r\nimport java.util.Set;\r\nimport com.fasterxml.jackson.annotation.JsonInclude;\r\nimport com.fasterxml.jackson.annotation.JsonProperty;\r\nimport com.fasterxml.jackson.annotation.JsonInclude.Include;\r\nimport com.selimhorri.app.domain.RoleBasedAuthority;\r\nimport lombok.AllArgsConstructor;\r\nimport lombok.Builder;\r\nimport lombok.Data;\r\nimport lombok.NoArgsConstructor;\r\n\r\n@NoArgsConstructor\r\n@AllArgsConstructor\r\n@Data\r\n@Builder\r\npublic class CredentialDto implements Serializable {\r\n\r\n    private static final long serialVersionUID = 1L;\r\n\r\n    private Integer credentialId;\r\n\r\n    private String username;\r\n\r\n    private String password;\r\n\r\n    private RoleBasedAuthority roleBasedAuthority;\r\n\r\n    private Boolean isEnabled;\r\n\r\n    private Boolean isAccountNonExpired;\r\n\r\n    private Boolean isAccountNonLocked;\r\n\r\n    private Boolean isCredentialsNonExpired;\r\n\r\n    @JsonProperty(\"user\")\r\n    @JsonInclude(value = Include.NON_NULL)\r\n    private UserDto userDto;\r\n\r\n    @JsonInclude(value = Include.NON_NULL)\r\n    private Set<VerificationTokenDto> verificationTokenDtos;\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 454,
+        "packageName": "com.selimhorri.app.exception.wrapper",
+        "className": "CredentialNotFoundException",
+        "qualifiedName": "com.selimhorri.app.exception.wrapper.CredentialNotFoundException",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/user-service/src/main/java/com/selimhorri/app/exception/wrapper/CredentialNotFoundException.java",
+        "sourceCode": "package com.selimhorri.app.exception.wrapper;\r\n\r\npublic class CredentialNotFoundException extends RuntimeException {\r\n\r\n    private static final long serialVersionUID = 1L;\r\n\r\n    public CredentialNotFoundException() {\r\n        super();\r\n    }\r\n\r\n    public CredentialNotFoundException(String message, Throwable cause) {\r\n        super(message, cause);\r\n    }\r\n\r\n    public CredentialNotFoundException(String message) {\r\n        super(message);\r\n    }\r\n\r\n    public CredentialNotFoundException(Throwable cause) {\r\n        super(cause);\r\n    }\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 455,
+        "packageName": "com.selimhorri.app.exception.wrapper",
+        "className": "UserObjectNotFoundException",
+        "qualifiedName": "com.selimhorri.app.exception.wrapper.UserObjectNotFoundException",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/user-service/src/main/java/com/selimhorri/app/exception/wrapper/UserObjectNotFoundException.java",
+        "sourceCode": "package com.selimhorri.app.exception.wrapper;\r\n\r\npublic class UserObjectNotFoundException extends RuntimeException {\r\n\r\n    private static final long serialVersionUID = 1L;\r\n\r\n    public UserObjectNotFoundException() {\r\n        super();\r\n    }\r\n\r\n    public UserObjectNotFoundException(String message, Throwable cause) {\r\n        super(message, cause);\r\n    }\r\n\r\n    public UserObjectNotFoundException(String message) {\r\n        super(message);\r\n    }\r\n\r\n    public UserObjectNotFoundException(Throwable cause) {\r\n        super(cause);\r\n    }\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 458,
+        "packageName": "com.selimhorri.app.helper",
+        "className": "CredentialMappingHelper",
+        "qualifiedName": "com.selimhorri.app.helper.CredentialMappingHelper",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/user-service/src/main/java/com/selimhorri/app/helper/CredentialMappingHelper.java",
+        "sourceCode": "package com.selimhorri.app.helper;\r\n\r\nimport com.selimhorri.app.domain.Credential;\r\nimport com.selimhorri.app.domain.User;\r\nimport com.selimhorri.app.dto.CredentialDto;\r\nimport com.selimhorri.app.dto.UserDto;\r\n\r\npublic interface CredentialMappingHelper {\r\n\r\n    public static CredentialDto map(final Credential credential) {\r\n        return CredentialDto.builder().credentialId(credential.getCredentialId()).username(credential.getUsername()).password(credential.getPassword()).roleBasedAuthority(credential.getRoleBasedAuthority()).isEnabled(credential.getIsEnabled()).isAccountNonExpired(credential.getIsAccountNonExpired()).isAccountNonLocked(credential.getIsAccountNonLocked()).isCredentialsNonExpired(credential.getIsCredentialsNonExpired()).userDto(UserDto.builder().userId(credential.getUser().getUserId()).firstName(credential.getUser().getFirstName()).lastName(credential.getUser().getLastName()).imageUrl(credential.getUser().getImageUrl()).email(credential.getUser().getEmail()).phone(credential.getUser().getPhone()).build()).build();\r\n    }\r\n\r\n    public static Credential map(final CredentialDto credentialDto) {\r\n        return Credential.builder().credentialId(credentialDto.getCredentialId()).username(credentialDto.getUsername()).password(credentialDto.getPassword()).roleBasedAuthority(credentialDto.getRoleBasedAuthority()).isEnabled(credentialDto.getIsEnabled()).isAccountNonExpired(credentialDto.getIsAccountNonExpired()).isAccountNonLocked(credentialDto.getIsAccountNonLocked()).isCredentialsNonExpired(credentialDto.getIsCredentialsNonExpired()).user(User.builder().userId(credentialDto.getUserDto().getUserId()).firstName(credentialDto.getUserDto().getFirstName()).lastName(credentialDto.getUserDto().getLastName()).imageUrl(credentialDto.getUserDto().getImageUrl()).email(credentialDto.getUserDto().getEmail()).phone(credentialDto.getUserDto().getPhone()).build()).build();\r\n    }\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 462,
+        "packageName": "com.selimhorri.app.repository",
+        "className": "CredentialRepository",
+        "qualifiedName": "com.selimhorri.app.repository.CredentialRepository",
+        "classType": "REPOSITORY",
+        "filePath": "ecommerce-microservice-backend-app/user-service/src/main/java/com/selimhorri/app/repository/CredentialRepository.java",
+        "sourceCode": "package com.selimhorri.app.repository;\r\n\r\nimport java.util.Optional;\r\nimport org.springframework.data.jpa.repository.JpaRepository;\r\nimport com.selimhorri.app.domain.Credential;\r\n\r\npublic interface CredentialRepository extends JpaRepository<Credential, Integer> {\r\n\r\n    Optional<Credential> findByUsername(final String username);\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 470,
+        "packageName": "com.selimhorri.app.service",
+        "className": "CredentialService",
+        "qualifiedName": "com.selimhorri.app.service.CredentialService",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/user-service/src/main/java/com/selimhorri/app/service/CredentialService.java",
+        "sourceCode": "package com.selimhorri.app.service;\r\n\r\nimport java.util.List;\r\nimport com.selimhorri.app.dto.CredentialDto;\r\n\r\npublic interface CredentialService {\r\n\r\n    List<CredentialDto> findAll();\r\n\r\n    CredentialDto findById(final Integer credentialId);\r\n\r\n    CredentialDto save(final CredentialDto credentialDto);\r\n\r\n    CredentialDto update(final CredentialDto credentialDto);\r\n\r\n    CredentialDto update(final Integer credentialId, final CredentialDto credentialDto);\r\n\r\n    void deleteById(final Integer credentialId);\r\n\r\n    CredentialDto findByUsername(final String username);\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 449,
+        "packageName": "com.selimhorri.app.dto",
+        "className": "UserDto",
+        "qualifiedName": "com.selimhorri.app.dto.UserDto",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/user-service/src/main/java/com/selimhorri/app/dto/UserDto.java",
+        "sourceCode": "package com.selimhorri.app.dto;\r\n\r\nimport java.io.Serializable;\r\nimport java.util.Set;\r\nimport com.fasterxml.jackson.annotation.JsonInclude;\r\nimport com.fasterxml.jackson.annotation.JsonInclude.Include;\r\nimport com.fasterxml.jackson.annotation.JsonProperty;\r\nimport lombok.AllArgsConstructor;\r\nimport lombok.Builder;\r\nimport lombok.Data;\r\nimport lombok.NoArgsConstructor;\r\n\r\n@NoArgsConstructor\r\n@AllArgsConstructor\r\n@Data\r\n@Builder\r\npublic class UserDto implements Serializable {\r\n\r\n    private static final long serialVersionUID = 1L;\r\n\r\n    private Integer userId;\r\n\r\n    private String firstName;\r\n\r\n    private String lastName;\r\n\r\n    private String imageUrl;\r\n\r\n    private String email;\r\n\r\n    private String phone;\r\n\r\n    @JsonInclude(value = Include.NON_NULL)\r\n    private Set<AddressDto> addressDtos;\r\n\r\n    @JsonProperty(\"credential\")\r\n    @JsonInclude(value = Include.NON_NULL)\r\n    private CredentialDto credentialDto;\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 459,
+        "packageName": "com.selimhorri.app.helper",
+        "className": "UserMappingHelper",
+        "qualifiedName": "com.selimhorri.app.helper.UserMappingHelper",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/user-service/src/main/java/com/selimhorri/app/helper/UserMappingHelper.java",
+        "sourceCode": "package com.selimhorri.app.helper;\r\n\r\nimport com.selimhorri.app.domain.Credential;\r\nimport com.selimhorri.app.domain.User;\r\nimport com.selimhorri.app.dto.CredentialDto;\r\nimport com.selimhorri.app.dto.UserDto;\r\n\r\npublic interface UserMappingHelper {\r\n\r\n    public static UserDto map(final User user) {\r\n        return UserDto.builder().userId(user.getUserId()).firstName(user.getFirstName()).lastName(user.getLastName()).imageUrl(user.getImageUrl()).email(user.getEmail()).phone(user.getPhone()).credentialDto(CredentialDto.builder().credentialId(user.getCredential().getCredentialId()).username(user.getCredential().getUsername()).password(user.getCredential().getPassword()).roleBasedAuthority(user.getCredential().getRoleBasedAuthority()).isEnabled(user.getCredential().getIsEnabled()).isAccountNonExpired(user.getCredential().getIsAccountNonExpired()).isAccountNonLocked(user.getCredential().getIsAccountNonLocked()).isCredentialsNonExpired(user.getCredential().getIsCredentialsNonExpired()).build()).build();\r\n    }\r\n\r\n    public static User map(final UserDto userDto) {\r\n        return User.builder().userId(userDto.getUserId()).firstName(userDto.getFirstName()).lastName(userDto.getLastName()).imageUrl(userDto.getImageUrl()).email(userDto.getEmail()).phone(userDto.getPhone()).credential(Credential.builder().credentialId(userDto.getCredentialDto().getCredentialId()).username(userDto.getCredentialDto().getUsername()).password(userDto.getCredentialDto().getPassword()).roleBasedAuthority(userDto.getCredentialDto().getRoleBasedAuthority()).isEnabled(userDto.getCredentialDto().getIsEnabled()).isAccountNonExpired(userDto.getCredentialDto().getIsAccountNonExpired()).isAccountNonLocked(userDto.getCredentialDto().getIsAccountNonLocked()).isCredentialsNonExpired(userDto.getCredentialDto().getIsCredentialsNonExpired()).build()).build();\r\n    }\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 463,
+        "packageName": "com.selimhorri.app.repository",
+        "className": "UserRepository",
+        "qualifiedName": "com.selimhorri.app.repository.UserRepository",
+        "classType": "REPOSITORY",
+        "filePath": "ecommerce-microservice-backend-app/user-service/src/main/java/com/selimhorri/app/repository/UserRepository.java",
+        "sourceCode": "package com.selimhorri.app.repository;\r\n\r\nimport java.util.Optional;\r\nimport org.springframework.data.jpa.repository.JpaRepository;\r\nimport com.selimhorri.app.domain.User;\r\n\r\npublic interface UserRepository extends JpaRepository<User, Integer> {\r\n\r\n    Optional<User> findByCredentialUsername(final String username);\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 475,
+        "packageName": "com.selimhorri.app.service",
+        "className": "UserService",
+        "qualifiedName": "com.selimhorri.app.service.UserService",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/user-service/src/main/java/com/selimhorri/app/service/UserService.java",
+        "sourceCode": "package com.selimhorri.app.service;\r\n\r\nimport java.util.List;\r\nimport com.selimhorri.app.dto.UserDto;\r\n\r\npublic interface UserService {\r\n\r\n    List<UserDto> findAll();\r\n\r\n    UserDto findById(final Integer userId);\r\n\r\n    UserDto save(final UserDto userDto);\r\n\r\n    UserDto update(final UserDto userDto);\r\n\r\n    UserDto update(final Integer userId, final UserDto userDto);\r\n\r\n    void deleteById(final Integer userId);\r\n\r\n    UserDto findByUsername(final String username);\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 450,
+        "packageName": "com.selimhorri.app.dto",
+        "className": "VerificationTokenDto",
+        "qualifiedName": "com.selimhorri.app.dto.VerificationTokenDto",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/user-service/src/main/java/com/selimhorri/app/dto/VerificationTokenDto.java",
+        "sourceCode": "package com.selimhorri.app.dto;\r\n\r\nimport java.io.Serializable;\r\nimport java.time.LocalDate;\r\nimport org.springframework.format.annotation.DateTimeFormat;\r\nimport com.fasterxml.jackson.annotation.JsonFormat;\r\nimport com.fasterxml.jackson.annotation.JsonInclude;\r\nimport com.fasterxml.jackson.annotation.JsonProperty;\r\nimport com.fasterxml.jackson.annotation.JsonFormat.Shape;\r\nimport com.fasterxml.jackson.annotation.JsonInclude.Include;\r\nimport com.selimhorri.app.constant.AppConstant;\r\nimport lombok.AllArgsConstructor;\r\nimport lombok.Builder;\r\nimport lombok.Data;\r\nimport lombok.NoArgsConstructor;\r\n\r\n@NoArgsConstructor\r\n@AllArgsConstructor\r\n@Data\r\n@Builder\r\npublic class VerificationTokenDto implements Serializable {\r\n\r\n    private static final long serialVersionUID = 1L;\r\n\r\n    private Integer verificationTokenId;\r\n\r\n    private String token;\r\n\r\n    @JsonFormat(pattern = AppConstant.LOCAL_DATE_FORMAT, shape = Shape.STRING)\r\n    @DateTimeFormat(pattern = AppConstant.LOCAL_DATE_FORMAT)\r\n    private LocalDate expireDate;\r\n\r\n    @JsonProperty(\"credential\")\r\n    @JsonInclude(value = Include.NON_NULL)\r\n    private CredentialDto credentialDto;\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 456,
+        "packageName": "com.selimhorri.app.exception.wrapper",
+        "className": "VerificationTokenNotFoundException",
+        "qualifiedName": "com.selimhorri.app.exception.wrapper.VerificationTokenNotFoundException",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/user-service/src/main/java/com/selimhorri/app/exception/wrapper/VerificationTokenNotFoundException.java",
+        "sourceCode": "package com.selimhorri.app.exception.wrapper;\r\n\r\npublic class VerificationTokenNotFoundException extends RuntimeException {\r\n\r\n    private static final long serialVersionUID = 1L;\r\n\r\n    public VerificationTokenNotFoundException() {\r\n        super();\r\n    }\r\n\r\n    public VerificationTokenNotFoundException(String message, Throwable cause) {\r\n        super(message, cause);\r\n    }\r\n\r\n    public VerificationTokenNotFoundException(String message) {\r\n        super(message);\r\n    }\r\n\r\n    public VerificationTokenNotFoundException(Throwable cause) {\r\n        super(cause);\r\n    }\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 460,
+        "packageName": "com.selimhorri.app.helper",
+        "className": "VerificationTokenMappingHelper",
+        "qualifiedName": "com.selimhorri.app.helper.VerificationTokenMappingHelper",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/user-service/src/main/java/com/selimhorri/app/helper/VerificationTokenMappingHelper.java",
+        "sourceCode": "package com.selimhorri.app.helper;\r\n\r\nimport com.selimhorri.app.domain.Credential;\r\nimport com.selimhorri.app.domain.VerificationToken;\r\nimport com.selimhorri.app.dto.CredentialDto;\r\nimport com.selimhorri.app.dto.VerificationTokenDto;\r\n\r\npublic interface VerificationTokenMappingHelper {\r\n\r\n    public static VerificationTokenDto map(final VerificationToken verificationToken) {\r\n        return VerificationTokenDto.builder().verificationTokenId(verificationToken.getVerificationTokenId()).token(verificationToken.getToken()).expireDate(verificationToken.getExpireDate()).credentialDto(CredentialDto.builder().credentialId(verificationToken.getCredential().getCredentialId()).username(verificationToken.getCredential().getUsername()).password(verificationToken.getCredential().getPassword()).roleBasedAuthority(verificationToken.getCredential().getRoleBasedAuthority()).isEnabled(verificationToken.getCredential().getIsEnabled()).isAccountNonExpired(verificationToken.getCredential().getIsAccountNonExpired()).isAccountNonLocked(verificationToken.getCredential().getIsAccountNonLocked()).isCredentialsNonExpired(verificationToken.getCredential().getIsCredentialsNonExpired()).build()).build();\r\n    }\r\n\r\n    public static VerificationToken map(final VerificationTokenDto verificationTokenDto) {\r\n        return VerificationToken.builder().verificationTokenId(verificationTokenDto.getVerificationTokenId()).token(verificationTokenDto.getToken()).expireDate(verificationTokenDto.getExpireDate()).credential(Credential.builder().credentialId(verificationTokenDto.getCredentialDto().getCredentialId()).username(verificationTokenDto.getCredentialDto().getUsername()).password(verificationTokenDto.getCredentialDto().getPassword()).roleBasedAuthority(verificationTokenDto.getCredentialDto().getRoleBasedAuthority()).isEnabled(verificationTokenDto.getCredentialDto().getIsEnabled()).isAccountNonExpired(verificationTokenDto.getCredentialDto().getIsAccountNonExpired()).isAccountNonLocked(verificationTokenDto.getCredentialDto().getIsAccountNonLocked()).isCredentialsNonExpired(verificationTokenDto.getCredentialDto().getIsCredentialsNonExpired()).build()).build();\r\n    }\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 464,
+        "packageName": "com.selimhorri.app.repository",
+        "className": "VerificationTokenRepository",
+        "qualifiedName": "com.selimhorri.app.repository.VerificationTokenRepository",
+        "classType": "REPOSITORY",
+        "filePath": "ecommerce-microservice-backend-app/user-service/src/main/java/com/selimhorri/app/repository/VerificationTokenRepository.java",
+        "sourceCode": "package com.selimhorri.app.repository;\r\n\r\nimport org.springframework.data.jpa.repository.JpaRepository;\r\nimport com.selimhorri.app.domain.VerificationToken;\r\n\r\npublic interface VerificationTokenRepository extends JpaRepository<VerificationToken, Integer> {\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 476,
+        "packageName": "com.selimhorri.app.service",
+        "className": "VerificationTokenService",
+        "qualifiedName": "com.selimhorri.app.service.VerificationTokenService",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/user-service/src/main/java/com/selimhorri/app/service/VerificationTokenService.java",
+        "sourceCode": "package com.selimhorri.app.service;\r\n\r\nimport java.util.List;\r\nimport com.selimhorri.app.dto.VerificationTokenDto;\r\n\r\npublic interface VerificationTokenService {\r\n\r\n    List<VerificationTokenDto> findAll();\r\n\r\n    VerificationTokenDto findById(final Integer verificationTokenId);\r\n\r\n    VerificationTokenDto save(final VerificationTokenDto verificationTokenDto);\r\n\r\n    VerificationTokenDto update(final VerificationTokenDto verificationTokenDto);\r\n\r\n    VerificationTokenDto update(final Integer verificationTokenId, final VerificationTokenDto verificationTokenDto);\r\n\r\n    void deleteById(final Integer verificationTokenId);\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 443,
+        "packageName": "com.selimhorri.app.domain",
+        "className": "RoleBasedAuthority",
+        "qualifiedName": "com.selimhorri.app.domain.RoleBasedAuthority",
+        "classType": "ENUM",
+        "filePath": "ecommerce-microservice-backend-app/user-service/src/main/java/com/selimhorri/app/domain/RoleBasedAuthority.java",
+        "sourceCode": "package com.selimhorri.app.domain;\r\n\r\nimport lombok.Getter;\r\nimport lombok.RequiredArgsConstructor;\r\n\r\n@RequiredArgsConstructor\r\n@Getter\r\npublic enum RoleBasedAuthority {\r\n\r\n    ROLE_USER(\"USER\"), ROLE_ADMIN(\"ADMIN\");\r\n\r\n    private final String role;\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 442,
+        "packageName": "com.selimhorri.app.domain",
+        "className": "Credential",
+        "qualifiedName": "com.selimhorri.app.domain.Credential",
+        "classType": "ENTITY",
+        "filePath": "ecommerce-microservice-backend-app/user-service/src/main/java/com/selimhorri/app/domain/Credential.java",
+        "sourceCode": "package com.selimhorri.app.domain;\r\n\r\nimport java.io.Serializable;\r\nimport java.util.Set;\r\nimport javax.persistence.CascadeType;\r\nimport javax.persistence.Column;\r\nimport javax.persistence.Entity;\r\nimport javax.persistence.EnumType;\r\nimport javax.persistence.Enumerated;\r\nimport javax.persistence.FetchType;\r\nimport javax.persistence.GeneratedValue;\r\nimport javax.persistence.GenerationType;\r\nimport javax.persistence.Id;\r\nimport javax.persistence.JoinColumn;\r\nimport javax.persistence.OneToMany;\r\nimport javax.persistence.OneToOne;\r\nimport javax.persistence.Table;\r\nimport com.fasterxml.jackson.annotation.JsonIgnore;\r\nimport lombok.AllArgsConstructor;\r\nimport lombok.Builder;\r\nimport lombok.Data;\r\nimport lombok.EqualsAndHashCode;\r\nimport lombok.NoArgsConstructor;\r\n\r\n@Entity\r\n@Table(name = \"credentials\")\r\n@NoArgsConstructor\r\n@AllArgsConstructor\r\n@EqualsAndHashCode(callSuper = true, exclude = { \"user\", \"verificationTokens\" })\r\n@Data\r\n@Builder\r\npublic final class Credential extends AbstractMappedEntity implements Serializable {\r\n\r\n    private static final long serialVersionUID = 1L;\r\n\r\n    @Id\r\n    @GeneratedValue(strategy = GenerationType.IDENTITY)\r\n    @Column(name = \"credential_id\", unique = true, nullable = false, updatable = false)\r\n    private Integer credentialId;\r\n\r\n    @Column(unique = true)\r\n    private String username;\r\n\r\n    private String password;\r\n\r\n    @Enumerated(EnumType.STRING)\r\n    @Column(name = \"role\")\r\n    private RoleBasedAuthority roleBasedAuthority;\r\n\r\n    @Column(name = \"is_enabled\")\r\n    private Boolean isEnabled;\r\n\r\n    @Column(name = \"is_account_non_expired\")\r\n    private Boolean isAccountNonExpired;\r\n\r\n    @Column(name = \"is_account_non_locked\")\r\n    private Boolean isAccountNonLocked;\r\n\r\n    @Column(name = \"is_credentials_non_expired\")\r\n    private Boolean isCredentialsNonExpired;\r\n\r\n    @JsonIgnore\r\n    @OneToOne(fetch = FetchType.LAZY)\r\n    @JoinColumn(name = \"user_id\", nullable = false)\r\n    private User user;\r\n\r\n    @JsonIgnore\r\n    @OneToMany(cascade = CascadeType.ALL, fetch = FetchType.LAZY, mappedBy = \"credential\")\r\n    private Set<VerificationToken> verificationTokens;\r\n}\r\n",
+        "annotations": [
+          {
+            "id": 742,
+            "targetType": "CLASS",
+            "category": "PERSISTENCE",
+            "annotationName": "Entity",
+            "attributes": "@Entity"
+          },
+          {
+            "id": 743,
+            "targetType": "CLASS",
+            "category": "PERSISTENCE",
+            "annotationName": "Table",
+            "attributes": "@Table(name = \"credentials\")"
+          }
+        ],
+        "methods": []
+      },
+      {
+        "id": 444,
+        "packageName": "com.selimhorri.app.domain",
+        "className": "User",
+        "qualifiedName": "com.selimhorri.app.domain.User",
+        "classType": "ENTITY",
+        "filePath": "ecommerce-microservice-backend-app/user-service/src/main/java/com/selimhorri/app/domain/User.java",
+        "sourceCode": "package com.selimhorri.app.domain;\r\n\r\nimport java.io.Serializable;\r\nimport java.util.Set;\r\nimport javax.persistence.CascadeType;\r\nimport javax.persistence.Column;\r\nimport javax.persistence.Entity;\r\nimport javax.persistence.FetchType;\r\nimport javax.persistence.GeneratedValue;\r\nimport javax.persistence.GenerationType;\r\nimport javax.persistence.Id;\r\nimport javax.persistence.OneToMany;\r\nimport javax.persistence.OneToOne;\r\nimport javax.persistence.Table;\r\nimport javax.validation.constraints.Email;\r\nimport com.fasterxml.jackson.annotation.JsonIgnore;\r\nimport lombok.AllArgsConstructor;\r\nimport lombok.Builder;\r\nimport lombok.Data;\r\nimport lombok.EqualsAndHashCode;\r\nimport lombok.NoArgsConstructor;\r\n\r\n@Entity\r\n@Table(name = \"users\")\r\n@NoArgsConstructor\r\n@AllArgsConstructor\r\n@EqualsAndHashCode(callSuper = true, exclude = { \"addresses\", \"credential\" })\r\n@Data\r\n@Builder\r\npublic final class User extends AbstractMappedEntity implements Serializable {\r\n\r\n    private static final long serialVersionUID = 1L;\r\n\r\n    @Id\r\n    @GeneratedValue(strategy = GenerationType.IDENTITY)\r\n    @Column(name = \"user_id\", unique = true, nullable = false, updatable = false)\r\n    private Integer userId;\r\n\r\n    @Column(name = \"first_name\")\r\n    private String firstName;\r\n\r\n    @Column(name = \"last_name\")\r\n    private String lastName;\r\n\r\n    @Column(name = \"image_url\")\r\n    private String imageUrl;\r\n\r\n    @Email(message = \"*Input must be in Email format!**\")\r\n    private String email;\r\n\r\n    private String phone;\r\n\r\n    @JsonIgnore\r\n    @OneToMany(cascade = CascadeType.ALL, mappedBy = \"user\", fetch = FetchType.LAZY)\r\n    private Set<Address> addresses;\r\n\r\n    @OneToOne(cascade = CascadeType.ALL, fetch = FetchType.LAZY, mappedBy = \"user\")\r\n    private Credential credential;\r\n}\r\n",
+        "annotations": [
+          {
+            "id": 744,
+            "targetType": "CLASS",
+            "category": "PERSISTENCE",
+            "annotationName": "Entity",
+            "attributes": "@Entity"
+          },
+          {
+            "id": 745,
+            "targetType": "CLASS",
+            "category": "PERSISTENCE",
+            "annotationName": "Table",
+            "attributes": "@Table(name = \"users\")"
+          }
+        ],
+        "methods": []
+      },
+      {
+        "id": 446,
+        "packageName": "com.selimhorri.app.dto",
+        "className": "AddressDto",
+        "qualifiedName": "com.selimhorri.app.dto.AddressDto",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/user-service/src/main/java/com/selimhorri/app/dto/AddressDto.java",
+        "sourceCode": "package com.selimhorri.app.dto;\r\n\r\nimport java.io.Serializable;\r\nimport com.fasterxml.jackson.annotation.JsonInclude;\r\nimport com.fasterxml.jackson.annotation.JsonProperty;\r\nimport com.fasterxml.jackson.annotation.JsonInclude.Include;\r\nimport lombok.AllArgsConstructor;\r\nimport lombok.Builder;\r\nimport lombok.Data;\r\nimport lombok.NoArgsConstructor;\r\n\r\n@NoArgsConstructor\r\n@AllArgsConstructor\r\n@Data\r\n@Builder\r\npublic class AddressDto implements Serializable {\r\n\r\n    private static final long serialVersionUID = 1L;\r\n\r\n    private Integer addressId;\r\n\r\n    private String fullAddress;\r\n\r\n    private String postalCode;\r\n\r\n    private String city;\r\n\r\n    @JsonProperty(\"user\")\r\n    @JsonInclude(value = Include.NON_NULL)\r\n    private UserDto userDto;\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 438,
+        "packageName": "com.selimhorri.app.constant",
+        "className": "AppConstant",
+        "qualifiedName": "com.selimhorri.app.constant.AppConstant",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/user-service/src/main/java/com/selimhorri/app/constant/AppConstant.java",
+        "sourceCode": "package com.selimhorri.app.constant;\r\n\r\nimport lombok.AccessLevel;\r\nimport lombok.NoArgsConstructor;\r\n\r\n@NoArgsConstructor(access = AccessLevel.PRIVATE)\r\npublic abstract class AppConstant {\r\n\r\n    public static final String LOCAL_DATE_FORMAT = \"dd-MM-yyyy\";\r\n\r\n    public static final String LOCAL_DATE_TIME_FORMAT = \"dd-MM-yyyy__HH:mm:ss:SSSSSS\";\r\n\r\n    public static final String ZONED_DATE_TIME_FORMAT = \"dd-MM-yyyy__HH:mm:ss:SSSSSS\";\r\n\r\n    public static final String INSTANT_FORMAT = \"dd-MM-yyyy__HH:mm:ss:SSSSSS\";\r\n\r\n    @NoArgsConstructor(access = AccessLevel.PRIVATE)\r\n    public abstract class DiscoveredDomainsApi {\r\n\r\n        public static final String USER_SERVICE_HOST = \"http://USER-SERVICE/user-service\";\r\n\r\n        public static final String USER_SERVICE_API_URL = \"http://USER-SERVICE/user-service/api/users\";\r\n\r\n        public static final String PRODUCT_SERVICE_HOST = \"http://PRODUCT-SERVICE/product-service\";\r\n\r\n        public static final String PRODUCT_SERVICE_API_URL = \"http://PRODUCT-SERVICE/product-service/api/products\";\r\n\r\n        public static final String ORDER_SERVICE_HOST = \"http://ORDER-SERVICE/order-service\";\r\n\r\n        public static final String ORDER_SERVICE_API_URL = \"http://ORDER-SERVICE/order-service/api/orders\";\r\n\r\n        public static final String FAVOURITE_SERVICE_HOST = \"http://FAVOURITE-SERVICE/favourite-service\";\r\n\r\n        public static final String FAVOURITE_SERVICE_API_URL = \"http://FAVOURITE-SERVICE/favourite-service/api/favourites\";\r\n\r\n        public static final String PAYMENT_SERVICE_HOST = \"http://PAYMENT-SERVICE/payment-service\";\r\n\r\n        public static final String PAYMENT_SERVICE_API_URL = \"http://PAYMENT-SERVICE/payment-service/api/payments\";\r\n\r\n        public static final String SHIPPING_SERVICE_HOST = \"http://SHIPPING-SERVICE/shipping-service\";\r\n\r\n        public static final String SHIPPING_SERVICE_API_URL = \"http://SHIPPING-SERVICE/shipping-service/api/shippings\";\r\n    }\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 445,
+        "packageName": "com.selimhorri.app.domain",
+        "className": "VerificationToken",
+        "qualifiedName": "com.selimhorri.app.domain.VerificationToken",
+        "classType": "ENTITY",
+        "filePath": "ecommerce-microservice-backend-app/user-service/src/main/java/com/selimhorri/app/domain/VerificationToken.java",
+        "sourceCode": "package com.selimhorri.app.domain;\r\n\r\nimport java.io.Serializable;\r\nimport java.time.LocalDate;\r\nimport javax.persistence.Column;\r\nimport javax.persistence.Entity;\r\nimport javax.persistence.FetchType;\r\nimport javax.persistence.GeneratedValue;\r\nimport javax.persistence.GenerationType;\r\nimport javax.persistence.Id;\r\nimport javax.persistence.JoinColumn;\r\nimport javax.persistence.ManyToOne;\r\nimport javax.persistence.Table;\r\nimport org.springframework.format.annotation.DateTimeFormat;\r\nimport com.fasterxml.jackson.annotation.JsonFormat;\r\nimport com.fasterxml.jackson.annotation.JsonFormat.Shape;\r\nimport com.selimhorri.app.constant.AppConstant;\r\nimport lombok.AllArgsConstructor;\r\nimport lombok.Builder;\r\nimport lombok.Data;\r\nimport lombok.EqualsAndHashCode;\r\nimport lombok.NoArgsConstructor;\r\n\r\n@Entity\r\n@Table(name = \"verification_tokens\")\r\n@NoArgsConstructor\r\n@AllArgsConstructor\r\n@EqualsAndHashCode(callSuper = true, exclude = { \"credential\" })\r\n@Data\r\n@Builder\r\npublic final class VerificationToken extends AbstractMappedEntity implements Serializable {\r\n\r\n    private static final long serialVersionUID = 1L;\r\n\r\n    @Id\r\n    @GeneratedValue(strategy = GenerationType.IDENTITY)\r\n    @Column(name = \"verification_token_id\", unique = true, nullable = false, updatable = false)\r\n    private Integer verificationTokenId;\r\n\r\n    @Column(name = \"verif_token\")\r\n    private String token;\r\n\r\n    @JsonFormat(pattern = AppConstant.LOCAL_DATE_FORMAT, shape = Shape.STRING)\r\n    @DateTimeFormat(pattern = AppConstant.LOCAL_DATE_FORMAT)\r\n    @Column(name = \"expire_date\")\r\n    private LocalDate expireDate;\r\n\r\n    @ManyToOne(fetch = FetchType.EAGER)\r\n    @JoinColumn(name = \"credential_id\")\r\n    private Credential credential;\r\n}\r\n",
+        "annotations": [
+          {
+            "id": 746,
+            "targetType": "CLASS",
+            "category": "PERSISTENCE",
+            "annotationName": "Entity",
+            "attributes": "@Entity"
+          },
+          {
+            "id": 747,
+            "targetType": "CLASS",
+            "category": "PERSISTENCE",
+            "annotationName": "Table",
+            "attributes": "@Table(name = \"verification_tokens\")"
+          }
+        ],
+        "methods": []
+      },
+      {
+        "id": 440,
+        "packageName": "com.selimhorri.app.domain",
+        "className": "AbstractMappedEntity",
+        "qualifiedName": "com.selimhorri.app.domain.AbstractMappedEntity",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/user-service/src/main/java/com/selimhorri/app/domain/AbstractMappedEntity.java",
+        "sourceCode": "package com.selimhorri.app.domain;\r\n\r\nimport java.io.Serializable;\r\nimport java.time.Instant;\r\nimport javax.persistence.Column;\r\nimport javax.persistence.MappedSuperclass;\r\nimport org.springframework.data.annotation.CreatedDate;\r\nimport org.springframework.data.annotation.LastModifiedDate;\r\nimport com.fasterxml.jackson.annotation.JsonFormat;\r\nimport com.fasterxml.jackson.annotation.JsonFormat.Shape;\r\nimport lombok.AccessLevel;\r\nimport lombok.AllArgsConstructor;\r\nimport lombok.Data;\r\nimport lombok.NoArgsConstructor;\r\n\r\n@MappedSuperclass\r\n@NoArgsConstructor(access = AccessLevel.PROTECTED)\r\n@AllArgsConstructor(access = AccessLevel.PROTECTED)\r\n@Data\r\nabstract public class AbstractMappedEntity implements Serializable {\r\n\r\n    private static final long serialVersionUID = 1L;\r\n\r\n    @CreatedDate\r\n    @JsonFormat(shape = Shape.STRING)\r\n    @Column(name = \"created_at\")\r\n    private Instant createdAt;\r\n\r\n    @LastModifiedDate\r\n    @JsonFormat(shape = Shape.STRING)\r\n    @Column(name = \"updated_at\")\r\n    private Instant updatedAt;\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 441,
+        "packageName": "com.selimhorri.app.domain",
+        "className": "Address",
+        "qualifiedName": "com.selimhorri.app.domain.Address",
+        "classType": "ENTITY",
+        "filePath": "ecommerce-microservice-backend-app/user-service/src/main/java/com/selimhorri/app/domain/Address.java",
+        "sourceCode": "package com.selimhorri.app.domain;\r\n\r\nimport java.io.Serializable;\r\nimport javax.persistence.Column;\r\nimport javax.persistence.Entity;\r\nimport javax.persistence.GeneratedValue;\r\nimport javax.persistence.GenerationType;\r\nimport javax.persistence.Id;\r\nimport javax.persistence.JoinColumn;\r\nimport javax.persistence.ManyToOne;\r\nimport javax.persistence.Table;\r\nimport lombok.AllArgsConstructor;\r\nimport lombok.Builder;\r\nimport lombok.Data;\r\nimport lombok.EqualsAndHashCode;\r\nimport lombok.NoArgsConstructor;\r\n\r\n@Entity\r\n@Table(name = \"address\")\r\n@NoArgsConstructor\r\n@AllArgsConstructor\r\n@EqualsAndHashCode(callSuper = true, exclude = { \"user\" })\r\n@Data\r\n@Builder\r\npublic final class Address extends AbstractMappedEntity implements Serializable {\r\n\r\n    private static final long serialVersionUID = 1L;\r\n\r\n    @Id\r\n    @GeneratedValue(strategy = GenerationType.IDENTITY)\r\n    @Column(name = \"address_id\", unique = true, nullable = false, updatable = false)\r\n    private Integer addressId;\r\n\r\n    @Column(name = \"full_address\", unique = true)\r\n    private String fullAddress;\r\n\r\n    @Column(name = \"postal_code\")\r\n    private String postalCode;\r\n\r\n    private String city;\r\n\r\n    @ManyToOne\r\n    @JoinColumn(name = \"user_id\")\r\n    private User user;\r\n}\r\n",
+        "annotations": [
+          {
+            "id": 740,
+            "targetType": "CLASS",
+            "category": "PERSISTENCE",
+            "annotationName": "Entity",
+            "attributes": "@Entity"
+          },
+          {
+            "id": 741,
+            "targetType": "CLASS",
+            "category": "PERSISTENCE",
+            "annotationName": "Table",
+            "attributes": "@Table(name = \"address\")"
+          }
+        ],
+        "methods": []
+      }
+    ],
+    "approvedBusinessRules": [
+      {
+        "id": 471,
+        "methodId": 993,
+        "ruleCode": "BR-077",
+        "description": "Khi lưu người dùng, service chuyển userDto thành đối tượng User, gọi userRepository.save và chuyển kết quả thành UserDto để trả về.",
+        "reviewNote": "SOURCE_BRANCH:STMT-2\nAI category: SIDE_EFFECT. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-2"
+      },
+      {
+        "id": 474,
+        "methodId": 986,
+        "ruleCode": "BR-080",
+        "description": "Khi lưu credential, service chuyển CredentialDto thành entity, gọi credentialRepository.save và chuyển entity được lưu thành CredentialDto để trả về.",
+        "reviewNote": "SOURCE_BRANCH:STMT-2\nAI category: SIDE_EFFECT. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-2"
+      },
+      {
+        "id": 477,
+        "methodId": 990,
+        "ruleCode": "BR-083",
+        "description": "Khi tra cứu credential theo username, service gọi findByUsername và ánh xạ credential tìm thấy thành CredentialDto.",
+        "reviewNote": "SOURCE_BRANCH:STMT-1\nAI category: INTEGRATION. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-1"
+      },
+      {
+        "id": 478,
+        "methodId": 990,
+        "ruleCode": "BR-084",
+        "description": "Khi không tìm thấy credential theo username, service ném UserObjectNotFoundException với thông điệp được tạo động từ username.",
+        "reviewNote": "SOURCE_BRANCH:STMT-1\nAI category: VALIDATION. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-1"
+      },
+      {
+        "id": 483,
+        "methodId": 1002,
+        "ruleCode": "BR-089",
+        "description": "Khi cập nhật theo verificationTokenId, service tìm token theo ID; nếu không tìm thấy thì ném VerificationTokenNotFoundException với thông điệp phụ thuộc vào ID và không xác định thêm nội dung tại đây, còn nếu tìm thấy thì lưu token tìm được và chuyển entity được lưu thành DTO trả về.",
+        "reviewNote": "SOURCE_BRANCH:STMT-2\nAI category: BUSINESS_LOGIC. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-2"
+      },
+      {
+        "id": 484,
+        "methodId": 1003,
+        "ruleCode": "BR-090",
+        "description": "Khi được gọi với verificationTokenId, service yêu cầu repository xóa token theo ID.",
+        "reviewNote": "SOURCE_BRANCH:STMT-2\nAI category: SIDE_EFFECT. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-2"
+      }
+    ],
+    "approvedTestPlans": [
+      {
+        "id": 347,
+        "businessRuleId": 471,
+        "coveredRuleIds": [
+          471
+        ],
+        "planCode": "TP-078",
+        "title": "Lưu người dùng",
+        "description": "Kiểm tra service ánh xạ userDto thành User, lưu qua repository và trả về UserDto được ánh xạ từ kết quả lưu.",
+        "testType": "HAPPY_PATH",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 348,
+        "businessRuleId": 474,
+        "coveredRuleIds": [
+          474
+        ],
+        "planCode": "TP-079",
+        "title": "Lưu thông tin xác thực",
+        "description": "Kiểm tra service ánh xạ CredentialDto thành entity, lưu qua repository và trả về CredentialDto được ánh xạ từ entity đã lưu.",
+        "testType": "HAPPY_PATH",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 349,
+        "businessRuleId": 477,
+        "coveredRuleIds": [
+          477,
+          478
+        ],
+        "planCode": "TP-080",
+        "title": "Tra cứu thông tin xác thực theo tên",
+        "description": "Kiểm tra tra cứu theo username: credential tìm thấy được ánh xạ thành CredentialDto; nếu không tìm thấy, ném UserObjectNotFoundException với thông điệp chứa username.",
+        "testType": "EXCEPTION",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 350,
+        "businessRuleId": 483,
+        "coveredRuleIds": [
+          483
+        ],
+        "planCode": "TP-081",
+        "title": "Cập nhật token theo ID",
+        "description": "Kiểm tra service tìm token theo ID, lưu token tìm được và trả DTO; nếu không tìm thấy, ném VerificationTokenNotFoundException với thông điệp phụ thuộc vào ID.\n[GreyTest testability: UNKNOWN] UNRESOLVED_HELPER_PATH @ ecommerce-microservice-backend-app/user-service/src/main/java/com/selimhorri/app/service/impl/VerificationTokenServiceImpl.java:50 update — Lời gọi helper nội bộ chưa được phân tích đường đi trong MVP: findById. | Kiểm tra đường đi qua helper trước khi kết luận có thể điều khiển nhánh; không thay kết quả helper bằng giả định.",
+        "testType": "HAPPY_PATH",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 351,
+        "businessRuleId": 484,
+        "coveredRuleIds": [
+          484
+        ],
+        "planCode": "TP-082",
+        "title": "Xóa token theo ID",
+        "description": "Kiểm tra service yêu cầu repository xóa verification token theo ID được truyền vào.",
+        "testType": "HAPPY_PATH",
+        "status": "APPROVED",
+        "isModified": false
+      }
+    ],
+    "existingTests": [],
+    "supportingResources": [],
+    "contextWarnings": []
+  },
+  "response": {
+    "cases": [
+      {
+        "plan_id": 347,
+        "test_type": "HAPPY_PATH",
+        "description": "Lưu người dùng và trả về UserDto được ánh xạ từ kết quả lưu.",
+        "preconditions": "UserServiceImpl được khởi tạo với UserRepository mock. Repository trả về entity User có các trường nghiệp vụ như entity được chuyển từ input và có credential khác null để mapper đọc được.",
+        "test_data": {
+          "input": {
+            "userDto": {
+              "userId": 21,
+              "firstName": "An",
+              "lastName": "Nguyen",
+              "imageUrl": "https://example.test/an.png",
+              "email": "an@example.test",
+              "phone": "0900000001",
+              "credentialDto": {
+                "credentialId": 31,
+                "username": "an",
+                "password": "original-password",
+                "roleBasedAuthority": "ROLE_USER",
+                "isEnabled": true,
+                "isAccountNonExpired": true,
+                "isAccountNonLocked": true,
+                "isCredentialsNonExpired": true
+              }
+            }
+          },
+          "mocks": {
+            "userRepository.save": "Trả về entity User được ánh xạ từ userDto, giữ nguyên các trường người dùng và credential đã cung cấp."
+          }
+        },
+        "expected_result": "Service trả về UserDto được ánh xạ từ entity do repository trả về, gồm userId 21, các trường người dùng đã gửi và credential gồm credentialId 31, username \"an\", password \"original-password\", roleBasedAuthority ROLE_USER cùng các cờ trạng thái true.",
+        "priority": "HIGH",
+        "trace_source": "BR-077 [STMT-2] -> TP-078 -> STMT-2"
+      },
+      {
+        "plan_id": 348,
+        "test_type": "HAPPY_PATH",
+        "description": "Lưu credential và trả về CredentialDto được ánh xạ từ entity đã lưu.",
+        "preconditions": "CredentialServiceImpl được khởi tạo với CredentialRepository mock. CredentialDto có userDto khác null vì mapper đọc thông tin user khi chuyển DTO thành entity. Repository trả về entity Credential với user khác null để mapper chuyển entity trở lại DTO.",
+        "test_data": {
+          "input": {
+            "credentialDto": {
+              "credentialId": 41,
+              "username": "minh",
+              "password": "original-password",
+              "roleBasedAuthority": "ROLE_USER",
+              "isEnabled": true,
+              "isAccountNonExpired": true,
+              "isAccountNonLocked": true,
+              "isCredentialsNonExpired": true,
+              "userDto": {
+                "userId": 51,
+                "firstName": "Minh",
+                "lastName": "Tran",
+                "imageUrl": "https://example.test/minh.png",
+                "email": "minh@example.test",
+                "phone": "0900000002"
+              }
+            }
+          },
+          "mocks": {
+            "credentialRepository.save": "Trả về entity Credential được ánh xạ từ credentialDto, giữ nguyên các trường credential và user đã gửi."
+          }
+        },
+        "expected_result": "Service trả về CredentialDto được ánh xạ từ entity do repository trả về, gồm credentialId 41, username \"minh\", password \"original-password\", roleBasedAuthority ROLE_USER, các cờ trạng thái true và UserDto có userId 51 cùng các trường người dùng đã gửi.",
+        "priority": "HIGH",
+        "trace_source": "BR-080 [STMT-2] -> TP-079 -> STMT-2"
+      },
+      {
+        "plan_id": 349,
+        "test_type": "HAPPY_PATH",
+        "description": "Tra cứu credential theo username và ánh xạ credential tìm thấy thành CredentialDto.",
+        "preconditions": "CredentialServiceImpl được khởi tạo với CredentialRepository mock. Credential trả về có user khác null vì mapper đọc userId và các trường người dùng khi tạo CredentialDto.",
+        "test_data": {
+          "input": {
+            "username": "linh"
+          },
+          "mocks": {
+            "credentialRepository.findByUsername(\"linh\")": "Trả về Optional chứa Credential có username \"linh\", credentialId 61, password \"stored-password\", roleBasedAuthority ROLE_USER, các cờ trạng thái true và user có userId 71, firstName \"Linh\", lastName \"Pham\", imageUrl \"https://example.test/linh.png\", email \"linh@example.test\", phone \"0900000003\"."
+          }
+        },
+        "expected_result": "Service trả về CredentialDto được ánh xạ từ credential tìm thấy, gồm credentialId 61, username \"linh\", password \"stored-password\", roleBasedAuthority ROLE_USER, các cờ trạng thái true và UserDto có userId 71 cùng các trường người dùng của entity.",
+        "priority": "HIGH",
+        "trace_source": "BR-083 [STMT-1] -> TP-080 -> STMT-1"
+      },
+      {
+        "plan_id": 349,
+        "test_type": "EXCEPTION",
+        "description": "Tra cứu credential theo username không tồn tại và ném ngoại lệ có thông điệp chứa username.",
+        "preconditions": "CredentialServiceImpl được khởi tạo với CredentialRepository mock. Repository trả về Optional rỗng cho username được tra cứu.",
+        "test_data": {
+          "input": {
+            "username": "missing-user"
+          },
+          "mocks": {
+            "credentialRepository.findByUsername(\"missing-user\")": "Trả về Optional rỗng."
+          }
+        },
+        "expected_result": "Service ném UserObjectNotFoundException với thông điệp \"#### Credential with username: missing-user not found! ####\".",
+        "priority": "HIGH",
+        "trace_source": "BR-084 [STMT-1] -> TP-080 -> STMT-1"
+      },
+      {
+        "plan_id": 350,
+        "test_type": "HAPPY_PATH",
+        "description": "Cập nhật token theo ID khi tìm thấy token và trả về DTO ánh xạ từ kết quả lưu.",
+        "preconditions": "VerificationTokenServiceImpl được khởi tạo với VerificationTokenRepository mock. Đường đi của helper findById được xác định: repository.findById trả về Optional chứa token, rồi helper chuyển token thành DTO. DTO đó có credentialDto khác null vì mapper DTO thành entity đọc credential. Repository.save trả về entity VerificationToken có credential khác null để mapper tạo DTO kết quả.",
+        "test_data": {
+          "input": {
+            "verificationTokenId": 81,
+            "verificationTokenDto": {
+              "verificationTokenId": 999,
+              "token": "ignored-input-token",
+              "expireDate": "2030-01-02",
+              "credentialDto": {
+                "credentialId": 91,
+                "username": "token-user",
+                "password": "stored-password",
+                "roleBasedAuthority": "ROLE_USER",
+                "isEnabled": true,
+                "isAccountNonExpired": true,
+                "isAccountNonLocked": true,
+                "isCredentialsNonExpired": true
+              }
+            }
+          },
+          "mocks": {
+            "verificationTokenRepository.findById(81)": "Trả về Optional chứa VerificationToken có verificationTokenId 81, token \"found-token\", expireDate 2030-02-03 và credential có credentialId 91, username \"token-user\", password \"stored-password\", roleBasedAuthority ROLE_USER cùng các cờ trạng thái true.",
+            "verificationTokenRepository.save": "Trả về entity VerificationToken được ánh xạ từ DTO tìm kiếm, giữ nguyên verificationTokenId 81, token \"found-token\", expireDate 2030-02-03 và credential đã tìm thấy."
+          }
+        },
+        "expected_result": "Service tìm token theo ID 81, lưu token tìm được và trả về VerificationTokenDto được ánh xạ từ entity do repository.save trả về, gồm verificationTokenId 81, token \"found-token\", expireDate 2030-02-03 và credential tương ứng. DTO truyền vào không thay thế token tìm được.",
+        "priority": "HIGH",
+        "trace_source": "BR-089 [STMT-2] -> TP-081 -> STMT-2"
+      },
+      {
+        "plan_id": 350,
+        "test_type": "EXCEPTION",
+        "description": "Cập nhật token theo ID không tồn tại và ném VerificationTokenNotFoundException.",
+        "preconditions": "VerificationTokenServiceImpl được khởi tạo với VerificationTokenRepository mock. Repository trả về Optional rỗng cho ID được tra cứu; đường đi helper findById ném ngoại lệ trước khi gọi repository.save.",
+        "test_data": {
+          "input": {
+            "verificationTokenId": 82,
+            "verificationTokenDto": {
+              "verificationTokenId": 999,
+              "token": "unused-token",
+              "expireDate": "2030-01-02",
+              "credentialDto": {
+                "credentialId": 92,
+                "username": "token-user",
+                "password": "stored-password",
+                "roleBasedAuthority": "ROLE_USER",
+                "isEnabled": true,
+                "isAccountNonExpired": true,
+                "isAccountNonLocked": true,
+                "isCredentialsNonExpired": true
+              }
+            }
+          },
+          "mocks": {
+            "verificationTokenRepository.findById(82)": "Trả về Optional rỗng."
+          }
+        },
+        "expected_result": "Service ném VerificationTokenNotFoundException với thông điệp phụ thuộc vào ID 82; không yêu cầu nội dung thông điệp cụ thể.",
+        "priority": "HIGH",
+        "trace_source": "BR-089 [STMT-2] -> TP-081 -> STMT-2"
+      },
+      {
+        "plan_id": 351,
+        "test_type": "HAPPY_PATH",
+        "description": "Yêu cầu repository xóa verification token theo ID được truyền vào.",
+        "preconditions": "VerificationTokenServiceImpl được khởi tạo với VerificationTokenRepository mock.",
+        "test_data": {
+          "input": {
+            "verificationTokenId": 101
+          },
+          "mocks": {}
+        },
+        "expected_result": "Service yêu cầu repository xóa verification token theo ID 101.",
+        "priority": "HIGH",
+        "trace_source": "BR-090 [STMT-2] -> TP-082 -> STMT-2"
+      }
+    ]
+  }
+}
