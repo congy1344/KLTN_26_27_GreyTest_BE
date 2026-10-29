@@ -61,8 +61,44 @@ class OpenAiLlmClientTest {
             assertThat(body.path("messages").path(0).path("role").asText()).isEqualTo("user");
             assertThat(body.path("messages").path(0).path("content").asText()).isEqualTo("Prompt text");
             assertThat(body.path("max_tokens").asInt()).isEqualTo(512);
+            assertThat(body.path("temperature").asDouble()).isEqualTo(0.3);
+            assertThat(body.has("max_completion_tokens")).isFalse();
+            assertThat(body.has("reasoning_effort")).isFalse();
             assertThat(body.has("input")).isFalse();
             assertThat(body.has("max_output_tokens")).isFalse();
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void sendsLunaCompatibleParametersAndPreservesPerRequestTokenLimit() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
+        AtomicReference<String> requestBody = new AtomicReference<>();
+        server.createContext("/", exchange -> {
+            requestBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            byte[] bytes = "{\"choices\":[{\"message\":{\"content\":\"{\\\"ok\\\":true}\"}}]}"
+                    .getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+        server.start();
+        try {
+            OpenAiLlmClient client = new OpenAiLlmClient(objectMapper, HttpClient.newHttpClient(), "test-key",
+                    "gpt-6-luna", 0.3, 16000, Duration.ofSeconds(5),
+                    URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/v1/chat/completions"));
+
+            String output = client.complete("Return JSON only.", new LlmRequestOptions(4096));
+
+            assertThat(output).isEqualTo("{\"ok\":true}");
+            JsonNode body = objectMapper.readTree(requestBody.get());
+            assertThat(body.path("model").asText()).isEqualTo("gpt-6-luna");
+            assertThat(body.path("max_completion_tokens").asInt()).isEqualTo(4096);
+            assertThat(body.path("reasoning_effort").asText()).isEqualTo("none");
+            assertThat(body.path("temperature").asDouble()).isEqualTo(0.3);
+            assertThat(body.path("response_format").path("type").asText()).isEqualTo("json_object");
+            assertThat(body.has("max_tokens")).isFalse();
         } finally {
             server.stop(0);
         }

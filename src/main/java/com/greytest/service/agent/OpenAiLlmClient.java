@@ -165,7 +165,13 @@ public class OpenAiLlmClient implements LlmClient {
                 .put("role", "user")
                 .put("content", prompt);
         root.put("temperature", temperature);
-        root.put("max_tokens", requestMaxTokens);
+        if ("gpt-6-luna".equals(model)) {
+            // Luna cần tham số token mới; tắt reasoning để giữ temperature hiện tại.
+            root.put("max_completion_tokens", requestMaxTokens);
+            root.put("reasoning_effort", "none");
+        } else {
+            root.put("max_tokens", requestMaxTokens);
+        }
         if (jsonMode) {
             root.putObject("response_format").put("type", "json_object");
         }
