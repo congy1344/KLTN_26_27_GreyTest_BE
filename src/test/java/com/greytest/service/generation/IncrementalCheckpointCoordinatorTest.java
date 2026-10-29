@@ -27,22 +27,36 @@ import org.springframework.transaction.support.SimpleTransactionStatus;
 
 class IncrementalCheckpointCoordinatorTest {
     @Test void deletedCaseChildConflictIsRecordedEvenWithoutACaseTargetKey() {
+        var fixture = deletedUnitFixture(3L);
+        assertThatThrownBy(() -> fixture.run(() -> fixture.coordinator.executeBatch(1L, 2L, GenerationProgressStage.TEST_CASE,
+                Set.of(3L), Path.of("candidate"), com.greytest.dto.agent.GenerationResponseDtos.TestCaseResponseDto.class,
+                ids -> { throw new GenerationConflictException(6L, "{\"action\":\"REMOVE\",\"afterData\":null}"); }, (ids, output) -> { })))
+                .isInstanceOf(GenerationConflictException.class);
+        verify(fixture.store).mark(any(), eq("TEST_CASE"), eq("3"), eq("CONFLICT"), anyString(), anyString(), contains("itemId"), anyString());
+    }
+
+    @Test void deletedUnitConflictIsNotAssignedToAnotherPlan() {
+        var fixture = deletedUnitFixture(4L);
+        assertThatThrownBy(() -> fixture.run(() -> fixture.coordinator.executeBatch(1L, 2L, GenerationProgressStage.TEST_CASE,
+                Set.of(3L), Path.of("candidate"), com.greytest.dto.agent.GenerationResponseDtos.TestCaseResponseDto.class,
+                ids -> { throw new GenerationConflictException(6L, "{\"action\":\"REMOVE\",\"afterData\":null}"); }, (ids, output) -> { })))
+                .isInstanceOf(GenerationConflictException.class);
+        verify(fixture.store).mark(any(), eq("TEST_CASE"), eq("3"), eq("FAILED"), anyString(), anyString(), isNull(), anyString());
+    }
+
+    private Fixture deletedUnitFixture(Long planId) {
         var fixture = new Fixture();
         var units = mock(com.greytest.repository.UnitTestRepository.class);
         var cases = mock(com.greytest.repository.TestCaseRepository.class);
         org.springframework.test.util.ReflectionTestUtils.setField(fixture.coordinator, "unitTests", units);
         org.springframework.test.util.ReflectionTestUtils.setField(fixture.coordinator, "cases", cases);
         var unit = new com.greytest.entity.UnitTest(); unit.setId(801L); unit.setTestCaseId(701L);
-        var parent = new com.greytest.entity.TestCase(); parent.setId(701L); parent.setTestPlanId(3L);
+        var parent = new com.greytest.entity.TestCase(); parent.setId(701L); parent.setTestPlanId(planId);
         when(units.findById(801L)).thenReturn(Optional.of(unit)); when(cases.findById(701L)).thenReturn(Optional.of(parent));
         var child = new SourceUpdateItem(); child.setId(6L); child.setTargetId(801L);
         child.setTargetType(com.greytest.entity.enums.SourceUpdateTargetType.UNIT_TEST);
         when(fixture.items.findById(6L)).thenReturn(Optional.of(child));
-        assertThatThrownBy(() -> fixture.run(() -> fixture.coordinator.executeBatch(1L, 2L, GenerationProgressStage.TEST_CASE,
-                Set.of(3L), Path.of("candidate"), com.greytest.dto.agent.GenerationResponseDtos.TestCaseResponseDto.class,
-                ids -> { throw new GenerationConflictException(6L, "{\"action\":\"REMOVE\",\"afterData\":null}"); }, (ids, output) -> { })))
-                .isInstanceOf(GenerationConflictException.class);
-        verify(fixture.store).mark(any(), eq("TEST_CASE"), eq("3"), eq("CONFLICT"), anyString(), anyString(), contains("itemId"), anyString());
+        return fixture;
     }
     @Test void baselineComparisonIgnoresJsonFieldOrderButDetectsActualEdits() throws Exception {
         var fixture = new Fixture();

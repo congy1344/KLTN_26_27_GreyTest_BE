@@ -425,8 +425,15 @@ public class IncrementalCheckpointCoordinator {
         if(belongs(stage,item,id)) return true;
         try {
             JsonNode value=item.getAfterData()==null ? mapper.createObjectNode() : mapper.readTree(item.getAfterData());
-            Long caseId=value.hasNonNull("case_id") ? value.path("case_id").asLong()
-                : item.getTargetKey()!=null && item.getTargetKey().startsWith("case:") ? Long.valueOf(item.getTargetKey().substring(5)) : null;
+            Long caseId = null;
+            if (value.hasNonNull("case_id")) caseId = value.path("case_id").asLong();
+            else if (item.getTargetKey() != null && item.getTargetKey().startsWith("case:"))
+                caseId = Long.valueOf(item.getTargetKey().substring(5));
+            // Đề xuất REMOVE có thể không còn afterData/targetKey; lần theo artifact để nhận đúng xung đột của case cha.
+            if (caseId == null && item.getTargetType() == com.greytest.entity.enums.SourceUpdateTargetType.UNIT_TEST
+                    && item.getTargetId() != null && unitTests != null) {
+                caseId = unitTests.findById(item.getTargetId()).map(com.greytest.entity.UnitTest::getTestCaseId).orElse(null);
+            }
             if(stage==GenerationProgressStage.TEST_CASE) {
                 Long targetCase=caseId!=null ? caseId : item.getTargetType()==com.greytest.entity.enums.SourceUpdateTargetType.TEST_CASE ? item.getTargetId() : null;
                 return targetCase!=null && cases.findById(targetCase).map(c->Objects.equals(c.getTestPlanId(),id)).orElse(false);

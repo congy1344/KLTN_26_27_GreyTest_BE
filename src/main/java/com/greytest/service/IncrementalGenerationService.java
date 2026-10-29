@@ -539,8 +539,27 @@ public class IncrementalGenerationService {
                     item.setReviewStatus(stale.getStatus() == ReviewStatus.APPROVED
                             ? SourceUpdateReviewStatus.PENDING : SourceUpdateReviewStatus.ACCEPTED);
                     saveSourceUpdateItem(item);
+                    proposeRemovedCaseUnitTests(updateId, stale);
                 }
             }
+        }
+    }
+
+    /** Đề xuất xóa test phụ thuộc, không xóa trực tiếp hoặc ghi đè lựa chọn người dùng. */
+    private void proposeRemovedCaseUnitTests(Long updateId, TestCase testCase) {
+        for (UnitTest unitTest : unitTestRepository.findByTestCaseIdIn(List.of(testCase.getId()))) {
+            SourceUpdateItem item = checkpoints == null
+                    ? existingProposal(updateId, SourceUpdateTargetType.UNIT_TEST, unitTest.getId()) : new SourceUpdateItem();
+            if (checkpoints == null && isUserDecision(item)) continue;
+            item.setSourceUpdateId(updateId);
+            item.setTargetType(SourceUpdateTargetType.UNIT_TEST);
+            item.setTargetId(unitTest.getId());
+            item.setAction(SourceUpdateAction.REMOVE);
+            item.setAfterData(null);
+            item.setReason("Xóa Unit Test gắn với Test Case không còn phù hợp");
+            item.setReviewStatus(testCase.getStatus() == ReviewStatus.APPROVED
+                    ? SourceUpdateReviewStatus.PENDING : SourceUpdateReviewStatus.ACCEPTED);
+            saveSourceUpdateItem(item);
         }
     }
 
@@ -671,7 +690,8 @@ public class IncrementalGenerationService {
                     && item.getAction() == SourceUpdateAction.UPDATE
                             ? SourceUpdateAction.CREATE : item.getAction();
             target.setTargetId(item.getTargetId());
-            target.setTargetKey(item.getTargetKey());
+            // REMOVE có thể chỉ mang targetId; không xóa liên kết case của đề xuất đã lưu.
+            if (item.getTargetKey() != null) target.setTargetKey(item.getTargetKey());
             target.setAction(action);
             target.setReason(item.getReason());
             if(target.getBeforeData()==null) target.setBeforeData(item.getBeforeData());
