@@ -20,6 +20,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import com.greytest.dto.agent.GenerationResponseDtos.TestCaseResponseDto;
 import com.greytest.dto.CoverageGapDto;
+import com.greytest.dto.CreateTestCaseRequest;
 import com.greytest.dto.agent.GenerationResponseDtos.GeneratedTestCaseDto;
 import com.greytest.entity.Project;
 import com.greytest.entity.BusinessRule;
@@ -71,6 +72,62 @@ class TestCaseServiceTest {
                 .when(projects.findByIdForUpdate(1L))
                 .thenReturn(Optional.of(project));
         return project;
+    }
+
+    @Test
+    void generationStartsAtOneEvenWhenAnotherProjectHasSixtySixCases() {
+        project(ProjectStatus.PLAN_APPROVED);
+        TestPlan plan = approvedPlan(20L, false);
+        when(plans.findByProjectId(1L)).thenReturn(List.of(plan));
+        when(plans.findById(20L)).thenReturn(Optional.of(plan));
+        when(plans.existsById(20L)).thenReturn(true);
+        TestCase foreignCase = existingCase(99L, 99L, "TC-066");
+        org.mockito.Mockito.lenient().when(cases.findAll()).thenReturn(List.of(foreignCase));
+        when(ai.generateTestCases(1L, Set.of(20L)))
+                .thenReturn(new TestCaseResponseDto(List.of(generatedCase(20L, "new project case"))));
+        mockPersistedCases();
+
+        var result = service.generate(1L);
+
+        assertThat(result).singleElement().satisfies(item -> assertThat(item.caseCode()).isEqualTo("TC-001"));
+        verify(cases).findByProjectId(1L);
+        assertThat(foreignCase.getCaseCode()).isEqualTo("TC-066");
+    }
+
+    @Test
+    void manualCreationContinuesAfterTheHighestProjectCodeDespiteNumberingGaps() {
+        project(ProjectStatus.CASE_PENDING_REVIEW);
+        TestPlan plan = approvedPlan(20L, false);
+        when(plans.findById(20L)).thenReturn(Optional.of(plan));
+        when(cases.findByProjectId(1L)).thenReturn(List.of(
+                existingCase(30L, 20L, "TC-001"), existingCase(32L, 20L, "TC-003")));
+        when(cases.save(org.mockito.ArgumentMatchers.any(TestCase.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        CreateTestCaseRequest request = new CreateTestCaseRequest(20L, TestType.HAPPY_PATH,
+                "manual case", "ready", java.util.Map.of(), "success", Priority.HIGH, "BR-001 -> TP-001");
+
+        assertThat(service.create(1L, request).caseCode()).isEqualTo("TC-004");
+    }
+
+    @Test
+    void resumedGenerationContinuesProjectNumberingAcrossPlans() {
+        project(ProjectStatus.PLAN_APPROVED);
+        TestPlan existingPlan = approvedPlan(20L, false);
+        TestPlan missingPlan = approvedPlan(21L, false);
+        when(plans.findByProjectId(1L)).thenReturn(List.of(existingPlan, missingPlan));
+        when(plans.findById(21L)).thenReturn(Optional.of(missingPlan));
+        when(plans.existsById(21L)).thenReturn(true);
+        TestCase existing = existingCase(30L, 20L, "TC-005");
+        when(cases.findByProjectId(1L)).thenReturn(List.of(existing));
+        when(ai.generateTestCases(1L, Set.of(21L)))
+                .thenReturn(new TestCaseResponseDto(List.of(generatedCase(21L, "missing case"))));
+        mockPersistedCases();
+        when(cases.findByTestPlanId(20L)).thenReturn(List.of(existing));
+
+        var result = service.generate(1L, (String) null, true);
+
+        assertThat(result).singleElement().satisfies(item -> assertThat(item.caseCode()).isEqualTo("TC-006"));
+        assertThat(existing.getCaseCode()).isEqualTo("TC-005");
     }
 
     @Test
@@ -496,7 +553,7 @@ class TestCaseServiceTest {
         when(ai.generateTestCases(1L, Set.of(20L)))
                 .thenReturn(new TestCaseResponseDto(List.of(generatedCase(20L, "new target case"))));
         when(cases.findByTestPlanId(20L)).thenReturn(List.of(targetCase));
-        when(cases.findAll()).thenReturn(List.of(untouchedCase));
+        when(cases.findByProjectId(1L)).thenReturn(List.of(untouchedCase));
         when(cases.saveAll(org.mockito.ArgumentMatchers.anyList()))
                 .thenAnswer(invocation -> invocation.getArgument(0));
 
@@ -551,7 +608,7 @@ class TestCaseServiceTest {
         when(plans.existsById(20L)).thenReturn(true);
         when(plans.findByProjectId(1L)).thenReturn(List.of(plan));
         when(rules.findById(7L)).thenReturn(Optional.of(rule));
-        when(cases.findAll()).thenReturn(List.of(oldCase));
+        when(cases.findByProjectId(1L)).thenReturn(List.of(oldCase));
         when(ai.generateCoverageRefinement(org.mockito.ArgumentMatchers.eq(1L),
                 org.mockito.ArgumentMatchers.eq(2), org.mockito.ArgumentMatchers.anyList()))
                 .thenReturn(new TestCaseResponseDto(List.of(new GeneratedTestCaseDto(

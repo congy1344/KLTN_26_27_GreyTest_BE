@@ -162,7 +162,7 @@ public class TestCaseService {
             generationProgress.start(projectId, GenerationProgressStage.TEST_CASE, stepLabels, progressMessage);
         }
 
-        int baseNumber = nextCaseNumber();
+        int baseNumber = nextCaseNumber(projectId);
         java.util.concurrent.atomic.AtomicInteger caseCounter = new java.util.concurrent.atomic.AtomicInteger(baseNumber);
         List<TestCaseDto> allSavedCases = new java.util.concurrent.CopyOnWriteArrayList<>();
         var expectedPlans = targetPlans.stream().collect(java.util.stream.Collectors.toMap(
@@ -365,7 +365,7 @@ public class TestCaseService {
         cases.deleteAll(currentPlans.stream()
                 .flatMap(plan -> cases.findByTestPlanId(plan.getId()).stream())
                 .toList());
-        int[] number = {nextCaseNumber()};
+        int[] number = {nextCaseNumber(projectId)};
         var saved = cases.saveAll(generatedCases.stream()
                 .map(testCase -> from(testCase, number[0]++))
                 .toList());
@@ -393,7 +393,7 @@ public class TestCaseService {
         }
 
         cases.deleteAll(cases.findByTestPlanId(currentPlan.getId()));
-        int[] number = {nextCaseNumber()};
+        int[] number = {nextCaseNumber(projectId)};
         var saved = cases.saveAll(generatedCases.stream()
                 .map(testCase -> from(testCase, number[0]++))
                 .toList());
@@ -506,7 +506,7 @@ public class TestCaseService {
         if(valid.stream().map(testCase->scenarioKey(planMethodIds.get(testCase.planId()),testCase))
                 .anyMatch(key->!scenarioKeys.add(key)))
             throw new LlmResponseException("AI sinh Test Case trùng với scenario đã có.");
-        int[] n={nextCaseNumber()};
+        int[] n={nextCaseNumber(projectId)};
         var saved=cases.saveAll(valid.stream().map(x->supplemental(x,n[0]++,round)).toList());
         p.setStatus(ProjectStatus.CASE_APPROVED);
         projects.save(p);
@@ -543,7 +543,12 @@ public class TestCaseService {
     private boolean isValid(GeneratedTestCaseDto c, Long projectId){ if(c==null||!plans.existsById(c.planId())||parseTypeOrNull(c.testType())==null) return false; var p=plans.findById(c.planId()).orElse(null); return p!=null&&projectId.equals(p.getProjectId())&&(p.getStatus()==ReviewStatus.APPROVED); }
     private TestCase from(GeneratedTestCaseDto x,int n){ TestCase c=new TestCase(); c.setTestPlanId(x.planId()); c.setCaseCode("TC-"+String.format("%03d", n)); c.setTestType(parseType(x.testType())); c.setDescription(x.description()); c.setPreconditions(x.preconditions()); c.setTestData(x.testData()); c.setExpectedResult(x.expectedResult()); c.setPriority(Priority.valueOf(x.priority())); c.setTraceSource(x.traceSource()); c.setStatus(ReviewStatus.PENDING_REVIEW); c.setIsModified(false); return c; }
     private TestCase supplemental(GeneratedTestCaseDto x,int n,int round){ TestCase c=from(x,n); c.setStatus(ReviewStatus.APPROVED); if(!x.traceSource().contains("JaCoCo")) c.setTraceSource(x.traceSource()+" -> JaCoCo round "+round); return c; }
-    private int nextCaseNumber(){ return cases.findAll().stream().map(TestCase::getCaseCode).filter(java.util.Objects::nonNull).filter(code->code.matches("TC-\\d+")).mapToInt(code->Integer.parseInt(code.substring(3))).max().orElse(0)+1; }
+    private int nextCaseNumber(Long projectId) {
+        // Mã TC chỉ liên tục trong từng project và vẫn giữ khoảng trống của các case đã xóa.
+        return cases.findByProjectId(projectId).stream().map(TestCase::getCaseCode)
+                .filter(java.util.Objects::nonNull).filter(code -> code.matches("TC-\\d+"))
+                .mapToInt(code -> Integer.parseInt(code.substring(3))).max().orElse(0) + 1;
+    }
     private SemanticScenarioKey scenarioKey(Long methodId,TestCase c){
         return new SemanticScenarioKey(methodId,normalize(c.getPreconditions()),c.getTestData(),normalize(c.getExpectedResult()));
     }
@@ -555,7 +560,7 @@ public class TestCaseService {
     private record PlanSnapshot(Long id,Long projectId,Long businessRuleId,String title,String description,TestType testType,ReviewStatus status,Boolean isModified){}
     private TestType parseType(String s){ return TestType.valueOf(s); }
     private TestType parseTypeOrNull(String s){ try{return TestType.valueOf(s);}catch(Exception e){return null;} }
-    private String nextCode(Long id){ return "TC-"+String.format("%03d", cases.count()+1); }
+    private String nextCode(Long projectId){ return "TC-"+String.format("%03d", nextCaseNumber(projectId)); }
     // Cho phép thao tác cả sau khi đã có coverage — vòng lặp gap: bổ sung case → approve lại
     // → sinh lại unit test → upload jacoco vòng mới. Mọi thay đổi đều kéo status về CASE_PENDING_REVIEW.
     private void ensureEditable(Project p){ if(!Set.of(ProjectStatus.BR_PENDING_REVIEW, ProjectStatus.BR_APPROVED, ProjectStatus.PLAN_PENDING_REVIEW, ProjectStatus.PLAN_APPROVED,ProjectStatus.CASE_PENDING_REVIEW,ProjectStatus.CASE_APPROVED,ProjectStatus.TEST_GENERATED,ProjectStatus.COVERAGE_ANALYZED,ProjectStatus.COMPLETED).contains(p.getStatus())) throw new InvalidProjectStatusException("Chi thao tac Test Case sau khi Test Plan da co."); }
