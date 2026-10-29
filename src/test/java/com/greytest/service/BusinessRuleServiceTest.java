@@ -7,16 +7,24 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.doAnswer;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -32,6 +40,7 @@ import com.greytest.dto.agent.GenerationResponseDtos.BusinessRuleReviewResponseD
 import com.greytest.dto.agent.GenerationResponseDtos.GeneratedBusinessRuleDto;
 import com.greytest.dto.agent.GenerationResponseDtos.ReviewedBusinessRuleSuggestionDto;
 import com.greytest.entity.BusinessRule;
+import com.greytest.entity.AuthUser;
 import com.greytest.entity.JavaClass;
 import com.greytest.entity.JavaMethod;
 import com.greytest.entity.Project;
@@ -39,8 +48,10 @@ import com.greytest.entity.enums.ClassType;
 import com.greytest.entity.enums.ProjectStatus;
 import com.greytest.entity.enums.ReviewStatus;
 import com.greytest.entity.enums.RuleSource;
+import com.greytest.entity.enums.UserTier;
 import com.greytest.exception.InvalidProjectStatusException;
 import com.greytest.repository.BusinessRuleRepository;
+import com.greytest.repository.AuthUserRepository;
 import com.greytest.repository.JavaClassRepository;
 import com.greytest.repository.JavaMethodRepository;
 import com.greytest.repository.ProjectRepository;
@@ -59,6 +70,14 @@ class BusinessRuleServiceTest {
     @Mock private TransactionStatus transactionStatus;
     @Mock private ServiceScopeResolver scopeResolver;
     @Mock private ServicePipelineStatusService scopedStatuses;
+    @Mock private AuthUserRepository users;
+    private LlmBatchExecutor batchExecutor;
+
+    @AfterEach
+    void cleanUpBatches() {
+        GenerationJobContext.clear();
+        if (batchExecutor != null) batchExecutor.shutdown();
+    }
 
     @BeforeEach
     void configureTransactions() {
@@ -107,11 +126,10 @@ class BusinessRuleServiceTest {
     }
 
     @Test
-    void concurrentFailureKeepsCompletedBatchesAndResumeSkipsThem() {
+    void concurrentFailureKeepsLaterCompletedBatchAndResumeSkipsIt() {
         mockProject();
         mockProjectSave();
-        mockServiceMethods(method(11L, "first"), method(12L, "second"), method(13L, "third"),
-                method(14L, "fourth"), method(15L, "fifth"), method(16L, "sixth"), method(17L, "seventh"));
+        mockSevenMethods();
         List<BusinessRule> persisted = new java.util.concurrent.CopyOnWriteArrayList<>();
         when(businessRuleRepository.findByProjectId(1L)).thenAnswer(ignored -> List.copyOf(persisted));
         AtomicLong ids = new AtomicLong(100);
@@ -121,14 +139,21 @@ class BusinessRuleServiceTest {
             persisted.add(rule);
             return rule;
         });
-        var firstAttempt = new java.util.concurrent.atomic.AtomicBoolean(true);
+        CountDownLatch secondSaved = new CountDownLatch(1);
+        doAnswer(ignored -> { secondSaved.countDown(); return null; }).when(generationProgressService)
+                .advanceStep(org.mockito.ArgumentMatchers.eq(1L),
+                        org.mockito.ArgumentMatchers.eq(com.greytest.dto.GenerationProgressStage.BUSINESS_RULE),
+                        org.mockito.ArgumentMatchers.eq(1), org.mockito.ArgumentMatchers.anyString());
+        AtomicBoolean firstAttempt = new AtomicBoolean(true);
         var original = new com.greytest.service.agent.LlmResponseException("provider failed");
         when(aiAgentService.generateBusinessRules(org.mockito.ArgumentMatchers.eq(1L), any(Set.class)))
                 .thenAnswer(invocation -> {
                     Set<Long> methodIds = invocation.getArgument(1);
-                    if (methodIds.contains(11L) && firstAttempt.getAndSet(false)) throw original;
-                    return new BusinessRuleResponseDto(methodIds.stream().map(id ->
-                            new GeneratedBusinessRuleDto(id, "Rule for method " + id, "BUSINESS_LOGIC")).toList());
+                    if (methodIds.contains(11L) && firstAttempt.getAndSet(false)) {
+                        assertThat(secondSaved.await(5, TimeUnit.SECONDS)).isTrue();
+                        throw original;
+                    }
+                    return generatedRules(methodIds);
                 });
         var executor = new LlmBatchExecutor(2, 0, 0);
         try {
@@ -136,20 +161,19 @@ class BusinessRuleServiceTest {
                     javaClassRepository, javaMethodRepository, aiAgentService, generationProgressService,
                     transactionManager, scopeResolver, scopedStatuses, executor);
             assertThatThrownBy(() -> service.generate(1L)).isSameAs(original);
-            assertThat(persisted).hasSize(4);
-            assertThat(service.generate(1L)).extracting(BusinessRuleDto::methodId).containsExactly(11L, 12L, 13L);
+            assertThat(persisted).extracting(BusinessRule::getMethodId).containsExactly(14L, 15L, 16L);
+            assertThat(service.generate(1L)).extracting(BusinessRuleDto::methodId)
+                    .containsExactlyInAnyOrder(11L, 12L, 13L, 17L);
             assertThat(persisted).hasSize(7).extracting(BusinessRule::getRuleCode).doesNotHaveDuplicates();
             verify(generationProgressService).resume(org.mockito.ArgumentMatchers.eq(1L),
                     org.mockito.ArgumentMatchers.eq(com.greytest.dto.GenerationProgressStage.BUSINESS_RULE),
-                    org.mockito.ArgumentMatchers.anyList(), org.mockito.ArgumentMatchers.eq(Set.of(1, 2)),
+                    org.mockito.ArgumentMatchers.anyList(), org.mockito.ArgumentMatchers.eq(Set.of(1)),
                     org.mockito.ArgumentMatchers.anyString());
             verify(aiAgentService).generateBusinessRules(1L, Set.of(14L, 15L, 16L));
-            verify(aiAgentService).generateBusinessRules(1L, Set.of(17L));
         } finally {
             executor.shutdown();
         }
     }
-
     @Test
     void pauseLetsRunningBatchesPersistAndSkipsQueuedBatches() {
         mockProject();
@@ -220,6 +244,186 @@ class BusinessRuleServiceTest {
 
         assertThat(rules).extracting(BusinessRuleDto::methodId).containsExactly(11L, 12L);
         verify(aiAgentService).generateBusinessRules(1L, Set.of(11L, 12L));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"FREE,2", "PLUS,3", "PRO,3"})
+    void generateUsesTierConcurrencyAndAssignsUniqueCodes(UserTier tier, int expectedPeak) {
+        mockProject();
+        mockProjectSave();
+        mockSevenMethods();
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of());
+        mockBusinessRuleSave();
+        AtomicInteger active = new AtomicInteger();
+        AtomicInteger peak = new AtomicInteger();
+        CountDownLatch firstWave = new CountDownLatch(expectedPeak);
+        when(aiAgentService.generateBusinessRules(org.mockito.ArgumentMatchers.eq(1L),
+                org.mockito.ArgumentMatchers.<Set<Long>>any())).thenAnswer(invocation -> {
+                    assertThat(GenerationJobContext.actorUserId()).isEqualTo(42L);
+                    int running = active.incrementAndGet();
+                    peak.accumulateAndGet(running, Math::max);
+                    firstWave.countDown();
+                    try {
+                        assertThat(firstWave.await(5, TimeUnit.SECONDS)).isTrue();
+                        return generatedRules(invocation.getArgument(1));
+                    } finally {
+                        active.decrementAndGet();
+                    }
+                });
+
+        List<BusinessRuleDto> rules = parallelService(tier).generate(1L);
+
+        assertThat(peak.get()).isEqualTo(expectedPeak);
+        assertThat(rules).extracting(BusinessRuleDto::methodId)
+                .containsExactlyInAnyOrder(11L, 12L, 13L, 14L, 15L, 16L, 17L);
+        assertThat(rules).extracting(BusinessRuleDto::ruleCode)
+                .containsExactlyInAnyOrder("BR-001", "BR-002", "BR-003", "BR-004", "BR-005", "BR-006", "BR-007");
+    }
+
+    @Test
+    void generateReportsParallelSaveFailureAndKeepsEarlierCommit() {
+        mockProject();
+        mockServiceMethods(method(11L, "m11"), method(12L, "m12"), method(13L, "m13"), method(14L, "m14"));
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of());
+        CountDownLatch firstSaved = new CountDownLatch(1);
+        doAnswer(ignored -> { firstSaved.countDown(); return null; }).when(generationProgressService)
+                .advanceStep(org.mockito.ArgumentMatchers.eq(1L),
+                        org.mockito.ArgumentMatchers.eq(com.greytest.dto.GenerationProgressStage.BUSINESS_RULE),
+                        org.mockito.ArgumentMatchers.eq(0), org.mockito.ArgumentMatchers.anyString());
+        when(aiAgentService.generateBusinessRules(1L, Set.of(11L, 12L, 13L)))
+                .thenReturn(generatedRules(Set.of(11L, 12L, 13L)));
+        when(aiAgentService.generateBusinessRules(1L, Set.of(14L))).thenAnswer(ignored -> {
+            assertThat(firstSaved.await(5, TimeUnit.SECONDS)).isTrue();
+            return generatedRules(Set.of(14L));
+        });
+        AtomicLong saves = new AtomicLong();
+        when(businessRuleRepository.save(any(BusinessRule.class))).thenAnswer(invocation -> {
+            BusinessRule rule = invocation.getArgument(0);
+            if (rule.getMethodId().equals(14L)) throw new IllegalStateException("database unavailable");
+            rule.setId(saves.incrementAndGet());
+            return rule;
+        });
+
+        assertThatThrownBy(() -> parallelService(UserTier.PLUS, 2).generate(1L))
+                .isInstanceOf(IllegalStateException.class).hasMessage("database unavailable");
+
+        assertThat(saves.get()).isEqualTo(3);
+        verify(generationProgressService).fail(org.mockito.ArgumentMatchers.eq(1L),
+                org.mockito.ArgumentMatchers.eq(com.greytest.dto.GenerationProgressStage.BUSINESS_RULE),
+                org.mockito.ArgumentMatchers.contains("Dừng ở batch 2/2. Đã lưu 3 Business Rule"));
+        verify(transactionManager).commit(transactionStatus);
+        verify(transactionManager).rollback(transactionStatus);
+    }
+    @Test
+    void generateResumesOnlyFailedMiddleBatchAfterLaterInFlightBatchWasSaved() {
+        mockProject();
+        mockProjectSave();
+        mockSevenMethods();
+        List<BusinessRule> persisted = new java.util.concurrent.CopyOnWriteArrayList<>();
+        when(businessRuleRepository.findByProjectId(1L)).thenAnswer(ignored -> List.copyOf(persisted));
+        when(businessRuleRepository.save(any(BusinessRule.class))).thenAnswer(invocation -> {
+            BusinessRule rule = invocation.getArgument(0);
+            rule.setId(100L + persisted.size());
+            persisted.add(rule);
+            return rule;
+        });
+        CountDownLatch allStarted = new CountDownLatch(3);
+        CountDownLatch thirdSaved = new CountDownLatch(1);
+        doAnswer(ignored -> { thirdSaved.countDown(); return null; }).when(generationProgressService)
+                .advanceStep(org.mockito.ArgumentMatchers.eq(1L),
+                        org.mockito.ArgumentMatchers.eq(com.greytest.dto.GenerationProgressStage.BUSINESS_RULE),
+                        org.mockito.ArgumentMatchers.eq(2), org.mockito.ArgumentMatchers.anyString());
+        AtomicBoolean firstAttempt = new AtomicBoolean(true);
+        var failure = new com.greytest.service.agent.LlmResponseException("AI batch failed");
+        when(aiAgentService.generateBusinessRules(org.mockito.ArgumentMatchers.eq(1L), any(Set.class)))
+                .thenAnswer(invocation -> {
+                    Set<Long> methodIds = invocation.getArgument(1);
+                    allStarted.countDown();
+                    assertThat(allStarted.await(5, TimeUnit.SECONDS)).isTrue();
+                    if (methodIds.contains(14L) && firstAttempt.getAndSet(false)) {
+                        assertThat(thirdSaved.await(5, TimeUnit.SECONDS)).isTrue();
+                        throw failure;
+                    }
+                    return generatedRules(methodIds);
+                });
+        BusinessRuleService service = parallelService(UserTier.PRO);
+
+        assertThatThrownBy(() -> service.generate(1L)).isSameAs(failure);
+        assertThat(persisted).extracting(BusinessRule::getMethodId).containsExactlyInAnyOrder(11L, 12L, 13L, 17L);
+        verify(generationProgressService).fail(org.mockito.ArgumentMatchers.eq(1L),
+                org.mockito.ArgumentMatchers.eq(com.greytest.dto.GenerationProgressStage.BUSINESS_RULE),
+                org.mockito.ArgumentMatchers.contains("Dừng ở batch 2/3."));
+
+        List<BusinessRuleDto> resumed = service.generate(1L);
+
+        assertThat(resumed).extracting(BusinessRuleDto::methodId).containsExactly(14L, 15L, 16L);
+        assertThat(resumed).extracting(BusinessRuleDto::ruleCode).containsExactly("BR-005", "BR-006", "BR-007");
+        verify(aiAgentService).generateBusinessRules(1L, Set.of(11L, 12L, 13L));
+        verify(aiAgentService).generateBusinessRules(1L, Set.of(17L));
+        verify(generationProgressService).resume(org.mockito.ArgumentMatchers.eq(1L),
+                org.mockito.ArgumentMatchers.eq(com.greytest.dto.GenerationProgressStage.BUSINESS_RULE),
+                org.mockito.ArgumentMatchers.anyList(), org.mockito.ArgumentMatchers.eq(Set.of(0, 2)),
+                org.mockito.ArgumentMatchers.anyString());
+    }
+    @Test
+    void generateStopsQueuedAiCallsAfterInFlightBatchesFail() {
+        mockProject();
+        mockServiceMethods(java.util.stream.LongStream.rangeClosed(11, 22)
+                .mapToObj(id -> method(id, "m" + id)).toArray(JavaMethod[]::new));
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of());
+        CountDownLatch firstWave = new CountDownLatch(2);
+        AtomicInteger requests = new AtomicInteger();
+        var failure = new com.greytest.service.agent.LlmResponseException("provider unavailable");
+        when(aiAgentService.generateBusinessRules(org.mockito.ArgumentMatchers.eq(1L),
+                org.mockito.ArgumentMatchers.<Set<Long>>any())).thenAnswer(ignored -> {
+                    requests.incrementAndGet();
+                    firstWave.countDown();
+                    assertThat(firstWave.await(5, TimeUnit.SECONDS)).isTrue();
+                    throw failure;
+                });
+
+        assertThatThrownBy(() -> parallelService(UserTier.PLUS, 2).generate(1L)).isSameAs(failure);
+
+        assertThat(requests.get()).isEqualTo(2);
+        verify(businessRuleRepository, org.mockito.Mockito.never()).save(any(BusinessRule.class));
+        verify(generationProgressService).fail(org.mockito.ArgumentMatchers.eq(1L),
+                org.mockito.ArgumentMatchers.eq(com.greytest.dto.GenerationProgressStage.BUSINESS_RULE),
+                org.mockito.ArgumentMatchers.contains("Dừng ở batch 1/4. Chưa lưu"));
+    }
+
+    @Test
+    void generatePauseSavesInFlightBatchesAndSkipsQueuedBatch() {
+        mockProject();
+        mockSevenMethods();
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of());
+        mockBusinessRuleSave();
+        AtomicBoolean paused = new AtomicBoolean();
+        CountDownLatch secondStarted = new CountDownLatch(1);
+        CountDownLatch firstSaved = new CountDownLatch(1);
+        when(generationProgressService.isPaused(1L, com.greytest.dto.GenerationProgressStage.BUSINESS_RULE))
+                .thenAnswer(ignored -> paused.get());
+        when(aiAgentService.generateBusinessRules(1L, Set.of(11L, 12L, 13L))).thenAnswer(ignored -> {
+            assertThat(secondStarted.await(5, TimeUnit.SECONDS)).isTrue();
+            return generatedRules(Set.of(11L, 12L, 13L));
+        });
+        when(aiAgentService.generateBusinessRules(1L, Set.of(14L, 15L, 16L))).thenAnswer(ignored -> {
+            secondStarted.countDown();
+            assertThat(firstSaved.await(5, TimeUnit.SECONDS)).isTrue();
+            return generatedRules(Set.of(14L, 15L, 16L));
+        });
+        doAnswer(ignored -> {
+            paused.set(true);
+            firstSaved.countDown();
+            return null;
+        }).when(generationProgressService).advanceStep(org.mockito.ArgumentMatchers.eq(1L),
+                org.mockito.ArgumentMatchers.eq(com.greytest.dto.GenerationProgressStage.BUSINESS_RULE),
+                org.mockito.ArgumentMatchers.eq(0), org.mockito.ArgumentMatchers.anyString());
+
+        List<BusinessRuleDto> rules = parallelService(UserTier.PLUS, 2).generate(1L);
+
+        assertThat(rules).extracting(BusinessRuleDto::methodId).containsExactly(11L, 12L, 13L, 14L, 15L, 16L);
+        verify(aiAgentService, org.mockito.Mockito.never()).generateBusinessRules(1L, Set.of(17L));
+        verify(projectRepository, org.mockito.Mockito.never()).save(any(Project.class));
     }
 
     @Test
@@ -1415,6 +1619,33 @@ class BusinessRuleServiceTest {
         assertThat(project.getStatus()).isEqualTo(ProjectStatus.BR_PENDING_REVIEW);
     }
 
+    private void mockSevenMethods() {
+        mockServiceMethods(method(11L, "m11"), method(12L, "m12"), method(13L, "m13"),
+                method(14L, "m14"), method(15L, "m15"), method(16L, "m16"), method(17L, "m17"));
+    }
+
+    private BusinessRuleResponseDto generatedRules(Set<Long> methodIds) {
+        return new BusinessRuleResponseDto(methodIds.stream().sorted()
+                .map(id -> new GeneratedBusinessRuleDto(id, "Rule for method " + id, "BUSINESS_LOGIC"))
+                .toList());
+    }
+
+
+    private BusinessRuleService parallelService(UserTier tier) {
+        return parallelService(tier, 3);
+    }
+
+    private BusinessRuleService parallelService(UserTier tier, int concurrency) {
+        AuthUser actor = new AuthUser();
+        actor.setTier(tier);
+        when(users.findById(42L)).thenReturn(Optional.of(actor));
+        GenerationJobContext.bind(42L, ignored -> { });
+        batchExecutor = new LlmBatchExecutor(concurrency, users);
+        return new BusinessRuleService(businessRuleRepository, projectRepository, javaClassRepository,
+                javaMethodRepository, aiAgentService, generationProgressService, transactionManager,
+                scopeResolver, scopedStatuses, batchExecutor);
+    }
+
     private BusinessRuleService service() {
         return new BusinessRuleService(
                 businessRuleRepository,
@@ -1435,7 +1666,8 @@ class BusinessRuleServiceTest {
                 generationProgressService,
                 transactionManager,
                 scopeResolver,
-                scopedStatuses);
+                scopedStatuses,
+                null);
     }
 
     private void mockProject() {

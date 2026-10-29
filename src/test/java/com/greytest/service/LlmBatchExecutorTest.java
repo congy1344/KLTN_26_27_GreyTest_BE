@@ -8,6 +8,8 @@ import java.util.Locale;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -65,11 +67,14 @@ class LlmBatchExecutorTest {
     void reportsFailedBatchAndWaitsForOtherStartedBatches() {
         executor = new LlmBatchExecutor(2);
         AtomicInteger finished = new AtomicInteger();
+        var started = new java.util.concurrent.CountDownLatch(2);
         IllegalStateException original = new IllegalStateException("provider failed");
 
         RuntimeException failure = catchThrowableOfType(() ->
-                executor.map(List.of(1, 2, 3), input -> {
+                executor.map(List.of(1, 2), input -> {
                     try {
+                        started.countDown();
+                        if (!started.await(3, java.util.concurrent.TimeUnit.SECONDS)) throw new IllegalStateException("Workers did not start");
                         if (input == 2) throw original;
                         Thread.sleep(20);
                         finished.incrementAndGet();
@@ -82,7 +87,7 @@ class LlmBatchExecutorTest {
 
         assertThat(LlmBatchExecutor.failedBatch(failure, 0)).isEqualTo(2);
         assertThat(LlmBatchExecutor.originalFailure(failure)).isSameAs(original);
-        assertThat(finished.get()).isEqualTo(2);
+        assertThat(finished.get()).isEqualTo(1);
     }
 
     @Test
@@ -147,5 +152,38 @@ class LlmBatchExecutorTest {
 
         assertThat(failure).isInstanceOf(LlmBatchExecutor.BatchExecutionException.class);
         assertThat(calls).hasValue(1);
+    }
+    @Test
+    void serializesPersistenceCallbacksWhileAiWorkersRunInParallel() {
+        executor = new LlmBatchExecutor(3);
+        AtomicInteger activeCallbacks = new AtomicInteger();
+        AtomicInteger peakCallbacks = new AtomicInteger();
+        CountDownLatch workersStarted = new CountDownLatch(3);
+        List<Integer> saved = new ArrayList<>();
+
+        executor.map(List.of(1, 2, 3), input -> {
+            workersStarted.countDown();
+            try {
+                assertThat(workersStarted.await(3, TimeUnit.SECONDS)).isTrue();
+                return input;
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(exception);
+            }
+        }, (batchNumber, output) -> {
+            peakCallbacks.accumulateAndGet(activeCallbacks.incrementAndGet(), Math::max);
+            try {
+                Thread.sleep(20);
+                saved.add(output);
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(exception);
+            } finally {
+                activeCallbacks.decrementAndGet();
+            }
+        });
+
+        assertThat(peakCallbacks.get()).isEqualTo(1);
+        assertThat(saved).containsExactlyInAnyOrder(1, 2, 3);
     }
 }

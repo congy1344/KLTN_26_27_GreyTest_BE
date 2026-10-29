@@ -8,6 +8,7 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.function.BiConsumer;
@@ -39,6 +40,10 @@ public class LlmBatchExecutor {
 
     public LlmBatchExecutor(int concurrency) {
         this(concurrency, 2, 500L);
+    }
+
+    public LlmBatchExecutor(int concurrency, AuthUserRepository users) {
+        this(concurrency, 2, 500L, users);
     }
 
     public LlmBatchExecutor(int concurrency, int retryAttempts, long retryDelayMillis) {
@@ -97,6 +102,14 @@ public class LlmBatchExecutor {
         }
 
         Locale locale = LocaleContextHolder.getLocale();
+        AtomicBoolean failed = new AtomicBoolean();
+        Object completionLock = new Object();
+        // Giữ phần lưu kết quả tuần tự để không cấp trùng mã khi AI trả về đồng thời.
+        BiConsumer<Integer, O> serialCompletion = (batchNumber, output) -> {
+            synchronized (completionLock) {
+                onCompleted.accept(batchNumber, output);
+            }
+        };
         List<CompletableFuture<O>> futures = new ArrayList<>(inputs.size());
         for (int index = 0; index < inputs.size(); index++) {
             I input = inputs.get(index);
@@ -104,10 +117,14 @@ public class LlmBatchExecutor {
             Supplier<O> contextualTask = GenerationJobContext.wrap(() -> {
                 LocaleContextHolder.setLocale(locale);
                 try {
-                    if (shouldStop != null && shouldStop.getAsBoolean()) {
+                    if (failed.get() || (shouldStop != null && shouldStop.getAsBoolean())) {
                         return null;
                     }
-                    return executeBatch(batchNumber, input, worker, onCompleted);
+                    return executeBatch(batchNumber, input, worker, serialCompletion);
+                } catch (RuntimeException exception) {
+                    // Chỉ dừng batch chờ sau khi worker đã hết retry, giữ các batch đang chạy.
+                    failed.set(true);
+                    throw exception;
                 } finally {
                     LocaleContextHolder.resetLocaleContext();
                 }

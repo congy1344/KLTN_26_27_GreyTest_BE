@@ -1,5 +1,6 @@
 package com.greytest.service.agent;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -16,6 +17,7 @@ import com.greytest.dto.CoverageGapDto;
 import com.greytest.dto.agent.GenerationContextDtos.BusinessRuleGenerationContextDto;
 import com.greytest.dto.agent.GenerationContextDtos.BusinessRuleReviewContextDto;
 import com.greytest.dto.agent.GenerationContextDtos.CoverageRefinementContextDto;
+import com.greytest.dto.agent.GenerationContextDtos.MethodContextDto;
 import com.greytest.dto.agent.GenerationContextDtos.TestCaseContextDto;
 import com.greytest.dto.agent.GenerationContextDtos.TestPlanContextDto;
 import com.greytest.dto.agent.GenerationContextDtos.UnitTestContextDto;
@@ -28,6 +30,7 @@ import com.greytest.dto.agent.GenerationResponseDtos.GeneratedUnitTestDto;
 import com.greytest.dto.diff.MethodDiffItem;
 import com.greytest.repository.ProjectRepository;
 import com.greytest.service.GenerationJobContext;
+import com.greytest.service.SourceBranchReference;
 import com.greytest.service.UsageQuotaService;
 
 import lombok.extern.slf4j.Slf4j;
@@ -95,24 +98,6 @@ public class AIAgentService {
     /** Checkpoint và cache đều phải qua cùng validation với kết quả gọi AI mới. */
     public void validateSnapshotOutput(com.greytest.dto.GenerationProgressStage stage,Long projectId,Object context,Object output,java.nio.file.Path source) {
         validateSemanticOutput(com.greytest.service.generation.IncrementalCheckpointCoordinator.prompt(stage),projectId,context,output,source);
-        if(stage==com.greytest.dto.GenerationProgressStage.BUSINESS_RULE && context instanceof BusinessRuleGenerationContextDto c
-                && output instanceof BusinessRuleResponseDto r) {
-            for(var method:c.classes().stream().flatMap(t->t.methods().stream()).toList()) {
-                var rules=r.rules().stream().filter(b->Objects.equals(b.methodId(),method.id())).toList();
-                if(rules.isEmpty()) throw new LlmResponseException(VALIDATION_GATE_ERROR+"Missing business rules for method "+method.id(), true);
-                if(method.branches()==null) continue;
-                var returned=rules.stream().map(b->com.greytest.service.SourceBranchReference.normalize(b.branchId())).filter(Objects::nonNull).toList();
-                var required=method.branches().stream().filter(b->!"STATEMENT".equals(b.kind()))
-                    .map(b->com.greytest.service.SourceBranchReference.normalize(b.branchId())).collect(Collectors.toSet());
-                var anchors=method.branches().stream().map(b->com.greytest.service.SourceBranchReference.normalize(b.branchId())).collect(Collectors.toSet());
-                var missing = new java.util.TreeSet<>(required); missing.removeAll(returned);
-                if(!missing.isEmpty()) throw new LlmResponseException(VALIDATION_GATE_ERROR+"Missing source decisions for method "+method.id()+": "+missing+". Return one rule per required decision.", true);
-                if(returned.stream().anyMatch(id->!anchors.contains(id))) throw new LlmResponseException(VALIDATION_GATE_ERROR+"Invalid source decision for method "+method.id()+": "+returned, true);
-                if(!anchors.isEmpty() && returned.size()!=rules.size()) throw new LlmResponseException(VALIDATION_GATE_ERROR+"Missing source anchors for method "+method.id(), true);
-                var decisions=returned.stream().filter(required::contains).toList();
-                if(new java.util.HashSet<>(decisions).size()!=decisions.size()) throw new LlmResponseException(VALIDATION_GATE_ERROR+"Duplicate source decisions for method "+method.id()+": "+decisions+". Keep exactly one rule per decision.", true);
-            }
-        }
         if(stage==com.greytest.dto.GenerationProgressStage.TEST_PLAN && context instanceof TestPlanContextDto c
                 && output instanceof TestPlanResponseDto r) {
             var covered=r.plans().stream().flatMap(p->p.coveredRuleIds().stream()).collect(Collectors.toSet());
@@ -348,6 +333,9 @@ public class AIAgentService {
         String sourceMetadata = generationSourceMetadata(promptName, projectId, context, snapshot);
         String prompt = promptManager.render(promptName, Map.of("context_json", context));
         prompt += javaVersionInstruction(promptName, projectId, context, snapshot);
+        if ("business-rule".equals(promptName) && context instanceof BusinessRuleGenerationContextDto rulesContext) {
+            prompt += "\n\n# Required Business Rule decisions\n" + businessRuleDecisionChecklist(rulesContext);
+        }
         if (correction != null && !correction.isBlank()) {
             String correctionGuidance = "test-plan".equals(promptName)
                     ? "Regenerate the full plans array and fix ALL mapping errors listed above. "
@@ -503,6 +491,15 @@ public class AIAgentService {
                     attemptPrompt = repairPrompt + "\n\n# Generation validation correction\n" + exception.getMessage()
                             + "\nRegenerate the complete response using only selected source methods and approved rule/plan IDs from context. "
                             + "Preserve the required business coverage and expected outcomes; never invent IDs or silently drop requirements. Return strict JSON only.";
+                    if ("business-rule".equals(promptName) && context instanceof BusinessRuleGenerationContextDto rulesContext) {
+                        GenerationJobContext.log("Business Rule còn thiếu nhánh hoặc chưa khớp source; đang yêu cầu AI bổ sung và sửa lại.");
+                        attemptPrompt += "\n\n# Business Rule decision repair\n" + businessRuleDecisionChecklist(rulesContext)
+                                + "\nFix ALL reported problems together. Preserve every already valid rule's method_id, branch_id, category and meaning. "
+                                + "Add a separate rule for each missing decision id. For nested ternaries, each TERNARY-n is a separate decision; "
+                                + "do not summarize multiple decisions under one branch_id. Do not duplicate an existing decision or replace it with STMT-*. "
+                                + "Return the complete rules array for every selected method, not only the additions. "
+                                + "Do not invent business behavior or change source-proven thresholds, outcomes or exception literals.";
+                    }
                     continue;
                 } else if (isMalformedJson(exception)) {
                     String dtoPath = exception.getCause() instanceof com.fasterxml.jackson.databind.JsonMappingException mapping
@@ -556,8 +553,17 @@ public class AIAgentService {
 
     private <T> void validateSemanticOutput(String promptName, Long projectId, Object context, T parsed,
             java.nio.file.Path snapshot) {
-        GenerationValidationGate.validateReferences(context, parsed)
-                .ifPresent(problem -> { throw new LlmResponseException(VALIDATION_GATE_ERROR + problem, true); });
+        Optional<String> referenceProblem = GenerationValidationGate.validateReferences(context, parsed);
+        if ("business-rule".equals(promptName) && context instanceof BusinessRuleGenerationContextDto rulesContext
+                && parsed instanceof BusinessRuleResponseDto rulesResponse) {
+            // Báo đồng thời lỗi nội dung và nhánh thiếu để một lượt sửa không chỉ xử lý lỗi đầu tiên.
+            List<String> problems = new ArrayList<>();
+            referenceProblem.ifPresent(problems::add);
+            problems.addAll(businessRuleDecisionProblems(rulesContext, rulesResponse));
+            if (!problems.isEmpty()) throw new LlmResponseException(VALIDATION_GATE_ERROR + String.join("\n", problems), true);
+            return;
+        }
+        referenceProblem.ifPresent(problem -> { throw new LlmResponseException(VALIDATION_GATE_ERROR + problem, true); });
         if ("test-case".equals(promptName) && context instanceof TestCaseContextDto testCaseContext
                 && parsed instanceof TestCaseResponseDto testCaseResponse) {
             GenerationValidationGate.validateTestCases(testCaseContext, testCaseResponse)
@@ -582,6 +588,47 @@ public class AIAgentService {
                 .ifPresent(problem -> {
                     throw new LlmResponseException(UNIT_TEST_SEMANTIC_ERROR + problem, true);
                 });
+    }
+
+    private List<String> businessRuleDecisionProblems(BusinessRuleGenerationContextDto context, BusinessRuleResponseDto response) {
+        List<String> problems = new ArrayList<>();
+        for (var method : context.classes().stream().flatMap(type -> type.methods().stream()).toList()) {
+            var rules = response.rules().stream().filter(rule -> Objects.equals(rule.methodId(), method.id())).toList();
+            if (rules.isEmpty()) problems.add("Missing business rules for method " + method.id());
+            if (method.branches() == null) continue;
+            var returned = rules.stream().map(rule -> SourceBranchReference.normalize(rule.branchId())).filter(Objects::nonNull).toList();
+            Set<String> required = requiredDecisionIds(method);
+            var anchors = method.branches().stream().map(branch -> SourceBranchReference.normalize(branch.branchId())).collect(Collectors.toSet());
+            var missing = new java.util.TreeSet<>(required);
+            missing.removeAll(returned);
+            if (!missing.isEmpty()) problems.add("Missing source decisions for method " + method.id() + ": " + missing
+                    + ". Add one separate rule per missing decision; preserve valid rules.");
+            if (returned.stream().anyMatch(id -> !anchors.contains(id)))
+                problems.add("Invalid source decision for method " + method.id() + ": " + returned);
+            if (!anchors.isEmpty() && returned.size() != rules.size()) problems.add("Missing source anchors for method " + method.id());
+            var decisions = returned.stream().filter(required::contains).toList();
+            if (new java.util.HashSet<>(decisions).size() != decisions.size())
+                problems.add("Duplicate source decisions for method " + method.id() + ": " + decisions + ". Keep exactly one rule per decision.");
+        }
+        return problems;
+    }
+
+    private Set<String> requiredDecisionIds(MethodContextDto method) {
+        if (method.branches() == null) return Set.of();
+        return method.branches().stream().filter(branch -> !"STATEMENT".equals(branch.kind()))
+                .map(branch -> SourceBranchReference.normalize(branch.branchId())).collect(Collectors.toCollection(java.util.TreeSet::new));
+    }
+
+    private String businessRuleDecisionChecklist(BusinessRuleGenerationContextDto context) {
+        return context.classes().stream().flatMap(type -> type.methods().stream()).map(method -> {
+            Set<String> required = requiredDecisionIds(method);
+            String conditions = method.branches() == null ? "" : method.branches().stream()
+                    .filter(branch -> !"STATEMENT".equals(branch.kind()))
+                    .map(branch -> SourceBranchReference.normalize(branch.branchId()) + " => " + branch.condition())
+                    .distinct().collect(Collectors.joining("; "));
+            return "method_id=" + method.id() + " (" + method.methodName() + "): required branch_ids=" + required
+                    + (conditions.isEmpty() ? "; no required decision; use only source-proven statement anchors." : "; " + conditions);
+        }).collect(Collectors.joining("\n"));
     }
 
     private void waitBeforeRetry(String promptName, int attempt, LlmResponseException exception) {

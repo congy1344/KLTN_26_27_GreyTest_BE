@@ -184,7 +184,8 @@ public class IncrementalGenerationService {
             return checkpoints.withRun(projectId,updateId,user==null ? null : user.getId(),
                 () -> generateStage(projectId,updateId,stage,user));
         }
-        return generateStage(projectId,updateId,stage,user);
+        return GenerationJobContext.withActor(user == null ? null : user.getId(),
+                () -> generateStage(projectId,updateId,stage,user));
     }
 
     /** Một lượt Sinh Tất Cả dùng chung analysis và giữ lease xuyên suốt bốn stage. */
@@ -195,7 +196,8 @@ public class IncrementalGenerationService {
             for(var stage:GenerationProgressStage.values()) result=generateStage(projectId,updateId,stage,user);
             return result;
         };
-        return checkpoints==null ? run.get() : checkpoints.withRun(projectId,updateId,user==null ? null : user.getId(),run);
+        return checkpoints==null ? GenerationJobContext.withActor(user == null ? null : user.getId(), run)
+                : checkpoints.withRun(projectId,updateId,user==null ? null : user.getId(),run);
     }
 
     private void authorizeGeneration(Long projectId,Long updateId,AuthUser user) {

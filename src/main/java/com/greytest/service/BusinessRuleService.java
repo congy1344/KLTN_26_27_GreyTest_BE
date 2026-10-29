@@ -10,6 +10,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 import org.springframework.stereotype.Service;
@@ -48,7 +49,7 @@ import com.greytest.service.agent.GenerationContextBuilder;
 import com.greytest.service.agent.LlmResponseException;
 import com.greytest.service.analysis.MethodBranchAnalyzer;
 
-/** Sinh, lưu và quản lý review Business Rule từ các service method của project. */
+/** Quản lý Business Rule, điều phối sinh AI theo gói và lưu an toàn từng batch hợp lệ. */
 @Service
 public class BusinessRuleService {
 
@@ -300,9 +301,9 @@ public class BusinessRuleService {
             Set<Long> activeIds = allBatches.get(i).stream().filter(uncoveredMethodIds::contains)
                     .collect(Collectors.toCollection(LinkedHashSet::new));
             if (activeIds.isEmpty()) completedBatchIndices.add(i);
-            else pendingBatches.add(new BusinessRuleBatch(i, activeIds));
+            else pendingBatches.add(new BusinessRuleBatch(i + 1, activeIds));
         }
-        int firstPendingBatchIndex = pendingBatches.get(0).index();
+        int firstPendingBatchIndex = pendingBatches.get(0).number() - 1;
         if (!completedBatchIndices.isEmpty()) {
             generationProgressService.resume(projectId, GenerationProgressStage.BUSINESS_RULE,
                     stepLabels, completedBatchIndices,
@@ -315,39 +316,42 @@ public class BusinessRuleService {
         List<BusinessRuleDto> created = new ArrayList<>();
         Set<String> existingRuleKeys = ruleKeys(existingRules);
         int firstRuleNumber = nextRuleNumber(businessRuleRepository.findByProjectId(projectId));
+        List<BusinessRuleBatch> batchesToRun = pendingBatches;
+        AtomicInteger failedSaveBatch = new AtomicInteger();
         int lastAttemptedBatchNumber = firstPendingBatchIndex + 1;
         try {
-        LlmBatchExecutor.mapOrSequential(batchExecutor, pendingBatches,
-                () -> generationProgressService.isPaused(projectId, GenerationProgressStage.BUSINESS_RULE),
+        LlmBatchExecutor.mapOrSequential(
+                batchExecutor,
+                batchesToRun,
+                () -> failedSaveBatch.get() > 0
+                        || generationProgressService.isPaused(projectId, GenerationProgressStage.BUSINESS_RULE),
                 batch -> {
-                    int batchNumber = batch.index() + 1;
+                    String summary = formatMethodBatchSummary(batch.methodIds(), methodNameMap);
                     generationProgressService.setStepStatus(projectId, GenerationProgressStage.BUSINESS_RULE,
-                            batch.index(), com.greytest.dto.GenerationProgressStepStatus.RUNNING);
+                            batch.number() - 1, com.greytest.dto.GenerationProgressStepStatus.RUNNING);
                     generationProgressService.log(projectId, GenerationProgressStage.BUSINESS_RULE,
-                            "Đang gọi AI phân tích batch " + batchNumber + "/" + totalBatches
-                                    + " (" + formatMethodBatchSummary(batch.methodIds(), methodNameMap) + ")...");
-                    BusinessRuleResponseDto response = generateValidatedBusinessRules(projectId, batch.methodIds());
-                    List<GeneratedBusinessRuleDto> orderedRules = new ArrayList<>();
-                    for (Long methodId : batch.methodIds()) {
-                        response.rules().stream().filter(java.util.Objects::nonNull)
-                                .filter(rule -> methodId.equals(rule.methodId()))
-                                .sorted(Comparator.comparingInt(rule -> branchOrder(methodId, rule.branchId())))
-                                .forEach(orderedRules::add);
-                    }
-                    return orderedRules;
+                            "Đang gọi AI phân tích batch " + batch.number() + "/" + totalBatches
+                                    + " (" + summary + ")...");
+                    return generateValidatedBusinessRules(projectId, batch.methodIds());
                 },
-                (completedBatch, orderedRules) -> {
-                    BusinessRuleBatch batch = pendingBatches.get(completedBatch - 1);
-                    // Lưu lần lượt để các batch hoàn tất đồng thời không nhận trùng mã BR.
-                    synchronized (created) {
-                        List<BusinessRuleDto> saved = saveGeneratedRulesInTransaction(projectId, orderedRules,
-                                RuleSource.AI_GENERATED, batch.methodIds(), Set.of(), existingRuleKeys,
+                (completedRunBatch, response) -> {
+                    if (failedSaveBatch.get() > 0) return;
+                    BusinessRuleBatch current = batchesToRun.get(completedRunBatch - 1);
+                    try {
+                        // Callback đã được executor chạy tuần tự; lưu ngay để lỗi batch khác không làm mất kết quả hợp lệ.
+                        List<BusinessRuleDto> saved = saveGeneratedRulesInTransaction(
+                                projectId, orderedBatchRules(current.methodIds(), response), RuleSource.AI_GENERATED,
+                                current.methodIds(), Set.of(), existingRuleKeys,
                                 firstRuleNumber + created.size(), backfillAiRules);
                         created.addAll(saved);
                         generationProgressService.advanceStep(projectId, GenerationProgressStage.BUSINESS_RULE,
-                                batch.index(), "Batch " + (batch.index() + 1) + "/" + totalBatches + ": đã sinh "
+                                current.number() - 1,
+                                "Batch " + current.number() + "/" + totalBatches + ": đã sinh "
                                         + saved.size() + " Business Rule cho "
-                                        + formatMethodBatchSummary(batch.methodIds(), methodNameMap) + ".");
+                                        + formatMethodBatchSummary(current.methodIds(), methodNameMap) + ".");
+                    } catch (RuntimeException exception) {
+                        failedSaveBatch.set(current.number());
+                        throw exception;
                     }
                 });
 
@@ -369,14 +373,17 @@ public class BusinessRuleService {
             if (generationProgressService.isPaused(projectId, GenerationProgressStage.BUSINESS_RULE)) {
                 return created;
             }
-            int failedBatch = LlmBatchExecutor.failedBatch(exception, 0);
-            if (failedBatch > 0 && failedBatch <= pendingBatches.size()) {
-                lastAttemptedBatchNumber = pendingBatches.get(failedBatch - 1).index() + 1;
+            int failedRunBatch = LlmBatchExecutor.failedBatch(exception, 0);
+            if (failedSaveBatch.get() > 0) {
+                lastAttemptedBatchNumber = failedSaveBatch.get();
+            } else if (failedRunBatch > 0 && failedRunBatch <= batchesToRun.size()) {
+                lastAttemptedBatchNumber = batchesToRun.get(failedRunBatch - 1).number();
+            }
+            if (lastAttemptedBatchNumber <= totalBatches) {
                 generationProgressService.failStep(projectId, GenerationProgressStage.BUSINESS_RULE,
                         lastAttemptedBatchNumber - 1, "Sinh Business Rule thất bại.");
             }
-            RuntimeException originalFailure = LlmBatchExecutor.originalFailure(exception);
-            boolean isQuota = isUsageQuotaExceeded(originalFailure);
+            boolean isQuota = isUsageQuotaExceeded(exception);
             String failureLocation = lastAttemptedBatchNumber <= totalBatches
                     ? "Dừng ở batch " + lastAttemptedBatchNumber + "/" + totalBatches + "."
                     : "Dừng ở bước kiểm tra và lưu Business Rule.";
@@ -388,11 +395,24 @@ public class BusinessRuleService {
                     : " Sinh Business Rule thất bại; xem thông báo lỗi để biết chi tiết.";
             generationProgressService.fail(projectId, GenerationProgressStage.BUSINESS_RULE,
                     failureLocation + " " + persistedSummary + detailMsg);
-            throw originalFailure;
+            throw LlmBatchExecutor.originalFailure(exception);
         }
     }
 
-    private record BusinessRuleBatch(int index, Set<Long> methodIds) { }
+    private record BusinessRuleBatch(int number, Set<Long> methodIds) { }
+
+    private List<GeneratedBusinessRuleDto> orderedBatchRules(
+            Set<Long> methodIds, BusinessRuleResponseDto response) {
+        List<GeneratedBusinessRuleDto> orderedRules = new ArrayList<>();
+        for (Long methodId : methodIds) {
+            response.rules().stream()
+                    .filter(java.util.Objects::nonNull)
+                    .filter(rule -> methodId.equals(rule.methodId()))
+                    .sorted(Comparator.comparingInt(rule -> branchOrder(methodId, rule.branchId())))
+                    .forEach(orderedRules::add);
+        }
+        return orderedRules;
+    }
 
     private boolean isUsageQuotaExceeded(Throwable exception) {
         Throwable current = exception;

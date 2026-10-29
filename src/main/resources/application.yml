@@ -43,7 +43,7 @@ greytest:
   llm-cache:
     max-entries: ${GREYTEST_LLM_CACHE_MAX_ENTRIES:500}
   llm-batch:
-    # Trần chung của provider; mỗi tác vụ chạy tối đa FREE=2, PLUS=3, PRO=4 batch đồng thời.
+    # Trần batch mỗi tác vụ; Free/Plus/Pro lần lượt dùng tối đa 2/3/4 batch đồng thời.
     concurrency: ${GREYTEST_LLM_BATCH_CONCURRENCY:4}
     retry-attempts: ${GREYTEST_LLM_BATCH_RETRY_ATTEMPTS:2}
     retry-delay-millis: ${GREYTEST_LLM_BATCH_RETRY_DELAY_MILLIS:500}

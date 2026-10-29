@@ -1,0 +1,395 @@
+{
+  "project" : {
+    "id" : 377,
+    "name" : "greytest-commerce-benchmark",
+    "status" : "ANALYZED"
+  },
+  "analysis" : {
+    "totalClasses" : 50,
+    "totalMethods" : 47,
+    "totalEndpoints" : 2,
+    "totalRelations" : 9,
+    "totalControllerServiceRelations" : 2,
+    "existingTestFiles" : 4,
+    "totalProductionFiles" : 42,
+    "parsedProductionFiles" : 42,
+    "failedParseFiles" : 0,
+    "failedParseFilePaths" : [ ]
+  },
+  "classes" : [ {
+    "id" : 16688,
+    "packageName" : "com.greytest.benchmark.customer",
+    "className" : "CustomerService",
+    "qualifiedName" : "com.greytest.benchmark.customer.CustomerService",
+    "classType" : "SERVICE",
+    "filePath" : "greytest-commerce-benchmark/src/main/java/com/greytest/benchmark/customer/CustomerService.java",
+    "sourceCode" : "package com.greytest.benchmark.customer;\n\nimport com.greytest.benchmark.common.DomainException;\nimport com.greytest.benchmark.common.NotFoundException;\nimport org.springframework.stereotype.Service;\nimport org.springframework.dao.DataIntegrityViolationException;\nimport org.springframework.transaction.annotation.Transactional;\nimport java.math.BigDecimal;\n\n/**\n * Quản lý trạng thái, hạng thành viên và lịch sử chi tiêu của khách hàng.\n */\n@Service\npublic class CustomerService {\n\n    private final CustomerRepository repository;\n\n    public CustomerService(CustomerRepository repository) {\n        this.repository = repository;\n    }\n\n    @Transactional\n    public Customer register(CustomerRequest request) {\n        String email = request.email().trim().toLowerCase();\n        if (repository.findByEmailIgnoreCase(email).isPresent()) {\n            throw new DomainException(\"Email already registered\");\n        }\n        Customer customer = new Customer();\n        customer.setEmail(email);\n        customer.setFullName(request.fullName().trim());\n        customer.setTier(\"STANDARD\");\n        customer.setActive(true);\n        try {\n            return repository.save(customer);\n        } catch (DataIntegrityViolationException exception) {\n            throw new DomainException(\"Email already registered\");\n        }\n    }\n\n    @Transactional(readOnly = true)\n    public Customer requireActive(Long customerId) {\n        Customer customer = repository.findById(customerId).orElseThrow(() -> new NotFoundException(\"Customer\", customerId));\n        if (!customer.isActive()) {\n            throw new DomainException(\"Customer is inactive\");\n        }\n        return customer;\n    }\n\n    @Transactional\n    public void addSpend(Long customerId, BigDecimal amount) {\n        Customer customer = requireActive(customerId);\n        customer.setLifetimeSpend(customer.getLifetimeSpend().add(amount));\n        BigDecimal spend = customer.getLifetimeSpend();\n        customer.setTier(spend.compareTo(new BigDecimal(\"5000\")) >= 0 ? \"PLATINUM\" : spend.compareTo(new BigDecimal(\"1000\")) >= 0 ? \"GOLD\" : \"STANDARD\");\n        repository.save(customer);\n    }\n}\n",
+    "annotations" : [ {
+      "id" : 7240,
+      "targetType" : "CLASS",
+      "category" : "COMPONENT",
+      "annotationName" : "Service",
+      "attributes" : "@Service"
+    }, {
+      "id" : 7241,
+      "targetType" : "METHOD",
+      "category" : "TRANSACTION",
+      "annotationName" : "Transactional",
+      "attributes" : "@Transactional"
+    }, {
+      "id" : 7242,
+      "targetType" : "METHOD",
+      "category" : "TRANSACTION",
+      "annotationName" : "Transactional",
+      "attributes" : "@Transactional(readOnly = true)"
+    }, {
+      "id" : 7243,
+      "targetType" : "METHOD",
+      "category" : "TRANSACTION",
+      "annotationName" : "Transactional",
+      "attributes" : "@Transactional"
+    } ],
+    "methods" : [ {
+      "id" : 95432,
+      "classQualifiedName" : "com.greytest.benchmark.customer.CustomerService",
+      "methodName" : "register",
+      "returnType" : "Customer",
+      "parameters" : [ {
+        "name" : "request",
+        "type" : "CustomerRequest"
+      } ],
+      "throwsList" : [ ],
+      "visibility" : "PUBLIC",
+      "sourceCode" : "@Transactional\n    public Customer register(CustomerRequest request) {\n        String email = request.email().trim().toLowerCase();\r\n        if (repository.findByEmailIgnoreCase(email).isPresent()) {\n            throw new DomainException(\"Email already registered\");\n        }\n        Customer customer = new Customer();\n        customer.setEmail(email);\n        customer.setFullName(request.fullName().trim());\n        customer.setTier(\"STANDARD\");\n        customer.setActive(true);\n        try {\r\n            return repository.save(customer);\r\n        } catch (DataIntegrityViolationException exception) {\r\n            throw new DomainException(\"Email already registered\");\r\n        }\r\n    }",
+      "lineStart" : 20,
+      "lineEnd" : 36,
+      "annotations" : [ {
+        "id" : 7241,
+        "targetType" : "METHOD",
+        "category" : "TRANSACTION",
+        "annotationName" : "Transactional",
+        "attributes" : "@Transactional"
+      } ],
+      "endpoints" : [ ],
+      "branches" : [ {
+        "branchId" : "STMT-1",
+        "kind" : "STATEMENT",
+        "outcome" : "EXECUTABLE",
+        "condition" : "executable statement",
+        "lineStart" : 22,
+        "lineEnd" : 22
+      }, {
+        "branchId" : "IF-1-TRUE",
+        "kind" : "IF",
+        "outcome" : "TRUE",
+        "condition" : "repository.findByEmailIgnoreCase(email).isPresent()",
+        "lineStart" : 24,
+        "lineEnd" : 24
+      }, {
+        "branchId" : "IF-1-FALSE",
+        "kind" : "IF",
+        "outcome" : "FALSE",
+        "condition" : "repository.findByEmailIgnoreCase(email).isPresent()",
+        "lineStart" : 23,
+        "lineEnd" : 23
+      }, {
+        "branchId" : "STMT-2",
+        "kind" : "STATEMENT",
+        "outcome" : "EXECUTABLE",
+        "condition" : "executable statement",
+        "lineStart" : 26,
+        "lineEnd" : 26
+      }, {
+        "branchId" : "STMT-3",
+        "kind" : "STATEMENT",
+        "outcome" : "EXECUTABLE",
+        "condition" : "executable statement",
+        "lineStart" : 27,
+        "lineEnd" : 27
+      }, {
+        "branchId" : "STMT-4",
+        "kind" : "STATEMENT",
+        "outcome" : "EXECUTABLE",
+        "condition" : "executable statement",
+        "lineStart" : 28,
+        "lineEnd" : 28
+      }, {
+        "branchId" : "STMT-5",
+        "kind" : "STATEMENT",
+        "outcome" : "EXECUTABLE",
+        "condition" : "executable statement",
+        "lineStart" : 29,
+        "lineEnd" : 29
+      }, {
+        "branchId" : "STMT-6",
+        "kind" : "STATEMENT",
+        "outcome" : "EXECUTABLE",
+        "condition" : "executable statement",
+        "lineStart" : 30,
+        "lineEnd" : 30
+      }, {
+        "branchId" : "STMT-7",
+        "kind" : "STATEMENT",
+        "outcome" : "EXECUTABLE",
+        "condition" : "executable statement",
+        "lineStart" : 31,
+        "lineEnd" : 35
+      } ]
+    }, {
+      "id" : 95433,
+      "classQualifiedName" : "com.greytest.benchmark.customer.CustomerService",
+      "methodName" : "requireActive",
+      "returnType" : "Customer",
+      "parameters" : [ {
+        "name" : "customerId",
+        "type" : "Long"
+      } ],
+      "throwsList" : [ ],
+      "visibility" : "PUBLIC",
+      "sourceCode" : "@Transactional(readOnly = true)\n    public Customer requireActive(Long customerId) {\n        Customer customer = repository.findById(customerId)\n                .orElseThrow(() -> new NotFoundException(\"Customer\", customerId));\n        if (!customer.isActive()) {\n            throw new DomainException(\"Customer is inactive\");\n        }\n        return customer;\n    }",
+      "lineStart" : 38,
+      "lineEnd" : 46,
+      "annotations" : [ {
+        "id" : 7242,
+        "targetType" : "METHOD",
+        "category" : "TRANSACTION",
+        "annotationName" : "Transactional",
+        "attributes" : "@Transactional(readOnly = true)"
+      } ],
+      "endpoints" : [ ],
+      "branches" : [ {
+        "branchId" : "STMT-1",
+        "kind" : "STATEMENT",
+        "outcome" : "EXECUTABLE",
+        "condition" : "executable statement",
+        "lineStart" : 40,
+        "lineEnd" : 41
+      }, {
+        "branchId" : "IF-1-TRUE",
+        "kind" : "IF",
+        "outcome" : "TRUE",
+        "condition" : "!customer.isActive()",
+        "lineStart" : 43,
+        "lineEnd" : 43
+      }, {
+        "branchId" : "IF-1-FALSE",
+        "kind" : "IF",
+        "outcome" : "FALSE",
+        "condition" : "!customer.isActive()",
+        "lineStart" : 42,
+        "lineEnd" : 42
+      }, {
+        "branchId" : "STMT-2",
+        "kind" : "STATEMENT",
+        "outcome" : "EXECUTABLE",
+        "condition" : "executable statement",
+        "lineStart" : 45,
+        "lineEnd" : 45
+      } ]
+    }, {
+      "id" : 95434,
+      "classQualifiedName" : "com.greytest.benchmark.customer.CustomerService",
+      "methodName" : "addSpend",
+      "returnType" : "void",
+      "parameters" : [ {
+        "name" : "customerId",
+        "type" : "Long"
+      }, {
+        "name" : "amount",
+        "type" : "BigDecimal"
+      } ],
+      "throwsList" : [ ],
+      "visibility" : "PUBLIC",
+      "sourceCode" : "@Transactional\n    public void addSpend(Long customerId, BigDecimal amount) {\n        Customer customer = requireActive(customerId);\n        customer.setLifetimeSpend(customer.getLifetimeSpend().add(amount));\n        BigDecimal spend = customer.getLifetimeSpend();\n        customer.setTier(spend.compareTo(new BigDecimal(\"5000\")) >= 0 ? \"PLATINUM\"\n                : spend.compareTo(new BigDecimal(\"1000\")) >= 0 ? \"GOLD\" : \"STANDARD\");\n        repository.save(customer);\n    }",
+      "lineStart" : 48,
+      "lineEnd" : 56,
+      "annotations" : [ {
+        "id" : 7243,
+        "targetType" : "METHOD",
+        "category" : "TRANSACTION",
+        "annotationName" : "Transactional",
+        "attributes" : "@Transactional"
+      } ],
+      "endpoints" : [ ],
+      "branches" : [ {
+        "branchId" : "STMT-1",
+        "kind" : "STATEMENT",
+        "outcome" : "EXECUTABLE",
+        "condition" : "executable statement",
+        "lineStart" : 50,
+        "lineEnd" : 50
+      }, {
+        "branchId" : "STMT-2",
+        "kind" : "STATEMENT",
+        "outcome" : "EXECUTABLE",
+        "condition" : "executable statement",
+        "lineStart" : 51,
+        "lineEnd" : 51
+      }, {
+        "branchId" : "STMT-3",
+        "kind" : "STATEMENT",
+        "outcome" : "EXECUTABLE",
+        "condition" : "executable statement",
+        "lineStart" : 52,
+        "lineEnd" : 52
+      }, {
+        "branchId" : "TERNARY-1::TRUE",
+        "kind" : "TERNARY",
+        "outcome" : "TRUE",
+        "condition" : "spend.compareTo(new BigDecimal(\"5000\")) >= 0",
+        "lineStart" : 53,
+        "lineEnd" : 53
+      }, {
+        "branchId" : "TERNARY-1::FALSE",
+        "kind" : "TERNARY",
+        "outcome" : "FALSE",
+        "condition" : "spend.compareTo(new BigDecimal(\"5000\")) >= 0",
+        "lineStart" : 54,
+        "lineEnd" : 54
+      }, {
+        "branchId" : "TERNARY-2::TRUE",
+        "kind" : "TERNARY",
+        "outcome" : "TRUE",
+        "condition" : "spend.compareTo(new BigDecimal(\"1000\")) >= 0",
+        "lineStart" : 54,
+        "lineEnd" : 54
+      }, {
+        "branchId" : "TERNARY-2::FALSE",
+        "kind" : "TERNARY",
+        "outcome" : "FALSE",
+        "condition" : "spend.compareTo(new BigDecimal(\"1000\")) >= 0",
+        "lineStart" : 54,
+        "lineEnd" : 54
+      }, {
+        "branchId" : "STMT-4",
+        "kind" : "STATEMENT",
+        "outcome" : "EXECUTABLE",
+        "condition" : "executable statement",
+        "lineStart" : 55,
+        "lineEnd" : 55
+      } ]
+    } ]
+  }, {
+    "id" : 16665,
+    "packageName" : "com.greytest.benchmark.common",
+    "className" : "DomainException",
+    "qualifiedName" : "com.greytest.benchmark.common.DomainException",
+    "classType" : "OTHER",
+    "filePath" : "greytest-commerce-benchmark/src/main/java/com/greytest/benchmark/common/DomainException.java",
+    "sourceCode" : "package com.greytest.benchmark.common;\n\npublic class DomainException extends RuntimeException {\n\n    public DomainException(String message) {\n        super(message);\n    }\n}\n",
+    "annotations" : [ ],
+    "methods" : [ ]
+  }, {
+    "id" : 16666,
+    "packageName" : "com.greytest.benchmark.common",
+    "className" : "NotFoundException",
+    "qualifiedName" : "com.greytest.benchmark.common.NotFoundException",
+    "classType" : "OTHER",
+    "filePath" : "greytest-commerce-benchmark/src/main/java/com/greytest/benchmark/common/NotFoundException.java",
+    "sourceCode" : "package com.greytest.benchmark.common;\n\npublic class NotFoundException extends DomainException {\n\n    public NotFoundException(String resource, Object id) {\n        super(resource + \" not found: \" + id);\n    }\n}\n",
+    "annotations" : [ ],
+    "methods" : [ ]
+  }, {
+    "id" : 16687,
+    "packageName" : "com.greytest.benchmark.customer",
+    "className" : "Customer",
+    "qualifiedName" : "com.greytest.benchmark.customer.Customer",
+    "classType" : "ENTITY",
+    "filePath" : "greytest-commerce-benchmark/src/main/java/com/greytest/benchmark/customer/Customer.java",
+    "sourceCode" : "package com.greytest.benchmark.customer;\n\nimport jakarta.persistence.Column;\nimport jakarta.persistence.Entity;\nimport jakarta.persistence.Id;\nimport jakarta.persistence.GeneratedValue;\nimport jakarta.persistence.GenerationType;\nimport java.math.BigDecimal;\n\n@Entity\npublic class Customer {\n\n    @Id\n    @GeneratedValue(strategy = GenerationType.IDENTITY)\n    private Long id;\n\n    @Column(unique = true, nullable = false)\n    private String email;\n\n    private String fullName;\n\n    private String tier;\n\n    private boolean active;\n\n    private BigDecimal lifetimeSpend = BigDecimal.ZERO;\n\n    public Long getId() {\n        return id;\n    }\n\n    public String getEmail() {\n        return email;\n    }\n\n    public void setEmail(String email) {\n        this.email = email;\n    }\n\n    public String getFullName() {\n        return fullName;\n    }\n\n    public void setFullName(String fullName) {\n        this.fullName = fullName;\n    }\n\n    public String getTier() {\n        return tier;\n    }\n\n    public void setTier(String tier) {\n        this.tier = tier;\n    }\n\n    public boolean isActive() {\n        return active;\n    }\n\n    public void setActive(boolean active) {\n        this.active = active;\n    }\n\n    public BigDecimal getLifetimeSpend() {\n        return lifetimeSpend;\n    }\n\n    public void setLifetimeSpend(BigDecimal lifetimeSpend) {\n        this.lifetimeSpend = lifetimeSpend;\n    }\n}\n",
+    "annotations" : [ {
+      "id" : 7239,
+      "targetType" : "CLASS",
+      "category" : "PERSISTENCE",
+      "annotationName" : "Entity",
+      "attributes" : "@Entity"
+    } ],
+    "methods" : [ ]
+  }, {
+    "id" : 16691,
+    "packageName" : "com.greytest.benchmark.customer",
+    "className" : "CustomerRepository",
+    "qualifiedName" : "com.greytest.benchmark.customer.CustomerRepository",
+    "classType" : "REPOSITORY",
+    "filePath" : "greytest-commerce-benchmark/src/main/java/com/greytest/benchmark/customer/CustomerRepository.java",
+    "sourceCode" : "package com.greytest.benchmark.customer;\n\nimport org.springframework.data.jpa.repository.JpaRepository;\nimport java.util.Optional;\n\npublic interface CustomerRepository extends JpaRepository<Customer, Long> {\n\n    Optional<Customer> findByEmailIgnoreCase(String email);\n}\n",
+    "annotations" : [ ],
+    "methods" : [ ]
+  }, {
+    "id" : 16689,
+    "packageName" : "com.greytest.benchmark.customer",
+    "className" : "CustomerRequest",
+    "qualifiedName" : "com.greytest.benchmark.customer.CustomerRequest",
+    "classType" : "RECORD",
+    "filePath" : "greytest-commerce-benchmark/src/main/java/com/greytest/benchmark/customer/CustomerRequest.java",
+    "sourceCode" : "package com.greytest.benchmark.customer;\n\nimport jakarta.validation.constraints.Email;\nimport jakarta.validation.constraints.NotBlank;\n\npublic record CustomerRequest(@Email @NotBlank String email, @NotBlank String fullName) {\n}\n",
+    "annotations" : [ ],
+    "methods" : [ ]
+  } ],
+  "serviceRepositoryRelations" : [ {
+    "id" : 365,
+    "serviceClassName" : "CustomerService",
+    "serviceQualifiedName" : "com.greytest.benchmark.customer.CustomerService",
+    "repositoryClassName" : "CustomerRepository",
+    "repositoryQualifiedName" : "com.greytest.benchmark.customer.CustomerRepository"
+  } ],
+  "controllerServiceRelations" : [ {
+    "id" : 534,
+    "controllerClassName" : "CustomerController",
+    "controllerQualifiedName" : "com.greytest.benchmark.customer.CustomerController",
+    "controllerMethodName" : "register",
+    "serviceClassName" : "CustomerService",
+    "serviceQualifiedName" : "com.greytest.benchmark.customer.CustomerService",
+    "serviceMethodName" : "register",
+    "serviceFieldName" : "service",
+    "serviceFieldType" : "CustomerService"
+  } ],
+  "dependencyCalls" : [ {
+    "callerMethodId" : 95432,
+    "callerClassQualifiedName" : "com.greytest.benchmark.customer.CustomerService",
+    "collaboratorName" : "repository",
+    "collaboratorType" : "CustomerRepository",
+    "calleeClassName" : "CustomerRepository",
+    "calleeQualifiedName" : "com.greytest.benchmark.customer.CustomerRepository",
+    "calleeMethodName" : "findByEmailIgnoreCase",
+    "httpMethod" : null,
+    "endpointPath" : null,
+    "calleeServiceSourceCode" : null
+  }, {
+    "callerMethodId" : 95432,
+    "callerClassQualifiedName" : "com.greytest.benchmark.customer.CustomerService",
+    "collaboratorName" : "repository",
+    "collaboratorType" : "CustomerRepository",
+    "calleeClassName" : "CustomerRepository",
+    "calleeQualifiedName" : "com.greytest.benchmark.customer.CustomerRepository",
+    "calleeMethodName" : "save",
+    "httpMethod" : null,
+    "endpointPath" : null,
+    "calleeServiceSourceCode" : null
+  }, {
+    "callerMethodId" : 95433,
+    "callerClassQualifiedName" : "com.greytest.benchmark.customer.CustomerService",
+    "collaboratorName" : "repository",
+    "collaboratorType" : "CustomerRepository",
+    "calleeClassName" : "CustomerRepository",
+    "calleeQualifiedName" : "com.greytest.benchmark.customer.CustomerRepository",
+    "calleeMethodName" : "findById",
+    "httpMethod" : null,
+    "endpointPath" : null,
+    "calleeServiceSourceCode" : null
+  }, {
+    "callerMethodId" : 95434,
+    "callerClassQualifiedName" : "com.greytest.benchmark.customer.CustomerService",
+    "collaboratorName" : "repository",
+    "collaboratorType" : "CustomerRepository",
+    "calleeClassName" : "CustomerRepository",
+    "calleeQualifiedName" : "com.greytest.benchmark.customer.CustomerRepository",
+    "calleeMethodName" : "save",
+    "httpMethod" : null,
+    "endpointPath" : null,
+    "calleeServiceSourceCode" : null
+  } ],
+  "existingTests" : [ ],
+  "supportingResources" : [ ],
+  "contextWarnings" : [ ]
+}

@@ -13,6 +13,18 @@ class AwsDeploymentProfileTest {
             .withPropertyValues("spring.profiles.active=aws");
 
     @Test
+    void bindsLocalBatchCeilingUnderTheNamespaceUsedByTheExecutor() {
+        new ApplicationContextRunner()
+                .withInitializer(new ConfigDataApplicationContextInitializer())
+                .withPropertyValues("GREYTEST_LLM_BATCH_CONCURRENCY=2")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context.getEnvironment().getProperty("greytest.llm-batch.concurrency", Integer.class))
+                            .isEqualTo(2);
+                });
+    }
+
+    @Test
     void bindsDeploymentOverridesUnderTheNamespaceUsedByServices() {
         contextRunner.withPropertyValues(
                 "GREYTEST_LLM_BATCH_CONCURRENCY=1",

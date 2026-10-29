@@ -136,6 +136,18 @@ public final class GenerationJobContext {
         return remaining != null && remaining <= 0;
     }
 
+    /** Giữ actor cho tác vụ đồng bộ và khôi phục context cũ khi kết thúc. */
+    public static <T> T withActor(Long actorUserId, Supplier<T> task) {
+        Long previousActor = ACTOR_USER_ID.get();
+        ACTOR_USER_ID.set(actorUserId);
+        try {
+            return task.get();
+        } finally {
+            if (previousActor == null) ACTOR_USER_ID.remove();
+            else ACTOR_USER_ID.set(previousActor);
+        }
+    }
+
     public static void log(String message) {
         Consumer<String> consumer = LOG_CONSUMER.get();
         if (consumer != null) consumer.accept(message);
