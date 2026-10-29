@@ -51,7 +51,8 @@ public class UnitTestExportProvenanceService {
             // Export phải đọc identity active mới, không mượn overlay/analysis của draft trong caller.
             GenerationJobContext.bind(actor, ignored -> { });
             return GenerationJobContext.withValue("greytest.export-read-only", Boolean.TRUE,
-                    () -> tests.stream().map(test -> prepareOne(projectId, test, sourceRoot)).toList());
+                    () -> com.greytest.service.agent.GenerationContextBuilder.withInputSnapshot(
+                            () -> tests.stream().map(test -> prepareOne(projectId, test, sourceRoot)).toList()));
         }
     }
 
@@ -93,7 +94,7 @@ public class UnitTestExportProvenanceService {
                 var output = new UnitTestResponseDto(List.of(new GeneratedUnitTestDto(test.getTestCaseId(),
                         test.getTestClassName(), test.getTestMethodName(), test.getPackageName(),
                         test.getGenerationType(), source)));
-                var currentOutput = fingerprints.outputFingerprint(output, sourceRoot);
+                var currentOutput = fingerprints.outputFingerprint(output, sourceRoot, context);
                 if (!currentOutput.reusable() || !currentOutput.value().equals(envelope.path("outputFingerprint").asText())) continue;
                 agent.validateSnapshotOutput(GenerationProgressStage.UNIT_TEST, projectId, context, output, sourceRoot);
                 String metadata = GenerationSourceFingerprint.capture(sourceRoot, context.classes());

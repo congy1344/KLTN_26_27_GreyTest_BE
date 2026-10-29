@@ -29,6 +29,122 @@ class SourceUpdateApplyIntegrationTest {
     @Autowired private TestPlanCoveredRuleRepository coverage;
     @Autowired private JavaClassRepository classes;
     @Autowired private JavaMethodRepository methods;
+    @Autowired private com.greytest.service.analysis.AnalysisService analysis;
+    @Autowired private EndpointRepository endpoints;
+    @Autowired private TestCaseRepository testCases;
+    @Autowired private UnitTestService unitTestService;
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void keepsCheckpointReviewedOutputApprovedAndInvalidatesOnlyRetainedChildren(
+            boolean retainedChild, @TempDir Path snapshot) throws Exception {
+        SourceUpdate update = draft(snapshot);
+        BusinessRule rule = rule(update.getProjectId(), "BR-001");
+        TestPlan plan = new TestPlan(); plan.setProjectId(update.getProjectId()); plan.setBusinessRuleId(rule.getId());
+        plan.setPlanCode("TP-001"); plan.setTitle("Original plan"); plan.setDescription("Original description");
+        plan.setTestType(TestType.HAPPY_PATH); plan.setStatus(ReviewStatus.APPROVED); plan.setIsModified(false);
+        plan = plans.saveAndFlush(plan);
+        TestCase refreshed = approvedCase(plan.getId(), "TC-001");
+        TestCase retained = retainedChild ? approvedCase(plan.getId(), "TC-002") : null;
+        item(update, SourceUpdateTargetType.BUSINESS_RULE, rule.getId(), null,
+                "{\"method_id\":1,\"description\":\"Updated rule\",\"category\":\"BUSINESS_LOGIC\"}");
+        item(update, SourceUpdateTargetType.TEST_PLAN, plan.getId(), null,
+                "{\"method_id\":1,\"rule_id\":" + rule.getId() + ",\"covered_rule_ids\":[" + rule.getId()
+                        + "],\"title\":\"Reviewed plan\",\"description\":\"Updated description\",\"test_type\":\"BOUNDARY\"}");
+        item(update, SourceUpdateTargetType.TEST_CASE, refreshed.getId(), null,
+                "{\"plan_id\":" + plan.getId() + ",\"test_type\":\"EXCEPTION\",\"description\":\"Reviewed case\","
+                        + "\"preconditions\":\"Ready\",\"test_data\":{\"input\":{}},\"expected_result\":\"Updated expectation\","
+                        + "\"priority\":\"HIGH\",\"trace_source\":\"BR-001 -> TP-reviewed\"}");
+        item(update, SourceUpdateTargetType.UNIT_TEST, null, "case:" + refreshed.getId(),
+                "{\"case_id\":" + refreshed.getId() + ",\"test_class_name\":\"ReviewedTest\",\"test_method_name\":\"checksResult\","
+                        + "\"package_name\":\"demo\",\"generation_type\":\"NEW_TEST\","
+                        + "\"source_code\":\"package demo; class ReviewedTest { @org.junit.jupiter.api.Test void checksResult() {} }\"}");
+        org.mockito.Mockito.when(generationCoordinator.isRecordedOutput(org.mockito.ArgumentMatchers.any()))
+                .thenAnswer(call -> {
+                    SourceUpdateItem proposal = call.getArgument(0);
+                    return proposal.getTargetType() == SourceUpdateTargetType.TEST_PLAN
+                            || proposal.getTargetType() == SourceUpdateTargetType.TEST_CASE;
+                });
+
+        service.applyUpdate(update.getProjectId(), update.getId(), admin());
+
+        org.mockito.Mockito.verify(generationCoordinator).assertReadyForApply(update.getId());
+        assertThat(plans.findById(plan.getId()).orElseThrow().getStatus()).isEqualTo(ReviewStatus.APPROVED);
+        assertThat(testCases.findById(refreshed.getId()).orElseThrow().getStatus()).isEqualTo(ReviewStatus.APPROVED);
+        Long planId = plan.getId();
+        org.assertj.core.api.SoftAssertions.assertSoftly(softly -> {
+            softly.assertThat(plans.findById(planId).orElseThrow().getTestType()).isEqualTo(TestType.BOUNDARY);
+            softly.assertThat(testCases.findById(refreshed.getId()).orElseThrow().getTestType()).isEqualTo(TestType.EXCEPTION);
+            softly.assertThat(testCases.findById(refreshed.getId()).orElseThrow().getTraceSource()).isEqualTo("BR-001 -> TP-reviewed");
+        });
+        assertThat(unitTestService.listFiles(update.getProjectId())).hasSize(1);
+        if (retainedChild) assertThat(testCases.findById(retained.getId()).orElseThrow().getStatus()).isEqualTo(ReviewStatus.PENDING_REVIEW);
+        assertThat(projects.findById(update.getProjectId()).orElseThrow().getStatus())
+                .isEqualTo(retainedChild ? ProjectStatus.PLAN_PENDING_REVIEW : ProjectStatus.TEST_GENERATED);
+    }
+
+    private TestCase approvedCase(Long planId, String code) {
+        TestCase testCase = new TestCase(); testCase.setTestPlanId(planId); testCase.setCaseCode(code);
+        testCase.setTestType(TestType.HAPPY_PATH); testCase.setDescription("Original case"); testCase.setPreconditions("Ready");
+        testCase.setExpectedResult("Original expectation"); testCase.setTestData(java.util.Map.of("input", java.util.Map.of()));
+        testCase.setPriority(Priority.HIGH); testCase.setTraceSource("BR-001 -> TP-001");
+        testCase.setStatus(ReviewStatus.APPROVED); testCase.setIsModified(false);
+        return testCases.saveAndFlush(testCase);
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"", "wrapper/"})
+    void removesDeletedControllerEndpointAndKeepsSurvivingMethodIds(String wrapper, @TempDir Path snapshot) throws Exception {
+        Path baseline = snapshot.resolve("baseline");
+        Path candidate = snapshot.resolve("candidate");
+        String originalService = "package demo; @org.springframework.stereotype.Service public class MailService { public int send() { return 1; } }";
+        String originalController = "package demo; @org.springframework.web.bind.annotation.RestController public class MailController { "
+                + "@org.springframework.web.bind.annotation.GetMapping(\"/search\") public int search() { return 1; } "
+                + "@org.springframework.web.bind.annotation.GetMapping(\"/keep\") public int keep() { return 2; } }";
+        for (Path root : List.of(baseline, candidate)) {
+            String prefix = root == baseline ? "" : wrapper;
+            Files.createDirectories(root.resolve(prefix + "a/src/main/java/demo"));
+            Files.createDirectories(root.resolve(prefix + "b/src/main/java/demo"));
+            Files.writeString(root.resolve(prefix + "a/src/main/java/demo/MailService.java"),
+                    root == baseline ? originalService : originalService.replace("return 1", "return 3"));
+            Files.writeString(root.resolve(prefix + "a/src/main/java/demo/MailController.java"), root == baseline ? originalController
+                    : originalController.replace("@org.springframework.web.bind.annotation.GetMapping(\"/search\") public int search() { return 1; } ", ""));
+            Files.writeString(root.resolve(prefix + "b/src/main/java/demo/MailController.java"),
+                    originalController.replace("/search", "/other-search").replace("/keep", "/other-keep"));
+        }
+        SourceUpdate update = draft(candidate);
+        Project project = projects.findById(update.getProjectId()).orElseThrow();
+        project.setStoragePath(baseline.toString()); projects.save(project);
+        analysis.analyze(project.getId());
+        JavaClass controller = classes.findByProjectId(project.getId()).stream()
+                .filter(owner -> owner.getClassName().equals("MailController") && owner.getFilePath().startsWith("a/"))
+                .findFirst().orElseThrow();
+        JavaClass otherController = classes.findByProjectId(project.getId()).stream()
+                .filter(owner -> owner.getClassName().equals("MailController") && owner.getFilePath().startsWith("b/"))
+                .findFirst().orElseThrow();
+        List<Long> otherMethodIds = methods.findByClassId(otherController.getId()).stream().map(JavaMethod::getId).toList();
+        JavaMethod kept = methods.findByClassId(controller.getId()).stream()
+                .filter(method -> method.getMethodName().equals("keep")).findFirst().orElseThrow();
+        JavaMethod removed = methods.findByClassId(controller.getId()).stream()
+                .filter(method -> method.getMethodName().equals("search")).findFirst().orElseThrow();
+        JavaClass owner = classes.findByProjectId(project.getId()).stream()
+                .filter(type -> type.getClassName().equals("MailService")).findFirst().orElseThrow();
+        JavaMethod changed = methods.findByClassId(owner.getId()).get(0);
+        item(update, SourceUpdateTargetType.METHOD, changed.getId(), "demo.MailService#send()", "public int send() { return 3; }");
+        SourceUpdateItem proposal = items.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(update.getId()).get(0);
+        proposal.setAction(SourceUpdateAction.UPDATE); items.saveAndFlush(proposal);
+
+        service.applyUpdate(project.getId(), update.getId(), admin());
+        methods.flush();
+
+        assertThat(methods.findById(removed.getId())).isEmpty();
+        assertThat(endpoints.findByMethodId(removed.getId())).isEmpty();
+        assertThat(methods.findByClassId(controller.getId())).extracting(JavaMethod::getId).containsExactly(kept.getId());
+        assertThat(classes.findById(controller.getId()).orElseThrow().getSourceCode()).doesNotContain("/search");
+        assertThat(methods.findById(changed.getId())).isPresent();
+        assertThat(methods.findByClassId(otherController.getId())).extracting(JavaMethod::getId)
+                .containsExactlyInAnyOrderElementsOf(otherMethodIds);
+    }
 
     @Test
     void replacesAlreadyStagedCoverageWithoutDuplicateConstraint(@TempDir Path snapshot) {
@@ -52,12 +168,13 @@ class SourceUpdateApplyIntegrationTest {
         assertThat(plans.findByProjectId(update.getProjectId())).hasSize(1);
     }
 
-    @Test
-    void directlyAppliesParameterizedMethodWithoutOverwritingAnOverload(@TempDir Path snapshot) throws Exception {
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"/* Keep the address contract. */", "// Keep the address contract.\n"})
+    void directlyAppliesParameterizedMethodWithoutOverwritingAnOverload(String comment, @TempDir Path snapshot) throws Exception {
         SourceUpdate update = draft(snapshot);
         Path file = snapshot.resolve("src/main/java/demo/MailService.java"); Files.createDirectories(file.getParent());
         Files.writeString(file, "package demo;\nclass MailService {\n"
-                + " int send(int code) { return code; }\n int send(String address) { return address.length(); }\n}\n");
+                + " int send(int code) { return code; }\n int send(String address) { " + comment + " return address.length(); }\n}\n");
         JavaClass owner = new JavaClass(); owner.setProjectId(update.getProjectId()); owner.setClassName("MailService");
         owner.setQualifiedName("demo.MailService"); owner.setClassType(ClassType.SERVICE);
         owner.setFilePath("src/main/java/demo/MailService.java"); owner = classes.save(owner);
@@ -73,7 +190,7 @@ class SourceUpdateApplyIntegrationTest {
         assertThat(methods.findByClassId(owner.getId())).hasSize(2).anySatisfy(method -> {
             assertThat(method.getParameters()).containsExactly(new MethodParam("address", "String"));
             assertThat(method.getLineStart()).isEqualTo(4);
-            assertThat(method.getLineEnd()).isEqualTo(4);
+            assertThat(method.getLineEnd()).isEqualTo(comment.contains("\n") ? 5 : 4);
             assertThat(method.getReturnType()).isEqualTo("int");
         });
         assertThat(methods.findById(original.getId())).get().satisfies(method -> {
@@ -105,6 +222,21 @@ class SourceUpdateApplyIntegrationTest {
         assertThatThrownBy(() -> service.applyUpdate(update.getProjectId(), update.getId(), admin()))
                 .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("từ chối");
         assertThat(original.getSourceCode()).contains("return code;");
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {
+            "@Deprecated String label() { return \"https://clinic.example/a/b\"; }",
+            "String label() { return \"https://clinic.example/a//b\"; }"})
+    void rejectsMethodLiteralOrAnnotationChangesEvenWhenCommentsDiffer(String reviewed, @TempDir Path snapshot) throws Exception {
+        SourceUpdate update = draft(snapshot);
+        Path file = snapshot.resolve("src/main/java/demo/MailService.java"); Files.createDirectories(file.getParent());
+        String source = "package demo; class MailService { @Deprecated String label() { /* Source comment. */ return \"https://clinic.example/a//b\"; } }";
+        Files.writeString(file, source);
+        item(update, SourceUpdateTargetType.METHOD, null, "demo.MailService#label()", reviewed);
+        assertThatThrownBy(() -> service.applyUpdate(update.getProjectId(), update.getId(), admin()))
+                .isInstanceOf(IllegalStateException.class).hasCauseInstanceOf(IllegalArgumentException.class);
+        assertThat(Files.readString(file)).isEqualTo(source);
     }
 
     @Test

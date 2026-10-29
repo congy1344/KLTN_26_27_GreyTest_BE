@@ -159,7 +159,7 @@ public class GoogleLlmClient implements LlmClient {
                     .build();
             try {
                 long startedAt = System.nanoTime();
-                HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+                HttpResponse<String> response = LlmHttpTransport.send(httpClient, request, timeout);
                 int status = response.statusCode();
                 if (status >= 200 && status < 300) {
                     JsonNode root = responseRoot(response.body());

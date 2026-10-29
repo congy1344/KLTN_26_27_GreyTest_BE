@@ -1,0 +1,747 @@
+{
+  "context": {
+    "project": {
+      "id": 872,
+      "name": "spring-boot-realworld-example-app-master",
+      "status": "CASE_PENDING_REVIEW"
+    },
+    "analysis": {
+      "totalClasses": 96,
+      "totalMethods": 214,
+      "totalEndpoints": 19,
+      "totalRelations": 1,
+      "totalControllerServiceRelations": 20,
+      "existingTestFiles": 23,
+      "totalProductionFiles": 93,
+      "parsedProductionFiles": 93,
+      "failedParseFiles": 0,
+      "failedParseFilePaths": []
+    },
+    "classes": [
+      {
+        "id": 8999,
+        "packageName": "io.spring.application",
+        "className": "ArticleQueryService",
+        "qualifiedName": "io.spring.application.ArticleQueryService",
+        "classType": "SERVICE",
+        "filePath": "spring-boot-realworld-example-app-master/src/main/java/io/spring/application/ArticleQueryService.java",
+        "sourceCode": "package io.spring.application;\n\nimport static java.util.stream.Collectors.toList;\nimport io.spring.application.data.ArticleData;\nimport io.spring.application.data.ArticleDataList;\nimport io.spring.application.data.ArticleFavoriteCount;\nimport io.spring.core.user.User;\nimport io.spring.infrastructure.mybatis.readservice.ArticleFavoritesReadService;\nimport io.spring.infrastructure.mybatis.readservice.ArticleReadService;\nimport io.spring.infrastructure.mybatis.readservice.UserRelationshipQueryService;\nimport java.util.ArrayList;\nimport java.util.Collections;\nimport java.util.HashMap;\nimport java.util.List;\nimport java.util.Map;\nimport java.util.Optional;\nimport java.util.Set;\nimport lombok.AllArgsConstructor;\nimport org.joda.time.DateTime;\nimport org.springframework.stereotype.Service;\n\n@Service\n@AllArgsConstructor\npublic class ArticleQueryService {\n\n    private ArticleReadService articleReadService;\n\n    private UserRelationshipQueryService userRelationshipQueryService;\n\n    private ArticleFavoritesReadService articleFavoritesReadService;\n\n    public Optional<ArticleData> findById(String id, User user) {\n        ArticleData articleData = articleReadService.findById(id);\n        if (articleData == null) {\n            return Optional.empty();\n        } else {\n            if (user != null) {\n                fillExtraInfo(id, user, articleData);\n            }\n            return Optional.of(articleData);\n        }\n    }\n\n    public Optional<ArticleData> findBySlug(String slug, User user) {\n        ArticleData articleData = articleReadService.findBySlug(slug);\n        if (articleData == null) {\n            return Optional.empty();\n        } else {\n            if (user != null) {\n                fillExtraInfo(articleData.getId(), user, articleData);\n            }\n            return Optional.of(articleData);\n        }\n    }\n\n    public CursorPager<ArticleData> findRecentArticlesWithCursor(String tag, String author, String favoritedBy, CursorPageParameter<DateTime> page, User currentUser) {\n        List<String> articleIds = articleReadService.findArticlesWithCursor(tag, author, favoritedBy, page);\n        if (articleIds.size() == 0) {\n            return new CursorPager<>(new ArrayList<>(), page.getDirection(), false);\n        } else {\n            boolean hasExtra = articleIds.size() > page.getLimit();\n            if (hasExtra) {\n                articleIds.remove(page.getLimit());\n            }\n            if (!page.isNext()) {\n                Collections.reverse(articleIds);\n            }\n            List<ArticleData> articles = articleReadService.findArticles(articleIds);\n            fillExtraInfo(articles, currentUser);\n            return new CursorPager<>(articles, page.getDirection(), hasExtra);\n        }\n    }\n\n    public CursorPager<ArticleData> findUserFeedWithCursor(User user, CursorPageParameter<DateTime> page) {\n        List<String> followdUsers = userRelationshipQueryService.followedUsers(user.getId());\n        if (followdUsers.size() == 0) {\n            return new CursorPager<>(new ArrayList<>(), page.getDirection(), false);\n        } else {\n            List<ArticleData> articles = articleReadService.findArticlesOfAuthorsWithCursor(followdUsers, page);\n            boolean hasExtra = articles.size() > page.getLimit();\n            if (hasExtra) {\n                articles.remove(page.getLimit());\n            }\n            if (!page.isNext()) {\n                Collections.reverse(articles);\n            }\n            fillExtraInfo(articles, user);\n            return new CursorPager<>(articles, page.getDirection(), hasExtra);\n        }\n    }\n\n    public ArticleDataList findRecentArticles(String tag, String author, String favoritedBy, Page page, User currentUser) {\n        List<String> articleIds = articleReadService.queryArticles(tag, author, favoritedBy, page);\n        int articleCount = articleReadService.countArticle(tag, author, favoritedBy);\n        if (articleIds.size() == 0) {\n            return new ArticleDataList(new ArrayList<>(), articleCount);\n        } else {\n            List<ArticleData> articles = articleReadService.findArticles(articleIds);\n            fillExtraInfo(articles, currentUser);\n            return new ArticleDataList(articles, articleCount);\n        }\n    }\n\n    public ArticleDataList findUserFeed(User user, Page page) {\n        List<String> followdUsers = userRelationshipQueryService.followedUsers(user.getId());\n        if (followdUsers.size() == 0) {\n            return new ArticleDataList(new ArrayList<>(), 0);\n        } else {\n            List<ArticleData> articles = articleReadService.findArticlesOfAuthors(followdUsers, page);\n            fillExtraInfo(articles, user);\n            int count = articleReadService.countFeedSize(followdUsers);\n            return new ArticleDataList(articles, count);\n        }\n    }\n\n    private void fillExtraInfo(List<ArticleData> articles, User currentUser) {\n        setFavoriteCount(articles);\n        if (currentUser != null) {\n            setIsFavorite(articles, currentUser);\n            setIsFollowingAuthor(articles, currentUser);\n        }\n    }\n\n    private void setIsFollowingAuthor(List<ArticleData> articles, User currentUser) {\n        Set<String> followingAuthors = userRelationshipQueryService.followingAuthors(currentUser.getId(), articles.stream().map(articleData1 -> articleData1.getProfileData().getId()).collect(toList()));\n        articles.forEach(articleData -> {\n            if (followingAuthors.contains(articleData.getProfileData().getId())) {\n                articleData.getProfileData().setFollowing(true);\n            }\n        });\n    }\n\n    private void setFavoriteCount(List<ArticleData> articles) {\n        List<ArticleFavoriteCount> favoritesCounts = articleFavoritesReadService.articlesFavoriteCount(articles.stream().map(ArticleData::getId).collect(toList()));\n        Map<String, Integer> countMap = new HashMap<>();\n        favoritesCounts.forEach(item -> {\n            countMap.put(item.getId(), item.getCount());\n        });\n        articles.forEach(articleData -> articleData.setFavoritesCount(countMap.get(articleData.getId())));\n    }\n\n    private void setIsFavorite(List<ArticleData> articles, User currentUser) {\n        Set<String> favoritedArticles = articleFavoritesReadService.userFavorites(articles.stream().map(articleData -> articleData.getId()).collect(toList()), currentUser);\n        articles.forEach(articleData -> {\n            if (favoritedArticles.contains(articleData.getId())) {\n                articleData.setFavorited(true);\n            }\n        });\n    }\n\n    private void fillExtraInfo(String id, User user, ArticleData articleData) {\n        articleData.setFavorited(articleFavoritesReadService.isUserFavorite(user.getId(), id));\n        articleData.setFavoritesCount(articleFavoritesReadService.articleFavoriteCount(id));\n        articleData.getProfileData().setFollowing(userRelationshipQueryService.isUserFollowing(user.getId(), articleData.getProfileData().getId()));\n    }\n}\n",
+        "annotations": [
+          {
+            "id": 11416,
+            "targetType": "CLASS",
+            "category": "COMPONENT",
+            "annotationName": "Service",
+            "attributes": "@Service"
+          }
+        ],
+        "methods": [
+          {
+            "id": 18940,
+            "classQualifiedName": "io.spring.application.ArticleQueryService",
+            "methodName": "findUserFeedWithCursor",
+            "returnType": "CursorPager<ArticleData>",
+            "parameters": [
+              {
+                "name": "user",
+                "type": "User"
+              },
+              {
+                "name": "page",
+                "type": "CursorPageParameter<DateTime>"
+              }
+            ],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "public CursorPager<ArticleData> findUserFeedWithCursor(\n      User user, CursorPageParameter<DateTime> page) {\n    List<String> followdUsers = userRelationshipQueryService.followedUsers(user.getId());\n    if (followdUsers.size() == 0) {\n      return new CursorPager<>(new ArrayList<>(), page.getDirection(), false);\n    } else {\n      List<ArticleData> articles =\n          articleReadService.findArticlesOfAuthorsWithCursor(followdUsers, page);\n      boolean hasExtra = articles.size() > page.getLimit();\n      if (hasExtra) {\n        articles.remove(page.getLimit());\n      }\n      if (!page.isNext()) {\n        Collections.reverse(articles);\n      }\n      fillExtraInfo(articles, user);\n      return new CursorPager<>(articles, page.getDirection(), hasExtra);\n    }\n  }",
+            "lineStart": 80,
+            "lineEnd": 98,
+            "annotations": [],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 82,
+                "lineEnd": 82
+              },
+              {
+                "branchId": "IF-1-TRUE",
+                "kind": "IF",
+                "outcome": "TRUE",
+                "condition": "followdUsers.size() == 0",
+                "lineStart": 84,
+                "lineEnd": 84
+              },
+              {
+                "branchId": "IF-1-FALSE",
+                "kind": "IF",
+                "outcome": "FALSE",
+                "condition": "followdUsers.size() == 0",
+                "lineStart": 86,
+                "lineEnd": 96
+              },
+              {
+                "branchId": "IF-2-TRUE",
+                "kind": "IF",
+                "outcome": "TRUE",
+                "condition": "hasExtra",
+                "lineStart": 90,
+                "lineEnd": 90
+              },
+              {
+                "branchId": "IF-2-FALSE",
+                "kind": "IF",
+                "outcome": "FALSE",
+                "condition": "hasExtra",
+                "lineStart": 89,
+                "lineEnd": 89
+              },
+              {
+                "branchId": "IF-3-TRUE",
+                "kind": "IF",
+                "outcome": "TRUE",
+                "condition": "!page.isNext()",
+                "lineStart": 93,
+                "lineEnd": 93
+              },
+              {
+                "branchId": "IF-3-FALSE",
+                "kind": "IF",
+                "outcome": "FALSE",
+                "condition": "!page.isNext()",
+                "lineStart": 92,
+                "lineEnd": 92
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": 9001,
+        "packageName": "io.spring.application",
+        "className": "CursorPageParameter",
+        "qualifiedName": "io.spring.application.CursorPageParameter",
+        "classType": "OTHER",
+        "filePath": "spring-boot-realworld-example-app-master/src/main/java/io/spring/application/CursorPageParameter.java",
+        "sourceCode": "package io.spring.application;\n\nimport io.spring.application.CursorPager.Direction;\nimport lombok.Data;\nimport lombok.NoArgsConstructor;\n\n@Data\n@NoArgsConstructor\npublic class CursorPageParameter<T> {\n\n    private static final int MAX_LIMIT = 1000;\n\n    private int limit = 20;\n\n    private T cursor;\n\n    private Direction direction;\n\n    public CursorPageParameter(T cursor, int limit, Direction direction) {\n        setLimit(limit);\n        setCursor(cursor);\n        setDirection(direction);\n    }\n\n    public boolean isNext() {\n        return direction == Direction.NEXT;\n    }\n\n    public int getQueryLimit() {\n        return limit + 1;\n    }\n\n    private void setCursor(T cursor) {\n        this.cursor = cursor;\n    }\n\n    private void setLimit(int limit) {\n        if (limit > MAX_LIMIT) {\n            this.limit = MAX_LIMIT;\n        } else if (limit > 0) {\n            this.limit = limit;\n        }\n    }\n}\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 9002,
+        "packageName": "io.spring.application",
+        "className": "CursorPager",
+        "qualifiedName": "io.spring.application.CursorPager",
+        "classType": "OTHER",
+        "filePath": "spring-boot-realworld-example-app-master/src/main/java/io/spring/application/CursorPager.java",
+        "sourceCode": "package io.spring.application;\n\nimport java.util.List;\nimport lombok.Getter;\n\n@Getter\npublic class CursorPager<T extends Node> {\n\n    private List<T> data;\n\n    private boolean next;\n\n    private boolean previous;\n\n    public CursorPager(List<T> data, Direction direction, boolean hasExtra) {\n        this.data = data;\n        if (direction == Direction.NEXT) {\n            this.previous = false;\n            this.next = hasExtra;\n        } else {\n            this.next = false;\n            this.previous = hasExtra;\n        }\n    }\n\n    public boolean hasNext() {\n        return next;\n    }\n\n    public boolean hasPrevious() {\n        return previous;\n    }\n\n    public PageCursor getStartCursor() {\n        return data.isEmpty() ? null : data.get(0).getCursor();\n    }\n\n    public PageCursor getEndCursor() {\n        return data.isEmpty() ? null : data.get(data.size() - 1).getCursor();\n    }\n\n    public enum Direction {\n\n        PREV, NEXT\n    }\n}\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 9013,
+        "packageName": "io.spring.application",
+        "className": "Page",
+        "qualifiedName": "io.spring.application.Page",
+        "classType": "OTHER",
+        "filePath": "spring-boot-realworld-example-app-master/src/main/java/io/spring/application/Page.java",
+        "sourceCode": "package io.spring.application;\n\nimport lombok.Data;\nimport lombok.NoArgsConstructor;\n\n@NoArgsConstructor\n@Data\npublic class Page {\n\n    private static final int MAX_LIMIT = 100;\n\n    private int offset = 0;\n\n    private int limit = 20;\n\n    public Page(int offset, int limit) {\n        setOffset(offset);\n        setLimit(limit);\n    }\n\n    private void setOffset(int offset) {\n        if (offset > 0) {\n            this.offset = offset;\n        }\n    }\n\n    private void setLimit(int limit) {\n        if (limit > MAX_LIMIT) {\n            this.limit = MAX_LIMIT;\n        } else if (limit > 0) {\n            this.limit = limit;\n        }\n    }\n}\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 9004,
+        "packageName": "io.spring.application.data",
+        "className": "ArticleData",
+        "qualifiedName": "io.spring.application.data.ArticleData",
+        "classType": "OTHER",
+        "filePath": "spring-boot-realworld-example-app-master/src/main/java/io/spring/application/data/ArticleData.java",
+        "sourceCode": "package io.spring.application.data;\n\nimport com.fasterxml.jackson.annotation.JsonProperty;\nimport io.spring.application.DateTimeCursor;\nimport java.util.List;\nimport lombok.AllArgsConstructor;\nimport lombok.Data;\nimport lombok.NoArgsConstructor;\nimport org.joda.time.DateTime;\n\n@Data\n@NoArgsConstructor\n@AllArgsConstructor\npublic class ArticleData implements io.spring.application.Node {\n\n    private String id;\n\n    private String slug;\n\n    private String title;\n\n    private String description;\n\n    private String body;\n\n    private boolean favorited;\n\n    private int favoritesCount;\n\n    private DateTime createdAt;\n\n    private DateTime updatedAt;\n\n    private List<String> tagList;\n\n    @JsonProperty(\"author\")\n    private ProfileData profileData;\n\n    @Override\n    public DateTimeCursor getCursor() {\n        return new DateTimeCursor(updatedAt);\n    }\n}\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 9005,
+        "packageName": "io.spring.application.data",
+        "className": "ArticleDataList",
+        "qualifiedName": "io.spring.application.data.ArticleDataList",
+        "classType": "OTHER",
+        "filePath": "spring-boot-realworld-example-app-master/src/main/java/io/spring/application/data/ArticleDataList.java",
+        "sourceCode": "package io.spring.application.data;\n\nimport com.fasterxml.jackson.annotation.JsonProperty;\nimport java.util.List;\nimport lombok.Getter;\n\n@Getter\npublic class ArticleDataList {\n\n    @JsonProperty(\"articles\")\n    private final List<ArticleData> articleDatas;\n\n    @JsonProperty(\"articlesCount\")\n    private final int count;\n\n    public ArticleDataList(List<ArticleData> articleDatas, int count) {\n        this.articleDatas = articleDatas;\n        this.count = count;\n    }\n}\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 9006,
+        "packageName": "io.spring.application.data",
+        "className": "ArticleFavoriteCount",
+        "qualifiedName": "io.spring.application.data.ArticleFavoriteCount",
+        "classType": "OTHER",
+        "filePath": "spring-boot-realworld-example-app-master/src/main/java/io/spring/application/data/ArticleFavoriteCount.java",
+        "sourceCode": "package io.spring.application.data;\n\nimport lombok.Value;\n\n@Value\npublic class ArticleFavoriteCount {\n\n    private String id;\n\n    private Integer count;\n}\n",
+        "annotations": [
+          {
+            "id": 11418,
+            "targetType": "CLASS",
+            "category": "INJECTION",
+            "annotationName": "Value",
+            "attributes": "@Value"
+          }
+        ],
+        "methods": []
+      },
+      {
+        "id": 9035,
+        "packageName": "io.spring.core.user",
+        "className": "User",
+        "qualifiedName": "io.spring.core.user.User",
+        "classType": "OTHER",
+        "filePath": "spring-boot-realworld-example-app-master/src/main/java/io/spring/core/user/User.java",
+        "sourceCode": "package io.spring.core.user;\n\nimport io.spring.Util;\nimport java.util.UUID;\nimport lombok.EqualsAndHashCode;\nimport lombok.Getter;\nimport lombok.NoArgsConstructor;\n\n@Getter\n@NoArgsConstructor\n@EqualsAndHashCode(of = { \"id\" })\npublic class User {\n\n    private String id;\n\n    private String email;\n\n    private String username;\n\n    private String password;\n\n    private String bio;\n\n    private String image;\n\n    public User(String email, String username, String password, String bio, String image) {\n        this.id = UUID.randomUUID().toString();\n        this.email = email;\n        this.username = username;\n        this.password = password;\n        this.bio = bio;\n        this.image = image;\n    }\n\n    public void update(String email, String username, String password, String bio, String image) {\n        if (!Util.isEmpty(email)) {\n            this.email = email;\n        }\n        if (!Util.isEmpty(username)) {\n            this.username = username;\n        }\n        if (!Util.isEmpty(password)) {\n            this.password = password;\n        }\n        if (!Util.isEmpty(bio)) {\n            this.bio = bio;\n        }\n        if (!Util.isEmpty(image)) {\n            this.image = image;\n        }\n    }\n}\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 9054,
+        "packageName": "io.spring.infrastructure.mybatis.readservice",
+        "className": "ArticleFavoritesReadService",
+        "qualifiedName": "io.spring.infrastructure.mybatis.readservice.ArticleFavoritesReadService",
+        "classType": "OTHER",
+        "filePath": "spring-boot-realworld-example-app-master/src/main/java/io/spring/infrastructure/mybatis/readservice/ArticleFavoritesReadService.java",
+        "sourceCode": "package io.spring.infrastructure.mybatis.readservice;\n\nimport io.spring.application.data.ArticleFavoriteCount;\nimport io.spring.core.user.User;\nimport java.util.List;\nimport java.util.Set;\nimport org.apache.ibatis.annotations.Mapper;\nimport org.apache.ibatis.annotations.Param;\n\n@Mapper\npublic interface ArticleFavoritesReadService {\n\n    boolean isUserFavorite(@Param(\"userId\") String userId, @Param(\"articleId\") String articleId);\n\n    int articleFavoriteCount(@Param(\"articleId\") String articleId);\n\n    List<ArticleFavoriteCount> articlesFavoriteCount(@Param(\"ids\") List<String> ids);\n\n    Set<String> userFavorites(@Param(\"ids\") List<String> ids, @Param(\"currentUser\") User currentUser);\n}\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 9055,
+        "packageName": "io.spring.infrastructure.mybatis.readservice",
+        "className": "ArticleReadService",
+        "qualifiedName": "io.spring.infrastructure.mybatis.readservice.ArticleReadService",
+        "classType": "OTHER",
+        "filePath": "spring-boot-realworld-example-app-master/src/main/java/io/spring/infrastructure/mybatis/readservice/ArticleReadService.java",
+        "sourceCode": "package io.spring.infrastructure.mybatis.readservice;\n\nimport io.spring.application.CursorPageParameter;\nimport io.spring.application.Page;\nimport io.spring.application.data.ArticleData;\nimport java.util.List;\nimport org.apache.ibatis.annotations.Mapper;\nimport org.apache.ibatis.annotations.Param;\n\n@Mapper\npublic interface ArticleReadService {\n\n    ArticleData findById(@Param(\"id\") String id);\n\n    ArticleData findBySlug(@Param(\"slug\") String slug);\n\n    List<String> queryArticles(@Param(\"tag\") String tag, @Param(\"author\") String author, @Param(\"favoritedBy\") String favoritedBy, @Param(\"page\") Page page);\n\n    int countArticle(@Param(\"tag\") String tag, @Param(\"author\") String author, @Param(\"favoritedBy\") String favoritedBy);\n\n    List<ArticleData> findArticles(@Param(\"articleIds\") List<String> articleIds);\n\n    List<ArticleData> findArticlesOfAuthors(@Param(\"authors\") List<String> authors, @Param(\"page\") Page page);\n\n    List<ArticleData> findArticlesOfAuthorsWithCursor(@Param(\"authors\") List<String> authors, @Param(\"page\") CursorPageParameter page);\n\n    int countFeedSize(@Param(\"authors\") List<String> authors);\n\n    List<String> findArticlesWithCursor(@Param(\"tag\") String tag, @Param(\"author\") String author, @Param(\"favoritedBy\") String favoritedBy, @Param(\"page\") CursorPageParameter page);\n}\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 9059,
+        "packageName": "io.spring.infrastructure.mybatis.readservice",
+        "className": "UserRelationshipQueryService",
+        "qualifiedName": "io.spring.infrastructure.mybatis.readservice.UserRelationshipQueryService",
+        "classType": "OTHER",
+        "filePath": "spring-boot-realworld-example-app-master/src/main/java/io/spring/infrastructure/mybatis/readservice/UserRelationshipQueryService.java",
+        "sourceCode": "package io.spring.infrastructure.mybatis.readservice;\n\nimport java.util.List;\nimport java.util.Set;\nimport org.apache.ibatis.annotations.Mapper;\nimport org.apache.ibatis.annotations.Param;\n\n@Mapper\npublic interface UserRelationshipQueryService {\n\n    boolean isUserFollowing(@Param(\"userId\") String userId, @Param(\"anotherUserId\") String anotherUserId);\n\n    Set<String> followingAuthors(@Param(\"userId\") String userId, @Param(\"ids\") List<String> ids);\n\n    List<String> followedUsers(@Param(\"userId\") String userId);\n}\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 9003,
+        "packageName": "io.spring.application",
+        "className": "Direction",
+        "qualifiedName": "io.spring.application.CursorPager.Direction",
+        "classType": "ENUM",
+        "filePath": "spring-boot-realworld-example-app-master/src/main/java/io/spring/application/CursorPager.java",
+        "sourceCode": "package io.spring.application;\n\nimport java.util.List;\nimport lombok.Getter;\n\n@Getter\npublic class CursorPager<T extends Node> {\n\n    private List<T> data;\n\n    private boolean next;\n\n    private boolean previous;\n\n    public CursorPager(List<T> data, Direction direction, boolean hasExtra) {\n        this.data = data;\n        if (direction == Direction.NEXT) {\n            this.previous = false;\n            this.next = hasExtra;\n        } else {\n            this.next = false;\n            this.previous = hasExtra;\n        }\n    }\n\n    public boolean hasNext() {\n        return next;\n    }\n\n    public boolean hasPrevious() {\n        return previous;\n    }\n\n    public PageCursor getStartCursor() {\n        return data.isEmpty() ? null : data.get(0).getCursor();\n    }\n\n    public PageCursor getEndCursor() {\n        return data.isEmpty() ? null : data.get(data.size() - 1).getCursor();\n    }\n\n    public enum Direction {\n\n        PREV, NEXT\n    }\n}\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 9012,
+        "packageName": "io.spring.application",
+        "className": "Node",
+        "qualifiedName": "io.spring.application.Node",
+        "classType": "OTHER",
+        "filePath": "spring-boot-realworld-example-app-master/src/main/java/io/spring/application/Node.java",
+        "sourceCode": "package io.spring.application;\n\npublic interface Node {\n\n    PageCursor getCursor();\n}\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 9014,
+        "packageName": "io.spring.application",
+        "className": "PageCursor",
+        "qualifiedName": "io.spring.application.PageCursor",
+        "classType": "OTHER",
+        "filePath": "spring-boot-realworld-example-app-master/src/main/java/io/spring/application/PageCursor.java",
+        "sourceCode": "package io.spring.application;\n\npublic abstract class PageCursor<T> {\n\n    private T data;\n\n    public PageCursor(T data) {\n        this.data = data;\n    }\n\n    public T getData() {\n        return data;\n    }\n\n    @Override\n    public String toString() {\n        return data.toString();\n    }\n}\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 9011,
+        "packageName": "io.spring.application",
+        "className": "DateTimeCursor",
+        "qualifiedName": "io.spring.application.DateTimeCursor",
+        "classType": "OTHER",
+        "filePath": "spring-boot-realworld-example-app-master/src/main/java/io/spring/application/DateTimeCursor.java",
+        "sourceCode": "package io.spring.application;\n\nimport org.joda.time.DateTime;\nimport org.joda.time.DateTimeZone;\n\npublic class DateTimeCursor extends PageCursor<DateTime> {\n\n    public DateTimeCursor(DateTime data) {\n        super(data);\n    }\n\n    @Override\n    public String toString() {\n        return String.valueOf(getData().getMillis());\n    }\n\n    public static DateTime parse(String cursor) {\n        if (cursor == null) {\n            return null;\n        }\n        return new DateTime().withMillis(Long.parseLong(cursor)).withZone(DateTimeZone.UTC);\n    }\n}\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 9008,
+        "packageName": "io.spring.application.data",
+        "className": "ProfileData",
+        "qualifiedName": "io.spring.application.data.ProfileData",
+        "classType": "OTHER",
+        "filePath": "spring-boot-realworld-example-app-master/src/main/java/io/spring/application/data/ProfileData.java",
+        "sourceCode": "package io.spring.application.data;\n\nimport com.fasterxml.jackson.annotation.JsonIgnore;\nimport lombok.AllArgsConstructor;\nimport lombok.Data;\nimport lombok.NoArgsConstructor;\n\n@Data\n@NoArgsConstructor\n@AllArgsConstructor\npublic class ProfileData {\n\n    @JsonIgnore\n    private String id;\n\n    private String username;\n\n    private String bio;\n\n    private String image;\n\n    private boolean following;\n}\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 9070,
+        "packageName": "io.spring",
+        "className": "Util",
+        "qualifiedName": "io.spring.Util",
+        "classType": "OTHER",
+        "filePath": "spring-boot-realworld-example-app-master/src/main/java/io/spring/Util.java",
+        "sourceCode": "package io.spring;\n\npublic class Util {\n\n    public static boolean isEmpty(String value) {\n        return value == null || value.isEmpty();\n    }\n}\n",
+        "annotations": [],
+        "methods": []
+      }
+    ],
+    "approvedBusinessRules": [
+      {
+        "id": 4755,
+        "methodId": 18940,
+        "ruleCode": "BR-002",
+        "description": "Khi số bài viết vượt quá giới hạn trang, service loại bỏ bài viết tại vị trí giới hạn trước khi trả về trang.",
+        "reviewNote": "SOURCE_BRANCH:IF-2\nAI category: BUSINESS_LOGIC. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "IF-2"
+      },
+      {
+        "id": 4756,
+        "methodId": 18940,
+        "ruleCode": "BR-003",
+        "description": "Khi trang không phải trang kế tiếp, service đảo thứ tự bài viết trước khi trả về.",
+        "reviewNote": "SOURCE_BRANCH:IF-3\nAI category: BUSINESS_LOGIC. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "IF-3"
+      }
+    ],
+    "approvedTestPlans": [
+      {
+        "id": 2443,
+        "businessRuleId": 4755,
+        "coveredRuleIds": [
+          4755,
+          4756
+        ],
+        "planCode": "TP-021",
+        "title": "Phân trang feed theo giới hạn và hướng",
+        "description": "Kiểm tra feed có bài viết: bỏ bài tại vị trí giới hạn nếu có bài bổ sung, đảo thứ tự khi hướng không phải NEXT và trả trạng thái tương ứng.\n[GreyTest testability: UNKNOWN] COLLECTION_MUTATION @ spring-boot-realworld-example-app-master/src/main/java/io/spring/application/ArticleQueryService.java:82 findUserFeedWithCursor — Method sửa trực tiếp collection fixture: articles.; UNRESOLVED_HELPER_PATH @ spring-boot-realworld-example-app-master/src/main/java/io/spring/application/ArticleQueryService.java:87 findUserFeedWithCursor — Lời gọi helper nội bộ chưa được phân tích đường đi trong MVP: fillExtraInfo. | Tạo collection mutable thực; lưu bản sao expected trước khi gọi method, không tính expected từ fixture đã bị sửa.; Kiểm tra đường đi qua helper trước khi kết luận có thể điều khiển nhánh; không thay kết quả helper bằng giả định.",
+        "testType": "HAPPY_PATH",
+        "status": "APPROVED",
+        "isModified": false
+      }
+    ],
+    "existingTests": [
+      {
+        "id": 599,
+        "filePath": "spring-boot-realworld-example-app-master/src/test/java/io/spring/application/article/ArticleQueryServiceTest.java",
+        "packageName": "io.spring.application.article",
+        "testClassName": "ArticleQueryServiceTest",
+        "relatedClassId": 8999,
+        "relatedMethodId": null,
+        "testMethods": [
+          {
+            "name": "should_fetch_article_success",
+            "mocks": [],
+            "lineEnd": 70,
+            "lineStart": 59,
+            "assertions": [
+              "assertTrue",
+              "assertEquals",
+              "assertFalse",
+              "assertNotNull"
+            ],
+            "annotations": [
+              "Test"
+            ]
+          },
+          {
+            "name": "should_get_article_with_right_favorite_and_favorite_count",
+            "mocks": [],
+            "lineEnd": 84,
+            "lineStart": 72,
+            "assertions": [
+              "assertTrue",
+              "assertEquals"
+            ],
+            "annotations": [
+              "Test"
+            ]
+          },
+          {
+            "name": "should_get_default_article_list",
+            "mocks": [],
+            "lineEnd": 108,
+            "lineStart": 86,
+            "assertions": [
+              "assertEquals"
+            ],
+            "annotations": [
+              "Test"
+            ]
+          },
+          {
+            "name": "should_get_default_article_list_by_cursor",
+            "mocks": [],
+            "lineEnd": 143,
+            "lineStart": 110,
+            "assertions": [
+              "assertEquals"
+            ],
+            "annotations": [
+              "Test"
+            ]
+          },
+          {
+            "name": "should_query_article_by_author",
+            "mocks": [],
+            "lineEnd": 158,
+            "lineStart": 145,
+            "assertions": [
+              "assertEquals"
+            ],
+            "annotations": [
+              "Test"
+            ]
+          },
+          {
+            "name": "should_query_article_by_favorite",
+            "mocks": [],
+            "lineEnd": 181,
+            "lineStart": 160,
+            "assertions": [
+              "assertEquals",
+              "assertTrue"
+            ],
+            "annotations": [
+              "Test"
+            ]
+          },
+          {
+            "name": "should_query_article_by_tag",
+            "mocks": [],
+            "lineEnd": 197,
+            "lineStart": 183,
+            "assertions": [
+              "assertEquals"
+            ],
+            "annotations": [
+              "Test"
+            ]
+          },
+          {
+            "name": "should_show_following_if_user_followed_author",
+            "mocks": [],
+            "lineEnd": 212,
+            "lineStart": 199,
+            "assertions": [
+              "assertEquals",
+              "assertTrue"
+            ],
+            "annotations": [
+              "Test"
+            ]
+          },
+          {
+            "name": "should_get_user_feed",
+            "mocks": [],
+            "lineEnd": 229,
+            "lineStart": 214,
+            "assertions": [
+              "assertEquals",
+              "assertTrue"
+            ],
+            "annotations": [
+              "Test"
+            ]
+          }
+        ],
+        "imports": [
+          "io.spring.application.ArticleQueryService",
+          "io.spring.application.CursorPageParameter",
+          "io.spring.application.CursorPager",
+          "io.spring.application.CursorPager.Direction",
+          "io.spring.application.DateTimeCursor",
+          "io.spring.application.Page",
+          "io.spring.application.data.ArticleData",
+          "io.spring.application.data.ArticleDataList",
+          "io.spring.core.article.Article",
+          "io.spring.core.article.ArticleRepository",
+          "io.spring.core.favorite.ArticleFavorite",
+          "io.spring.core.favorite.ArticleFavoriteRepository",
+          "io.spring.core.user.FollowRelation",
+          "io.spring.core.user.User",
+          "io.spring.core.user.UserRepository",
+          "io.spring.infrastructure.DbTestBase",
+          "io.spring.infrastructure.repository.MyBatisArticleFavoriteRepository",
+          "io.spring.infrastructure.repository.MyBatisArticleRepository",
+          "io.spring.infrastructure.repository.MyBatisUserRepository",
+          "java.util.Arrays",
+          "java.util.Optional",
+          "org.joda.time.DateTime",
+          "org.junit.jupiter.api.Assertions",
+          "org.junit.jupiter.api.BeforeEach",
+          "org.junit.jupiter.api.Test",
+          "org.springframework.beans.factory.annotation.Autowired",
+          "org.springframework.context.annotation.Import"
+        ],
+        "sourceCode": "package io.spring.application.article;\n\nimport io.spring.application.ArticleQueryService;\nimport io.spring.application.CursorPageParameter;\nimport io.spring.application.CursorPager;\nimport io.spring.application.CursorPager.Direction;\nimport io.spring.application.DateTimeCursor;\nimport io.spring.application.Page;\nimport io.spring.application.data.ArticleData;\nimport io.spring.application.data.ArticleDataList;\nimport io.spring.core.article.Article;\nimport io.spring.core.article.ArticleRepository;\nimport io.spring.core.favorite.ArticleFavorite;\nimport io.spring.core.favorite.ArticleFavoriteRepository;\nimport io.spring.core.user.FollowRelation;\nimport io.spring.core.user.User;\nimport io.spring.core.user.UserRepository;\nimport io.spring.infrastructure.DbTestBase;\nimport io.spring.infrastructure.repository.MyBatisArticleFavoriteRepository;\nimport io.spring.infrastructure.repository.MyBatisArticleRepository;\nimport io.spring.infrastructure.repository.MyBatisUserRepository;\nimport java.util.Arrays;\nimport java.util.Optional;\nimport org.joda.time.DateTime;\nimport org.junit.jupiter.api.Assertions;\nimport org.junit.jupiter.api.BeforeEach;\nimport org.junit.jupiter.api.Test;\nimport org.springframework.beans.factory.annotation.Autowired;\nimport org.springframework.context.annotation.Import;\n\n@Import({\n  ArticleQueryService.class,\n  MyBatisUserRepository.class,\n  MyBatisArticleRepository.class,\n  MyBatisArticleFavoriteRepository.class\n})\npublic class ArticleQueryServiceTest extends DbTestBase {\n  @Autowired private ArticleQueryService queryService;\n\n  @Autowired private ArticleRepository articleRepository;\n\n  @Autowired private UserRepository userRepository;\n\n  @Autowired private ArticleFavoriteRepository articleFavoriteRepository;\n\n  private User user;\n  private Article article;\n\n  @BeforeEach\n  public void setUp() {\n    user = new User(\"aisensiy@gmail.com\", \"aisensiy\", \"123\", \"\", \"\");\n    userRepository.save(user);\n    article =\n        new Article(\n            \"test\", \"desc\", \"body\", Arrays.asList(\"java\", \"spring\"), user.getId(), new DateTime());\n    articleRepository.save(article);\n  }\n\n  @Test\n  public void should_fetch_article_success() {\n    Optional<ArticleData> optional = queryService.findById(article.getId(), user);\n    Assertions.assertTrue(optional.isPresent());\n\n    ArticleData fetched = optional.get();\n    Assertions.assertEquals(fetched.getFavoritesCount(), 0);\n    Assertions.assertFalse(fetched.isFavorited());\n    Assertions.assertNotNull(fetched.getCreatedAt());\n    Assertions.assertNotNull(fetched.getUpdatedAt());\n    Assertions.assertTrue(fetched.getTagList().contains(\"java\"));\n  }\n\n  @Test\n  public void should_get_article_with_right_favorite_and_favorite_count() {\n    User anotherUser = new User(\"other@test.com\", \"other\", \"123\", \"\", \"\");\n    userRepository.save(anotherUser);\n    articleFavoriteRepository.save(new ArticleFavorite(article.getId(), anotherUser.getId()));\n\n    Optional<ArticleData> optional = queryService.findById(article.getId(), anotherUser);\n    Assertions.assertTrue(optional.isPresent());\n\n    ArticleData articleData = optional.get();\n    Assertions.assertEquals(articleData.getFavoritesCount(), 1);\n    Assertions.assertTrue(articleData.isFavorited());\n  }\n\n  @Test\n  public void should_get_default_article_list() {\n    Article anotherArticle =\n        new Article(\n            \"new article\",\n            \"desc\",\n            \"body\",\n            Arrays.asList(\"test\"),\n            user.getId(),\n            new DateTime().minusHours(1));\n    articleRepository.save(anotherArticle);\n\n    ArticleDataList recentArticles =\n        queryService.findRecentArticles(null, null, null, new Page(), user);\n    Assertions.assertEquals(recentArticles.getCount(), 2);\n    Assertions.assertEquals(recentArticles.getArticleDatas().size(), 2);\n    Assertions.assertEquals(recentArticles.getArticleDatas().get(0).getId(), article.getId());\n\n    ArticleDataList nodata =\n        queryService.findRecentArticles(null, null, null, new Page(2\n/* truncated */"
+      }
+    ],
+    "supportingResources": [
+      {
+        "kind": "MYBATIS_MAPPER",
+        "filePath": "spring-boot-realworld-example-app-master/src/main/resources/mapper/ArticleFavoritesReadService.xml",
+        "content": "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n<!DOCTYPE mapper PUBLIC \"-//mybatis.org//DTD Mapper 3.0//EN\" \"http://mybatis.org/dtd/mybatis-3-mapper.dtd\" >\n<mapper namespace=\"io.spring.infrastructure.mybatis.readservice.ArticleFavoritesReadService\">\n    <select id=\"isUserFavorite\" resultType=\"java.lang.Boolean\">\n        select count(1) from article_favorites where user_id = #{userId} and article_id = #{articleId}\n    </select>\n    <select id=\"articleFavoriteCount\" resultType=\"java.lang.Integer\">\n        select count(1) from article_favorites where article_id = #{articleId}\n    </select>\n    <select id=\"articlesFavoriteCount\" resultMap=\"transfer.data.favoriteCount\">\n        select A.id, count(AF.user_id) as favoriteCount from articles A\n        left join article_favorites AF on A.id = AF.article_id\n        where id in\n        <foreach collection=\"ids\" item=\"item\" separator=\",\" open=\"(\" close=\")\">\n            #{item}\n        </foreach>\n        group by A.id\n    </select>\n    <select id=\"userFavorites\" resultType=\"java.lang.String\">\n        select\n          A.id\n        from articles A\n        left join article_favorites AF on A.id = AF.article_id\n        where id in\n        <foreach collection=\"ids\" item=\"item\" separator=\",\" open=\"(\" close=\")\">\n            #{item}\n        </foreach>\n        and AF.user_id = #{currentUser.id}\n    </select>\n</mapper>"
+      },
+      {
+        "kind": "MYBATIS_MAPPER",
+        "filePath": "spring-boot-realworld-example-app-master/src/main/resources/mapper/ArticleReadService.xml",
+        "content": "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n<!DOCTYPE mapper PUBLIC \"-//mybatis.org//DTD Mapper 3.0//EN\" \"http://mybatis.org/dtd/mybatis-3-mapper.dtd\" >\n<mapper namespace=\"io.spring.infrastructure.mybatis.readservice.ArticleReadService\">\n    <sql id=\"profileColumns\">\n        U.id userId,\n        U.username userUsername,\n        U.bio userBio,\n        U.image userImage\n    </sql>\n    <sql id=\"selectArticleData\">\n        select\n        A.id articleId,\n        A.slug articleSlug,\n        A.title articleTitle,\n        A.description articleDescription,\n        A.body articleBody,\n        A.created_at articleCreatedAt,\n        A.updated_at articleUpdatedAt,\n        T.name tagName,\n        <include refid=\"profileColumns\"/>\n        from\n        articles A\n        left join article_tags AT on A.id = AT.article_id\n        left join tags T on T.id = AT.tag_id\n        left join users U on U.id = A.user_id\n    </sql>\n    <sql id=\"selectArticleIds\">\n        select\n        DISTINCT(A.id) articleId, A.created_at\n        from\n        articles A\n        left join article_tags AT on A.id = AT.article_id\n        left join tags T on T.id = AT.tag_id\n        left join article_favorites AF on AF.article_id = A.id\n        left join users AU on AU.id = A.user_id\n        left join users AFU on AFU.id = AF.user_id\n    </sql>\n\n    <select id=\"findById\" resultMap=\"transfer.data.articleData\">\n        <include refid=\"selectArticleData\"/>\n        where A.id = #{id}\n    </select>\n    <select id=\"findBySlug\" resultMap=\"transfer.data.articleData\">\n        <include refid=\"selectArticleData\"/>\n        where A.slug = #{slug}\n    </select>\n    <select id=\"queryArticles\" resultMap=\"articleId\">\n        <include refid=\"selectArticleIds\" />\n        <where>\n            <if test=\"tag != null\">\n                T.name = #{tag}\n            </if>\n            <if test=\"author != null\">\n                AND AU.username = #{author}\n            </if>\n            <if test=\"favoritedBy != null\">\n                AND AFU.username = #{favoritedBy}\n            </if>\n        </where>\n        order by A.created_at desc\n        limit #{page.offset}, #{page.limit}\n    </select>\n    <select id=\"countArticle\" resultType=\"java.lang.Integer\">\n        select\n        count(DISTINCT A.id)\n        from\n        articles A\n        left join article_tags AT on A.id = AT.article_id\n        left join tags T on T.id = AT.tag_id\n        left join article_favorites AF on AF.article_id = A.id\n        left join users AU on AU.id = A.user_id\n        left join users AFU on AFU.id = AF.user_id\n        <where>\n            <if test=\"tag != null\">\n                T.name = #{tag}\n            </if>\n            <if test=\"author != null\">\n                AND AU.username = #{author}\n            </if>\n            <if test=\"favoritedBy != null\">\n                AND AFU.username = #{favoritedBy}\n            </if>\n        </where>\n    </select>\n    <select id=\"findArticles\" resultMap=\"transfer.data.articleData\">\n        <include refid=\"selectArticleData\"/>\n        where A.id in\n        <foreach index=\"index\" collection=\"articleIds\" item=\"id\" open=\"(\" separator=\",\" close=\")\">\n            #{id}\n        </foreach>\n        order by A.created_at desc\n    </select>\n    <select id=\"findArticlesOfAuthors\" resultMap=\"transfer.data.articleData\">\n        <include refid=\"selectArticleData\"/>\n        where A.user_id in\n        <foreach index=\"index\" collection=\"authors\" item=\"id\" open=\"(\" separator=\",\" close=\")\">\n            #{id}\n        </foreach>\n        limit #{page.offset}, #{page.limit}\n    </select>\n    <select id=\"countFeedSize\" resultType=\"java.lang.Integer\">\n        select count(1) from articles A where A.user_id in\n        <foreach collection=\"authors\" item=\"id\" open=\"(\" close=\")\" separator=\",\">\n            #{id}\n        </foreach>\n    </select>\n    <select id=\"findArticlesWithCursor\" resultType=\"java.lang.String\">\n        <include refid=\"selectArticleIds\" />\n        <where>\n            <if test=\"tag != null\">\n                T.name = #{tag}\n            </if>\n            <if test=\"author != null\">\n                AND AU.username = #{author}\n            </if>\n            <if test=\"favoritedBy != null\">\n                AND AFU.username = #{favoritedBy}\n            </if>\n            <if test='page.cursor != null and page.direction.name() == \"NEXT\"'>\n                AND A.created_at &lt; #{page.cursor}\n            </if>\n            <if test='page.cursor != null and page.direction.name() == \"PREV\"'>\n                AND A.created_at > #{page.cursor}\n            </if>\n        </where>\n        <if test='page.direction.name() == \"NEXT\"'>\n            order by A.created_at desc\n        </if>\n        <if test='page.direction.name() == \"PREV\"'>\n            order by A.created_at asc\n        </if>\n        limit #{page.queryLimit}\n    </select>\n    <select id=\"findArticlesOfAuthorsWithCursor\" resultMap=\"transfer.data.articleData\">\n        <include refid=\"selectArticleData\"/>\n        <where>\n        A.user_id in\n        <foreach index=\"index\" collection=\"authors\" item=\"id\" open=\"(\" separator=\",\" close=\")\">\n            #{id}\n        </foreach>\n        <if test='page.cursor != null and page.direction.name() == \"NEXT\"'>\n            AND A.created_at &lt; #{page.cursor}\n        </if>\n        <if test='page.cursor != null and page.direction.name() == \"PREV\"'>\n            AND A.created_at > #{page.cursor}\n        </if>\n        <if test='page.direction.name() == \"NEXT\"'>\n            order by A.created_at desc\n        </if>\n        <if test='page.direction.name() == \"PREV\"'>\n            order by A.created_at asc\n        </if>\n        </where>\n        limit #{page.queryLimit}\n    </select>\n\n    <resultMap id=\"articleId\" type=\"string\">\n        <id javaType=\"string\" column=\"articleId\"/>\n    </resultMap>\n</mapper>"
+      },
+      {
+        "kind": "MYBATIS_MAPPER",
+        "filePath": "spring-boot-realworld-example-app-master/src/main/resources/mapper/UserRelationshipQueryService.xml",
+        "content": "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n<!DOCTYPE mapper PUBLIC \"-//mybatis.org//DTD Mapper 3.0//EN\" \"http://mybatis.org/dtd/mybatis-3-mapper.dtd\" >\n<mapper namespace=\"io.spring.infrastructure.mybatis.readservice.UserRelationshipQueryService\">\n    <select id=\"isUserFollowing\" resultType=\"java.lang.Boolean\">\n        select count(1) from follows where user_id = #{userId} and follow_id = #{anotherUserId}\n    </select>\n    <select id=\"followingAuthors\" resultType=\"java.lang.String\">\n        select F.follow_id from follows F\n        where F.follow_id in\n        <foreach collection=\"ids\" item=\"id\" open=\"(\" close=\")\" separator=\",\">\n            #{id}\n        </foreach>\n        and F.user_id = #{userId}\n    </select>\n    <select id=\"followedUsers\" resultType=\"java.lang.String\">\n        select F.follow_id from follows F where F.user_id = #{userId}\n    </select>\n</mapper>"
+      }
+    ],
+    "contextWarnings": []
+  },
+  "response": {
+    "cases": [
+      {
+        "plan_id": 2443,
+        "test_type": "BOUNDARY",
+        "description": "Số bài viết bằng giới hạn trang thì giữ nguyên danh sách và hướng PREV đảo thứ tự.",
+        "preconditions": "userRelationshipQueryService trả về [author-1]. articleReadService trả về danh sách mutable có hai ArticleData theo thứ tự article-1, article-2, mỗi bài có profileData hợp lệ. articleFavoritesReadService trả về số lượt yêu thích cho cả hai ID; userFavorites trả về tập rỗng; followingAuthors trả về tập rỗng. Lưu thứ tự kỳ vọng trước khi gọi method.\n[GreyTest testability: UNKNOWN] COLLECTION_MUTATION @ spring-boot-realworld-example-app-master/src/main/java/io/spring/application/ArticleQueryService.java:82 findUserFeedWithCursor — Method sửa trực tiếp collection fixture: articles.; UNRESOLVED_HELPER_PATH @ spring-boot-realworld-example-app-master/src/main/java/io/spring/application/ArticleQueryService.java:87 findUserFeedWithCursor — Lời gọi helper nội bộ chưa được phân tích đường đi trong MVP: fillExtraInfo. | Tạo collection mutable thực; lưu bản sao expected trước khi gọi method, không tính expected từ fixture đã bị sửa.; Kiểm tra đường đi qua helper trước khi kết luận có thể điều khiển nhánh; không thay kết quả helper bằng giả định.",
+        "test_data": {
+          "input": {
+            "page": {
+              "limit": 2,
+              "cursor": null,
+              "direction": "PREV"
+            },
+            "user": {
+              "id": "user-1"
+            }
+          },
+          "mocks": {
+            "articleFavoritesReadService.userFavorites": {
+              "returns": [],
+              "arguments": [
+                [
+                  "article-1",
+                  "article-2"
+                ],
+                "user-1"
+              ]
+            },
+            "userRelationshipQueryService.followedUsers": {
+              "returns": [
+                "author-1"
+              ],
+              "arguments": [
+                "user-1"
+              ]
+            },
+            "userRelationshipQueryService.followingAuthors": {
+              "returns": [],
+              "arguments": [
+                "user-1",
+                [
+                  "author-1",
+                  "author-1"
+                ]
+              ]
+            },
+            "articleFavoritesReadService.articlesFavoriteCount": {
+              "returns": [
+                {
+                  "id": "article-1",
+                  "count": 3
+                },
+                {
+                  "id": "article-2",
+                  "count": 4
+                }
+              ],
+              "arguments": [
+                [
+                  "article-1",
+                  "article-2"
+                ]
+              ]
+            },
+            "articleReadService.findArticlesOfAuthorsWithCursor": {
+              "returns": [
+                {
+                  "id": "article-1",
+                  "favorited": false,
+                  "profileData": {
+                    "id": "author-1",
+                    "following": false
+                  },
+                  "favoritesCount": 0
+                },
+                {
+                  "id": "article-2",
+                  "favorited": false,
+                  "profileData": {
+                    "id": "author-1",
+                    "following": false
+                  },
+                  "favoritesCount": 0
+                }
+              ],
+              "arguments": [
+                [
+                  "author-1"
+                ],
+                {
+                  "limit": 2,
+                  "direction": "PREV"
+                }
+              ]
+            }
+          }
+        },
+        "expected_result": "Trả về danh sách theo thứ tự article-2, article-1; favoritesCount lần lượt là 4 và 3, favorited=false và profileData.following=false cho cả hai bài. Không có bài vượt giới hạn nên hasNext=false và hasPrevious=false. Các dependency bổ sung được gọi với ID bài viết theo thứ tự trước khi đảo danh sách.",
+        "priority": "HIGH",
+        "trace_source": "BR-002 [IF-2], BR-003 [IF-3] -> TP-021 -> IF-1-FALSE -> IF-2-FALSE -> IF-3-TRUE"
+      },
+      {
+        "plan_id": 2443,
+        "test_type": "HAPPY_PATH",
+        "description": "Khi có bài vượt giới hạn, loại bài tại vị trí giới hạn rồi đảo thứ tự phần còn lại cho hướng PREV.",
+        "preconditions": "userRelationshipQueryService trả về [author-1]. articleReadService trả về danh sách mutable gồm article-1, article-2, article-3, mỗi bài có profileData hợp lệ. Lưu riêng article-3 và danh sách kỳ vọng trước khi gọi method. articleFavoritesReadService trả về số lượt yêu thích cho cả ba bài; userFavorites trả về article-1; followingAuthors trả về author-1.\n[GreyTest testability: UNKNOWN] COLLECTION_MUTATION @ spring-boot-realworld-example-app-master/src/main/java/io/spring/application/ArticleQueryService.java:82 findUserFeedWithCursor — Method sửa trực tiếp collection fixture: articles.; UNRESOLVED_HELPER_PATH @ spring-boot-realworld-example-app-master/src/main/java/io/spring/application/ArticleQueryService.java:87 findUserFeedWithCursor — Lời gọi helper nội bộ chưa được phân tích đường đi trong MVP: fillExtraInfo. | Tạo collection mutable thực; lưu bản sao expected trước khi gọi method, không tính expected từ fixture đã bị sửa.; Kiểm tra đường đi qua helper trước khi kết luận có thể điều khiển nhánh; không thay kết quả helper bằng giả định.",
+        "test_data": {
+          "input": {
+            "page": {
+              "limit": 2,
+              "cursor": null,
+              "direction": "PREV"
+            },
+            "user": {
+              "id": "user-1"
+            }
+          },
+          "mocks": {
+            "articleFavoritesReadService.userFavorites": {
+              "returns": [
+                "article-1"
+              ],
+              "arguments": [
+                [
+                  "article-1",
+                  "article-2",
+                  "article-3"
+                ],
+                "user-1"
+              ]
+            },
+            "userRelationshipQueryService.followedUsers": {
+              "returns": [
+                "author-1"
+              ],
+              "arguments": [
+                "user-1"
+              ]
+            },
+            "userRelationshipQueryService.followingAuthors": {
+              "returns": [
+                "author-1"
+              ],
+              "arguments": [
+                "user-1",
+                [
+                  "author-1",
+                  "author-1",
+                  "author-1"
+                ]
+              ]
+            },
+            "articleFavoritesReadService.articlesFavoriteCount": {
+              "returns": [
+                {
+                  "id": "article-1",
+                  "count": 1
+                },
+                {
+                  "id": "article-2",
+                  "count": 2
+                },
+                {
+                  "id": "article-3",
+                  "count": 3
+                }
+              ],
+              "arguments": [
+                [
+                  "article-1",
+                  "article-2",
+                  "article-3"
+                ]
+              ]
+            },
+            "articleReadService.findArticlesOfAuthorsWithCursor": {
+              "returns": [
+                {
+                  "id": "article-1",
+                  "favorited": false,
+                  "profileData": {
+                    "id": "author-1",
+                    "following": false
+                  },
+                  "favoritesCount": 0
+                },
+                {
+                  "id": "article-2",
+                  "favorited": false,
+                  "profileData": {
+                    "id": "author-1",
+                    "following": false
+                  },
+                  "favoritesCount": 0
+                },
+                {
+                  "id": "article-3",
+                  "favorited": false,
+                  "profileData": {
+                    "id": "author-1",
+                    "following": false
+                  },
+                  "favoritesCount": 0
+                }
+              ],
+              "arguments": [
+                [
+                  "author-1"
+                ],
+                {
+                  "limit": 2,
+                  "direction": "PREV"
+                }
+              ]
+            }
+          }
+        },
+        "expected_result": "article-3 bị loại khỏi danh sách trả về; hai bài còn lại được đảo thành article-2, article-1. article-2 có favoritesCount=2, favorited=false và profileData.following=true; article-1 có favoritesCount=1, favorited=true và profileData.following=true. hasNext=false và hasPrevious=true. Các dependency bổ sung nhận cả ba ID theo thứ tự article-1, article-2, article-3 trước khi phần tử bị loại và danh sách bị đảo.",
+        "priority": "HIGH",
+        "trace_source": "BR-002 [IF-2], BR-003 [IF-3] -> TP-021 -> IF-1-FALSE -> IF-2-TRUE -> IF-3-TRUE"
+      }
+    ]
+  }
+}

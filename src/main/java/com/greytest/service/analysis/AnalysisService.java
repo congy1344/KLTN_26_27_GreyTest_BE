@@ -122,6 +122,7 @@ public class AnalysisService {
 
         SourceScanResult sourceScan = parserHelper.scanProject(sourceDir);
         List<ParsedFile> parsedFiles = sourceScan.productionFiles();
+        var classTypes = parserHelper.determineClassTypes(parsedFiles);
         log.info("Đã parse {} production file .java, loại {} existing test files",
                 parsedFiles.size(), sourceScan.existingTestFileCount());
         project.setTotalProductionFiles(sourceScan.totalProductionFileCount());
@@ -148,7 +149,7 @@ public class AnalysisService {
             List<TypeDeclaration<?>> typeDecls = parserHelper.findTypes(pf.compilationUnit());
 
             for (TypeDeclaration<?> typeDecl : typeDecls) {
-                ClassType classType = parserHelper.determineClassType(typeDecl);
+                ClassType classType = classTypes.get(typeDecl);
                 String qualifiedName = qualifiedTypeName(packageName, typeDecl);
 
                 // Lưu Java type (class/interface/enum/record)
@@ -250,7 +251,7 @@ public class AnalysisService {
         for (ParsedFile pf : parsedFiles) {
             List<ClassOrInterfaceDeclaration> classDecls = parserHelper.findClasses(pf.compilationUnit());
             for (ClassOrInterfaceDeclaration classDecl : classDecls) {
-                ClassType classType = parserHelper.determineClassType(classDecl);
+                ClassType classType = classTypes.get(classDecl);
                 if (classType != ClassType.SERVICE) continue;
 
                 String packageName = parserHelper.getPackageName(pf.compilationUnit());

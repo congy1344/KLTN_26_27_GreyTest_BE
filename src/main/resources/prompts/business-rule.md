@@ -9,6 +9,7 @@ Rules:
 - Use only method id values from Context -> classes[] -> methods[] -> id.
 - Do not invent method_id. Do not use class id.
 - Do not invent behavior, validation, exceptions, or outcomes.
+- When quoting an exception message, inspect the supplied exception constructor and formatting expressions and preserve exact punctuation inside the quotes. Sentence punctuation belongs outside the quoted value. If the required exception declaration is absent, state the exception type without inventing its message.
 - supportingResources contains related mapper XML and only configuration keys referenced by the supplied Java declarations, with file paths for provenance. Read them when explaining a reached collaborator call, SQL result mapping or configured value. Missing files, parse failures and evidence limits appear in contextWarnings: an omitted resource is unknown evidence, never proof of a fallback or missing validation.
 - Implementation classes are candidate declarations, not proof of runtime injection. Check qualifiers, profiles and configuration before claiming which implementation executes. If binding is unproven, describe the visible call and leave the callee outcome unknown. Do not turn supporting methods or resource statements into new target methods/rules.
 - Configuration values are declarations from separate files/documents/profiles; do not merge them into an assumed active environment. Preserve unresolved placeholders, distinguish source defaults from runtime overrides, and do not invent values for omitted or sensitive keys.
@@ -67,6 +68,8 @@ Rules:
 - When a control-flow decision has several facets with no separate source anchor, combine the condition, threshold/formula, state transition, persistence, and side effects in that decision's one rule. Do not omit a side effect merely because another service performs it.
 - For methods with no control-flow decisions, still return rules for independently testable behavior proven directly by the source and attach the matching `STMT-*` anchor.
 - Language contract: the appended # Output language section is authoritative. Every natural-language description in one response must use that one language only. Technical identifiers, exception names, enum values, method names, code, and file paths stay unchanged. Do not copy English prose from the source into a Vietnamese response or Vietnamese prose into an English response.
+
+- Evidence check before output: an exact exception message needs a trace from the selected throw/orElseThrow through the supplied exception constructor, including String.format/concatenation and literal punctuation. A constructor call with resource/field/value arguments does not prove a conventional message format. If the constructor/helper is unavailable or dynamic, state the proven exception type and condition without inventing a quoted exact message. Keep sentence punctuation outside the quoted source string.
 
 Output schema:
 - Root object has "rules".

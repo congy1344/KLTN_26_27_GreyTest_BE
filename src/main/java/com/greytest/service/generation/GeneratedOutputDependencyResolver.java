@@ -23,15 +23,17 @@ final class GeneratedOutputDependencyResolver {
     private final Map<String, String> dependencies = new TreeMap<>();
     private final Set<String> visited = new HashSet<>();
     private final List<String> problems;
+    private String module;
 
-    GeneratedOutputDependencyResolver(SourceDependencyIndex index, List<String> problems) {
+    GeneratedOutputDependencyResolver(SourceDependencyIndex index, List<String> problems, String module) {
         this.index = index;
         this.problems = problems;
+        this.module = module;
         visited.add("output-dependency-mode");
     }
 
     Map<String, String> resolve(List<String> sources) {
-        var solver = new JavaSymbolSolver(index.outputSolver());
+        index.classpathEvidence(dependencies);
         for (String source : sources) {
             var parsed = GenerationJobContext.memoize("output-dependency-ast-v1:" + GenerationFingerprintService.hash(source), () -> {
                 GenerationJobContext.increment("outputDependencyAstParses");
@@ -39,7 +41,7 @@ final class GeneratedOutputDependencyResolver {
             });
             if (!parsed.isSuccessful()) { problems.add("unresolved output source syntax"); continue; }
             CompilationUnit unit = parsed.getResult().orElseThrow().clone();
-            unit.setData(com.github.javaparser.ast.Node.SYMBOL_RESOLVER_KEY, solver);
+            unit.setData(com.github.javaparser.ast.Node.SYMBOL_RESOLVER_KEY, new JavaSymbolSolver(index.outputSolver(module)));
             for (ClassOrInterfaceType type : unit.findAll(ClassOrInterfaceType.class)) {
                 TypeDeclaration<?> sourceType = sourceType(type.getNameWithScope(), unit);
                 if (sourceType != null) index.outputContract(sourceType, dependencies, visited, problems);
@@ -60,14 +62,20 @@ final class GeneratedOutputDependencyResolver {
                     || declaringType.equals("java.lang.Class") && Set.of("getDeclaredMethod", "getMethod", "newInstance").contains(call.getNameAsString())) {
                 problems.add("unresolved reflective output API");
             }
-            TypeDeclaration<?> owner = index.outputType(declaringType, problems);
+            TypeDeclaration<?> owner = productionType(declaringType);
+            if (owner != null && !resolved.isStatic() && call.getScope().isPresent()) {
+                Expression receiver = call.getScope().orElseThrow();
+                if (receiver.isNameExpr()) receiver.asNameExpr().resolve();
+                else if (receiver.isFieldAccessExpr()) receiver.asFieldAccessExpr().resolve();
+                else if (receiver.isTypeExpr()) throw new IllegalArgumentException("Instance method called through a type");
+            }
             if (owner != null) index.outputMethod(owner, resolved.getName(), resolved.getSignature(),
-                    call.getArguments().size(), dependencies, visited, problems);
+                    call.getArguments().size(), call, dependencies, visited, problems);
             return;
         } catch (RuntimeException exception) {
             TypeDeclaration<?> owner = call.getScope().map(scope -> receiverType(scope, unit)).orElse(null);
             if (owner != null) {
-                index.outputMethod(owner, call.getNameAsString(), null, call.getArguments().size(), dependencies, visited, problems);
+                index.outputMethod(owner, call.getNameAsString(), null, call.getArguments().size(), call, dependencies, visited, problems);
                 return;
             }
             if (knownExternal(call, unit) || ownTestHelper(call, unit)) return;
@@ -78,7 +86,7 @@ final class GeneratedOutputDependencyResolver {
     private boolean knownSpringFixture(MethodCallExpr call, CompilationUnit unit) {
         if (!Set.of("setField", "getField").contains(call.getNameAsString())) return false;
         String fixture = "org.springframework.test.util.ReflectionTestUtils";
-        if (index.outputType(fixture, problems) != null) return false;
+        if (productionType(fixture) != null) return false;
         if (call.getScope().isEmpty()) return unit.getImports().stream().anyMatch(imported -> imported.isStatic()
                 && (imported.isAsterisk() && imported.getNameAsString().equals(fixture)
                     || imported.getNameAsString().equals(fixture + "." + call.getNameAsString())));
@@ -99,25 +107,25 @@ final class GeneratedOutputDependencyResolver {
         }
         try {
             var type = scope.calculateResolvedType();
-            if (type.isReferenceType()) return index.outputType(type.asReferenceType().getQualifiedName(), problems);
+            if (type.isReferenceType()) return productionType(type.asReferenceType().getQualifiedName());
         } catch (RuntimeException exception) { /* Static type qualifiers are not value expressions. */ }
         return sourceType(scope.toString(), unit);
     }
 
     private TypeDeclaration<?> sourceType(String name, CompilationUnit unit) {
-        if (name.contains(".")) return index.outputType(name, problems);
+        if (name.contains(".")) return productionType(name);
         for (var imported : unit.getImports()) {
             if (!imported.isAsterisk() && !imported.isStatic() && imported.getName().getIdentifier().equals(name)) {
-                return index.outputType(imported.getNameAsString(), problems);
+                return productionType(imported.getNameAsString());
             }
         }
         String local = unit.getPackageDeclaration().map(pkg -> pkg.getNameAsString() + ".").orElse("") + name;
-        TypeDeclaration<?> type = index.outputType(local, problems);
+        TypeDeclaration<?> type = productionType(local);
         if (type != null) return type;
         TypeDeclaration<?> selected = null;
         for (var imported : unit.getImports()) {
             if (!imported.isAsterisk() || imported.isStatic()) continue;
-            var candidate = index.outputType(imported.getNameAsString() + "." + name, problems);
+            var candidate = productionType(imported.getNameAsString() + "." + name);
             if (candidate == null) continue;
             if (selected != null) { problems.add("unresolved output wildcard type: " + name); return null; }
             selected = candidate;
@@ -139,7 +147,7 @@ final class GeneratedOutputDependencyResolver {
                 var type = scope.calculateResolvedType();
                 if (type.isReferenceType()) {
                     String name = type.asReferenceType().getQualifiedName();
-                    if (index.outputType(name, problems) != null) return false;
+                    if (productionType(name) != null) return false;
                     return name.startsWith("java.") || name.startsWith("org.junit.") || name.startsWith("org.mockito.")
                             || name.startsWith("org.assertj.");
                 }
@@ -158,4 +166,6 @@ final class GeneratedOutputDependencyResolver {
     private boolean testFramework(String name) {
         return name.startsWith("org.junit.") || name.startsWith("org.mockito.") || name.startsWith("org.assertj.");
     }
+
+    private TypeDeclaration<?> productionType(String name) { return index.outputType(name, module, problems); }
 }

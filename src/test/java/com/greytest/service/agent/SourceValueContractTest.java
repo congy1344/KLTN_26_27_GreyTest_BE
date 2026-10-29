@@ -17,6 +17,45 @@ import com.greytest.dto.agent.GenerationContextDtos.UnitTestContextDto;
 
 /** Hồi quy theo khai báo kiểu dữ liệu, không phụ thuộc tên class của dự án đầu vào. */
 class SourceValueContractTest {
+    @Test
+    void rejectsAProjectClassLiteralWhoseImportIsMissing() {
+        var member = new ClassContextDto(1L, "sample.model", "Member", "sample.model.Member", "OTHER", "Member.java",
+                "package sample.model; public class Member {}", List.of(), List.of());
+        var context = new UnitTestContextDto(null, null, List.of(member), List.of(), List.of(), List.of(), List.of(), List.of(), List.of());
+        var test = new JavaParser().parse("package sample.service; class Check { void check() { "
+                + "org.mockito.ArgumentMatchers.any(Member.class); } }").getResult().orElseThrow();
+
+        assertThat(GeneratedTestApiValidator.validate(context, test))
+                .anySatisfy(problem -> assertThat(problem).contains("import", "sample.model.Member"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"import sample.model.Member; class Check { Member value; }",
+            "class Check { sample.model.Member value; }", "class Check { static class Member {} Member value; }",
+            "class Check<Member> { Member value; }"})
+    void preservesResolvedOrLocallyDeclaredProjectTypeNames(String body) {
+        var member = new ClassContextDto(1L, "sample.model", "Member", "sample.model.Member", "OTHER", "Member.java",
+                "package sample.model; public class Member {}", List.of(), List.of());
+        var context = new UnitTestContextDto(null, null, List.of(member), List.of(), List.of(), List.of(), List.of(), List.of(), List.of());
+        var test = new JavaParser().parse("package sample.service; " + body).getResult().orElseThrow();
+
+        assertThat(GeneratedTestApiValidator.validate(context, test)).isEmpty();
+    }
+
+    @Test
+    void doesNotGuessImportsForAnUnpackagedSnippetOrMetadataWithoutSource() {
+        var known = new ClassContextDto(1L, "sample.model", "Member", "sample.model.Member", "OTHER", "Member.java",
+                "package sample.model; public class Member {}", List.of(), List.of());
+        var unknown = new ClassContextDto(2L, "sample.model", "Other", "sample.model.Other", "OTHER", "Other.java",
+                null, List.of(), List.of());
+        var context = new UnitTestContextDto(null, null, List.of(known, unknown), List.of(), List.of(), List.of(), List.of(), List.of(), List.of());
+        var snippet = new JavaParser().parse("class Check { Member value; }").getResult().orElseThrow();
+        var missingSource = new JavaParser().parse("package sample.service; class Check { Other value; }").getResult().orElseThrow();
+
+        assertThat(GeneratedTestApiValidator.validate(context, snippet)).isEmpty();
+        assertThat(GeneratedTestApiValidator.validate(context, missingSource)).isEmpty();
+    }
+
     static Stream<Arguments> primitiveAssertions() {
         return Stream.of("byte", "short", "int", "long", "float", "double", "boolean", "char")
                 .flatMap(type -> Stream.of(

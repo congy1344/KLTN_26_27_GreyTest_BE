@@ -65,6 +65,7 @@ public final class SnapshotAnalysisLoader {
         List<SourceType> sources = scan.productionFiles().stream().flatMap(file -> parser.findTypes(file.compilationUnit())
                 .stream().map(type -> new SourceType(file, type, type.getFullyQualifiedName().orElseThrow()))).toList();
         List<JavaClassDto> classes = new ArrayList<>();
+        var classTypes = parser.determineClassTypes(scan.productionFiles());
         for (SourceType source : sources) {
             List<JavaMethodDto> methods = new ArrayList<>();
             for (var method : parser.extractMethods(source.type())) {
@@ -78,7 +79,7 @@ public final class SnapshotAnalysisLoader {
             var unit = source.file().compilationUnit().clone();
             unit.setTypes(new NodeList<>(owner.clone()));
             classes.add(new JavaClassDto(null, parser.getPackageName(unit), source.type().getNameAsString(),
-                    source.qualifiedName(), parser.determineClassType(source.type()).name(), source.file().relativePath(),
+                    source.qualifiedName(), classTypes.get(source.type()).name(), source.file().relativePath(),
                     unit.toString(), List.of(), List.copyOf(methods)));
         }
         return new ParsedSnapshot(List.copyOf(classes), scan.existingTestFileCount(), scan.totalProductionFileCount(),

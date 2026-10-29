@@ -29,6 +29,38 @@ class CoverageToolBootstrapTest {
     @TempDir Path workspace;
     private final UnitTestFileService service = new UnitTestFileService();
 
+    @Test
+    void windowsUsesShortJunctionForDeepAsciiWorkspace() throws Exception {
+        windowsOnly();
+        var module = module("deep-ascii-" + "x".repeat(80), true);
+        Files.writeString(module.resolve("gradlew.bat"), GRADLE_CMD);
+        var result = run(module, false, env -> { });
+        assertThat(result.exit()).withFailMessage(result.output()).isZero();
+        assertThat(result.output()).contains("Junction", "JUNCTION_1", "SUCCESS");
+    }
+
+    @Test
+    void windowsKeepsParentGradleSettingsAndSiblingProjectsForDeepAsciiModule() throws Exception {
+        windowsOnly();
+        var module = module("subprojects/child-" + "x".repeat(80), true);
+        Files.writeString(module.getParent().resolve("settings.gradle"), "include ':child', ':shared'\n");
+        Files.createDirectories(module.getParent().resolve("shared"));
+        Files.writeString(module.getParent().resolve("shared/marker.txt"), "sibling");
+        Files.writeString(module.resolve("gradlew.bat"), GRADLE_CMD.replace("echo JUNCTION_", "if not exist ..\\settings.gradle exit /b 9\r\n"
+                + "if not exist ..\\shared\\marker.txt exit /b 9\r\necho JUNCTION_"));
+        var result = run(module, false, env -> { });
+        assertThat(result.exit()).withFailMessage(result.output()).isZero();
+        assertThat(result.output()).contains("SUCCESS").doesNotContain("JUNCTION_1");
+    }
+
+    private static final String GRADLE_CMD = """
+            @echo off
+            echo JUNCTION_%GREYTEST_JUNCTION_RUN%
+            if not exist build\\reports\\jacoco\\test mkdir build\\reports\\jacoco\\test
+            echo ^<report/^>>build\\reports\\jacoco\\test\\jacocoTestReport.xml
+            exit /b 0
+            """.replace("\n", "\r\n");
+
     private static final String MAVEN_CMD = """
             @echo off
             echo TEST_MAVEN %*

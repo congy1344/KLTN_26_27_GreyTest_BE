@@ -1,0 +1,318 @@
+{
+  "context": {
+    "project": {
+      "id": 1,
+      "name": "LibraryManagmentSystem-Libria-master",
+      "status": "ANALYZED"
+    },
+    "analysis": {
+      "totalClasses": 9,
+      "totalMethods": 11,
+      "totalEndpoints": 2,
+      "totalRelations": 1,
+      "totalControllerServiceRelations": 2,
+      "existingTestFiles": 1,
+      "totalProductionFiles": 9,
+      "parsedProductionFiles": 9,
+      "failedParseFiles": 0,
+      "failedParseFilePaths": []
+    },
+    "classes": [
+      {
+        "id": 9,
+        "packageName": "pl.com.coders.libria1.service",
+        "className": "BookService",
+        "qualifiedName": "pl.com.coders.libria1.service.BookService",
+        "classType": "SERVICE",
+        "filePath": "LibraryManagmentSystem-Libria-master/src/main/java/pl/com/coders/libria1/service/BookService.java",
+        "sourceCode": "package pl.com.coders.libria1.service;\n\nimport org.springframework.beans.factory.annotation.Autowired;\nimport org.springframework.stereotype.Service;\nimport pl.com.coders.libria1.controller.BookCreateRequest;\nimport pl.com.coders.libria1.controller.BookView;\nimport pl.com.coders.libria1.domain.Book;\nimport pl.com.coders.libria1.mapper.BookMapper;\nimport pl.com.coders.libria1.repository.BookRepository;\nimport java.util.Optional;\n\n@Service\npublic class BookService {\n\n    @Autowired\n    private BookRepository bookRepository;\n\n    @Autowired\n    private BookMapper bookMapper;\n\n    public BookView get(Long id) {\n        Optional<Book> bookOpt = bookRepository.findById(id);\n        Book book = bookOpt.orElseThrow(() -> new IllegalArgumentException(\"Book not exist with id : \" + id));\n        return bookMapper.toView(book);\n    }\n\n    public BookView create(BookCreateRequest bookCreateRequest) {\n        Book book = bookMapper.toEntity(bookCreateRequest);\n        return bookMapper.toView(bookRepository.save(book));\n    }\n}\n",
+        "annotations": [
+          {
+            "id": 7,
+            "targetType": "CLASS",
+            "category": "COMPONENT",
+            "annotationName": "Service",
+            "attributes": "@Service"
+          }
+        ],
+        "methods": [
+          {
+            "id": 10,
+            "classQualifiedName": "pl.com.coders.libria1.service.BookService",
+            "methodName": "get",
+            "returnType": "BookView",
+            "parameters": [
+              {
+                "name": "id",
+                "type": "Long"
+              }
+            ],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "public BookView get(Long id) {\n        Optional<Book> bookOpt = bookRepository.findById(id);\n        Book book = bookOpt.orElseThrow(() -> new IllegalArgumentException(\"Book not exist with id : \" + id));\n\n        return bookMapper.toView(book);\n    }",
+            "lineStart": 22,
+            "lineEnd": 27,
+            "annotations": [],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 23,
+                "lineEnd": 23
+              },
+              {
+                "branchId": "STMT-2",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 24,
+                "lineEnd": 24
+              },
+              {
+                "branchId": "STMT-3",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 26,
+                "lineEnd": 26
+              }
+            ]
+          },
+          {
+            "id": 11,
+            "classQualifiedName": "pl.com.coders.libria1.service.BookService",
+            "methodName": "create",
+            "returnType": "BookView",
+            "parameters": [
+              {
+                "name": "bookCreateRequest",
+                "type": "BookCreateRequest"
+              }
+            ],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "public BookView create(BookCreateRequest bookCreateRequest) {\n        Book book = bookMapper.toEntity(bookCreateRequest);\n\n        return bookMapper.toView(bookRepository.save(book));\n    }",
+            "lineStart": 29,
+            "lineEnd": 33,
+            "annotations": [],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 30,
+                "lineEnd": 30
+              },
+              {
+                "branchId": "STMT-2",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 32,
+                "lineEnd": 32
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": 3,
+        "packageName": "pl.com.coders.libria1.controller",
+        "className": "BookCreateRequest",
+        "qualifiedName": "pl.com.coders.libria1.controller.BookCreateRequest",
+        "classType": "OTHER",
+        "filePath": "LibraryManagmentSystem-Libria-master/src/main/java/pl/com/coders/libria1/controller/BookCreateRequest.java",
+        "sourceCode": "package pl.com.coders.libria1.controller;\n\npublic class BookCreateRequest {\n\n    private String title;\n\n    private String author;\n\n    private int amount;\n\n    public String getTitle() {\n        return title;\n    }\n\n    public String getAuthor() {\n        return author;\n    }\n\n    public int getAmount() {\n        return amount;\n    }\n\n    public void setTitle(String title) {\n        this.title = title;\n    }\n\n    public void setAuthor(String author) {\n        this.author = author;\n    }\n\n    public void setAmount(int amount) {\n        this.amount = amount;\n    }\n}\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 4,
+        "packageName": "pl.com.coders.libria1.controller",
+        "className": "BookView",
+        "qualifiedName": "pl.com.coders.libria1.controller.BookView",
+        "classType": "OTHER",
+        "filePath": "LibraryManagmentSystem-Libria-master/src/main/java/pl/com/coders/libria1/controller/BookView.java",
+        "sourceCode": "package pl.com.coders.libria1.controller;\n\nimport java.time.LocalDateTime;\n\npublic class BookView {\n\n    private Long id;\n\n    private String title;\n\n    private String author;\n\n    private int amount;\n\n    private LocalDateTime created;\n\n    private LocalDateTime updated;\n\n    public BookView(Long id, String title, String author, int amount, LocalDateTime created, LocalDateTime updated) {\n        this.id = id;\n        this.title = title;\n        this.author = author;\n        this.amount = amount;\n        this.created = created;\n        this.updated = updated;\n    }\n\n    public BookView() {\n    }\n\n    public Long getId() {\n        return id;\n    }\n\n    public String getTitle() {\n        return title;\n    }\n\n    public String getAuthor() {\n        return author;\n    }\n\n    public int getAmount() {\n        return amount;\n    }\n\n    public LocalDateTime getCreated() {\n        return created;\n    }\n\n    public LocalDateTime getUpdated() {\n        return updated;\n    }\n\n    public void setId(Long id) {\n        this.id = id;\n    }\n\n    public void setTitle(String title) {\n        this.title = title;\n    }\n\n    public void setAuthor(String author) {\n        this.author = author;\n    }\n\n    public void setAmount(int amount) {\n        this.amount = amount;\n    }\n\n    public void setCreated(LocalDateTime created) {\n        this.created = created;\n    }\n\n    public void setUpdated(LocalDateTime updated) {\n        this.updated = updated;\n    }\n}\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 5,
+        "packageName": "pl.com.coders.libria1.domain",
+        "className": "Book",
+        "qualifiedName": "pl.com.coders.libria1.domain.Book",
+        "classType": "ENTITY",
+        "filePath": "LibraryManagmentSystem-Libria-master/src/main/java/pl/com/coders/libria1/domain/Book.java",
+        "sourceCode": "package pl.com.coders.libria1.domain;\n\nimport org.hibernate.annotations.CreationTimestamp;\nimport org.hibernate.annotations.UpdateTimestamp;\nimport javax.persistence.Entity;\nimport javax.persistence.GeneratedValue;\nimport javax.persistence.GenerationType;\nimport javax.persistence.Id;\nimport java.time.LocalDateTime;\n\n@Entity(name = \"BOOK\")\npublic class Book {\n\n    @Id\n    @GeneratedValue(strategy = GenerationType.IDENTITY)\n    private Long id;\n\n    private String title;\n\n    private String author;\n\n    private int amount;\n\n    @CreationTimestamp\n    private LocalDateTime created;\n\n    @UpdateTimestamp\n    private LocalDateTime updated;\n\n    public Book(String title, String author, int amount) {\n        this.title = title;\n        this.author = author;\n        this.amount = amount;\n    }\n\n    public Book() {\n    }\n\n    public Long getId() {\n        return id;\n    }\n\n    public String getTitle() {\n        return title;\n    }\n\n    public String getAuthor() {\n        return author;\n    }\n\n    public int getAmount() {\n        return amount;\n    }\n\n    public LocalDateTime getCreated() {\n        return created;\n    }\n\n    public LocalDateTime getUpdated() {\n        return updated;\n    }\n\n    public void setId(Long id) {\n        this.id = id;\n    }\n\n    public void setTitle(String title) {\n        this.title = title;\n    }\n\n    public void setAuthor(String author) {\n        this.author = author;\n    }\n\n    public void setAmount(int amount) {\n        this.amount = amount;\n    }\n\n    public void setCreated(LocalDateTime created) {\n        this.created = created;\n    }\n\n    public void setUpdated(LocalDateTime updated) {\n        this.updated = updated;\n    }\n}\n",
+        "annotations": [
+          {
+            "id": 5,
+            "targetType": "CLASS",
+            "category": "PERSISTENCE",
+            "annotationName": "Entity",
+            "attributes": "@Entity(name = \"BOOK\")"
+          }
+        ],
+        "methods": []
+      },
+      {
+        "id": 7,
+        "packageName": "pl.com.coders.libria1.mapper",
+        "className": "BookMapper",
+        "qualifiedName": "pl.com.coders.libria1.mapper.BookMapper",
+        "classType": "OTHER",
+        "filePath": "LibraryManagmentSystem-Libria-master/src/main/java/pl/com/coders/libria1/mapper/BookMapper.java",
+        "sourceCode": "package pl.com.coders.libria1.mapper;\n\nimport org.mapstruct.Mapper;\nimport pl.com.coders.libria1.controller.BookCreateRequest;\nimport pl.com.coders.libria1.controller.BookView;\nimport pl.com.coders.libria1.domain.Book;\n\n@Mapper(componentModel = \"spring\")\npublic interface BookMapper {\n\n    BookView toView(Book book);\n\n    Book toEntity(BookView view);\n\n    Book toEntity(BookCreateRequest bookCreateRequest);\n}\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8,
+        "packageName": "pl.com.coders.libria1.repository",
+        "className": "BookRepository",
+        "qualifiedName": "pl.com.coders.libria1.repository.BookRepository",
+        "classType": "REPOSITORY",
+        "filePath": "LibraryManagmentSystem-Libria-master/src/main/java/pl/com/coders/libria1/repository/BookRepository.java",
+        "sourceCode": "package pl.com.coders.libria1.repository;\n\nimport org.springframework.data.repository.CrudRepository;\nimport org.springframework.stereotype.Repository;\nimport pl.com.coders.libria1.domain.Book;\n\n@Repository\npublic interface BookRepository extends CrudRepository<Book, Long> {\n}\n",
+        "annotations": [
+          {
+            "id": 6,
+            "targetType": "CLASS",
+            "category": "COMPONENT",
+            "annotationName": "Repository",
+            "attributes": "@Repository"
+          }
+        ],
+        "methods": []
+      }
+    ],
+    "serviceRepositoryRelations": [
+      {
+        "id": 1,
+        "serviceClassName": "BookService",
+        "serviceQualifiedName": "pl.com.coders.libria1.service.BookService",
+        "repositoryClassName": "BookRepository",
+        "repositoryQualifiedName": "pl.com.coders.libria1.repository.BookRepository"
+      }
+    ],
+    "controllerServiceRelations": [
+      {
+        "id": 2,
+        "controllerClassName": "BookController",
+        "controllerQualifiedName": "pl.com.coders.libria1.controller.BookController",
+        "controllerMethodName": "create",
+        "serviceClassName": "BookService",
+        "serviceQualifiedName": "pl.com.coders.libria1.service.BookService",
+        "serviceMethodName": "create",
+        "serviceFieldName": "bookService",
+        "serviceFieldType": "BookService"
+      },
+      {
+        "id": 1,
+        "controllerClassName": "BookController",
+        "controllerQualifiedName": "pl.com.coders.libria1.controller.BookController",
+        "controllerMethodName": "get",
+        "serviceClassName": "BookService",
+        "serviceQualifiedName": "pl.com.coders.libria1.service.BookService",
+        "serviceMethodName": "get",
+        "serviceFieldName": "bookService",
+        "serviceFieldType": "BookService"
+      }
+    ],
+    "dependencyCalls": [
+      {
+        "callerMethodId": 10,
+        "callerClassQualifiedName": "pl.com.coders.libria1.service.BookService",
+        "collaboratorName": "bookMapper",
+        "collaboratorType": "BookMapper",
+        "calleeClassName": "BookMapper",
+        "calleeQualifiedName": "pl.com.coders.libria1.mapper.BookMapper",
+        "calleeMethodName": "toView",
+        "httpMethod": null,
+        "endpointPath": null,
+        "calleeServiceSourceCode": null
+      },
+      {
+        "callerMethodId": 10,
+        "callerClassQualifiedName": "pl.com.coders.libria1.service.BookService",
+        "collaboratorName": "bookRepository",
+        "collaboratorType": "BookRepository",
+        "calleeClassName": "BookRepository",
+        "calleeQualifiedName": "pl.com.coders.libria1.repository.BookRepository",
+        "calleeMethodName": "findById",
+        "httpMethod": null,
+        "endpointPath": null,
+        "calleeServiceSourceCode": null
+      },
+      {
+        "callerMethodId": 11,
+        "callerClassQualifiedName": "pl.com.coders.libria1.service.BookService",
+        "collaboratorName": "bookMapper",
+        "collaboratorType": "BookMapper",
+        "calleeClassName": "BookMapper",
+        "calleeQualifiedName": "pl.com.coders.libria1.mapper.BookMapper",
+        "calleeMethodName": "toEntity",
+        "httpMethod": null,
+        "endpointPath": null,
+        "calleeServiceSourceCode": null
+      },
+      {
+        "callerMethodId": 11,
+        "callerClassQualifiedName": "pl.com.coders.libria1.service.BookService",
+        "collaboratorName": "bookMapper",
+        "collaboratorType": "BookMapper",
+        "calleeClassName": "BookMapper",
+        "calleeQualifiedName": "pl.com.coders.libria1.mapper.BookMapper",
+        "calleeMethodName": "toView",
+        "httpMethod": null,
+        "endpointPath": null,
+        "calleeServiceSourceCode": null
+      },
+      {
+        "callerMethodId": 11,
+        "callerClassQualifiedName": "pl.com.coders.libria1.service.BookService",
+        "collaboratorName": "bookRepository",
+        "collaboratorType": "BookRepository",
+        "calleeClassName": "BookRepository",
+        "calleeQualifiedName": "pl.com.coders.libria1.repository.BookRepository",
+        "calleeMethodName": "save",
+        "httpMethod": null,
+        "endpointPath": null,
+        "calleeServiceSourceCode": null
+      }
+    ],
+    "existingTests": [],
+    "supportingResources": [],
+    "contextWarnings": []
+  },
+  "response": {
+    "rules": [
+      {
+        "method_id": 10,
+        "description": "Khi không tìm thấy sách theo id đã cung cấp, service ném IllegalArgumentException với thông báo được ghép từ chuỗi \"Book not exist with id : \" và giá trị id.",
+        "category": "VALIDATION",
+        "branch_id": "STMT-2"
+      },
+      {
+        "method_id": 10,
+        "description": "Khi tìm thấy sách theo id đã cung cấp, service chuyển sách thành BookView và trả về kết quả chuyển đổi.",
+        "category": "BUSINESS_LOGIC",
+        "branch_id": "STMT-3"
+      },
+      {
+        "method_id": 11,
+        "description": "Khi nhận yêu cầu tạo sách, service chuyển yêu cầu thành Book, lưu sách bằng save và chuyển kết quả lưu thành BookView để trả về.",
+        "category": "SIDE_EFFECT",
+        "branch_id": "STMT-2"
+      }
+    ]
+  },
+  "capturedContext": "20261027-200736-119-1-business-rule.log",
+  "capturedResponse": "20261027-200824-909-10-business-rule-response-2.log"
+}

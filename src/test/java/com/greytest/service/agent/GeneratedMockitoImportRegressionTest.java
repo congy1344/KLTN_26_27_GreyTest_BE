@@ -18,6 +18,48 @@ import com.greytest.exception.StorageException;
 import com.greytest.service.UnitTestFileService;
 
 class GeneratedMockitoImportRegressionTest {
+    @Test
+    void allowsLegalWildcardStaticImportOfAnExistingAnnotationType() {
+        var file = file("import static org.mockito.Mock.*;", "", "");
+        assertThat(new UnitTestFileService().createCoverageArchive(List.of(file))).isNotEmpty();
+    }
+    @ParameterizedTest
+    @ValueSource(strings = {"thenAnswer", "thenReturn", "thenThrow", "thenCallRealMethod"})
+    void rejectsFluentStubbingMethodsImportedAsMockitoStatics(String method) {
+        var file = file("import static org.mockito.Mockito." + method + ";", "", "");
+        assertThatThrownBy(() -> new UnitTestFileService().createCoverageArchive(List.of(file)))
+                .isInstanceOf(StorageException.class).hasMessageContaining(method, "OngoingStubbing");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"import static org.junit.jupiter.api.MockitoSettings;",
+            "import org.junit.jupiter.api.MockitoSettings;", "import org.junit.jupiter.api.MockitoExtension;",
+            "import org.junit.jupiter.api.Mock;", "import static org.junit.jupiter.api.*;", "import static org.mockito.*;"})
+    void rejectsFrameworkPackagesUsedAsStaticTypesAndWrongMockitoAnnotationPackages(String imports) {
+        var file = file(imports, "", "");
+        assertThatThrownBy(() -> new UnitTestFileService().createCoverageArchive(List.of(file)))
+                .isInstanceOf(StorageException.class).hasMessageContaining("import");
+    }
+
+
+    @ParameterizedTest
+    @ValueSource(strings = {"import static org.junit.jupiter.api.Mockito.*;",
+            "import org.junit.jupiter.api.Mockito;",
+            "import static org.junit.jupiter.api.Mockito.when;",
+            "import org.junit.jupiter.api.Mockito.*;",
+            "import static org.junit.Mockito.*;",
+            "import static demo.CustomHelpers.*; import static org.junit.jupiter.api.Mockito.*;",
+            "import static org.mockito.Mockito.*; import static org.junit.jupiter.api.Mockito.*;"})
+    void rejectsMockitoImportedFromJUnitDuringGenerationAndExport(String imports) {
+        var file = file(imports, "", "");
+        var response = new UnitTestResponseDto(List.of(new GeneratedUnitTestDto(
+                40L, "ServiceTest", "testCase", "demo", "NEW_TEST", file.sourceCode())));
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context(), response))
+                .hasValueSatisfying(message -> assertThat(message).contains("org.mockito.Mockito", "JUnit"));
+        assertThatThrownBy(() -> new UnitTestFileService().createCoverageArchive(List.of(file)))
+                .isInstanceOf(StorageException.class).hasMessageContaining("org.mockito.Mockito");
+    }
 
     @ParameterizedTest
     @ValueSource(strings = {"import org.mockito.junit.jupiter.Strictness;",

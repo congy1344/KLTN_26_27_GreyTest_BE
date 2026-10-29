@@ -1,0 +1,435 @@
+{
+  "context": {
+    "project": {
+      "id": 872,
+      "name": "spring-boot-realworld-example-app-master",
+      "status": "CASE_PENDING_REVIEW"
+    },
+    "analysis": {
+      "totalClasses": 96,
+      "totalMethods": 214,
+      "totalEndpoints": 19,
+      "totalRelations": 1,
+      "totalControllerServiceRelations": 20,
+      "existingTestFiles": 23,
+      "totalProductionFiles": 93,
+      "parsedProductionFiles": 93,
+      "failedParseFiles": 0,
+      "failedParseFilePaths": []
+    },
+    "classes": [
+      {
+        "id": 9064,
+        "packageName": "io.spring.infrastructure.service",
+        "className": "DefaultJwtService",
+        "qualifiedName": "io.spring.infrastructure.service.DefaultJwtService",
+        "classType": "SERVICE",
+        "filePath": "spring-boot-realworld-example-app-master/src/main/java/io/spring/infrastructure/service/DefaultJwtService.java",
+        "sourceCode": "package io.spring.infrastructure.service;\n\nimport io.jsonwebtoken.Claims;\nimport io.jsonwebtoken.Jws;\nimport io.jsonwebtoken.Jwts;\nimport io.jsonwebtoken.SignatureAlgorithm;\nimport io.spring.core.service.JwtService;\nimport io.spring.core.user.User;\nimport java.util.Date;\nimport java.util.Optional;\nimport javax.crypto.SecretKey;\nimport javax.crypto.spec.SecretKeySpec;\nimport org.springframework.beans.factory.annotation.Autowired;\nimport org.springframework.beans.factory.annotation.Value;\nimport org.springframework.stereotype.Component;\n\n@Component\npublic class DefaultJwtService implements JwtService {\n\n    private final SecretKey signingKey;\n\n    private final SignatureAlgorithm signatureAlgorithm;\n\n    private int sessionTime;\n\n    @Autowired\n    public DefaultJwtService(@Value(\"${jwt.secret}\") String secret, @Value(\"${jwt.sessionTime}\") int sessionTime) {\n        this.sessionTime = sessionTime;\n        signatureAlgorithm = SignatureAlgorithm.HS512;\n        this.signingKey = new SecretKeySpec(secret.getBytes(), signatureAlgorithm.getJcaName());\n    }\n\n    @Override\n    public String toToken(User user) {\n        return Jwts.builder().setSubject(user.getId()).setExpiration(expireTimeFromNow()).signWith(signingKey).compact();\n    }\n\n    @Override\n    public Optional<String> getSubFromToken(String token) {\n        try {\n            Jws<Claims> claimsJws = Jwts.parserBuilder().setSigningKey(signingKey).build().parseClaimsJws(token);\n            return Optional.ofNullable(claimsJws.getBody().getSubject());\n        } catch (Exception e) {\n            return Optional.empty();\n        }\n    }\n\n    private Date expireTimeFromNow() {\n        return new Date(System.currentTimeMillis() + sessionTime * 1000L);\n    }\n}\n",
+        "annotations": [
+          {
+            "id": 11434,
+            "targetType": "CLASS",
+            "category": "COMPONENT",
+            "annotationName": "Component",
+            "attributes": "@Component"
+          }
+        ],
+        "methods": [
+          {
+            "id": 19104,
+            "classQualifiedName": "io.spring.infrastructure.service.DefaultJwtService",
+            "methodName": "toToken",
+            "returnType": "String",
+            "parameters": [
+              {
+                "name": "user",
+                "type": "User"
+              }
+            ],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "@Override\n  public String toToken(User user) {\n    return Jwts.builder()\n        .setSubject(user.getId())\n        .setExpiration(expireTimeFromNow())\n        .signWith(signingKey)\n        .compact();\n  }",
+            "lineStart": 31,
+            "lineEnd": 38,
+            "annotations": [],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 33,
+                "lineEnd": 37
+              }
+            ]
+          },
+          {
+            "id": 19105,
+            "classQualifiedName": "io.spring.infrastructure.service.DefaultJwtService",
+            "methodName": "getSubFromToken",
+            "returnType": "Optional<String>",
+            "parameters": [
+              {
+                "name": "token",
+                "type": "String"
+              }
+            ],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "@Override\n  public Optional<String> getSubFromToken(String token) {\n    try {\n      Jws<Claims> claimsJws =\n          Jwts.parserBuilder().setSigningKey(signingKey).build().parseClaimsJws(token);\n      return Optional.ofNullable(claimsJws.getBody().getSubject());\n    } catch (Exception e) {\n      return Optional.empty();\n    }\n  }",
+            "lineStart": 40,
+            "lineEnd": 49,
+            "annotations": [],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 42,
+                "lineEnd": 48
+              }
+            ]
+          },
+          {
+            "id": 19106,
+            "classQualifiedName": "io.spring.infrastructure.service.DefaultJwtService",
+            "methodName": "expireTimeFromNow",
+            "returnType": "Date",
+            "parameters": [],
+            "throwsList": [],
+            "visibility": "PRIVATE",
+            "sourceCode": "private Date expireTimeFromNow() {\n    return new Date(System.currentTimeMillis() + sessionTime * 1000L);\n  }",
+            "lineStart": 51,
+            "lineEnd": 53,
+            "annotations": [],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 52,
+                "lineEnd": 52
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": 9033,
+        "packageName": "io.spring.core.service",
+        "className": "JwtService",
+        "qualifiedName": "io.spring.core.service.JwtService",
+        "classType": "OTHER",
+        "filePath": "spring-boot-realworld-example-app-master/src/main/java/io/spring/core/service/JwtService.java",
+        "sourceCode": "package io.spring.core.service;\n\nimport io.spring.core.user.User;\nimport java.util.Optional;\nimport org.springframework.stereotype.Service;\n\n@Service\npublic interface JwtService {\n\n    String toToken(User user);\n\n    Optional<String> getSubFromToken(String token);\n}\n",
+        "annotations": [
+          {
+            "id": 11426,
+            "targetType": "CLASS",
+            "category": "COMPONENT",
+            "annotationName": "Service",
+            "attributes": "@Service"
+          }
+        ],
+        "methods": []
+      },
+      {
+        "id": 9035,
+        "packageName": "io.spring.core.user",
+        "className": "User",
+        "qualifiedName": "io.spring.core.user.User",
+        "classType": "OTHER",
+        "filePath": "spring-boot-realworld-example-app-master/src/main/java/io/spring/core/user/User.java",
+        "sourceCode": "package io.spring.core.user;\n\nimport io.spring.Util;\nimport java.util.UUID;\nimport lombok.EqualsAndHashCode;\nimport lombok.Getter;\nimport lombok.NoArgsConstructor;\n\n@Getter\n@NoArgsConstructor\n@EqualsAndHashCode(of = { \"id\" })\npublic class User {\n\n    private String id;\n\n    private String email;\n\n    private String username;\n\n    private String password;\n\n    private String bio;\n\n    private String image;\n\n    public User(String email, String username, String password, String bio, String image) {\n        this.id = UUID.randomUUID().toString();\n        this.email = email;\n        this.username = username;\n        this.password = password;\n        this.bio = bio;\n        this.image = image;\n    }\n\n    public void update(String email, String username, String password, String bio, String image) {\n        if (!Util.isEmpty(email)) {\n            this.email = email;\n        }\n        if (!Util.isEmpty(username)) {\n            this.username = username;\n        }\n        if (!Util.isEmpty(password)) {\n            this.password = password;\n        }\n        if (!Util.isEmpty(bio)) {\n            this.bio = bio;\n        }\n        if (!Util.isEmpty(image)) {\n            this.image = image;\n        }\n    }\n}\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 9070,
+        "packageName": "io.spring",
+        "className": "Util",
+        "qualifiedName": "io.spring.Util",
+        "classType": "OTHER",
+        "filePath": "spring-boot-realworld-example-app-master/src/main/java/io/spring/Util.java",
+        "sourceCode": "package io.spring;\n\npublic class Util {\n\n    public static boolean isEmpty(String value) {\n        return value == null || value.isEmpty();\n    }\n}\n",
+        "annotations": [],
+        "methods": []
+      }
+    ],
+    "approvedBusinessRules": [
+      {
+        "id": 4819,
+        "methodId": 19104,
+        "ruleCode": "BR-022",
+        "description": "Khi tạo token cho người dùng, service đặt ID người dùng làm subject, thiết lập thời điểm hết hạn dựa trên thời lượng phiên cấu hình, ký token bằng signingKey rồi tạo chuỗi token.",
+        "reviewNote": "SOURCE_BRANCH:STMT-1\nAI category: BUSINESS_LOGIC. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-1"
+      },
+      {
+        "id": 4820,
+        "methodId": 19105,
+        "ruleCode": "BR-023",
+        "description": "Khi phân tích token, service xác minh token bằng signingKey và trả về subject dưới dạng Optional; nếu subject là null thì Optional rỗng, còn nếu xảy ra Exception thì service cũng trả về Optional rỗng.",
+        "reviewNote": "SOURCE_BRANCH:STMT-1\nAI category: BUSINESS_LOGIC. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-1"
+      },
+      {
+        "id": 4821,
+        "methodId": 19106,
+        "ruleCode": "BR-024",
+        "description": "Khi tính thời điểm hết hạn, service cộng sessionTime nhân 1000L vào thời gian hệ thống hiện tại để tạo Date.",
+        "reviewNote": "SOURCE_BRANCH:STMT-1\nAI category: BUSINESS_LOGIC. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-1"
+      }
+    ],
+    "approvedTestPlans": [
+      {
+        "id": 2457,
+        "businessRuleId": 4819,
+        "coveredRuleIds": [
+          4819
+        ],
+        "planCode": "TP-035",
+        "title": "Tạo token cho người dùng",
+        "description": "Token có subject là ID người dùng, thời hạn theo sessionTime cấu hình và được ký bằng signingKey.\n[GreyTest testability: UNKNOWN] UNRESOLVED_HELPER_PATH @ spring-boot-realworld-example-app-master/src/main/java/io/spring/infrastructure/service/DefaultJwtService.java:35 toToken — Lời gọi helper nội bộ chưa được phân tích đường đi trong MVP: expireTimeFromNow.; INTERNAL_FINAL_COLLABORATOR @ spring-boot-realworld-example-app-master/src/main/java/io/spring/infrastructure/service/DefaultJwtService.java:20 toToken — Collaborator final được tạo bên trong class: signingKey. | Kiểm tra đường đi qua helper trước khi kết luận có thể điều khiển nhánh; không thay kết quả helper bằng giả định.; Dùng collaborator/collection thật và kiểm tra trạng thái qua API có sẵn; không giả định @InjectMocks thay được field final đã khởi tạo.",
+        "testType": "HAPPY_PATH",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2458,
+        "businessRuleId": 4820,
+        "coveredRuleIds": [
+          4820
+        ],
+        "planCode": "TP-036",
+        "title": "Phân tích token hợp lệ và không hợp lệ",
+        "description": "Token hợp lệ trả về subject trong Optional; subject null hoặc exception khi phân tích trả về Optional rỗng.\n[GreyTest testability: READY] INTERNAL_FINAL_COLLABORATOR @ spring-boot-realworld-example-app-master/src/main/java/io/spring/infrastructure/service/DefaultJwtService.java:20 getSubFromToken — Collaborator final được tạo bên trong class: signingKey. | Dùng collaborator/collection thật và kiểm tra trạng thái qua API có sẵn; không giả định @InjectMocks thay được field final đã khởi tạo.",
+        "testType": "HAPPY_PATH",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2459,
+        "businessRuleId": 4821,
+        "coveredRuleIds": [
+          4821
+        ],
+        "planCode": "TP-037",
+        "title": "Tính thời điểm hết hạn",
+        "description": "Thời điểm hết hạn bằng thời gian hệ thống hiện tại cộng sessionTime nhân 1000L; kiểm tra trong khoảng thời gian phù hợp.\n[GreyTest testability: UNKNOWN] UNCONTROLLED_TIME @ spring-boot-realworld-example-app-master/src/main/java/io/spring/infrastructure/service/DefaultJwtService.java:49 expireTimeFromNow — Nguồn thời gian hệ thống chưa có Clock điều khiển được. | Không so sánh timestamp tuyệt đối từ đồng hồ hệ thống; cần Clock có thể truyền vào hoặc assertion theo khoảng thời gian phù hợp scenario.",
+        "testType": "BOUNDARY",
+        "status": "APPROVED",
+        "isModified": false
+      }
+    ],
+    "approvedTestCases": [
+      {
+        "id": 3453,
+        "testPlanId": 2457,
+        "caseCode": "TC-1882",
+        "testType": "HAPPY_PATH",
+        "description": "Tạo token có subject là ID người dùng và thời điểm hết hạn theo thời lượng phiên đã cấu hình.",
+        "preconditions": "Khởi tạo DefaultJwtService với sessionTime là 3600 giây và signing key HS512 hợp lệ từ secret ASCII có ít nhất 64 byte. Tạo User bằng constructor có ID được khởi tạo tự động.\n[GreyTest testability: UNKNOWN] UNRESOLVED_HELPER_PATH @ spring-boot-realworld-example-app-master/src/main/java/io/spring/infrastructure/service/DefaultJwtService.java:35 toToken — Lời gọi helper nội bộ chưa được phân tích đường đi trong MVP: expireTimeFromNow.; INTERNAL_FINAL_COLLABORATOR @ spring-boot-realworld-example-app-master/src/main/java/io/spring/infrastructure/service/DefaultJwtService.java:20 toToken — Collaborator final được tạo bên trong class: signingKey. | Kiểm tra đường đi qua helper trước khi kết luận có thể điều khiển nhánh; không thay kết quả helper bằng giả định.; Dùng collaborator/collection thật và kiểm tra trạng thái qua API có sẵn; không giả định @InjectMocks thay được field final đã khởi tạo.",
+        "testData": {
+          "input": {
+            "user": {
+              "id": "ID được khởi tạo bởi constructor",
+              "constructor": {
+                "bio": "Tiểu sử",
+                "email": "linh@example.com",
+                "image": "https://example.com/avatar.png",
+                "password": "password",
+                "username": "linh"
+              }
+            },
+            "secret": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "sessionTime": 3600
+          },
+          "mocks": {}
+        },
+        "expectedResult": "Phương thức trả về chuỗi token hợp lệ được ký bằng signingKey. Khi giải mã token bằng cùng khóa, subject bằng ID của User; thời điểm hết hạn nằm trong khoảng từ thời điểm gọi đến 3600 giây sau đó, cho phép sai số do thời gian thực thi.",
+        "priority": "HIGH",
+        "traceSource": "BR-022 [STMT-1] -> TP-035 -> STMT-1-EXECUTABLE",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 3461,
+        "testPlanId": 2458,
+        "caseCode": "TC-1883",
+        "testType": "HAPPY_PATH",
+        "description": "Phân tích token hợp lệ và trả về subject trong Optional.",
+        "preconditions": "Khởi tạo DefaultJwtService với secret ASCII có ít nhất 64 byte để dùng HS512. Tạo User bằng constructor User(String email, String username, String password, String bio, String image); constructor tự sinh id. Tạo token bằng toToken(user) trên service đã khởi tạo.\n[GreyTest testability: READY] INTERNAL_FINAL_COLLABORATOR @ spring-boot-realworld-example-app-master/src/main/java/io/spring/infrastructure/service/DefaultJwtService.java:20 getSubFromToken — Collaborator final được tạo bên trong class: signingKey. | Dùng collaborator/collection thật và kiểm tra trạng thái qua API có sẵn; không giả định @InjectMocks thay được field final đã khởi tạo.",
+        "testData": {
+          "input": {
+            "token": "Token hợp lệ do service.toToken(user) tạo; subject là user.getId()"
+          },
+          "mocks": {}
+        },
+        "expectedResult": "Trả về Optional chứa đúng user.getId().",
+        "priority": "HIGH",
+        "traceSource": "BR-023 [STMT-1] -> TP-036 -> STMT-1",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 3462,
+        "testPlanId": 2458,
+        "caseCode": "TC-1884",
+        "testType": "EDGE",
+        "description": "Phân tích token hợp lệ có subject là null.",
+        "preconditions": "Khởi tạo DefaultJwtService với secret ASCII có ít nhất 64 byte để dùng HS512. Tạo JWT đã ký bằng cùng secret và thuật toán HS512, không đặt subject, đồng thời đặt thời hạn còn hiệu lực.\n[GreyTest testability: READY] INTERNAL_FINAL_COLLABORATOR @ spring-boot-realworld-example-app-master/src/main/java/io/spring/infrastructure/service/DefaultJwtService.java:20 getSubFromToken — Collaborator final được tạo bên trong class: signingKey. | Dùng collaborator/collection thật và kiểm tra trạng thái qua API có sẵn; không giả định @InjectMocks thay được field final đã khởi tạo.",
+        "testData": {
+          "input": {
+            "token": "JWT hợp lệ có subject null, được ký bằng cùng secret HS512"
+          },
+          "mocks": {}
+        },
+        "expectedResult": "Trả về Optional rỗng vì subject là null.",
+        "priority": "MEDIUM",
+        "traceSource": "BR-023 [STMT-1] -> TP-036 -> STMT-1",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 3463,
+        "testPlanId": 2458,
+        "caseCode": "TC-1885",
+        "testType": "EXCEPTION",
+        "description": "Phân tích token không hợp lệ và trả về Optional rỗng.",
+        "preconditions": "Khởi tạo DefaultJwtService với secret ASCII có ít nhất 64 byte để dùng HS512. Không cần cấu hình mock.\n[GreyTest testability: READY] INTERNAL_FINAL_COLLABORATOR @ spring-boot-realworld-example-app-master/src/main/java/io/spring/infrastructure/service/DefaultJwtService.java:20 getSubFromToken — Collaborator final được tạo bên trong class: signingKey. | Dùng collaborator/collection thật và kiểm tra trạng thái qua API có sẵn; không giả định @InjectMocks thay được field final đã khởi tạo.",
+        "testData": {
+          "input": {
+            "token": "not-a-valid-jwt"
+          },
+          "mocks": {}
+        },
+        "expectedResult": "Trả về Optional rỗng khi việc phân tích token gây ra exception.",
+        "priority": "HIGH",
+        "traceSource": "BR-023 [STMT-1] -> TP-036 -> STMT-1",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 3464,
+        "testPlanId": 2459,
+        "caseCode": "TC-1886",
+        "testType": "BOUNDARY",
+        "description": "Verify the token expiration is approximately one second after the system time when sessionTime is 1.",
+        "preconditions": "Instantiate DefaultJwtService with sessionTime 1 and a deterministic ASCII secret of at least 64 bytes for HS512. Create a User with a non-null ID using its five-argument constructor. Because expireTimeFromNow is private, observe the expiration through the token produced by toToken; allow for the system clock advancing during the call.\n[GreyTest testability: UNKNOWN] UNCONTROLLED_TIME @ spring-boot-realworld-example-app-master/src/main/java/io/spring/infrastructure/service/DefaultJwtService.java:49 expireTimeFromNow — Nguồn thời gian hệ thống chưa có Clock điều khiển được. | Không so sánh timestamp tuyệt đối từ đồng hồ hệ thống; cần Clock có thể truyền vào hoặc assertion theo khoảng thời gian phù hợp scenario.",
+        "testData": {
+          "input": {
+            "user": {
+              "bio": "",
+              "email": "qa@example.com",
+              "image": "",
+              "password": "password",
+              "username": "qa-user"
+            },
+            "secret": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "sessionTime": 1
+          },
+          "mocks": {}
+        },
+        "expectedResult": "The generated token has an expiration approximately 1000 milliseconds after the system time used during token generation. No dependency mocks are required.",
+        "priority": "MEDIUM",
+        "traceSource": "BR-024 [STMT-1] -> TP-037 -> STMT-1-EXECUTABLE",
+        "status": "APPROVED",
+        "isModified": false
+      }
+    ],
+    "existingApprovedTestCases": [],
+    "previousGeneratedUnitTests": [],
+    "existingTests": [
+      {
+        "id": 609,
+        "filePath": "spring-boot-realworld-example-app-master/src/test/java/io/spring/infrastructure/service/DefaultJwtServiceTest.java",
+        "packageName": "io.spring.infrastructure.service",
+        "testClassName": "DefaultJwtServiceTest",
+        "relatedClassId": 9064,
+        "relatedMethodId": null,
+        "testMethods": [
+          {
+            "name": "should_generate_and_parse_token",
+            "mocks": [],
+            "lineEnd": 27,
+            "lineStart": 19,
+            "assertions": [
+              "assertNotNull",
+              "assertTrue",
+              "assertEquals"
+            ],
+            "annotations": [
+              "Test"
+            ]
+          },
+          {
+            "name": "should_get_null_with_wrong_jwt",
+            "mocks": [],
+            "lineEnd": 33,
+            "lineStart": 29,
+            "assertions": [
+              "assertFalse"
+            ],
+            "annotations": [
+              "Test"
+            ]
+          },
+          {
+            "name": "should_get_null_with_expired_jwt",
+            "mocks": [],
+            "lineEnd": 40,
+            "lineStart": 35,
+            "assertions": [
+              "assertFalse"
+            ],
+            "annotations": [
+              "Test"
+            ]
+          }
+        ],
+        "imports": [
+          "io.spring.core.service.JwtService",
+          "io.spring.core.user.User",
+          "java.util.Optional",
+          "org.junit.jupiter.api.Assertions",
+          "org.junit.jupiter.api.BeforeEach",
+          "org.junit.jupiter.api.Test"
+        ],
+        "sourceCode": "package io.spring.infrastructure.service;\n\nimport io.spring.core.service.JwtService;\nimport io.spring.core.user.User;\nimport java.util.Optional;\nimport org.junit.jupiter.api.Assertions;\nimport org.junit.jupiter.api.BeforeEach;\nimport org.junit.jupiter.api.Test;\n\npublic class DefaultJwtServiceTest {\n\n  private JwtService jwtService;\n\n  @BeforeEach\n  public void setUp() {\n    jwtService = new DefaultJwtService(\"123123123123123123123123123123123123123123123123123123123123\", 3600);\n  }\n\n  @Test\n  public void should_generate_and_parse_token() {\n    User user = new User(\"email@email.com\", \"username\", \"123\", \"\", \"\");\n    String token = jwtService.toToken(user);\n    Assertions.assertNotNull(token);\n    Optional<String> optional = jwtService.getSubFromToken(token);\n    Assertions.assertTrue(optional.isPresent());\n    Assertions.assertEquals(optional.get(), user.getId());\n  }\n\n  @Test\n  public void should_get_null_with_wrong_jwt() {\n    Optional<String> optional = jwtService.getSubFromToken(\"123\");\n    Assertions.assertFalse(optional.isPresent());\n  }\n\n  @Test\n  public void should_get_null_with_expired_jwt() {\n    String token =\n        \"eyJhbGciOiJIUzUxMiJ9.eyJzdWIiOiJhaXNlbnNpeSIsImV4cCI6MTUwMjE2MTIwNH0.SJB-U60WzxLYNomqLo4G3v3LzFxJKuVrIud8D8Lz3-mgpo9pN1i7C8ikU_jQPJGm8HsC1CquGMI-rSuM7j6LDA\";\n    Assertions.assertFalse(jwtService.getSubFromToken(token).isPresent());\n  }\n}\n"
+      }
+    ],
+    "supportingResources": [
+      {
+        "kind": "CONFIGURATION",
+        "filePath": "spring-boot-realworld-example-app-master/src/main/resources/application.properties",
+        "content": "Document 1; profile=unspecified. Values are declarations; active profile/environment overrides are unknown.\njwt.sessionTime = 86400\n"
+      }
+    ],
+    "contextWarnings": []
+  },
+  "test": {
+    "case_id": 3464,
+    "test_class_name": "DefaultJwtServiceTest",
+    "test_method_name": "setsExpirationApproximatelyOneSecondAfterGeneration",
+    "package_name": "io.spring.infrastructure.service",
+    "generation_type": "SUPPLEMENT_EXISTING_TEST",
+    "source_code": "// GREYTEST_SOURCE_V1 640c6d59c9e489f5be3d7366047b0773015f844c900b89189feedb3e72f1f87f c3ByaW5nLWJvb3QtcmVhbHdvcmxkLWV4YW1wbGUtYXBwLW1hc3Rlci9zcmMvbWFpbi9qYXZhL2lvL3NwcmluZy9pbmZyYXN0cnVjdHVyZS9zZXJ2aWNlL0RlZmF1bHRKd3RTZXJ2aWNlLmphdmE=\n// GREYTEST_SOURCE_V1 c81abf7985be7e1f7dfebd722def6890e68c937a31bc23d9f8b58797ca71445a c3ByaW5nLWJvb3QtcmVhbHdvcmxkLWV4YW1wbGUtYXBwLW1hc3Rlci9zcmMvbWFpbi9qYXZhL2lvL3NwcmluZy9jb3JlL3NlcnZpY2UvSnd0U2VydmljZS5qYXZh\n// GREYTEST_SOURCE_V1 0a6dbe64ec842468be6eb191ae741de4c671b59736aa65c7935364936c16a568 c3ByaW5nLWJvb3QtcmVhbHdvcmxkLWV4YW1wbGUtYXBwLW1hc3Rlci9zcmMvbWFpbi9qYXZhL2lvL3NwcmluZy9jb3JlL3VzZXIvVXNlci5qYXZh\n// GREYTEST_SOURCE_V1 3846d4f022890d3e3d00b31227c583ac27b18b076eb455dc0c7fb8abe19cb49f c3ByaW5nLWJvb3QtcmVhbHdvcmxkLWV4YW1wbGUtYXBwLW1hc3Rlci9zcmMvbWFpbi9qYXZhL2lvL3NwcmluZy9VdGlsLmphdmE=\npackage io.spring.infrastructure.service;\n\nimport static org.junit.jupiter.api.Assertions.assertNotNull;\nimport static org.junit.jupiter.api.Assertions.assertTrue;\n\nimport io.jsonwebtoken.Claims;\nimport io.jsonwebtoken.Jws;\nimport io.jsonwebtoken.Jwts;\nimport io.jsonwebtoken.SignatureAlgorithm;\nimport io.spring.core.user.User;\nimport java.util.Date;\nimport javax.crypto.spec.SecretKeySpec;\nimport org.junit.jupiter.api.Test;\n\npublic class DefaultJwtServiceTest {\n\n  // GreyTest trace: toToken | STMT-1 | BR-024 -> TP-037 -> TC-1886\n  @Test\n  public void setsExpirationApproximatelyOneSecondAfterGeneration() {\n    String secret = \"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\";\n    DefaultJwtService service = new DefaultJwtService(secret, 1);\n    User user = new User(\"qa@example.com\", \"qa-user\", \"password\", \"\", \"\");\n    long beforeGeneration = System.currentTimeMillis();\n\n    String token = service.toToken(user);\n\n    long afterGeneration = System.currentTimeMillis();\n    Jws<Claims> parsed = Jwts.parserBuilder()\n        .setSigningKey(new SecretKeySpec(secret.getBytes(), SignatureAlgorithm.HS512.getJcaName()))\n        .build()\n        .parseClaimsJws(token);\n    Date expiration = parsed.getBody().getExpiration();\n    assertNotNull(expiration);\n    assertTrue(expiration.getTime() >= beforeGeneration + 1000L);\n    assertTrue(expiration.getTime() <= afterGeneration + 1000L);\n  }\n}"
+  }
+}

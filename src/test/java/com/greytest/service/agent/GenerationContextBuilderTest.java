@@ -986,7 +986,21 @@ class GenerationContextBuilderTest {
     }
 
     @Test
-    void unitTestContextDoesNotSilentlyDropDependenciesAtTheClassLimit() {
+    void smallDependencyGraphIsNotRejectedBecauseItContainsMoreThan25Types() {
+        stubDependencyGraph(0);
+        assertThat(builder.buildUnitTestContext(1L, Set.of(30L)).classes()).hasSize(27);
+        assertThat(builder.buildTestPlanContext(1L, Set.of(7L)).classes()).hasSize(27);
+        assertThat(builder.buildTestCaseContext(1L, Set.of(20L)).classes()).hasSize(27);
+    }
+
+    @Test
+    void oversizedDependencySourceIsReportedWithoutSilentlyOmittingTypes() {
+        stubDependencyGraph(5_000);
+        assertThatThrownBy(() -> builder.buildUnitTestContext(1L, Set.of(30L)))
+                .isInstanceOf(LlmResponseException.class).hasMessageContaining("characters");
+    }
+
+    private void stubDependencyGraph(int commentSize) {
         mockCommonInputs();
         stubApprovedUnitTestCase(11L);
         var classes = new java.util.ArrayList<JavaClassDto>();
@@ -994,7 +1008,7 @@ class GenerationContextBuilderTest {
         for (int index = 0; index < 26; index++) {
             fields.append(" Dep").append(index).append(" field").append(index).append(";");
             classes.add(new JavaClassDto(100L + index, "demo", "Dep" + index, "demo.Dep" + index,
-                    "OTHER", "src/main/java/demo/Dep" + index + ".java", "class Dep" + index + " {}",
+                    "OTHER", "src/main/java/demo/Dep" + index + ".java", "class Dep" + index + " { /*" + "x".repeat(commentSize) + "*/ }",
                     List.of(), List.of()));
         }
         AnalysisResultDto base = analysisWithServiceSource("class UserService {" + fields + "}");
@@ -1003,8 +1017,6 @@ class GenerationContextBuilderTest {
                 base.projectId(), base.projectName(), base.status(), 27, base.totalMethods(), 0, 0, 0, 0, 27, 27, 0,
                 List.of(), classes, List.of(), List.of()));
 
-        assertThatThrownBy(() -> builder.buildUnitTestContext(1L, Set.of(30L)))
-                .isInstanceOf(LlmResponseException.class).hasMessageContaining("supporting production classes");
     }
 
     @Test

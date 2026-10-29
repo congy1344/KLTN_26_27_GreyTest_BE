@@ -7,6 +7,26 @@ import org.junit.jupiter.api.Test;
 class TextSanitizerTest {
 
     @Test
+    void preservesQuotedExceptionMessagesAndCodeSpansVerbatim() {
+        String input = "Ném \"Book not exist with id : \" và `id  :  1001` hoặc 'date : '.";
+        assertThat(TextSanitizer.cleanAiText(input)).isEqualTo(input);
+    }
+
+    @Test
+    void cleansOnlyProseAroundEscapedQuotesAndForeignLanguageLiterals() {
+        String input = "抛出 \"返回  id : \\\"1001\\\"\" nếu lỗi .";
+        assertThat(TextSanitizer.cleanAiText(input))
+                .isEqualTo("ném ra \"返回  id : \\\"1001\\\"\" nếu lỗi.");
+    }
+
+    @Test
+    void preservesFencedCodeIncludingWhitespaceAndPunctuation() {
+        String input = "Ví dụ :\n```java\nthrow new Exception(\"id :  \" );\n```";
+        assertThat(TextSanitizer.cleanAiText(input))
+                .isEqualTo("Ví dụ:\n```java\nthrow new Exception(\"id :  \" );\n```");
+    }
+
+    @Test
     void translatesCommonChineseTermsToVietnamese() {
         String input = "Khi tìm phòng ban theo tên, nếu repository không trả về phòng ban nào khớp với tên đã cho thì抛出 DepartmentNotFoundException.";
         String output = TextSanitizer.cleanAiText(input);

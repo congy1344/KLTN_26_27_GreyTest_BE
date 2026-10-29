@@ -14,7 +14,7 @@ import com.github.javaparser.ast.expr.ObjectCreationExpr;
 import com.github.javaparser.ast.expr.AnnotationExpr;
 import com.github.javaparser.ast.expr.FieldAccessExpr;
 
-/** Phát hiện lời gọi Mockito thiếu static import trước khi lưu output AI hoặc xuất file test. */
+/** Phát hiện package Mockito sai và lời gọi thiếu static import trước khi lưu output AI hoặc xuất file test. */
 final class GeneratedMockitoImportValidator {
 
     private static final Set<String> MOCKITO = Set.of("mock", "spy", "when", "verify", "times", "never", "atLeast",
@@ -32,11 +32,20 @@ final class GeneratedMockitoImportValidator {
     private static final Set<String> KNOWN_WILDCARDS = Set.of("org.mockito.Mockito", "org.mockito.BDDMockito",
             "org.mockito.ArgumentMatchers", "org.mockito.Matchers", "org.junit.Assert", "org.junit.Assume",
             "org.junit.jupiter.api.Assertions", "org.junit.jupiter.api.Assumptions");
+    private static final Set<String> FLUENT_STUB_METHODS = Set.of("thenAnswer", "thenReturn", "thenThrow", "thenCallRealMethod");
+    private static final java.util.Map<String, String> MOCKITO_TYPES = java.util.Map.of(
+            "MockitoSettings", "org.mockito.junit.jupiter.MockitoSettings",
+            "MockitoExtension", "org.mockito.junit.jupiter.MockitoExtension",
+            "Mock", "org.mockito.Mock", "InjectMocks", "org.mockito.InjectMocks",
+            "Spy", "org.mockito.Spy", "Captor", "org.mockito.Captor");
+    private static final Set<String> FRAMEWORK_PACKAGES = Set.of("org.junit", "org.junit.jupiter", "org.junit.jupiter.api",
+            "org.mockito", "org.mockito.junit.jupiter", "org.mockito.quality");
 
     private GeneratedMockitoImportValidator() { }
 
     static List<String> validate(CompilationUnit source) {
         List<String> problems = new java.util.ArrayList<>(validateStrictness(source));
+        problems.addAll(validateMockitoPackage(source));
         Set<String> missing = new TreeSet<>();
         // shortcut: Wildcard thư viện chưa biết có thể cung cấp helper; chỉ chặn binding chắc chắn thiếu.
         boolean unknownWildcard = source.getImports().stream().anyMatch(item -> item.isStatic() && item.isAsterisk()
@@ -54,6 +63,40 @@ final class GeneratedMockitoImportValidator {
                 + "' has no static import or declared/inherited helper. Add its matching Mockito/ArgumentMatchers "
                 + "static import or use a fully qualified API supported by the target Mockito version; preserve test assertions.")
                 .toList());
+        return problems;
+    }
+
+    private static List<String> validateMockitoPackage(CompilationUnit source) {
+        List<String> problems = new java.util.ArrayList<>();
+        for (var imported : source.getImports()) {
+            String name = imported.getNameAsString();
+            String correctType = MOCKITO_TYPES.get(imported.getName().getIdentifier());
+            if (correctType != null && (name.startsWith("org.junit.") || name.startsWith("org.mockito."))
+                    && (!correctType.equals(name) || imported.isStatic() && !imported.isAsterisk())) {
+                problems.add("Invalid import '" + imported.toString().trim() + "'. Use the annotation/type import: import "
+                        + correctType + "; (not a static import).");
+            }
+            String owner = imported.isAsterisk() ? name : name.substring(0, Math.max(0, name.lastIndexOf('.')));
+            if (imported.isStatic() && FRAMEWORK_PACKAGES.contains(owner)) {
+                problems.add("Invalid static import '" + imported.toString().trim() + "': '" + owner
+                        + "' is a package. Static imports require a declaring class, such as org.junit.jupiter.api.Assertions or org.mockito.Mockito.");
+            }
+            if (FLUENT_STUB_METHODS.contains(imported.getName().getIdentifier()) && List.of("org.mockito.Mockito.",
+                    "org.mockito.BDDMockito.", "org.mockito.stubbing.OngoingStubbing.").stream().anyMatch(name::startsWith)) {
+                problems.add("Invalid import '" + imported.toString().trim() + "': " + imported.getName().getIdentifier()
+                        + " is an OngoingStubbing instance method. Use when(mock.method(...))." + imported.getName().getIdentifier()
+                        + "(...) without importing the fluent method; preserve approved fixtures and assertions.");
+            }
+            for (String wrongOwner : List.of("org.junit.jupiter.api.Mockito", "org.junit.jupiter.Mockito", "org.junit.Mockito")) {
+                if (!name.equals(wrongOwner) && !name.startsWith(wrongOwner + ".")) continue;
+                // Package sai vẫn gây lỗi biên dịch dù import không dùng hoặc có wildcard helper khác.
+                problems.add("Mockito belongs to org.mockito.Mockito, not JUnit. Invalid import '"
+                        + imported.toString().trim() + "'. Use import org.mockito.Mockito; for qualified calls or "
+                        + "import static org.mockito.Mockito.*; (or its specific method) for unqualified calls. "
+                        + "Preserve the test inputs and assertions.");
+                break;
+            }
+        }
         return problems;
     }
 

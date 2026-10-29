@@ -195,6 +195,99 @@ class GenerationFingerprintServiceTest {
         assertThat(service.outputFingerprint(Map.of("unit_tests", List.of(Map.of("source_code", source))), root).reusable()).isFalse();
     }
 
+    @Test void implementationInAnotherModuleCannotBeDiscarded() throws Exception {
+        write("module-a/src/main/java/example/Subject.java", "package example; class Subject { Repo repo; int target() { return repo.save(1); } }");
+        write("module-a/src/main/java/example/Repo.java", "package example; interface Repo { int save(int n); }");
+        write("module-a/src/main/java/example/Local.java", "package example; class Local implements Repo { public int save(int n) { return n; } }");
+        write("module-b/src/main/java/example/Remote.java", "package example; class Remote implements Repo { public int save(int n) { return n + 1; } }");
+        Files.delete(root.resolve("src/main/java/example/Subject.java"));
+        var response = Map.of("source_code", "package example; class SubjectTest { void test() { new Subject().target(); } }");
+        assertThat(service.outputFingerprint(response, root).reusable()).isFalse();
+    }
+
+    @Test void constructorHelperDependenciesAreResolvedAndTracked() throws Exception {
+        write("src/main/java/example/Subject.java", "package example; class Subject { Subject() { Factory.touch(); } int target() { return 1; } }");
+        write("src/main/java/example/Factory.java", "package example; class Factory { static void touch() { int value = 1; } }");
+        var response = Map.of("source_code", "package example; class SubjectTest { void test() { new Subject().target(); } }");
+        var before = service.outputFingerprint(response, root);
+        assertThat(before.provenance()).doesNotContain("unresolved constructor helper calls");
+        assertThat(before.reusable()).isTrue();
+        write("src/main/java/example/Factory.java", "package example; class Factory { static void touch() { int value = 2; } }");
+        assertThat(service.outputFingerprint(response, root).value()).isNotEqualTo(before.value());
+    }
+
+    @Test void unknownConstructorHelperCannotBeReused() throws Exception {
+        write("src/main/java/example/Subject.java", "package example; class Subject { Subject() { missing(); } int target() { return 1; } }");
+        var response = Map.of("source_code", "package example; class SubjectTest { void test() { new Subject().target(); } }");
+        assertThat(service.outputFingerprint(response, root).reusable()).isFalse();
+    }
+
+    @Test void inheritedConstructorHelperIsTracked() throws Exception {
+        write("src/main/java/example/Subject.java", "package example; class Subject extends Base { Subject() { super(); } int target() { return 1; } }");
+        write("src/main/java/example/Base.java", "package example; class Base { Base() { Factory.touch(); } }");
+        write("src/main/java/example/Factory.java", "package example; class Factory { static void touch() { int value = 1; } }");
+        var response = Map.of("source_code", "package example; class SubjectTest { void test() { new Subject().target(); } }");
+        var before = service.outputFingerprint(response, root);
+        assertThat(before.reusable()).isTrue();
+        write("src/main/java/example/Factory.java", "package example; class Factory { static void touch() { int value = 2; } }");
+        assertThat(service.outputFingerprint(response, root).value()).isNotEqualTo(before.value());
+    }
+
+    @Test void lombokGeneratedAccessorsTrackFieldContract() throws Exception {
+        write("src/main/java/example/Patient.java", "package example; @lombok.Data final class Patient { private String name; }");
+        var response = Map.of("source_code", "package example; class PatientTest { void test() { Patient p = new Patient(); p.getName(); } }");
+        var before = service.outputFingerprint(response, root);
+        assertThat(before.provenance()).doesNotContain("unresolved output overload");
+        assertThat(before.reusable()).isTrue();
+        write("src/main/java/example/Patient.java", "package example; @lombok.Data final class Patient { private int name; }");
+        assertThat(service.outputFingerprint(response, root).value()).isNotEqualTo(before.value());
+    }
+
+    @Test void lombokAccessorOnExtensibleTypeCannotIgnoreOverrides() throws Exception {
+        write("src/main/java/example/Patient.java", "package example; @lombok.Data class Patient { private String name; }");
+        write("src/main/java/example/Child.java", "package example; class Child extends Patient { public String getName() { return \"child\"; } }");
+        var response = Map.of("source_code", "package example; class PatientTest { void test() { Patient p = new Child(); p.getName(); } }");
+        assertThat(service.outputFingerprint(response, root).reusable()).isFalse();
+    }
+
+    @Test void lombokAccessorSuppressedByExistingMethodIsNotVerified() throws Exception {
+        for (String method : List.of("String getname() { return name; }", "String GETNAME(String... args) { return name; }")) {
+            write("src/main/java/example/Patient.java", "package example; @lombok.Data final class Patient { private String name; " + method + " }");
+            var response = Map.of("source_code", "package example; class PatientTest { void test() { Patient p = new Patient(); p.getName(); } }");
+            assertThat(service.outputFingerprint(response, root).reusable()).as(method).isFalse();
+        }
+    }
+
+    @Test void explicitVarargsAccessorTracksActualMethod() throws Exception {
+        write("src/main/java/example/Patient.java", "package example; @lombok.Data final class Patient { private String name; String getName(String... args) { return \"one\"; } }");
+        var response = Map.of("source_code", "package example; class PatientTest { void test() { Patient p = new Patient(); p.getName(); } }");
+        var before = service.outputFingerprint(response, root);
+        assertThat(before.reusable()).isTrue();
+        write("src/main/java/example/Patient.java", "package example; @lombok.Data final class Patient { private String name; String getName(String... args) { return \"two\"; } }");
+        assertThat(service.outputFingerprint(response, root).value()).isNotEqualTo(before.value());
+    }
+
+    @Test void lombokConfigurationDisablesAccessorInference() throws Exception {
+        write("src/main/java/example/Patient.java", "package example; @lombok.Data final class Patient { private String name; }");
+        write("lombok.config", "lombok.accessors.fluent = true\n");
+        var response = Map.of("source_code", "package example; class PatientTest { void test() { Patient p = new Patient(); p.getName(); } }");
+        assertThat(service.outputFingerprint(response, root).reusable()).isFalse();
+    }
+
+    @Test void lombokAccessorRejectsTypeQualifierAndIncompatibleArgument() throws Exception {
+        write("src/main/java/example/Patient.java", "package example; @lombok.Data final class Patient { private String name; }");
+        for (String call : List.of("Patient.getName();", "Patient p = new Patient(); p.setName(42);")) {
+            var response = Map.of("source_code", "package example; class PatientTest { void test() { " + call + " } }");
+            assertThat(service.outputFingerprint(response, root).reusable()).as(call).isFalse();
+        }
+    }
+
+    @Test void accessorWithoutLombokRemainsUnresolved() throws Exception {
+        write("src/main/java/example/Patient.java", "package example; class Patient { private String name; }");
+        var response = Map.of("source_code", "package example; class PatientTest { void test() { Patient p = new Patient(); p.getName(); } }");
+        assertThat(service.outputFingerprint(response, root).reusable()).isFalse();
+    }
+
     @Test void factoryReturningSutDoesNotFingerprintUnrelatedSutMethods() throws Exception {
         write("src/main/java/example/Factory.java", "package example; class Factory { static Subject make() { return new Subject(); } }");
         var response = Map.of("unit_tests", List.of(Map.of("source_code", "package example; class SubjectTest { Subject subject = Factory.make(); void testTarget() { subject.target(1); } }")));

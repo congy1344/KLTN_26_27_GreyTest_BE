@@ -1,0 +1,927 @@
+{
+  "context": {
+    "project": {
+      "id": 4,
+      "name": "Hospital-Management-System",
+      "status": "PLAN_APPROVED"
+    },
+    "analysis": {
+      "totalClasses": 61,
+      "totalMethods": 152,
+      "totalEndpoints": 55,
+      "totalRelations": 19,
+      "totalControllerServiceRelations": 62,
+      "existingTestFiles": 0,
+      "totalProductionFiles": 62,
+      "parsedProductionFiles": 62,
+      "failedParseFiles": 0,
+      "failedParseFilePaths": []
+    },
+    "classes": [
+      {
+        "id": 143,
+        "packageName": "com.example.HMS.service",
+        "className": "PrescriptionService",
+        "qualifiedName": "com.example.HMS.service.PrescriptionService",
+        "classType": "SERVICE",
+        "filePath": "Hospital-Management-System/HMS/src/main/java/com/example/HMS/service/PrescriptionService.java",
+        "sourceCode": "package com.example.HMS.service;\r\n\r\nimport com.example.HMS.anotations.Auditable;\r\nimport com.example.HMS.dto.PrescriptionDto;\r\nimport com.example.HMS.dto.PrescriptionMapper;\r\nimport com.example.HMS.entity.MedicalRecord;\r\nimport com.example.HMS.entity.Prescription;\r\nimport com.example.HMS.exception.MedicalRecordNotFoundException;\r\nimport com.example.HMS.exception.PrescriptionNotFoundException;\r\nimport com.example.HMS.repository.MedicalRecordRepository;\r\nimport com.example.HMS.repository.PrescriptionRepository;\r\nimport lombok.RequiredArgsConstructor;\r\nimport org.springframework.cache.annotation.CacheEvict;\r\nimport org.springframework.cache.annotation.CachePut;\r\nimport org.springframework.cache.annotation.Cacheable;\r\nimport org.springframework.cache.annotation.Caching;\r\nimport org.springframework.stereotype.Service;\r\nimport java.util.List;\r\nimport java.util.Optional;\r\n\r\n@Service\r\n@RequiredArgsConstructor\r\npublic class PrescriptionService {\r\n\r\n    private final PrescriptionRepository prescriptionRepository;\r\n\r\n    private final PrescriptionMapper prescriptionMapper;\r\n\r\n    private final MedicalRecordRepository medicalRecordRepository;\r\n\r\n    MedicalRecord medicalRecord;\r\n\r\n    // create prescription\r\n    @Auditable(action = \"CREATE_PRESCRIPTION\")\r\n    public PrescriptionDto createPrescription(PrescriptionDto dto) {\r\n        Prescription prescription = prescriptionMapper.toEntity(dto);\r\n        MedicalRecord medicalRecord = null;\r\n        if (dto.getMedicalRecordId() != null) {\r\n            medicalRecord = medicalRecordRepository.findById(dto.getMedicalRecordId()).orElseThrow(() -> new MedicalRecordNotFoundException(\"Failed to find the medical record with id \" + dto.getMedicalRecordId()));\r\n            // setting the medical record here\r\n            prescription.setMedicalRecord(medicalRecord);\r\n            medicalRecord.setPrescription(prescription);\r\n        }\r\n        Prescription savedPrescription = prescriptionRepository.save(prescription);\r\n        return prescriptionMapper.toDto(savedPrescription);\r\n    }\r\n\r\n    // get all prescription\r\n    public List<PrescriptionDto> fetchAllPrescription() {\r\n        List<Prescription> prescriptions = prescriptionRepository.findAll();\r\n        return prescriptions.stream().map(prescriptionMapper::toDto).toList();\r\n    }\r\n\r\n    // get prescription by id\r\n    @Cacheable(value = \"prescriptions\", key = \"#prescriptionId\")\r\n    public PrescriptionDto fetchPrescriptionById(Long prescriptionId) {\r\n        if (prescriptionId == null || prescriptionId <= 0) {\r\n            throw new IllegalArgumentException(\"Prescription ID must be valid and positive\");\r\n        }\r\n        // Correct repository method\r\n        Prescription prescription = prescriptionRepository.findById(prescriptionId).orElseThrow(() -> new PrescriptionNotFoundException(\"Failed to find the prescription with id: \" + prescriptionId));\r\n        return prescriptionMapper.toDto(prescription);\r\n    }\r\n\r\n    // get prescription by MedicalRecord\r\n    @Cacheable(value = \"prescriptionByMedicalRecord\", key = \"#recordId\")\r\n    public PrescriptionDto fetchPrescriptionByMedicalRecord(Long recordId) {\r\n        if (recordId == null || recordId <= 0) {\r\n            throw new IllegalArgumentException(\"Medical Record ID must be valid and positive\");\r\n        }\r\n        Prescription prescription = prescriptionRepository.findByMedicalRecord_RecordId(recordId).orElseThrow(() -> new PrescriptionNotFoundException(\"Failed to find the prescription for medical record id: \" + recordId));\r\n        return prescriptionMapper.toDto(prescription);\r\n    }\r\n\r\n    // get prescription by patient\r\n    @Cacheable(value = \"prescriptionByPatient\", key = \"#patientId\")\r\n    public List<PrescriptionDto> fetchPrescriptionByPatient(Long patientId) {\r\n        if (patientId == null || patientId <= 0) {\r\n            throw new IllegalArgumentException(\"Patient ID must be valid\");\r\n        }\r\n        List<Prescription> prescriptions = prescriptionRepository.findPrescriptionsByPatientId(patientId);\r\n        if (prescriptions.isEmpty()) {\r\n            throw new PrescriptionNotFoundException(\"No prescription found for patient id: \" + patientId);\r\n        }\r\n        return prescriptions.stream().map(prescriptionMapper::toDto).toList();\r\n    }\r\n\r\n    // update prescription\r\n    @Caching(put = { @CachePut(value = \"prescriptions\", key = \"#prescriptionId\") }, evict = { @CacheEvict(value = \"prescriptionByPatient\", allEntries = true), @CacheEvict(value = \"prescriptionByMedicalRecord\", allEntries = true) })\r\n    @Auditable(action = \"UPDATE_PRESCRIPTION\")\r\n    public PrescriptionDto updatePrescription(Long prescriptionId, PrescriptionDto dto) {\r\n        Prescription prescription = prescriptionRepository.findById(prescriptionId).orElseThrow(() -> new PrescriptionNotFoundException(\"Prescription not found with id \" + prescriptionId));\r\n        if (dto.getInstructions() != null) {\r\n            prescription.setInstructions(dto.getInstructions());\r\n        }\r\n        if (dto.getDosage() != null) {\r\n            prescription.setDosage(dto.getDosage());\r\n        }\r\n        if (dto.getMedicine() != null) {\r\n            prescription.setMedicine(dto.getMedicine());\r\n        }\r\n        if (dto.getMedicalRecordId() != null) {\r\n            MedicalRecord record = medicalRecordRepository.findById(dto.getMedicalRecordId()).orElseThrow(() -> new MedicalRecordNotFoundException(\"Failed to find the medical record with id \" + dto.getMedicalRecordId()));\r\n            prescription.setMedicalRecord(record);\r\n        }\r\n        prescriptionRepository.save(prescription);\r\n        return prescriptionMapper.toDto(prescription);\r\n    }\r\n\r\n    // delete prescription\r\n    @Caching(evict = { @CacheEvict(value = \"prescriptions\", key = \"#prescriptionId\"), @CacheEvict(value = \"prescriptionByMedicalRecord\", allEntries = true), @CacheEvict(value = \"prescriptionByPatient\", allEntries = true) })\r\n    @Auditable(action = \"DELETE_PRESCRIPTION\")\r\n    public void deletePrescription(Long prescriptionId) {\r\n        if (prescriptionId == null) {\r\n            throw new IllegalArgumentException(\"Prescription ID must be valid\");\r\n        }\r\n        prescriptionRepository.deleteById(prescriptionId);\r\n    }\r\n}\r\n",
+        "annotations": [
+          {
+            "id": 231,
+            "targetType": "CLASS",
+            "category": "COMPONENT",
+            "annotationName": "Service",
+            "attributes": "@Service"
+          }
+        ],
+        "methods": [
+          {
+            "id": 352,
+            "classQualifiedName": "com.example.HMS.service.PrescriptionService",
+            "methodName": "createPrescription",
+            "returnType": "PrescriptionDto",
+            "parameters": [
+              {
+                "name": "dto",
+                "type": "PrescriptionDto"
+              }
+            ],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "@Auditable(action = \"CREATE_PRESCRIPTION\")\r\n    public PrescriptionDto createPrescription(PrescriptionDto dto)\r\n    {\r\n        Prescription prescription = prescriptionMapper.toEntity(dto);\r\n\r\n        MedicalRecord medicalRecord = null;\r\n        if (dto.getMedicalRecordId() != null){\r\n            medicalRecord = medicalRecordRepository.findById(dto.getMedicalRecordId())\r\n                    .orElseThrow(()-> new MedicalRecordNotFoundException(\r\n                            \"Failed to find the medical record with id \"+dto.getMedicalRecordId()));\r\n\r\n\r\n            prescription.setMedicalRecord(medicalRecord);                                   \r\n            medicalRecord.setPrescription(prescription);\r\n        }\r\n\r\n        Prescription savedPrescription = prescriptionRepository.save(prescription);\r\n\r\n        return prescriptionMapper.toDto(savedPrescription);\r\n    }",
+            "lineStart": 33,
+            "lineEnd": 52,
+            "annotations": [],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 36,
+                "lineEnd": 36
+              },
+              {
+                "branchId": "STMT-2",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 38,
+                "lineEnd": 38
+              },
+              {
+                "branchId": "IF-1-TRUE",
+                "kind": "IF",
+                "outcome": "TRUE",
+                "condition": "dto.getMedicalRecordId() != null",
+                "lineStart": 40,
+                "lineEnd": 46
+              },
+              {
+                "branchId": "IF-1-FALSE",
+                "kind": "IF",
+                "outcome": "FALSE",
+                "condition": "dto.getMedicalRecordId() != null",
+                "lineStart": 39,
+                "lineEnd": 39
+              },
+              {
+                "branchId": "STMT-3",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 49,
+                "lineEnd": 49
+              },
+              {
+                "branchId": "STMT-4",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 51,
+                "lineEnd": 51
+              }
+            ]
+          },
+          {
+            "id": 353,
+            "classQualifiedName": "com.example.HMS.service.PrescriptionService",
+            "methodName": "fetchAllPrescription",
+            "returnType": "List<PrescriptionDto>",
+            "parameters": [],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "public List<PrescriptionDto> fetchAllPrescription()\r\n    {\r\n        List<Prescription> prescriptions = prescriptionRepository.findAll();\r\n\r\n        return prescriptions.stream().map(prescriptionMapper::toDto).toList();\r\n    }",
+            "lineStart": 55,
+            "lineEnd": 60,
+            "annotations": [],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 57,
+                "lineEnd": 57
+              },
+              {
+                "branchId": "STMT-2",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 59,
+                "lineEnd": 59
+              }
+            ]
+          },
+          {
+            "id": 354,
+            "classQualifiedName": "com.example.HMS.service.PrescriptionService",
+            "methodName": "fetchPrescriptionById",
+            "returnType": "PrescriptionDto",
+            "parameters": [
+              {
+                "name": "prescriptionId",
+                "type": "Long"
+              }
+            ],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "@Cacheable(value = \"prescriptions\", key = \"#prescriptionId\")\r\n    public PrescriptionDto fetchPrescriptionById(Long prescriptionId)\r\n    {\r\n        if (prescriptionId == null || prescriptionId <= 0) {\r\n            throw new IllegalArgumentException(\"Prescription ID must be valid and positive\");\r\n        }\r\n\r\n                                    \r\n        Prescription prescription = prescriptionRepository.findById(prescriptionId)\r\n                .orElseThrow(() -> new PrescriptionNotFoundException(\r\n                        \"Failed to find the prescription with id: \" + prescriptionId));\r\n\r\n        return prescriptionMapper.toDto(prescription);\r\n    }",
+            "lineStart": 63,
+            "lineEnd": 76,
+            "annotations": [],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "IF-1-TRUE",
+                "kind": "IF",
+                "outcome": "TRUE",
+                "condition": "prescriptionId == null || prescriptionId <= 0",
+                "lineStart": 67,
+                "lineEnd": 67
+              },
+              {
+                "branchId": "IF-1-FALSE",
+                "kind": "IF",
+                "outcome": "FALSE",
+                "condition": "prescriptionId == null || prescriptionId <= 0",
+                "lineStart": 66,
+                "lineEnd": 66
+              },
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 71,
+                "lineEnd": 73
+              },
+              {
+                "branchId": "STMT-2",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 75,
+                "lineEnd": 75
+              }
+            ]
+          },
+          {
+            "id": 357,
+            "classQualifiedName": "com.example.HMS.service.PrescriptionService",
+            "methodName": "updatePrescription",
+            "returnType": "PrescriptionDto",
+            "parameters": [
+              {
+                "name": "prescriptionId",
+                "type": "Long"
+              },
+              {
+                "name": "dto",
+                "type": "PrescriptionDto"
+              }
+            ],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "@Caching(\r\n            put = {\r\n                    @CachePut(value = \"prescriptions\", key = \"#prescriptionId\")\r\n            },\r\n            evict = {\r\n                    @CacheEvict(value = \"prescriptionByPatient\", allEntries = true),\r\n                    @CacheEvict(value = \"prescriptionByMedicalRecord\", allEntries = true)\r\n            }\r\n    )\r\n    @Auditable(action = \"UPDATE_PRESCRIPTION\")\r\n    public PrescriptionDto updatePrescription(Long prescriptionId, PrescriptionDto dto)\n    {\n        Prescription prescription = prescriptionRepository.findById(prescriptionId)\n                .orElseThrow(() -> new PrescriptionNotFoundException(\n                        \"Prescription not found with id \" + prescriptionId));\n\r\n        if (dto.getInstructions() != null){\r\n            prescription.setInstructions(dto.getInstructions());\r\n        }\r\n\r\n        if (dto.getDosage() != null){\r\n            prescription.setDosage(dto.getDosage());\r\n        }\r\n\r\n        if (dto.getMedicine() != null){\r\n            prescription.setMedicine(dto.getMedicine());\r\n        }\r\n\r\n        if (dto.getMedicalRecordId() != null){\n            MedicalRecord record = medicalRecordRepository.findById(dto.getMedicalRecordId())\n                    .orElseThrow(()-> new MedicalRecordNotFoundException(\n                            \"Failed to find the medical record with id \"+dto.getMedicalRecordId()));\n            prescription.setMedicalRecord(record);\n        }\n\n        prescriptionRepository.save(prescription);\n\r\n        return prescriptionMapper.toDto(prescription);\r\n\r\n    }",
+            "lineStart": 114,
+            "lineEnd": 153,
+            "annotations": [],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 126,
+                "lineEnd": 128
+              },
+              {
+                "branchId": "IF-1-TRUE",
+                "kind": "IF",
+                "outcome": "TRUE",
+                "condition": "dto.getInstructions() != null",
+                "lineStart": 131,
+                "lineEnd": 131
+              },
+              {
+                "branchId": "IF-1-FALSE",
+                "kind": "IF",
+                "outcome": "FALSE",
+                "condition": "dto.getInstructions() != null",
+                "lineStart": 130,
+                "lineEnd": 130
+              },
+              {
+                "branchId": "IF-2-TRUE",
+                "kind": "IF",
+                "outcome": "TRUE",
+                "condition": "dto.getDosage() != null",
+                "lineStart": 135,
+                "lineEnd": 135
+              },
+              {
+                "branchId": "IF-2-FALSE",
+                "kind": "IF",
+                "outcome": "FALSE",
+                "condition": "dto.getDosage() != null",
+                "lineStart": 134,
+                "lineEnd": 134
+              },
+              {
+                "branchId": "IF-3-TRUE",
+                "kind": "IF",
+                "outcome": "TRUE",
+                "condition": "dto.getMedicine() != null",
+                "lineStart": 139,
+                "lineEnd": 139
+              },
+              {
+                "branchId": "IF-3-FALSE",
+                "kind": "IF",
+                "outcome": "FALSE",
+                "condition": "dto.getMedicine() != null",
+                "lineStart": 138,
+                "lineEnd": 138
+              },
+              {
+                "branchId": "IF-4-TRUE",
+                "kind": "IF",
+                "outcome": "TRUE",
+                "condition": "dto.getMedicalRecordId() != null",
+                "lineStart": 143,
+                "lineEnd": 146
+              },
+              {
+                "branchId": "IF-4-FALSE",
+                "kind": "IF",
+                "outcome": "FALSE",
+                "condition": "dto.getMedicalRecordId() != null",
+                "lineStart": 142,
+                "lineEnd": 142
+              },
+              {
+                "branchId": "STMT-2",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 149,
+                "lineEnd": 149
+              },
+              {
+                "branchId": "STMT-3",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 151,
+                "lineEnd": 151
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": 144,
+        "packageName": "com.example.HMS.service",
+        "className": "webhookService",
+        "qualifiedName": "com.example.HMS.service.webhookService",
+        "classType": "SERVICE",
+        "filePath": "Hospital-Management-System/HMS/src/main/java/com/example/HMS/service/webhookService.java",
+        "sourceCode": "package com.example.HMS.service;\r\n\r\nimport org.springframework.stereotype.Service;\r\nimport org.springframework.web.client.RestTemplate;\r\nimport java.util.Map;\r\n\r\n@Service\r\npublic class webhookService {\r\n\r\n    private final RestTemplate restTemplate;\r\n\r\n    public webhookService(RestTemplate restTemplate) {\r\n        this.restTemplate = restTemplate;\r\n    }\r\n\r\n    public void sendWebhook(String url, Enum eventType, Map<String, Object> payload) {\r\n        payload.put(\"event\", eventType.name());\r\n        try {\r\n            restTemplate.postForObject(url, payload, String.class);\r\n            System.out.println(\"Webhooks sent successfully to : \" + url);\r\n        } catch (Exception e) {\r\n            System.err.println(\"Failed to send webhooks : \" + e.getMessage());\r\n        }\r\n    }\r\n}\r\n",
+        "annotations": [
+          {
+            "id": 232,
+            "targetType": "CLASS",
+            "category": "COMPONENT",
+            "annotationName": "Service",
+            "attributes": "@Service"
+          }
+        ],
+        "methods": [
+          {
+            "id": 359,
+            "classQualifiedName": "com.example.HMS.service.webhookService",
+            "methodName": "sendWebhook",
+            "returnType": "void",
+            "parameters": [
+              {
+                "name": "url",
+                "type": "String"
+              },
+              {
+                "name": "eventType",
+                "type": "Enum"
+              },
+              {
+                "name": "payload",
+                "type": "Map<String,Object>"
+              }
+            ],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "public void sendWebhook(String url, Enum eventType, Map<String, Object>payload) {\r\n        payload.put(\"event\",eventType.name());\r\n\r\n        try {\r\n            restTemplate.postForObject(url, payload, String.class);\r\n            System.out.println(\"Webhooks sent successfully to : \"+url);\r\n        }\r\n        catch (Exception e) {\r\n            System.err.println(\"Failed to send webhooks : \" + e.getMessage());\r\n        }\r\n    }",
+            "lineStart": 17,
+            "lineEnd": 27,
+            "annotations": [],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 18,
+                "lineEnd": 18
+              },
+              {
+                "branchId": "STMT-2",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 20,
+                "lineEnd": 26
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": 108,
+        "packageName": "com.example.HMS.dto",
+        "className": "PrescriptionDto",
+        "qualifiedName": "com.example.HMS.dto.PrescriptionDto",
+        "classType": "OTHER",
+        "filePath": "Hospital-Management-System/HMS/src/main/java/com/example/HMS/dto/PrescriptionDto.java",
+        "sourceCode": "package com.example.HMS.dto;\r\n\r\nimport lombok.AllArgsConstructor;\r\nimport lombok.Getter;\r\nimport lombok.NoArgsConstructor;\r\nimport lombok.Setter;\r\n\r\n@AllArgsConstructor\r\n@NoArgsConstructor\r\n@Getter\r\n@Setter\r\npublic class PrescriptionDto {\r\n\r\n    private Long prescriptionId;\r\n\r\n    private String medicine;\r\n\r\n    private String dosage;\r\n\r\n    private String instructions;\r\n\r\n    private Long medicalRecordId;\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 109,
+        "packageName": "com.example.HMS.dto",
+        "className": "PrescriptionMapper",
+        "qualifiedName": "com.example.HMS.dto.PrescriptionMapper",
+        "classType": "OTHER",
+        "filePath": "Hospital-Management-System/HMS/src/main/java/com/example/HMS/dto/PrescriptionMapper.java",
+        "sourceCode": "package com.example.HMS.dto;\r\n\r\nimport com.example.HMS.entity.Prescription;\r\nimport org.springframework.stereotype.Component;\r\n\r\n@Component\r\npublic class PrescriptionMapper {\r\n\r\n    // Dto ---> Entity\r\n    public Prescription toEntity(PrescriptionDto dto) {\r\n        if (dto == null) {\r\n            return null;\r\n        }\r\n        Prescription prescription = new Prescription();\r\n        prescription.setDosage(dto.getDosage());\r\n        prescription.setMedicine(dto.getMedicine());\r\n        prescription.setInstructions(dto.getInstructions());\r\n        return prescription;\r\n    }\r\n\r\n    // Entity ---> Dto\r\n    public PrescriptionDto toDto(Prescription prescription) {\r\n        if (prescription == null) {\r\n            return null;\r\n        }\r\n        PrescriptionDto dto = new PrescriptionDto();\r\n        dto.setPrescriptionId(prescription.getPrescriptionId());\r\n        dto.setDosage(prescription.getDosage());\r\n        dto.setMedicine(prescription.getMedicine());\r\n        dto.setInstructions(prescription.getInstructions());\r\n        if (prescription.getMedicalRecord() != null) {\r\n            dto.setMedicalRecordId(prescription.getMedicalRecord().getRecordId());\r\n        }\r\n        return dto;\r\n    }\r\n}\r\n",
+        "annotations": [
+          {
+            "id": 210,
+            "targetType": "CLASS",
+            "category": "COMPONENT",
+            "annotationName": "Component",
+            "attributes": "@Component"
+          }
+        ],
+        "methods": []
+      },
+      {
+        "id": 114,
+        "packageName": "com.example.HMS.entity",
+        "className": "MedicalRecord",
+        "qualifiedName": "com.example.HMS.entity.MedicalRecord",
+        "classType": "ENTITY",
+        "filePath": "Hospital-Management-System/HMS/src/main/java/com/example/HMS/entity/MedicalRecord.java",
+        "sourceCode": "package com.example.HMS.entity;\r\n\r\nimport jakarta.persistence.*;\r\nimport lombok.*;\r\nimport java.time.LocalDate;\r\n\r\n@Entity\r\n@Builder\r\n@AllArgsConstructor\r\n@NoArgsConstructor\r\n@Getter\r\n@Setter\r\npublic class MedicalRecord {\r\n\r\n    @Id\r\n    @GeneratedValue(strategy = GenerationType.IDENTITY)\r\n    private Long recordId;\r\n\r\n    private String diagnosis;\r\n\r\n    private String treatment;\r\n\r\n    private LocalDate visitDate;\r\n\r\n    @ManyToOne(fetch = FetchType.LAZY)\r\n    @JoinColumn(name = \"appointment_id\")\r\n    private Appointment appointment;\r\n\r\n    @ManyToOne(fetch = FetchType.LAZY)\r\n    @JoinColumn(name = \"doctor_id\")\r\n    private Doctor doctor;\r\n\r\n    @ManyToOne(fetch = FetchType.LAZY)\r\n    @JoinColumn(name = \"patient_id\")\r\n    private Patient patient;\r\n\r\n    @OneToOne(cascade = CascadeType.ALL, orphanRemoval = true)\r\n    @JoinColumn(name = \"prescription_id\")\r\n    private Prescription prescription;\r\n}\r\n",
+        "annotations": [
+          {
+            "id": 215,
+            "targetType": "CLASS",
+            "category": "PERSISTENCE",
+            "annotationName": "Entity",
+            "attributes": "@Entity"
+          }
+        ],
+        "methods": []
+      },
+      {
+        "id": 116,
+        "packageName": "com.example.HMS.entity",
+        "className": "Prescription",
+        "qualifiedName": "com.example.HMS.entity.Prescription",
+        "classType": "ENTITY",
+        "filePath": "Hospital-Management-System/HMS/src/main/java/com/example/HMS/entity/Prescription.java",
+        "sourceCode": "package com.example.HMS.entity;\r\n\r\nimport jakarta.persistence.*;\r\nimport lombok.*;\r\n\r\n@Entity\r\n@Builder\r\n@AllArgsConstructor\r\n@NoArgsConstructor\r\n@Getter\r\n@Setter\r\npublic class Prescription {\r\n\r\n    @Id\r\n    @GeneratedValue(strategy = GenerationType.IDENTITY)\r\n    private Long prescriptionId;\r\n\r\n    private String medicine;\r\n\r\n    private String dosage;\r\n\r\n    private String instructions;\r\n\r\n    @OneToOne(mappedBy = \"prescription\", orphanRemoval = true)\r\n    private MedicalRecord medicalRecord;\r\n}\r\n",
+        "annotations": [
+          {
+            "id": 217,
+            "targetType": "CLASS",
+            "category": "PERSISTENCE",
+            "annotationName": "Entity",
+            "attributes": "@Entity"
+          }
+        ],
+        "methods": []
+      },
+      {
+        "id": 126,
+        "packageName": "com.example.HMS.exception",
+        "className": "MedicalRecordNotFoundException",
+        "qualifiedName": "com.example.HMS.exception.MedicalRecordNotFoundException",
+        "classType": "OTHER",
+        "filePath": "Hospital-Management-System/HMS/src/main/java/com/example/HMS/exception/MedicalRecordNotFoundException.java",
+        "sourceCode": "package com.example.HMS.exception;\r\n\r\npublic class MedicalRecordNotFoundException extends RuntimeException {\r\n\r\n    public MedicalRecordNotFoundException(String message) {\r\n        super(message);\r\n    }\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 128,
+        "packageName": "com.example.HMS.exception",
+        "className": "PrescriptionNotFoundException",
+        "qualifiedName": "com.example.HMS.exception.PrescriptionNotFoundException",
+        "classType": "OTHER",
+        "filePath": "Hospital-Management-System/HMS/src/main/java/com/example/HMS/exception/PrescriptionNotFoundException.java",
+        "sourceCode": "package com.example.HMS.exception;\r\n\r\npublic class PrescriptionNotFoundException extends RuntimeException {\r\n\r\n    public PrescriptionNotFoundException(String message) {\r\n        super(message);\r\n    }\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 134,
+        "packageName": "com.example.HMS.repository",
+        "className": "MedicalRecordRepository",
+        "qualifiedName": "com.example.HMS.repository.MedicalRecordRepository",
+        "classType": "REPOSITORY",
+        "filePath": "Hospital-Management-System/HMS/src/main/java/com/example/HMS/repository/MedicalRecordRepository.java",
+        "sourceCode": "package com.example.HMS.repository;\r\n\r\nimport com.example.HMS.entity.MedicalRecord;\r\nimport org.springframework.data.jpa.repository.JpaRepository;\r\nimport org.springframework.stereotype.Repository;\r\nimport java.time.LocalDate;\r\nimport java.util.List;\r\n\r\n@Repository\r\npublic interface MedicalRecordRepository extends JpaRepository<MedicalRecord, Long> {\r\n\r\n    List<MedicalRecord> findByPatientPatientIdOrderByVisitDateDesc(Long patientId);\r\n\r\n    List<MedicalRecord> findByDoctorDoctorIdOrderByVisitDateDesc(Long patientId);\r\n\r\n    List<MedicalRecord> findByVisitDate(LocalDate visitDate);\r\n\r\n    List<MedicalRecord> findByAppointment_AppointmentId(Long appointmentId);\r\n}\r\n",
+        "annotations": [
+          {
+            "id": 222,
+            "targetType": "CLASS",
+            "category": "COMPONENT",
+            "annotationName": "Repository",
+            "attributes": "@Repository"
+          }
+        ],
+        "methods": []
+      },
+      {
+        "id": 136,
+        "packageName": "com.example.HMS.repository",
+        "className": "PrescriptionRepository",
+        "qualifiedName": "com.example.HMS.repository.PrescriptionRepository",
+        "classType": "REPOSITORY",
+        "filePath": "Hospital-Management-System/HMS/src/main/java/com/example/HMS/repository/PrescriptionRepository.java",
+        "sourceCode": "package com.example.HMS.repository;\r\n\r\nimport com.example.HMS.entity.Prescription;\r\nimport org.springframework.data.jpa.repository.JpaRepository;\r\nimport org.springframework.data.jpa.repository.Query;\r\nimport org.springframework.data.repository.query.Param;\r\nimport org.springframework.stereotype.Repository;\r\nimport java.util.List;\r\nimport java.util.Optional;\r\n\r\n@Repository\r\npublic interface PrescriptionRepository extends JpaRepository<Prescription, Long> {\r\n\r\n    @Query(\"SELECT p FROM Prescription p \" + \"WHERE p.medicalRecord.patient.patientId = :patientId\")\r\n    List<Prescription> findPrescriptionsByPatientId(@Param(\"patientId\") Long patientId);\r\n\r\n    Optional<Prescription> findByMedicalRecord_RecordId(Long medicalRecordId);\r\n}\r\n",
+        "annotations": [
+          {
+            "id": 224,
+            "targetType": "CLASS",
+            "category": "COMPONENT",
+            "annotationName": "Repository",
+            "attributes": "@Repository"
+          }
+        ],
+        "methods": []
+      },
+      {
+        "id": 110,
+        "packageName": "com.example.HMS.entity",
+        "className": "Appointment",
+        "qualifiedName": "com.example.HMS.entity.Appointment",
+        "classType": "ENTITY",
+        "filePath": "Hospital-Management-System/HMS/src/main/java/com/example/HMS/entity/Appointment.java",
+        "sourceCode": "package com.example.HMS.entity;\r\n\r\nimport com.example.HMS.enums.AppointmentStatus;\r\nimport jakarta.persistence.*;\r\nimport lombok.*;\r\nimport java.time.LocalDate;\r\nimport java.time.LocalTime;\r\n\r\n@Entity\r\n@Builder\r\n@AllArgsConstructor\r\n@NoArgsConstructor\r\n@Getter\r\n@Setter\r\npublic class Appointment {\r\n\r\n    @Id\r\n    @GeneratedValue(strategy = GenerationType.IDENTITY)\r\n    private Long appointmentId;\r\n\r\n    private LocalDate date;\r\n\r\n    private LocalTime time;\r\n\r\n    private String patientEmail;\r\n\r\n    @Enumerated(EnumType.STRING)\r\n    private AppointmentStatus status;\r\n\r\n    @ManyToOne(fetch = FetchType.LAZY)\r\n    @JoinColumn(name = \"doctor_id\")\r\n    private Doctor doctor;\r\n\r\n    @ManyToOne(fetch = FetchType.LAZY)\r\n    @JoinColumn(name = \"patient_id\")\r\n    private Patient patient;\r\n\r\n    @OneToOne(mappedBy = \"appointment\", cascade = CascadeType.ALL, orphanRemoval = true)\r\n    private MedicalRecord medicalRecord;\r\n\r\n    @OneToOne(mappedBy = \"appointment\", cascade = CascadeType.ALL)\r\n    private Bill bill;\r\n}\r\n",
+        "annotations": [
+          {
+            "id": 211,
+            "targetType": "CLASS",
+            "category": "PERSISTENCE",
+            "annotationName": "Entity",
+            "attributes": "@Entity"
+          }
+        ],
+        "methods": []
+      },
+      {
+        "id": 113,
+        "packageName": "com.example.HMS.entity",
+        "className": "Doctor",
+        "qualifiedName": "com.example.HMS.entity.Doctor",
+        "classType": "ENTITY",
+        "filePath": "Hospital-Management-System/HMS/src/main/java/com/example/HMS/entity/Doctor.java",
+        "sourceCode": "package com.example.HMS.entity;\r\n\r\nimport jakarta.persistence.*;\r\nimport lombok.*;\r\nimport java.util.List;\r\n\r\n@Entity\r\n@Builder\r\n@AllArgsConstructor\r\n@NoArgsConstructor\r\n@Getter\r\n@Setter\r\npublic class Doctor {\r\n\r\n    @Id\r\n    @GeneratedValue(strategy = GenerationType.IDENTITY)\r\n    private Long doctorId;\r\n\r\n    @Column(nullable = false)\r\n    private String doctorName;\r\n\r\n    @Column(nullable = false)\r\n    private String specialization;\r\n\r\n    private Boolean doctorAvailable;\r\n\r\n    @ManyToOne(fetch = FetchType.LAZY)\r\n    @JoinColumn(name = \"department_id\")\r\n    private Department department;\r\n\r\n    @OneToMany(mappedBy = \"doctor\", cascade = CascadeType.ALL)\r\n    private List<MedicalRecord> medicalRecords;\r\n\r\n    @OneToMany(mappedBy = \"doctor\", cascade = CascadeType.ALL)\r\n    private List<Appointment> appointments;\r\n}\r\n",
+        "annotations": [
+          {
+            "id": 214,
+            "targetType": "CLASS",
+            "category": "PERSISTENCE",
+            "annotationName": "Entity",
+            "attributes": "@Entity"
+          }
+        ],
+        "methods": []
+      },
+      {
+        "id": 115,
+        "packageName": "com.example.HMS.entity",
+        "className": "Patient",
+        "qualifiedName": "com.example.HMS.entity.Patient",
+        "classType": "ENTITY",
+        "filePath": "Hospital-Management-System/HMS/src/main/java/com/example/HMS/entity/Patient.java",
+        "sourceCode": "package com.example.HMS.entity;\r\n\r\nimport com.example.HMS.enums.Gender;\r\nimport jakarta.persistence.*;\r\nimport lombok.*;\r\nimport java.util.List;\r\n\r\n@Entity\r\n@Builder\r\n@AllArgsConstructor\r\n@NoArgsConstructor\r\n@Getter\r\n@Setter\r\npublic class Patient {\r\n\r\n    @Id\r\n    @GeneratedValue(strategy = GenerationType.IDENTITY)\r\n    private Long patientId;\r\n\r\n    private String patientName;\r\n\r\n    private Integer patientAge;\r\n\r\n    private String patientPhone;\r\n\r\n    private String patientEmail;\r\n\r\n    @Enumerated(EnumType.STRING)\r\n    private Gender gender;\r\n\r\n    @OneToMany(mappedBy = \"patient\", cascade = CascadeType.ALL)\r\n    private List<Appointment> appointments;\r\n\r\n    @OneToMany(mappedBy = \"patient\", cascade = CascadeType.ALL)\r\n    private List<MedicalRecord> medicalRecords;\r\n\r\n    @OneToMany(mappedBy = \"patient\", cascade = CascadeType.ALL)\r\n    private List<Bill> bills;\r\n}\r\n",
+        "annotations": [
+          {
+            "id": 216,
+            "targetType": "CLASS",
+            "category": "PERSISTENCE",
+            "annotationName": "Entity",
+            "attributes": "@Entity"
+          }
+        ],
+        "methods": []
+      },
+      {
+        "id": 111,
+        "packageName": "com.example.HMS.entity",
+        "className": "Bill",
+        "qualifiedName": "com.example.HMS.entity.Bill",
+        "classType": "ENTITY",
+        "filePath": "Hospital-Management-System/HMS/src/main/java/com/example/HMS/entity/Bill.java",
+        "sourceCode": "package com.example.HMS.entity;\r\n\r\nimport com.example.HMS.enums.PaymentMethod;\r\nimport com.example.HMS.enums.PaymentStatus;\r\nimport jakarta.persistence.*;\r\nimport lombok.*;\r\nimport org.hibernate.annotations.Fetch;\r\nimport java.time.LocalDate;\r\n\r\n@Entity\r\n@Builder\r\n@AllArgsConstructor\r\n@NoArgsConstructor\r\n@Getter\r\n@Setter\r\npublic class Bill {\r\n\r\n    @Id\r\n    @GeneratedValue(strategy = GenerationType.IDENTITY)\r\n    private Long billId;\r\n\r\n    private Double amount;\r\n\r\n    private LocalDate billDate;\r\n\r\n    @Enumerated(EnumType.STRING)\r\n    private PaymentStatus status;\r\n\r\n    @Enumerated(EnumType.STRING)\r\n    private PaymentMethod paymentMethod;\r\n\r\n    @ManyToOne(fetch = FetchType.LAZY)\r\n    @JoinColumn(name = \"patient_id\")\r\n    private Patient patient;\r\n\r\n    @OneToOne\r\n    @JoinColumn(name = \"appointment_id\")\r\n    private Appointment appointment;\r\n}\r\n",
+        "annotations": [
+          {
+            "id": 212,
+            "targetType": "CLASS",
+            "category": "PERSISTENCE",
+            "annotationName": "Entity",
+            "attributes": "@Entity"
+          }
+        ],
+        "methods": []
+      },
+      {
+        "id": 117,
+        "packageName": "com.example.HMS.enums",
+        "className": "AppointmentStatus",
+        "qualifiedName": "com.example.HMS.enums.AppointmentStatus",
+        "classType": "ENUM",
+        "filePath": "Hospital-Management-System/HMS/src/main/java/com/example/HMS/enums/AppointmentStatus.java",
+        "sourceCode": "package com.example.HMS.enums;\r\n\r\npublic enum AppointmentStatus {\r\n\r\n    APPOINTMENT_SCHEDULED(\"Appointment scheduled\"),\r\n    APPOINTMENT_UPDATED(\"Appointment updated\"),\r\n    APPOINTMENT_COMPLETED(\"Appointment completed\"),\r\n    APPOINTMENT_CANCELLED(\"Appointment cancelled\"),\r\n    APPOINTMENT_RESCHEDULED(\"Appointment rescheduled\"),\r\n    APPOINTMENT_NO_SHOW(\"Patient did not show up\");\r\n\r\n    private final String description;\r\n\r\n    AppointmentStatus(String description) {\r\n        this.description = description;\r\n    }\r\n\r\n    public String getDescription() {\r\n        return description;\r\n    }\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 112,
+        "packageName": "com.example.HMS.entity",
+        "className": "Department",
+        "qualifiedName": "com.example.HMS.entity.Department",
+        "classType": "ENTITY",
+        "filePath": "Hospital-Management-System/HMS/src/main/java/com/example/HMS/entity/Department.java",
+        "sourceCode": "package com.example.HMS.entity;\r\n\r\nimport com.fasterxml.jackson.annotation.JsonIgnore;\r\nimport jakarta.persistence.*;\r\nimport lombok.*;\r\nimport java.util.List;\r\n\r\n@Entity\r\n@Builder\r\n@AllArgsConstructor\r\n@NoArgsConstructor\r\n@Getter\r\n@Setter\r\npublic class Department {\r\n\r\n    @Id\r\n    @GeneratedValue(strategy = GenerationType.IDENTITY)\r\n    private Long departmentId;\r\n\r\n    @Column(nullable = false)\r\n    private String departmentName;\r\n\r\n    @OneToMany(mappedBy = \"department\", cascade = CascadeType.ALL)\r\n    @JsonIgnore\r\n    private List<Doctor> doctors;\r\n}\r\n",
+        "annotations": [
+          {
+            "id": 213,
+            "targetType": "CLASS",
+            "category": "PERSISTENCE",
+            "annotationName": "Entity",
+            "attributes": "@Entity"
+          }
+        ],
+        "methods": []
+      },
+      {
+        "id": 119,
+        "packageName": "com.example.HMS.enums",
+        "className": "Gender",
+        "qualifiedName": "com.example.HMS.enums.Gender",
+        "classType": "ENUM",
+        "filePath": "Hospital-Management-System/HMS/src/main/java/com/example/HMS/enums/Gender.java",
+        "sourceCode": "package com.example.HMS.enums;\r\n\r\nimport lombok.Getter;\r\n\r\npublic enum Gender {\r\n\r\n    MALE(\"Male\"), FEMALE(\"Female\"), OTHER(\"Other\");\r\n\r\n    private final String description;\r\n\r\n    Gender(String description) {\r\n        this.description = description;\r\n    }\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 120,
+        "packageName": "com.example.HMS.enums",
+        "className": "PaymentMethod",
+        "qualifiedName": "com.example.HMS.enums.PaymentMethod",
+        "classType": "ENUM",
+        "filePath": "Hospital-Management-System/HMS/src/main/java/com/example/HMS/enums/PaymentMethod.java",
+        "sourceCode": "package com.example.HMS.enums;\r\n\r\npublic enum PaymentMethod {\r\n\r\n    CASH(\"Cash payment\"), CARD(\"Credit/Debit card\"), UPI(\"UPI transfer\"), NET_BANKING(\"Net banking\"), INSURANCE(\"Insurance claim\");\r\n\r\n    private final String description;\r\n\r\n    PaymentMethod(String description) {\r\n        this.description = description;\r\n    }\r\n\r\n    public String getDescription() {\r\n        return description;\r\n    }\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 121,
+        "packageName": "com.example.HMS.enums",
+        "className": "PaymentStatus",
+        "qualifiedName": "com.example.HMS.enums.PaymentStatus",
+        "classType": "ENUM",
+        "filePath": "Hospital-Management-System/HMS/src/main/java/com/example/HMS/enums/PaymentStatus.java",
+        "sourceCode": "package com.example.HMS.enums;\r\n\r\npublic enum PaymentStatus {\r\n\r\n    PAID(\"Payment completed\"), UNPAID(\"Payment pending\"), PARTIAL(\"Partially paid\"), REFUNDED(\"Payment refunded\"), CANCELLED(\"Payment cancelled\");\r\n\r\n    private final String description;\r\n\r\n    PaymentStatus(String description) {\r\n        this.description = description;\r\n    }\r\n\r\n    public String getDescription() {\r\n        return description;\r\n    }\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      }
+    ],
+    "approvedBusinessRules": [
+      {
+        "id": 255,
+        "methodId": 357,
+        "ruleCode": "BR-161",
+        "description": "Khi prescription đã được xử lý, service gọi `prescriptionRepository.save` để lưu prescription.",
+        "reviewNote": "SOURCE_BRANCH:STMT-2\nAI category: SIDE_EFFECT. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-2"
+      },
+      {
+        "id": 256,
+        "methodId": 357,
+        "ruleCode": "BR-162",
+        "description": "Khi cập nhật hoàn tất, service chuyển prescription thành DTO để trả về.",
+        "reviewNote": "SOURCE_BRANCH:STMT-3\nAI category: BUSINESS_LOGIC. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-3"
+      },
+      {
+        "id": 257,
+        "methodId": 359,
+        "ruleCode": "BR-163",
+        "description": "Khi được gọi, service thêm tên eventType vào payload với khóa \"event\".",
+        "reviewNote": "SOURCE_BRANCH:STMT-1\nAI category: SIDE_EFFECT. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-1"
+      },
+      {
+        "id": 258,
+        "methodId": 359,
+        "ruleCode": "BR-164",
+        "description": "Khi được gọi, service gửi payload đến url bằng restTemplate.postForObject.",
+        "reviewNote": "SOURCE_BRANCH:STMT-2\nAI category: INTEGRATION. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-2"
+      },
+      {
+        "id": 259,
+        "methodId": 359,
+        "ruleCode": "BR-165",
+        "description": "Khi restTemplate.postForObject ném Exception, service ghi lỗi và không ném lại ngoại lệ.",
+        "reviewNote": "SOURCE_BRANCH:STMT-2\nAI category: INTEGRATION. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-2"
+      },
+      {
+        "id": 314,
+        "methodId": 352,
+        "ruleCode": "BR-166",
+        "description": "Khi DTO có medicalRecordId khác null, service tìm medical record theo ID và ném MedicalRecordNotFoundException với thông điệp \"Failed to find the medical record with id \" nối với ID nếu không tìm thấy; nếu tìm thấy, liên kết medical record với prescription theo cả hai chiều.",
+        "reviewNote": "SOURCE_BRANCH:IF-1\nAI category: BUSINESS_LOGIC. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "IF-1"
+      },
+      {
+        "id": 315,
+        "methodId": 352,
+        "ruleCode": "BR-167",
+        "description": "Khi được gọi, service lưu prescription qua save và chuyển kết quả đã lưu thành PrescriptionDto để trả về.",
+        "reviewNote": "SOURCE_BRANCH:STMT-3\nAI category: SIDE_EFFECT. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-3"
+      },
+      {
+        "id": 316,
+        "methodId": 353,
+        "ruleCode": "BR-168",
+        "description": "Khi được gọi, service lấy toàn bộ prescription qua findAll, chuyển từng phần tử thành PrescriptionDto và trả về danh sách.",
+        "reviewNote": "SOURCE_BRANCH:STMT-1\nAI category: INTEGRATION. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-1"
+      },
+      {
+        "id": 317,
+        "methodId": 354,
+        "ruleCode": "BR-169",
+        "description": "Khi prescriptionId là null hoặc nhỏ hơn hoặc bằng 0, service ném IllegalArgumentException với thông điệp \"Prescription ID must be valid and positive\".",
+        "reviewNote": "SOURCE_BRANCH:IF-1\nAI category: VALIDATION. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "IF-1"
+      }
+    ],
+    "approvedTestPlans": [
+      {
+        "id": 197,
+        "businessRuleId": 255,
+        "coveredRuleIds": [
+          255
+        ],
+        "planCode": "TP-089",
+        "title": "Lưu prescription sau cập nhật",
+        "description": "Xác minh prescription được xử lý được lưu qua prescriptionRepository.save.",
+        "testType": "HAPPY_PATH",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 198,
+        "businessRuleId": 256,
+        "coveredRuleIds": [
+          256
+        ],
+        "planCode": "TP-090",
+        "title": "Trả DTO sau cập nhật",
+        "description": "Xác minh service chuyển prescription sau cập nhật thành DTO để trả về.",
+        "testType": "HAPPY_PATH",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 199,
+        "businessRuleId": 257,
+        "coveredRuleIds": [
+          257
+        ],
+        "planCode": "TP-091",
+        "title": "Thêm event vào payload",
+        "description": "Xác minh service thêm tên eventType vào payload bằng khóa event.\n[GreyTest testability: READY] COLLECTION_MUTATION @ Hospital-Management-System/HMS/src/main/java/com/example/HMS/service/webhookService.java:17 sendWebhook — Method sửa trực tiếp collection fixture: payload. | Tạo collection mutable thực; lưu bản sao expected trước khi gọi method, không tính expected từ fixture đã bị sửa.",
+        "testType": "HAPPY_PATH",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 200,
+        "businessRuleId": 258,
+        "coveredRuleIds": [
+          258,
+          259
+        ],
+        "planCode": "TP-092",
+        "title": "Gửi webhook và xử lý lỗi",
+        "description": "Xác minh payload được gửi đến URL; nếu postForObject ném Exception, service ghi lỗi và không ném lại.\n[GreyTest testability: READY] COLLECTION_MUTATION @ Hospital-Management-System/HMS/src/main/java/com/example/HMS/service/webhookService.java:17 sendWebhook — Method sửa trực tiếp collection fixture: payload. | Tạo collection mutable thực; lưu bản sao expected trước khi gọi method, không tính expected từ fixture đã bị sửa.",
+        "testType": "EXCEPTION",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 201,
+        "businessRuleId": 314,
+        "coveredRuleIds": [
+          314
+        ],
+        "planCode": "TP-093",
+        "title": "Liên kết medical record khi tạo",
+        "description": "Kiểm tra có mã record thì tìm record, liên kết hai chiều khi tìm thấy và ném MedicalRecordNotFoundException nếu không tìm thấy.",
+        "testType": "EXCEPTION",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 202,
+        "businessRuleId": 315,
+        "coveredRuleIds": [
+          315
+        ],
+        "planCode": "TP-094",
+        "title": "Lưu và trả DTO prescription",
+        "description": "Xác minh service lưu prescription và chuyển kết quả đã lưu thành PrescriptionDto để trả về.",
+        "testType": "HAPPY_PATH",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 203,
+        "businessRuleId": 316,
+        "coveredRuleIds": [
+          316
+        ],
+        "planCode": "TP-095",
+        "title": "Lấy toàn bộ prescription",
+        "description": "Xác minh service lấy danh sách qua findAll, chuyển từng phần tử thành DTO và trả về danh sách.",
+        "testType": "HAPPY_PATH",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 204,
+        "businessRuleId": 317,
+        "coveredRuleIds": [
+          317
+        ],
+        "planCode": "TP-096",
+        "title": "Kiểm tra mã prescription",
+        "description": "Xác minh mã null hoặc không dương khiến service ném IllegalArgumentException với thông điệp đã chỉ định.",
+        "testType": "BOUNDARY",
+        "status": "APPROVED",
+        "isModified": false
+      }
+    ],
+    "existingTests": [],
+    "supportingResources": [],
+    "contextWarnings": []
+  },
+  "response": {
+    "cases": [
+      {
+        "plan_id": 201,
+        "test_type": "HAPPY_PATH",
+        "description": "Liên kết medical record hai chiều khi tạo prescription",
+        "preconditions": "PrescriptionService được tạo với mock cho các repository và dùng PrescriptionMapper thật. MedicalRecordRepository tìm thấy MedicalRecord ID 20. PrescriptionRepository.save trả về chính entity đã nhận, với prescriptionId được giả lập là 10 và các trường nghiệp vụ được giữ nguyên.",
+        "test_data": {
+          "input": {
+            "dto": {
+              "prescriptionId": null,
+              "medicine": "Thuốc A",
+              "dosage": "10 mg",
+              "instructions": "Uống sau ăn",
+              "medicalRecordId": 20
+            }
+          },
+          "mocks": {
+            "MedicalRecordRepository.findById(20)": "Optional chứa MedicalRecord ID 20",
+            "PrescriptionRepository.save": "Nhận prescription có các trường medicine Thuốc A, dosage 10 mg, instructions Uống sau ăn và liên kết với MedicalRecord ID 20; trả về chính entity đó với prescriptionId 10"
+          }
+        },
+        "expected_result": "Service tìm record ID 20, liên kết record với prescription và prescription với record, lưu prescription rồi trả về DTO phản ánh các trường đã lưu và medicalRecordId là 20.",
+        "priority": "HIGH",
+        "trace_source": "BR-166 [IF-1], BR-167 [STMT-3] -> TP-093 -> IF-1-TRUE; TP-094 -> STMT-3, STMT-4"
+      },
+      {
+        "plan_id": 201,
+        "test_type": "EXCEPTION",
+        "description": "Không tìm thấy medical record khi tạo prescription",
+        "preconditions": "PrescriptionService dùng PrescriptionMapper thật. MedicalRecordRepository không tìm thấy record ID 20.",
+        "test_data": {
+          "input": {
+            "dto": {
+              "prescriptionId": null,
+              "medicine": "Thuốc A",
+              "dosage": "10 mg",
+              "instructions": "Uống sau ăn",
+              "medicalRecordId": 20
+            }
+          },
+          "mocks": {
+            "MedicalRecordRepository.findById(20)": "Optional.empty"
+          }
+        },
+        "expected_result": "Service ném MedicalRecordNotFoundException với thông điệp \"Failed to find the medical record with id 20\"; prescription không được lưu và DTO không được trả về.",
+        "priority": "HIGH",
+        "trace_source": "BR-166 [IF-1] -> TP-093 -> IF-1-TRUE; TP-094 -> nhánh tra cứu thất bại trước STMT-3 và STMT-4"
+      },
+      {
+        "plan_id": 201,
+        "test_type": "HAPPY_PATH",
+        "description": "Tạo prescription không có medical record",
+        "preconditions": "PrescriptionService dùng PrescriptionMapper thật. PrescriptionRepository.save trả về chính entity đã nhận, giữ nguyên các trường nghiệp vụ và cung cấp prescriptionId 10.",
+        "test_data": {
+          "input": {
+            "dto": {
+              "prescriptionId": null,
+              "medicine": "Thuốc A",
+              "dosage": "10 mg",
+              "instructions": "Uống sau ăn",
+              "medicalRecordId": null
+            }
+          },
+          "mocks": {
+            "PrescriptionRepository.save": "Nhận prescription có medicine Thuốc A, dosage 10 mg, instructions Uống sau ăn và không có medicalRecord; trả về chính entity đó với prescriptionId 10"
+          }
+        },
+        "expected_result": "Service không tra cứu medical record, lưu prescription và trả về DTO có prescriptionId 10 cùng các trường nghiệp vụ đã lưu; medicalRecordId là null.",
+        "priority": "HIGH",
+        "trace_source": "BR-166 [IF-1], BR-167 [STMT-3] -> TP-093 -> IF-1-FALSE; TP-094 -> STMT-3, STMT-4"
+      }
+    ]
+  }
+}

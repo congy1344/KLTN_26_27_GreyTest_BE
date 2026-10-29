@@ -82,6 +82,11 @@ public class GenerationFingerprintService {
 
     /** Dấu vết production API thực tế được output UT gọi, độc lập với byte source của test. */
     public Fingerprint outputFingerprint(Object response, Path sourceRoot) {
+        return outputFingerprint(response, sourceRoot, null);
+    }
+
+    /** Module lấy từ context đã chọn, không suy đoán từ package do LLM sinh. */
+    public Fingerprint outputFingerprint(Object response, Path sourceRoot, Object context) {
         List<String> problems = new ArrayList<>();
         Map<String, Object> manifest = new TreeMap<>();
         manifest.put("format", "greytest-output-dependencies-v1");
@@ -103,10 +108,18 @@ public class GenerationFingerprintService {
                 SourceDependencyIndex index = SourceDependencyIndex.load(sourceRoot);
                 synchronized (index) {
                     try {
-                    var dependencies = new GeneratedOutputDependencyResolver(index, problems).resolve(sources);
+                    String module = context instanceof String scope ? scope : null;
+                    if (context != null && module == null) {
+                        var modules = targets(classes(context), mapper.valueToTree(context)).stream()
+                                .map(type -> ServiceScopeResolver.modulePath(type.filePath())).distinct().toList();
+                        if (modules.size() != 1) throw new IllegalArgumentException("Output requires one target module");
+                        module = modules.get(0);
+                    }
+                    index.outputModule(module);
+                    var dependencies = new GeneratedOutputDependencyResolver(index, problems, module).resolve(sources);
                     manifest.put("sourceDependencies", dependencies);
                     manifest.put("resources", index.sourceResources(dependencies, problems));
-                    } finally { index.releaseUncachedFacades(); }
+                    } finally { index.outputModule(null); index.releaseUncachedFacades(); }
                 }
             }
         } catch (RuntimeException | java.io.IOException exception) {

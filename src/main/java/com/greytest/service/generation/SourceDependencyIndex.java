@@ -43,7 +43,9 @@ final class SourceDependencyIndex {
     private final Map<String, CompilationUnit> units = new TreeMap<>();
     private final Map<String, List<TypeDeclaration<?>>> types = new TreeMap<>();
     private final Map<String, CombinedTypeSolver> solvers = new TreeMap<>();
+    private final ParserDependencyClasspath.Snapshot classpath;
     private CombinedTypeSolver cachedOutputSolver;
+    private String analysisModule;
     private volatile boolean retainedInProcessCache;
     private record IndexReadKey(Path root) {}
     private record BuildReadKey(Path root, String module) {}
@@ -56,8 +58,9 @@ final class SourceDependencyIndex {
     private record Closure(Map<String, String> dependencies, List<String> problems) {}
     private final Map<ClosureKey, Closure> closures = new java.util.LinkedHashMap<>(64, 0.75f, true);
 
-    private SourceDependencyIndex(Path root, Map<String, String> sources, Map<String, CompilationUnit> parsedUnits) {
+    private SourceDependencyIndex(Path root, Map<String, String> sources, Map<String, CompilationUnit> parsedUnits, ParserDependencyClasspath.Snapshot classpath) {
         this.root = root;
+        this.classpath = classpath;
         ParserConfiguration config = new ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_21);
         JavaParser parser = new JavaParser(config);
         for (var entry : sources.entrySet()) {
@@ -76,6 +79,7 @@ final class SourceDependencyIndex {
                 type.getFullyQualifiedName().ifPresent(name -> types.computeIfAbsent(name, ignored -> new ArrayList<>()).add(type));
             }
         }
+        LombokSourceSymbols.expand(root, units);
         configureResolvers();
     }
 
@@ -86,20 +90,20 @@ final class SourceDependencyIndex {
             if (solvers.containsKey(module)) continue;
             MemoryTypeSolver memory = new MemoryTypeSolver();
             memories.put(module, memory);
-            solvers.put(module, new CombinedTypeSolver(memory, new ReflectionTypeSolver(false)));
+            solvers.put(module, classpath.solver(memory, module));
         }
         units.forEach((path, unit) -> unit.setData(Node.SYMBOL_RESOLVER_KEY,
                 new JavaSymbolSolver(solvers.get(ServiceScopeResolver.modulePath(path)))));
         for (var entry : memories.entrySet()) {
             for (var sourceType : types.entrySet()) {
                 var local = sourceType.getValue().stream().filter(type -> ServiceScopeResolver.modulePath(relative(type)).equals(entry.getKey())).toList();
-                TypeDeclaration<?> declaration = local.size() == 1 ? local.get(0)
-                        : sourceType.getValue().size() == 1 ? sourceType.getValue().get(0) : null;
+                var available = sourceType.getValue().stream().filter(type -> classpath.sourceAvailable(entry.getKey(), ServiceScopeResolver.modulePath(relative(type)))).toList();
+                TypeDeclaration<?> declaration = local.size() == 1 ? local.get(0) : available.size() == 1 ? available.get(0) : null;
                 if (declaration == null) continue;
                 try {
                     String module = ServiceScopeResolver.modulePath(relative(declaration));
                     entry.getValue().addDeclaration(sourceType.getKey(), JavaParserFacade.get(solvers.get(module)).getTypeDeclaration(declaration));
-                } catch (RuntimeException exception) {
+                } catch (RuntimeException | LinkageError exception) {
                     // Record/type chưa được solver hỗ trợ vẫn giữ AST; bước resolve sẽ trả diagnostic rõ ràng.
                 }
             }
@@ -139,29 +143,32 @@ final class SourceDependencyIndex {
                     return FileVisitResult.CONTINUE;
                 }
             });
+            var classpath = ParserDependencyClasspath.load(root, sources.keySet().stream().map(ServiceScopeResolver::modulePath).collect(java.util.stream.Collectors.toSet()));
             StringBuilder manifest = new StringBuilder();
+            manifest.append("analysis-classpath:").append(classpath.digest()).append('\n');
             sources.forEach((path, source) -> manifest.append(path.length()).append(':').append(path)
-                    .append(':').append(GenerationFingerprintService.hash(source)).append('\n'));
+                    .append(':').append(GenerationFingerprintService.hash(source)).append(':')
+                    .append(LombokSourceSymbols.hasConfiguration(root.resolve(path).getParent())).append('\n'));
             String digest = GenerationFingerprintService.hash(manifest.toString());
             return GenerationJobContext.memoize("source-dependency-index-v1:" + root + ":" + digest,
-                    () -> verifiedIndex(new VerifiedIndexKey(root, digest), sources, parsedUnits));
+                    () -> verifiedIndex(new VerifiedIndexKey(root, digest), sources, parsedUnits, classpath));
         } catch (IOException exception) { throw new IllegalArgumentException("Unreadable snapshot", exception); }
     }
 
     private static SourceDependencyIndex verifiedIndex(VerifiedIndexKey key, Map<String, String> sources,
-            Map<String, CompilationUnit> parsedUnits) {
+            Map<String, CompilationUnit> parsedUnits, ParserDependencyClasspath.Snapshot classpath) {
         synchronized (VERIFIED_INDEXES) {
             CachedIndex cached = VERIFIED_INDEXES.get(key);
             if (cached != null) { GenerationJobContext.increment("dependencyIndexHits"); return cached.index(); }
         }
         GenerationJobContext.increment("dependencyIndexMisses");
-        SourceDependencyIndex created = new SourceDependencyIndex(key.root(), sources, parsedUnits);
+        SourceDependencyIndex created = new SourceDependencyIndex(key.root(), sources, parsedUnits, classpath);
         long characters = sources.values().stream().mapToLong(String::length).sum();
         if (characters > MAX_CACHED_SOURCE_CHARACTERS) { created.releaseUncachedFacades(); return created; }
         synchronized (VERIFIED_INDEXES) {
             CachedIndex previous = VERIFIED_INDEXES.get(key);
             if (previous != null) { created.releaseUncachedFacades(); return previous.index(); }
-            while (!VERIFIED_INDEXES.isEmpty() && (VERIFIED_INDEXES.size() >= 4
+            while (!VERIFIED_INDEXES.isEmpty() && (VERIFIED_INDEXES.size() >= (classpath.configured() ? 1 : 4)
                     || cachedSourceCharacters + characters > MAX_CACHED_SOURCE_CHARACTERS)) {
                 var oldest = VERIFIED_INDEXES.entrySet().iterator();
                 var removed = oldest.next();
@@ -180,7 +187,7 @@ final class SourceDependencyIndex {
 
     synchronized Map<String, String> dependencies(List<ClassContextDto> targets, List<String> problems) {
         try { return dependenciesWithLifetime(targets,problems); }
-        finally { releaseUncachedFacades(); }
+        finally { analysisModule = null; releaseUncachedFacades(); }
     }
 
     private Map<String,String> dependenciesWithLifetime(List<ClassContextDto> targets,List<String> problems) {
@@ -207,10 +214,13 @@ final class SourceDependencyIndex {
 
     private Map<String, String> computeDependencies(List<ClassContextDto> targets, List<String> problems) {
         Map<String, String> result = new TreeMap<>();
-        Set<String> visited = new HashSet<>();
-        for (ClassContextDto target : targets) visited.add("target-type:"
+        classpathEvidence(result);
+        Set<String> targetTypes = new HashSet<>();
+        for (ClassContextDto target : targets) targetTypes.add("target-type:"
                 + ServiceScopeResolver.modulePath(target.filePath()) + ":" + target.qualifiedName());
         for (ClassContextDto owner : targets) {
+            analysisModule = ServiceScopeResolver.modulePath(owner.filePath());
+            Set<String> visited = new HashSet<>(targetTypes);
             String path = safeRelative(owner.filePath());
             CompilationUnit unit = units.get(path);
             if (unit == null) { problems.add("unresolved target source: " + path); continue; }
@@ -244,9 +254,14 @@ final class SourceDependencyIndex {
         result.put(key, digest(method));
         visitContract(owner, result, visited, problems, false);
         for (AnnotationExpr annotation : method.findAll(AnnotationExpr.class)) visitAnnotation(annotation, owner, result, visited, problems);
+        visitBody(method, owner, key, result, visited, problems);
+    }
+
+    private void visitBody(Node body, TypeDeclaration<?> owner, String key, Map<String, String> result,
+            Set<String> visited, List<String> problems) {
         // Source AST giữ literal nguyên vẹn; nối dependency bằng receiver/type/signature đã resolve.
-        for (ClassOrInterfaceType type : method.findAll(ClassOrInterfaceType.class)) visitReferencedType(type, result, visited, problems, true);
-        for (MethodCallExpr call : method.findAll(MethodCallExpr.class)) {
+        for (ClassOrInterfaceType type : body.findAll(ClassOrInterfaceType.class)) visitReferencedType(type, result, visited, problems, true);
+        for (MethodCallExpr call : body.findAll(MethodCallExpr.class)) {
             try {
                 var resolved = call.resolve();
                 result.put("resolved-call:" + resolved.getQualifiedSignature(), "external-or-source");
@@ -268,44 +283,113 @@ final class SourceDependencyIndex {
                         }
                     }
                 } else if (types.containsKey(resolved.declaringType().getQualifiedName())) problems.add("unresolved source method: " + resolved.getQualifiedSignature());
-            } catch (RuntimeException exception) { problems.add("unresolved call: " + identity(owner) + "#" + call.getNameAsString()); }
+            } catch (RuntimeException | LinkageError exception) {
+                // Reflection có thể gặp type tùy chọn thiếu trong runtime; không dùng closure này làm bằng chứng tái sử dụng.
+                if (!knownConstructorStreamCollector(call, owner, result, visited, problems))
+                    problems.add("unresolved call: " + identity(owner) + "#" + call.getNameAsString());
+            }
         }
-        for (FieldAccessExpr access : method.findAll(FieldAccessExpr.class)) {
+        for (FieldAccessExpr access : body.findAll(FieldAccessExpr.class)) {
+            if (knownTypeQualifier(access)) continue;
             try {
                 var field = access.resolve();
                 if (field.isField()) visitFieldOwner(field.asField().declaringType().getQualifiedName(), owner, result, visited, problems);
-            } catch (RuntimeException exception) { problems.add("unresolved field access: " + identity(owner)); }
+            } catch (RuntimeException | LinkageError exception) { problems.add("unresolved field access: " + identity(owner)); }
         }
-        for (NameExpr name : method.findAll(NameExpr.class)) {
+        for (NameExpr name : body.findAll(NameExpr.class)) {
             try {
                 var value = name.resolve();
                 if (value.isField()) visitFieldOwner(value.asField().declaringType().getQualifiedName(), owner, result, visited, problems);
-            } catch (RuntimeException exception) {
+            } catch (RuntimeException | LinkageError exception) {
                 // Type qualifiers such as Math in Math.abs are resolved by their surrounding expression.
                 if (!(name.getParentNode().orElse(null) instanceof MethodCallExpr)
                         && !(name.getParentNode().orElse(null) instanceof FieldAccessExpr)) problems.add("unresolved value: " + name.getNameAsString());
             }
         }
-        for (ObjectCreationExpr creation : method.findAll(ObjectCreationExpr.class)) {
+        for (ObjectCreationExpr creation : body.findAll(ObjectCreationExpr.class)) {
             try {
                 var resolved = creation.resolve();
                 TypeDeclaration<?> sourceType = exactType(resolved.declaringType().getQualifiedName(), owner, problems);
                 if (sourceType != null) visitContract(sourceType, result, visited, problems, false);
-            } catch (RuntimeException exception) { problems.add("unresolved constructor: " + identity(owner)); }
+            } catch (RuntimeException | LinkageError exception) { problems.add("unresolved constructor: " + identity(owner)); }
         }
-        if (!method.findAll(MethodReferenceExpr.class).isEmpty()) problems.add("unresolved method reference: " + key);
+        for (MethodReferenceExpr reference : body.findAll(MethodReferenceExpr.class)) {
+            if (!visitConstructorReference(reference, owner, result, visited, problems)) problems.add("unresolved method reference: " + key);
+        }
+    }
+
+    private boolean knownTypeQualifier(FieldAccessExpr access) {
+        Node qualifier = access;
+        while (qualifier.getParentNode().orElse(null) instanceof FieldAccessExpr parent && parent.getScope() == qualifier) qualifier = parent;
+        if (!(qualifier.getParentNode().orElse(null) instanceof MethodCallExpr call) || call.getScope().orElse(null) != qualifier) return false;
+        try {
+            var resolved = call.resolve();
+            return resolved.isStatic() && resolved.declaringType().getQualifiedName().equals(qualifier.toString());
+        } catch (RuntimeException | LinkageError unresolved) { return false; }
+    }
+
+    private boolean knownConstructorStreamCollector(MethodCallExpr call, TypeDeclaration<?> owner, Map<String, String> result,
+            Set<String> visited, List<String> problems) {
+        if (!call.getNameAsString().equals("collect") || call.getArguments().size() != 1
+                || call.getScope().filter(scope -> scope.isMethodCallExpr()).isEmpty()
+                || !call.getArgument(0).isMethodCallExpr()) return false;
+        MethodCallExpr map = call.getScope().orElseThrow().asMethodCallExpr();
+        MethodCallExpr collector = call.getArgument(0).asMethodCallExpr();
+        try {
+            var resolved = collector.resolve();
+            if (!resolved.declaringType().getQualifiedName().equals("java.util.stream.Collectors")
+                    || !Set.of("toList", "toSet").contains(resolved.getName()) || !collector.getArguments().isEmpty()
+                    || map.getArguments().size() != 1 || !map.getArgument(0).isMethodReferenceExpr()) return false;
+            if (!visitConstructorReference(map.getArgument(0).asMethodReferenceExpr(), owner, result, visited, problems)) return false;
+            result.put("resolved-call:java.util.stream.Stream.collect(java.util.stream.Collector)", "external-or-source");
+            return true;
+        } catch (RuntimeException | LinkageError unresolved) { return false; }
+    }
+
+    private boolean visitConstructorReference(MethodReferenceExpr reference, TypeDeclaration<?> caller, Map<String, String> result,
+            Set<String> visited, List<String> problems) {
+        if (!reference.getIdentifier().equals("new") || !reference.getScope().isTypeExpr()
+                || reference.getParentNode().filter(MethodCallExpr.class::isInstance).isEmpty()) return false;
+        MethodCallExpr map = (MethodCallExpr) reference.getParentNode().orElseThrow();
+        if (!map.getNameAsString().equals("map") || map.getArguments().size() != 1 || map.getArgument(0) != reference || map.getScope().isEmpty()) return false;
+        try {
+            if (!map.resolve().declaringType().getQualifiedName().equals("java.util.stream.Stream")) return false;
+            var stream = map.getScope().orElseThrow().calculateResolvedType();
+            if (!stream.isReferenceType() || !stream.asReferenceType().getQualifiedName().equals("java.util.stream.Stream")) return false;
+            var arguments = stream.asReferenceType().typeParametersValues();
+            if (arguments.size() != 1 || !arguments.get(0).isReferenceType() || !arguments.get(0).asReferenceType().typeParametersValues().isEmpty()) return false;
+            var target = reference.getScope().asTypeExpr().getType().resolve();
+            if (!target.isReferenceType()) return false;
+            var type = exactType(target.asReferenceType().getQualifiedName(), caller, problems);
+            if (type == null || !type.isClassOrInterfaceDeclaration() || type.asClassOrInterfaceDeclaration().isInterface()
+                    || type.asClassOrInterfaceDeclaration().isAbstract() || !type.asClassOrInterfaceDeclaration().getTypeParameters().isEmpty()
+                    || type.getParentNode().filter(CompilationUnit.class::isInstance).isEmpty()) return false;
+            if (!type.isPublic() && !type.findCompilationUnit().orElseThrow().getPackageDeclaration().map(p -> p.getNameAsString()).orElse("")
+                    .equals(caller.findCompilationUnit().orElseThrow().getPackageDeclaration().map(p -> p.getNameAsString()).orElse(""))) return false;
+            var constructors = type.getConstructors().stream().filter(c -> c.getParameters().size() == 1)
+                    .filter(c -> c.getParameter(0).getType().resolve().isAssignableBy(arguments.get(0))).toList();
+            if (constructors.size() != 1) return false;
+            visitContract(type, result, visited, problems, false);
+            var constructor = constructors.get(0);
+            if (!constructor.isPublic() || !constructor.getTypeParameters().isEmpty() || !constructor.getThrownExceptions().isEmpty()) return false;
+            result.put("resolved-constructor-reference:" + identity(type) + "#" + constructor.getSignature(), digest(constructor));
+            return true;
+        } catch (RuntimeException | LinkageError unresolved) { return false; }
     }
 
     private boolean sameResolvedSignature(MethodDeclaration method, String signature) {
         try { return method.resolve().getSignature().equals(signature); }
-        catch (RuntimeException exception) { return false; }
+        catch (RuntimeException | LinkageError exception) { return false; }
     }
 
     private void visitContract(TypeDeclaration<?> owner, Map<String, String> result, Set<String> visited,
             List<String> problems, boolean dto) {
+        dto = dto || LombokSourceSymbols.isData(owner);
         String key = identity(owner) + (dto ? "#dto" : "#contract");
         if (!visited.add(key)) return;
+        if (LombokSourceSymbols.unsupported(owner) != null) problems.add(LombokSourceSymbols.unsupported(owner));
         TypeDeclaration<?> contract = owner.clone();
+        LombokSourceSymbols.removeGenerated(contract);
         if (!dto) contract.getMembers().removeIf(member -> member.isMethodDeclaration() || member.isTypeDeclaration());
         result.put(key, digest(contract));
         for (ClassOrInterfaceType type : owner.findAll(ClassOrInterfaceType.class)) {
@@ -313,10 +397,11 @@ final class SourceDependencyIndex {
             visitReferencedType(type, result, visited, problems, dto);
         }
         owner.getConstructors().forEach(constructor -> {
-            if (!constructor.findAll(MethodCallExpr.class).isEmpty()) problems.add("unresolved constructor helper calls: " + identity(owner));
+            visitBody(constructor, owner, identity(owner) + "#" + constructor.getSignature(), result, visited, problems);
         });
         for (var member : owner.getMembers()) {
             if (!member.isMethodDeclaration() && !member.isConstructorDeclaration() && !member.isTypeDeclaration()
+                    && !LombokSourceSymbols.isGenerated(member)
                     && (!member.findAll(MethodCallExpr.class).isEmpty() || !member.findAll(ObjectCreationExpr.class).isEmpty())) {
                 problems.add("unresolved initializer dependency: " + identity(owner));
             }
@@ -325,7 +410,13 @@ final class SourceDependencyIndex {
             if (!dto && annotation.findAncestor(MethodDeclaration.class).isPresent()) continue;
             visitAnnotation(annotation, owner, result, visited, problems);
         }
-        if (dto) for (MethodDeclaration method : owner.getMethods()) visitMethod(method, result, visited, problems);
+        if (dto) for (MethodDeclaration method : owner.getMethods()) {
+            visitMethod(method, result, visited, problems);
+            if (LombokSourceSymbols.isData(owner) && !method.isPrivate() && !method.isStatic() && !method.isFinal()
+                    && owner.isClassOrInterfaceDeclaration() && !owner.asClassOrInterfaceDeclaration().isFinal()) {
+                new SourceDispatchResolver(this).visit(owner, method, owner, result, visited, problems);
+            }
+        }
     }
 
     private void visitAnnotation(AnnotationExpr annotation, TypeDeclaration<?> owner, Map<String, String> result,
@@ -333,11 +424,20 @@ final class SourceDependencyIndex {
         try {
             TypeDeclaration<?> sourceType = exactType(annotation.resolve().getQualifiedName(), owner, problems);
             if (sourceType != null) visitContract(sourceType, result, visited, problems, true);
-        } catch (RuntimeException exception) { problems.add("unresolved annotation: " + annotation.getNameAsString()); }
+        } catch (RuntimeException | LinkageError exception) { problems.add("unresolved annotation: " + annotation.getNameAsString()); }
     }
 
     TypeDeclaration<?> outputType(String name, List<String> problems) {
+        return outputType(name, null, problems);
+    }
+
+    TypeDeclaration<?> outputType(String name, String module, List<String> problems) {
         var candidates = types.getOrDefault(name, List.of());
+        if (classpath.configured()) {
+            var available = candidates.stream().filter(type -> classpath.sourceAvailable(module, ServiceScopeResolver.modulePath(relative(type)))).toList();
+            if (!candidates.isEmpty() && available.isEmpty()) problems.add("unresolved source outside analysis module classpath: " + name);
+            candidates = available;
+        }
         if (candidates.size() > 1) problems.add("unresolved output module: " + name);
         return candidates.size() == 1 ? candidates.get(0) : null;
     }
@@ -345,17 +445,22 @@ final class SourceDependencyIndex {
     synchronized CombinedTypeSolver outputSolver() {
         if(cachedOutputSolver!=null) return cachedOutputSolver;
         MemoryTypeSolver memory = new MemoryTypeSolver();
-        CombinedTypeSolver solver = new CombinedTypeSolver(memory, new ReflectionTypeSolver(false));
+        CombinedTypeSolver solver = classpath.solver(memory, ".");
         for (var entry : types.entrySet()) {
             if (entry.getValue().size() != 1) continue;
             TypeDeclaration<?> declaration = entry.getValue().get(0);
             try {
                 memory.addDeclaration(entry.getKey(), JavaParserFacade.get(solvers.get(
                         ServiceScopeResolver.modulePath(relative(declaration)))).getTypeDeclaration(declaration));
-            } catch (RuntimeException exception) { /* Unsupported types produce diagnostics when actually referenced. */ }
+            } catch (RuntimeException | LinkageError exception) { /* Unsupported types produce diagnostics when actually referenced. */ }
         }
         cachedOutputSolver=solver;
         return solver;
+    }
+
+    CombinedTypeSolver outputSolver(String module) {
+        if (classpath.configured() && !solvers.containsKey(module)) throw new IllegalArgumentException("Missing authoritative output module");
+        return classpath.configured() ? solvers.get(module) : outputSolver();
     }
 
     void releaseUncachedFacades() {
@@ -366,12 +471,31 @@ final class SourceDependencyIndex {
         visitContract(type, result, visited, problems, false);
     }
 
-    void outputMethod(TypeDeclaration<?> owner, String name, String signature, int arity,
+    void classpathEvidence(Map<String, String> evidence) { evidence.put("analysis-classpath-v1", classpath.digest()); }
+
+    void outputModule(String module) { analysisModule = module; }
+
+    List<TypeDeclaration<?>> dispatchTypes(TypeDeclaration<?> caller) {
+        String module = analysisModule == null ? ServiceScopeResolver.modulePath(relative(caller)) : analysisModule;
+        return sourceTypes().stream().filter(type -> classpath.sourceAvailable(module, ServiceScopeResolver.modulePath(relative(type)))).toList();
+    }
+
+
+    void outputMethod(TypeDeclaration<?> owner, String name, String signature, int arity, MethodCallExpr call,
             Map<String, String> result, Set<String> visited, List<String> problems) {
         var methods = owner.getMethodsByName(name).stream().filter(method -> signature != null
                 ? sameResolvedSignature(method, signature) : method.getParameters().size() == arity).toList();
         if (methods.size() != 1) { problems.add("unresolved output overload: " + identity(owner) + "#" + name); return; }
+        if (signature == null && LombokSourceSymbols.isGenerated(methods.get(0))) {
+            problems.add("unresolved generated output call: " + identity(owner) + "#" + name); return;
+        }
         visitMethod(methods.get(0), result, visited, problems);
+        var method = methods.get(0);
+        if (owner.isClassOrInterfaceDeclaration() && !owner.asClassOrInterfaceDeclaration().isFinal()
+                && !method.isPrivate() && !method.isFinal() && !method.isStatic()
+                && (call == null || call.getScope().filter(scope -> scope.isObjectCreationExpr()).isEmpty())) {
+            new SourceDispatchResolver(this).visit(owner, method, owner, result, visited, problems);
+        }
     }
 
     synchronized List<ClassContextDto> resourceClasses(Map<String, String> dependencyEvidence) {
@@ -384,6 +508,7 @@ final class SourceDependencyIndex {
             String identity = identity(type);
             if (!dependencies.containsKey(identity + "#contract") && !dependencies.containsKey(identity + "#dto")) continue;
             TypeDeclaration<?> slice = type.clone();
+            LombokSourceSymbols.removeGenerated(slice);
             if (!dependencies.containsKey(identity + "#dto")) slice.getMembers().removeIf(member -> member.isMethodDeclaration()
                     && !dependencies.containsKey(identity + "#" + member.asMethodDeclaration().getSignature()));
             CompilationUnit source = type.findCompilationUnit().orElseThrow().clone();
@@ -408,7 +533,7 @@ final class SourceDependencyIndex {
             result.put("resolved-type:" + resolved.asReferenceType().getQualifiedName(), "external-or-source");
             if (sourceType != null) visitContract(sourceType, result, visited, problems,
                     dto && isDto(sourceType, caller, visited));
-        } catch (RuntimeException exception) {
+        } catch (RuntimeException | LinkageError exception) {
             // JavaParser 3.26 chưa resolve đầy đủ record; chỉ fallback theo package/import tường minh.
             TypeDeclaration<?> caller = reference.findAncestor(TypeDeclaration.class).orElseThrow();
             CompilationUnit unit = reference.findCompilationUnit().orElseThrow();
@@ -449,6 +574,8 @@ final class SourceDependencyIndex {
         List<TypeDeclaration<?>> candidates = types.getOrDefault(name, List.of());
         if (candidates.isEmpty()) return null;
         String module = ServiceScopeResolver.modulePath(relative(caller));
+        if (classpath.configured()) candidates = candidates.stream().filter(type -> classpath.sourceAvailable(module, ServiceScopeResolver.modulePath(relative(type)))).toList();
+        if (candidates.isEmpty()) return null;
         var local = candidates.stream().filter(type -> ServiceScopeResolver.modulePath(relative(type)).equals(module)).toList();
         if (local.size() == 1) return local.get(0);
         if (candidates.size() == 1) return candidates.get(0);

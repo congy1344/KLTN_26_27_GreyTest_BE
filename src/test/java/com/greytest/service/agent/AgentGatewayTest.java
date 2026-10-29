@@ -240,6 +240,72 @@ class AgentGatewayTest {
     }
 
     @Test
+    void retriesIncompleteSaveFixtureWithoutChangingApprovedInputsOrAssertions(@TempDir Path root) throws Exception {
+        var context = GeneratedRepositoryFixtureRegressionTest.context(false, "Return the saved entity retaining mapped fields", "Valid request");
+        var contexts = mock(GenerationContextBuilder.class);
+        when(contexts.buildUnitTestContext(1L)).thenReturn(context);
+        var invalid = GeneratedRepositoryFixtureRegressionTest.response(GeneratedRepositoryFixtureRegressionTest.source("", "thenReturn(saved)", ""));
+        var corrected = GeneratedRepositoryFixtureRegressionTest.response(GeneratedRepositoryFixtureRegressionTest.source("", "thenAnswer(invocation -> invocation.getArgument(0))", ""));
+        var client = mock(LlmClient.class);
+        when(client.complete(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any(LlmRequestOptions.class)))
+                .thenReturn(objectMapper.writeValueAsString(invalid), objectMapper.writeValueAsString(corrected));
+        var agent = new AIAgentService(contexts, promptManager, client, parser,
+                new AiContextLogService(objectMapper, root.toString(), false, false));
+
+        assertThat(agent.generateUnitTests(1L)).isEqualTo(corrected);
+        var prompts = org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(client, org.mockito.Mockito.times(2)).complete(prompts.capture(), org.mockito.ArgumentMatchers.any(LlmRequestOptions.class));
+        assertThat(prompts.getAllValues().get(1)).contains("save-return fixture", "Preserve approved inputs", "An");
+    }
+
+    @Test
+    void retriesMockitoImportFromJUnitWithoutChangingTheTest(@TempDir Path root) throws Exception {
+        var contexts = mock(GenerationContextBuilder.class);
+        when(contexts.buildUnitTestContext(1L)).thenReturn(unitTestContext());
+        var generated = generatedUnitTest("@org.junit.jupiter.api.Test public void testCase() { "
+                + "org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class, "
+                + "() -> service.findReadyToNotify(null)); }");
+        String source = generated.sourceCode().replace("package demo;", "package demo; import static org.junit.jupiter.api.Mockito.*;");
+        var invalid = new UnitTestResponseDto(List.of(new GeneratedUnitTestDto(generated.caseId(), generated.testClassName(),
+                generated.testMethodName(), generated.packageName(), generated.generationType(), source)));
+        var corrected = new UnitTestResponseDto(List.of(new GeneratedUnitTestDto(generated.caseId(), generated.testClassName(),
+                generated.testMethodName(), generated.packageName(), generated.generationType(),
+                source.replace("org.junit.jupiter.api.Mockito", "org.mockito.Mockito"))));
+        var client = mock(LlmClient.class);
+        when(client.complete(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any(LlmRequestOptions.class)))
+                .thenReturn(objectMapper.writeValueAsString(invalid), objectMapper.writeValueAsString(corrected));
+        var agent = new AIAgentService(contexts, promptManager, client, parser,
+                new AiContextLogService(objectMapper, root.toString(), false, false));
+
+        assertThat(agent.generateUnitTests(1L)).isEqualTo(corrected);
+        var prompts = org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(client, org.mockito.Mockito.times(2)).complete(prompts.capture(), org.mockito.ArgumentMatchers.any(LlmRequestOptions.class));
+        assertThat(prompts.getAllValues().get(1)).contains("org.mockito.Mockito", "preserve approved test inputs");
+    }
+
+    @Test
+    void retriesBigDecimalScaleAssertionWithoutChangingTheApprovedNumericExpectation(@TempDir Path root) throws Exception {
+        var context = GeneratedBigDecimalAssertionRegressionTest.context("BigDecimal.ZERO", "The returned paidAmount is 0.00");
+        var contexts = mock(GenerationContextBuilder.class);
+        when(contexts.buildUnitTestContext(1L)).thenReturn(context);
+        var invalid = GeneratedBigDecimalAssertionRegressionTest.response(
+                "assertEquals(new BigDecimal(\"0.0\"), result.getPaidAmount());");
+        var corrected = GeneratedBigDecimalAssertionRegressionTest.response(
+                "assertNotNull(result.getPaidAmount()); assertEquals(0, new BigDecimal(\"0.0\").compareTo(result.getPaidAmount()));");
+        var client = mock(LlmClient.class);
+        when(client.complete(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any(LlmRequestOptions.class)))
+                .thenReturn(objectMapper.writeValueAsString(invalid), objectMapper.writeValueAsString(corrected));
+        var agent = new AIAgentService(contexts, promptManager, client, parser,
+                new AiContextLogService(objectMapper, root.toString(), false, false));
+
+        assertThat(agent.generateUnitTests(1L)).isEqualTo(corrected);
+        var prompts = org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(client, org.mockito.Mockito.times(2)).complete(prompts.capture(), org.mockito.ArgumentMatchers.any(LlmRequestOptions.class));
+        assertThat(prompts.getAllValues().get(1)).contains("BigDecimal", "compareTo", "The returned paidAmount is 0.00",
+                "preserve approved test inputs");
+    }
+
+    @Test
     void retriesWrongProductionConstructorBeforeReturningGeneratedTests(@TempDir Path root) throws Exception {
         var base = unitTestContext();
         var method = new MethodContextDto(10L, "demo.Service", "send", "Receipt", List.of(), List.of(),

@@ -550,11 +550,19 @@ public class IncrementalGenerationService {
                 .filter(i->i.getReviewStatus()!=SourceUpdateReviewStatus.REJECTED)
                 .map(SourceUpdateItem::getTargetId).filter(Objects::nonNull).collect(Collectors.toSet());
         Set<Long> caseIds = new HashSet<>(impact.affectedTestCaseIds());
-        caseIds.removeAll(removedCaseIds);
+        // Hash UT bao phủ cả file: method không đổi vẫn cần xác minh/sinh lại khi file nguồn đổi.
+        caseIds.addAll(staleSourceCaseIds(projectId, sourceUpdateService.getCandidateSourcePath(update)));
+        Set<Long> removedUnitIds = existingItems.stream()
+                .filter(i -> i.getTargetType() == SourceUpdateTargetType.UNIT_TEST && i.getAction() == SourceUpdateAction.REMOVE)
+                .filter(i -> i.getReviewStatus() != SourceUpdateReviewStatus.REJECTED)
+                .map(SourceUpdateItem::getTargetId).filter(Objects::nonNull).collect(Collectors.toSet());
         existingItems.stream()
                 .filter(i -> i.getTargetType() == SourceUpdateTargetType.TEST_CASE && i.getAction() == SourceUpdateAction.CREATE)
                 .filter(i->i.getReviewStatus()!=SourceUpdateReviewStatus.REJECTED)
                 .map(SourceUpdateItem::getTargetId).filter(Objects::nonNull).forEach(caseIds::add);
+        caseIds.removeAll(removedCaseIds);
+        for (Long unitId : removedUnitIds) unitTestRepository.findById(unitId)
+                .map(UnitTest::getTestCaseId).ifPresent(caseIds::remove);
         if (caseIds.isEmpty()) return;
 
         List<Set<Long>> caseBatches = partitionIds(caseIds, GenerationContextBuilder.MAX_UNIT_TEST_CASES);
@@ -582,6 +590,29 @@ public class IncrementalGenerationService {
         }
         if (!blockedCases.isEmpty()) throw blockedSnapshotFailure(blockedCases, null);
         if (responses.isEmpty()) log.info("AI không trả về Unit Test cho project {}", projectId);
+    }
+
+    private Set<Long> staleSourceCaseIds(Long projectId, java.nio.file.Path candidate) {
+        if (candidate == null || testPlanRepository == null || testCaseRepository == null || unitTestRepository == null)
+            return Set.of();
+        Set<Long> approvedPlans = testPlanRepository.findByProjectId(projectId).stream()
+                .filter(plan -> plan.getStatus() == ReviewStatus.APPROVED).map(TestPlan::getId).collect(Collectors.toSet());
+        List<Long> approvedCases = testCaseRepository.findByProjectId(projectId).stream()
+                .filter(testCase -> testCase.getStatus() == ReviewStatus.APPROVED && approvedPlans.contains(testCase.getTestPlanId()))
+                .map(TestCase::getId).toList();
+        if (approvedCases.isEmpty()) return Set.of();
+        Set<Long> stale = new HashSet<>();
+        for (UnitTest test : unitTestRepository.findByTestCaseIdIn(approvedCases)) {
+            if (test.getSourceCode() == null) continue;
+            String metadata = com.greytest.service.agent.GenerationSourceFingerprint.aggregate(List.of(test.getSourceCode()));
+            if (!metadata.contains(com.greytest.service.agent.GenerationSourceFingerprint.PREFIX)) continue;
+            try {
+                com.greytest.service.agent.GenerationSourceFingerprint.alignToSourceRoot(List.of(test.getSourceCode()), candidate);
+            } catch (IllegalArgumentException changed) {
+                stale.add(test.getTestCaseId());
+            }
+        }
+        return stale;
     }
 
     private TestFeasibilityBlockedException blockedSnapshotFailure(

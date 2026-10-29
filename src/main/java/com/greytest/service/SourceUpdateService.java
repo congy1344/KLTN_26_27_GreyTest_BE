@@ -48,6 +48,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.javaparser.ast.NodeList;
 import com.github.javaparser.ast.CompilationUnit;
 import com.github.javaparser.ast.body.MethodDeclaration;
+import com.github.javaparser.printer.configuration.PrettyPrinterConfiguration;
 import com.github.javaparser.ast.body.TypeDeclaration;
 import com.greytest.service.analysis.JavaParserHelper;
 import com.greytest.dto.agent.GenerationResponseDtos.GeneratedBusinessRuleDto;
@@ -630,7 +631,8 @@ public class SourceUpdateService {
             }
             if (proposal.has("activeSnapshot")) {
                 String current = generationCoordinator == null ? null : generationCoordinator.activeSnapshot(item);
-                if (current == null || !Objects.equals(current, proposal.path("activeSnapshot").asText(null))) {
+                if (current == null || !Objects.equals(objectMapper.readTree(current),
+                        objectMapper.readTree(proposal.path("activeSnapshot").asText(null)))) {
                     throw new ResponseStatusException(HttpStatus.CONFLICT, "Artifact đã đổi sau khi ghi nhận xung đột; hãy tiếp tục sinh để tải đề xuất mới");
                 }
                 if ("KEEP_USER".equals(request.resolution())) {
@@ -901,6 +903,7 @@ public class SourceUpdateService {
                                 plan.setTitle(dto.title());
                                 plan.setDescription(dto.description());
                                 plan.setBusinessRuleId(targetRuleId);
+                                plan.setTestType(TestType.valueOf(dto.testType()));
                                 plan.setStatus(ReviewStatus.APPROVED);
                                 plan.setIsModified(false);
                                 testPlanRepository.save(plan);
@@ -953,8 +956,10 @@ public class SourceUpdateService {
                                 tc.setPreconditions(dto.preconditions());
                                 tc.setTestData(dto.testData());
                                 tc.setExpectedResult(dto.expectedResult());
+                                tc.setTestType(TestType.valueOf(dto.testType()));
                                 tc.setPriority(Priority.valueOf(dto.priority()));
                                 tc.setTestPlanId(targetPlanId);
+                                tc.setTraceSource(dto.traceSource());
                                 tc.setStatus(ReviewStatus.APPROVED);
                                 tc.setIsModified(false);
                                 testCaseRepository.save(tc);
@@ -1046,7 +1051,7 @@ public class SourceUpdateService {
         update.setStatus(SourceUpdateStatus.APPLIED);
         update = sourceUpdateRepository.save(update);
 
-        boolean invalidatedPlans = invalidateChangedOracleDescendants(projectId, changedOracleRuleIds, appliedPlansCoveringChangedRules);
+        boolean invalidatedPlans = invalidateChangedOracleDescendants(projectId, changedOracleRuleIds, appliedPlansCoveringChangedRules, items);
         boolean hasUnitTests = items.stream().anyMatch(i -> i.getTargetType() == SourceUpdateTargetType.UNIT_TEST);
         if (invalidatedPlans) {
             project.setStatus(ProjectStatus.PLAN_PENDING_REVIEW);
@@ -1062,25 +1067,44 @@ public class SourceUpdateService {
     }
 
     /** Giữ output cũ để đối chiếu, nhưng không gọi chúng là đã duyệt theo yêu cầu vừa thay đổi. */
-    private boolean invalidateChangedOracleDescendants(Long projectId, Set<Long> changedRuleIds, Set<Long> appliedPlanIds) {
+    private boolean invalidateChangedOracleDescendants(Long projectId, Set<Long> changedRuleIds, Set<Long> appliedPlanIds,
+            List<SourceUpdateItem> items) {
         if (changedRuleIds.isEmpty()) return false;
+        Set<Long> reviewedPlans = checkpointReviewedIds(items, SourceUpdateTargetType.TEST_PLAN);
+        Set<Long> reviewedCases = checkpointReviewedIds(items, SourceUpdateTargetType.TEST_CASE);
         Set<Long> planIds = new HashSet<>(appliedPlanIds);
         for (Long ruleId : changedRuleIds) {
             testPlanCoveredRuleRepository.findByBusinessRuleId(ruleId).forEach(link -> planIds.add(link.getTestPlanId()));
         }
         List<TestPlan> affectedPlans = testPlanRepository.findByProjectId(projectId).stream()
                 .filter(plan -> changedRuleIds.contains(plan.getBusinessRuleId()) || planIds.contains(plan.getId())).toList();
+        boolean invalidated = false;
         for (TestPlan plan : affectedPlans) {
-            plan.setStatus(ReviewStatus.PENDING_REVIEW);
-            plan.setIsModified(true);
-            testPlanRepository.save(plan);
+            boolean reviewedPlan = reviewedPlans.contains(plan.getId());
+            if (!reviewedPlan) {
+                plan.setStatus(ReviewStatus.PENDING_REVIEW);
+                plan.setIsModified(true);
+                testPlanRepository.save(plan);
+                invalidated = true;
+            }
             for (TestCase testCase : testCaseRepository.findByTestPlanId(plan.getId())) {
+                // Giữ quyết định duyệt khi cả cha và con đã được kiểm chứng trong cùng checkpoint.
+                if (reviewedPlan && reviewedCases.contains(testCase.getId())) continue;
                 testCase.setStatus(ReviewStatus.PENDING_REVIEW);
                 testCase.setIsModified(true);
                 testCaseRepository.save(testCase);
+                invalidated = true;
             }
         }
-        return !affectedPlans.isEmpty();
+        return invalidated;
+    }
+
+    private Set<Long> checkpointReviewedIds(List<SourceUpdateItem> items, SourceUpdateTargetType type) {
+        if (generationCoordinator == null) return Set.of();
+        return items.stream().filter(item -> item.getTargetType() == type && item.getTargetId() != null
+                && item.getAfterData() != null && (item.getAction() == SourceUpdateAction.CREATE || item.getAction() == SourceUpdateAction.UPDATE)
+                && (item.getReviewStatus() == SourceUpdateReviewStatus.ACCEPTED || item.getReviewStatus() == SourceUpdateReviewStatus.MODIFIED))
+                .filter(generationCoordinator::isRecordedOutput).map(SourceUpdateItem::getTargetId).collect(Collectors.toSet());
     }
 
     /** Bao gồm liên kết mới trong payload đã áp dụng, kể cả chưa có persisted coverage link. */
@@ -1143,7 +1167,7 @@ public class SourceUpdateService {
                 var type = parser.findTypes(file.compilationUnit()).stream()
                         .filter(t -> t.getFullyQualifiedName().filter(key[0]::equals).isPresent()).findFirst().orElseThrow();
                 var methods = type.getMethods().stream().filter(m -> key[1].equals(parser.methodKey(m))).toList();
-                if (methods.size() != 1 || !methods.get(0).toString().equals(reviewed.toString())) {
+                if (methods.size() != 1 || !methodCode(methods.get(0)).equals(methodCode(reviewed))) {
                     throw new IllegalArgumentException("METHOD đã duyệt khác snapshot; cần tải source ứng viên mới");
                 }
             } catch (RuntimeException invalid) {
@@ -1151,6 +1175,11 @@ public class SourceUpdateService {
             }
         }
         return scanned;
+    }
+
+    /** Đối chiếu AST như bước diff; giữ nguyên annotation và literal, bỏ khác biệt comment. */
+    private String methodCode(MethodDeclaration declaration) {
+        return declaration.clone().toString(new PrettyPrinterConfiguration().setPrintComments(false).setPrintJavadoc(false));
     }
 
     private List<SourceUpdateItem> appliedMethodItems(List<SourceUpdateItem> items) {
@@ -1181,6 +1210,15 @@ public class SourceUpdateService {
             var sameModule = candidates.stream().filter(file -> ServiceScopeResolver.modulePath(file.relativePath())
                     .equals(ServiceScopeResolver.modulePath(owner.getFilePath()))).toList();
             if (sameModule.size() == 1) return sameModule.get(0);
+            var aliases = candidates.stream().filter(file -> sameModuleAlias(
+                    ServiceScopeResolver.modulePath(file.relativePath()), ServiceScopeResolver.modulePath(owner.getFilePath()))).toList();
+            if (aliases.size() == 1) {
+                String module = ServiceScopeResolver.modulePath(aliases.get(0).relativePath());
+                long reverseMatches = stored.stream().filter(type -> Objects.equals(type.getQualifiedName(), qualifiedName)
+                        && sameModuleAlias(module, ServiceScopeResolver.modulePath(type.getFilePath()))).count();
+                // ZIP có thể thêm/bớt thư mục ngoài cùng; chỉ nhận ánh xạ module duy nhất hai chiều.
+                if (reverseMatches == 1) return aliases.get(0);
+            }
             if (stored.stream().filter(c -> Objects.equals(c.getQualifiedName(), qualifiedName)).count() > 1)
                 throw new IllegalArgumentException("Không xác định duy nhất module source của " + qualifiedName);
         }
@@ -1188,13 +1226,19 @@ public class SourceUpdateService {
         return candidates.get(0);
     }
 
+    private boolean sameModuleAlias(String first, String second) {
+        return first.equals(second) || first.equals(".") || second.equals(".")
+                || first.endsWith("/" + second) || second.endsWith("/" + first);
+    }
+
     /** Dùng cùng AST đã xác minh, giữ ID/module và range của source thực tế. */
     private void synchronizeChangedSource(Long projectId, List<SourceUpdateItem> items, JavaParserHelper.SourceScanResult scanned) {
+        if (scanned == null) return;
         var changed = appliedMethodItems(items);
-        if (changed.isEmpty()) return;
         JavaParserHelper parser = new JavaParserHelper();
         List<JavaClass> stored = javaClassRepository.findByProjectId(projectId);
         Set<Long> affected = affectedClassIds(changed, stored);
+        affected.addAll(removeDeletedControllerMethods(parser, scanned, stored));
         for (JavaClass owner : stored) {
             if (!affected.contains(owner.getId())) continue;
             var file = methodSourceFile(parser, scanned, owner.getQualifiedName(), owner, stored);
@@ -1215,6 +1259,28 @@ public class SourceUpdateService {
             owner.setPackageName(parser.getPackageName(unit));
             javaClassRepository.save(owner);
         }
+    }
+
+    private Set<Long> removeDeletedControllerMethods(JavaParserHelper parser,
+            JavaParserHelper.SourceScanResult scanned, List<JavaClass> stored) {
+        Set<Long> affected = new HashSet<>();
+        for (JavaClass owner : stored) {
+            if (owner.getClassType() != ClassType.CONTROLLER) continue;
+            boolean present = scanned.productionFiles().stream().anyMatch(file -> parser.findTypes(file.compilationUnit()).stream()
+                    .anyMatch(type -> type.getFullyQualifiedName().filter(owner.getQualifiedName()::equals).isPresent()));
+            if (!present) continue;
+            var file = methodSourceFile(parser, scanned, owner.getQualifiedName(), owner, stored);
+            var type = parser.findTypes(file.compilationUnit()).stream().filter(declaration -> declaration.getFullyQualifiedName()
+                    .filter(owner.getQualifiedName()::equals).isPresent()).findFirst().orElseThrow();
+            Set<String> signatures = type.getMethods().stream().map(parser::methodKey).collect(Collectors.toSet());
+            for (JavaMethod method : javaMethodRepository.findByClassId(owner.getId())) {
+                if (signatures.contains(methodSignature(method))) continue;
+                // FK cascade xóa endpoint và relation của đúng method, giữ ID các method còn lại.
+                javaMethodRepository.delete(method);
+                affected.add(owner.getId());
+            }
+        }
+        return affected;
     }
 
     private Set<Long> affectedClassIds(List<SourceUpdateItem> changed, List<JavaClass> stored) {

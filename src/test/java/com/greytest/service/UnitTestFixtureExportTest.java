@@ -21,6 +21,30 @@ class UnitTestFixtureExportTest {
     private final UnitTestFileService service = new UnitTestFileService();
 
     @Test
+    void caseOnlyClassNamesKeepBothTestsOnCaseInsensitiveFilesystems(@TempDir Path directory) throws Exception {
+        var first = test(1L, "check", fixture("", "", "assertEquals(1, 1);"));
+        var second = test(2L, "other", fixture("", "", "assertEquals(2, 2);")
+                .replace("UserServiceTest", "userServiceTest").replace("void check()", "void other()"));
+        second.setTestClassName("userServiceTest");
+        second.setFilePath("src/test/java/com/example/userServiceTest.java");
+        var files = service.mergeByClass(List.of(first, second));
+        assertThat(files).hasSize(2);
+        assertThat(files.stream().map(f -> f.filePath().toLowerCase(java.util.Locale.ROOT)).distinct().count()).isEqualTo(2);
+        assertThat(files).flatExtracting(UnitTestFileService.MergedFile::caseIds).containsExactlyInAnyOrder(1L, 2L);
+        compileAndRun(files, directory);
+    }
+
+    @Test
+    void conflictingStaticImportsExportAndExecuteInSeparateClasses(@TempDir Path directory) throws Exception {
+        String first = fixture("", "", "assertEquals(2, max(1, 2));")
+                .replace("package com.example;", "package com.example; import static java.lang.Math.max;");
+        String second = first.replace("java.lang.Math.max", "java.lang.Integer.max").replace("void check()", "void other()");
+        var files = service.mergeByClass(List.of(test(1L, "check", first), test(2L, "other", second)));
+        assertThat(files).hasSize(2);
+        compileAndRun(files, directory);
+    }
+
+    @Test
     void exportedTestsKeepTheirRealAndSpySetups(@TempDir Path directory) throws Exception {
         var files = service.mergeByClass(List.of(
                 test(1L, "realEncoder", encoderTest("new BCryptPasswordEncoder()", "realEncoder",

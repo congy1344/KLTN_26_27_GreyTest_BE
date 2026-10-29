@@ -1,0 +1,648 @@
+{
+  "context": {
+    "project": {
+      "id": 849,
+      "name": "ecommerce-microservice-backend-app",
+      "status": "BR_APPROVED"
+    },
+    "analysis": {
+      "totalClasses": 237,
+      "totalMethods": 444,
+      "totalEndpoints": 143,
+      "totalRelations": 11,
+      "totalControllerServiceRelations": 71,
+      "existingTestFiles": 11,
+      "totalProductionFiles": 227,
+      "parsedProductionFiles": 227,
+      "failedParseFiles": 0,
+      "failedParseFilePaths": []
+    },
+    "classes": [
+      {
+        "id": 8626,
+        "packageName": "com.selimhorri.app.service.impl",
+        "className": "PaymentServiceImpl",
+        "qualifiedName": "com.selimhorri.app.service.impl.PaymentServiceImpl",
+        "classType": "SERVICE",
+        "filePath": "ecommerce-microservice-backend-app/payment-service/src/main/java/com/selimhorri/app/service/impl/PaymentServiceImpl.java",
+        "sourceCode": "package com.selimhorri.app.service.impl;\r\n\r\nimport java.util.List;\r\nimport java.util.stream.Collectors;\r\nimport javax.transaction.Transactional;\r\nimport org.springframework.stereotype.Service;\r\nimport org.springframework.web.client.RestTemplate;\r\nimport com.selimhorri.app.constant.AppConstant;\r\nimport com.selimhorri.app.dto.OrderDto;\r\nimport com.selimhorri.app.dto.PaymentDto;\r\nimport com.selimhorri.app.exception.wrapper.PaymentNotFoundException;\r\nimport com.selimhorri.app.helper.PaymentMappingHelper;\r\nimport com.selimhorri.app.repository.PaymentRepository;\r\nimport com.selimhorri.app.service.PaymentService;\r\nimport lombok.RequiredArgsConstructor;\r\nimport lombok.extern.slf4j.Slf4j;\r\n\r\n@Service\r\n@Transactional\r\n@Slf4j\r\n@RequiredArgsConstructor\r\npublic class PaymentServiceImpl implements PaymentService {\r\n\r\n    private final PaymentRepository paymentRepository;\r\n\r\n    private final RestTemplate restTemplate;\r\n\r\n    @Override\r\n    public List<PaymentDto> findAll() {\r\n        log.info(\"*** PaymentDto List, service; fetch all payments *\");\r\n        return this.paymentRepository.findAll().stream().map(PaymentMappingHelper::map).map(p -> {\r\n            p.setOrderDto(this.restTemplate.getForObject(AppConstant.DiscoveredDomainsApi.ORDER_SERVICE_API_URL + \"/\" + p.getOrderDto().getOrderId(), OrderDto.class));\r\n            return p;\r\n        }).distinct().collect(Collectors.toUnmodifiableList());\r\n    }\r\n\r\n    @Override\r\n    public PaymentDto findById(final Integer paymentId) {\r\n        log.info(\"*** PaymentDto, service; fetch payment by id *\");\r\n        return this.paymentRepository.findById(paymentId).map(PaymentMappingHelper::map).map(p -> {\r\n            p.setOrderDto(this.restTemplate.getForObject(AppConstant.DiscoveredDomainsApi.ORDER_SERVICE_API_URL + \"/\" + p.getOrderDto().getOrderId(), OrderDto.class));\r\n            return p;\r\n        }).orElseThrow(() -> new PaymentNotFoundException(String.format(\"Payment with id: %d not found\", paymentId)));\r\n    }\r\n\r\n    @Override\r\n    public PaymentDto save(final PaymentDto paymentDto) {\r\n        log.info(\"*** PaymentDto, service; save payment *\");\r\n        return PaymentMappingHelper.map(this.paymentRepository.save(PaymentMappingHelper.map(paymentDto)));\r\n    }\r\n\r\n    @Override\r\n    public PaymentDto update(final PaymentDto paymentDto) {\r\n        log.info(\"*** PaymentDto, service; update payment *\");\r\n        return PaymentMappingHelper.map(this.paymentRepository.save(PaymentMappingHelper.map(paymentDto)));\r\n    }\r\n\r\n    @Override\r\n    public void deleteById(final Integer paymentId) {\r\n        log.info(\"*** Void, service; delete payment by id *\");\r\n        this.paymentRepository.deleteById(paymentId);\r\n    }\r\n}\r\n",
+        "annotations": [
+          {
+            "id": 10681,
+            "targetType": "CLASS",
+            "category": "COMPONENT",
+            "annotationName": "Service",
+            "attributes": "@Service"
+          },
+          {
+            "id": 10682,
+            "targetType": "CLASS",
+            "category": "TRANSACTION",
+            "annotationName": "Transactional",
+            "attributes": "@Transactional"
+          }
+        ],
+        "methods": [
+          {
+            "id": 18165,
+            "classQualifiedName": "com.selimhorri.app.service.impl.PaymentServiceImpl",
+            "methodName": "findAll",
+            "returnType": "List<PaymentDto>",
+            "parameters": [],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "@Override\r\n\tpublic List<PaymentDto> findAll() {\r\n\t\tlog.info(\"*** PaymentDto List, service; fetch all payments *\");\r\n\t\treturn this.paymentRepository.findAll()\r\n\t\t\t\t.stream()\r\n\t\t\t\t\t.map(PaymentMappingHelper::map)\r\n\t\t\t\t\t.map(p -> {\r\n\t\t\t\t\t\tp.setOrderDto(this.restTemplate.getForObject(AppConstant.DiscoveredDomainsApi\r\n\t\t\t\t\t\t\t\t.ORDER_SERVICE_API_URL + \"/\" + p.getOrderDto().getOrderId(), OrderDto.class));\r\n\t\t\t\t\t\treturn p;\r\n\t\t\t\t\t})\r\n\t\t\t\t\t.distinct()\r\n\t\t\t\t\t.collect(Collectors.toUnmodifiableList());\r\n\t}",
+            "lineStart": 31,
+            "lineEnd": 44,
+            "annotations": [],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 33,
+                "lineEnd": 33
+              },
+              {
+                "branchId": "STMT-2",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 34,
+                "lineEnd": 43
+              }
+            ]
+          },
+          {
+            "id": 18166,
+            "classQualifiedName": "com.selimhorri.app.service.impl.PaymentServiceImpl",
+            "methodName": "findById",
+            "returnType": "PaymentDto",
+            "parameters": [
+              {
+                "name": "paymentId",
+                "type": "Integer"
+              }
+            ],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "@Override\r\n\tpublic PaymentDto findById(final Integer paymentId) {\r\n\t\tlog.info(\"*** PaymentDto, service; fetch payment by id *\");\r\n\t\treturn this.paymentRepository.findById(paymentId)\r\n\t\t\t\t.map(PaymentMappingHelper::map)\r\n\t\t\t\t.map(p -> {\r\n\t\t\t\t\tp.setOrderDto(this.restTemplate.getForObject(AppConstant.DiscoveredDomainsApi\r\n\t\t\t\t\t\t\t.ORDER_SERVICE_API_URL + \"/\" + p.getOrderDto().getOrderId(), OrderDto.class));\r\n\t\t\t\t\treturn p;\r\n\t\t\t\t})\r\n\t\t\t\t.orElseThrow(() -> new PaymentNotFoundException(String.format(\"Payment with id: %d not found\", paymentId)));\r\n\t}",
+            "lineStart": 46,
+            "lineEnd": 57,
+            "annotations": [],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 48,
+                "lineEnd": 48
+              },
+              {
+                "branchId": "STMT-2",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 49,
+                "lineEnd": 56
+              }
+            ]
+          },
+          {
+            "id": 18167,
+            "classQualifiedName": "com.selimhorri.app.service.impl.PaymentServiceImpl",
+            "methodName": "save",
+            "returnType": "PaymentDto",
+            "parameters": [
+              {
+                "name": "paymentDto",
+                "type": "PaymentDto"
+              }
+            ],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "@Override\r\n\tpublic PaymentDto save(final PaymentDto paymentDto) {\r\n\t\tlog.info(\"*** PaymentDto, service; save payment *\");\r\n\t\treturn PaymentMappingHelper.map(this.paymentRepository\r\n\t\t\t\t.save(PaymentMappingHelper.map(paymentDto)));\r\n\t}",
+            "lineStart": 59,
+            "lineEnd": 64,
+            "annotations": [],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 61,
+                "lineEnd": 61
+              },
+              {
+                "branchId": "STMT-2",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 62,
+                "lineEnd": 63
+              }
+            ]
+          },
+          {
+            "id": 18168,
+            "classQualifiedName": "com.selimhorri.app.service.impl.PaymentServiceImpl",
+            "methodName": "update",
+            "returnType": "PaymentDto",
+            "parameters": [
+              {
+                "name": "paymentDto",
+                "type": "PaymentDto"
+              }
+            ],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "@Override\r\n\tpublic PaymentDto update(final PaymentDto paymentDto) {\r\n\t\tlog.info(\"*** PaymentDto, service; update payment *\");\r\n\t\treturn PaymentMappingHelper.map(this.paymentRepository\r\n\t\t\t\t.save(PaymentMappingHelper.map(paymentDto)));\r\n\t}",
+            "lineStart": 66,
+            "lineEnd": 71,
+            "annotations": [],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 68,
+                "lineEnd": 68
+              },
+              {
+                "branchId": "STMT-2",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 69,
+                "lineEnd": 70
+              }
+            ]
+          },
+          {
+            "id": 18169,
+            "classQualifiedName": "com.selimhorri.app.service.impl.PaymentServiceImpl",
+            "methodName": "deleteById",
+            "returnType": "void",
+            "parameters": [
+              {
+                "name": "paymentId",
+                "type": "Integer"
+              }
+            ],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "@Override\r\n\tpublic void deleteById(final Integer paymentId) {\r\n\t\tlog.info(\"*** Void, service; delete payment by id *\");\r\n\t\tthis.paymentRepository.deleteById(paymentId);\r\n\t}",
+            "lineStart": 73,
+            "lineEnd": 77,
+            "annotations": [],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 75,
+                "lineEnd": 75
+              },
+              {
+                "branchId": "STMT-2",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 76,
+                "lineEnd": 76
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": 8610,
+        "packageName": "com.selimhorri.app.constant",
+        "className": "AppConstant",
+        "qualifiedName": "com.selimhorri.app.constant.AppConstant",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/payment-service/src/main/java/com/selimhorri/app/constant/AppConstant.java",
+        "sourceCode": "package com.selimhorri.app.constant;\r\n\r\nimport lombok.AccessLevel;\r\nimport lombok.NoArgsConstructor;\r\n\r\n@NoArgsConstructor(access = AccessLevel.PRIVATE)\r\npublic abstract class AppConstant {\r\n\r\n    public static final String LOCAL_DATE_FORMAT = \"dd-MM-yyyy\";\r\n\r\n    public static final String LOCAL_DATE_TIME_FORMAT = \"dd-MM-yyyy__HH:mm:ss:SSSSSS\";\r\n\r\n    public static final String ZONED_DATE_TIME_FORMAT = \"dd-MM-yyyy__HH:mm:ss:SSSSSS\";\r\n\r\n    public static final String INSTANT_FORMAT = \"dd-MM-yyyy__HH:mm:ss:SSSSSS\";\r\n\r\n    @NoArgsConstructor(access = AccessLevel.PRIVATE)\r\n    public abstract class DiscoveredDomainsApi {\r\n\r\n        public static final String USER_SERVICE_HOST = \"http://USER-SERVICE/user-service\";\r\n\r\n        public static final String USER_SERVICE_API_URL = \"http://USER-SERVICE/user-service/api/users\";\r\n\r\n        public static final String PRODUCT_SERVICE_HOST = \"http://PRODUCT-SERVICE/product-service\";\r\n\r\n        public static final String PRODUCT_SERVICE_API_URL = \"http://PRODUCT-SERVICE/product-service/api/products\";\r\n\r\n        public static final String ORDER_SERVICE_HOST = \"http://ORDER-SERVICE/order-service\";\r\n\r\n        public static final String ORDER_SERVICE_API_URL = \"http://ORDER-SERVICE/order-service/api/orders\";\r\n\r\n        public static final String FAVOURITE_SERVICE_HOST = \"http://FAVOURITE-SERVICE/favourite-service\";\r\n\r\n        public static final String FAVOURITE_SERVICE_API_URL = \"http://FAVOURITE-SERVICE/favourite-service/api/favourites\";\r\n\r\n        public static final String PAYMENT_SERVICE_HOST = \"http://PAYMENT-SERVICE/payment-service\";\r\n\r\n        public static final String PAYMENT_SERVICE_API_URL = \"http://PAYMENT-SERVICE/payment-service/api/payments\";\r\n\r\n        public static final String SHIPPING_SERVICE_HOST = \"http://SHIPPING-SERVICE/shipping-service\";\r\n\r\n        public static final String SHIPPING_SERVICE_API_URL = \"http://SHIPPING-SERVICE/shipping-service/api/shippings\";\r\n    }\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8615,
+        "packageName": "com.selimhorri.app.dto",
+        "className": "OrderDto",
+        "qualifiedName": "com.selimhorri.app.dto.OrderDto",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/payment-service/src/main/java/com/selimhorri/app/dto/OrderDto.java",
+        "sourceCode": "package com.selimhorri.app.dto;\r\n\r\nimport java.io.Serializable;\r\nimport java.time.LocalDateTime;\r\nimport org.springframework.format.annotation.DateTimeFormat;\r\nimport com.fasterxml.jackson.annotation.JsonFormat;\r\nimport com.fasterxml.jackson.annotation.JsonFormat.Shape;\r\nimport com.fasterxml.jackson.databind.annotation.JsonDeserialize;\r\nimport com.fasterxml.jackson.databind.annotation.JsonSerialize;\r\nimport com.fasterxml.jackson.datatype.jsr310.deser.LocalDateTimeDeserializer;\r\nimport com.fasterxml.jackson.datatype.jsr310.ser.LocalDateTimeSerializer;\r\nimport com.selimhorri.app.constant.AppConstant;\r\nimport lombok.AllArgsConstructor;\r\nimport lombok.Builder;\r\nimport lombok.Data;\r\nimport lombok.NoArgsConstructor;\r\n\r\n@NoArgsConstructor\r\n@AllArgsConstructor\r\n@Data\r\n@Builder\r\npublic class OrderDto implements Serializable {\r\n\r\n    private static final long serialVersionUID = 1L;\r\n\r\n    private Integer orderId;\r\n\r\n    @JsonSerialize(using = LocalDateTimeSerializer.class)\r\n    @JsonDeserialize(using = LocalDateTimeDeserializer.class)\r\n    @JsonFormat(pattern = AppConstant.LOCAL_DATE_TIME_FORMAT, shape = Shape.STRING)\r\n    @DateTimeFormat(pattern = AppConstant.LOCAL_DATE_TIME_FORMAT)\r\n    private LocalDateTime orderDate;\r\n\r\n    private String orderDesc;\r\n\r\n    private Double orderFee;\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8616,
+        "packageName": "com.selimhorri.app.dto",
+        "className": "PaymentDto",
+        "qualifiedName": "com.selimhorri.app.dto.PaymentDto",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/payment-service/src/main/java/com/selimhorri/app/dto/PaymentDto.java",
+        "sourceCode": "package com.selimhorri.app.dto;\r\n\r\nimport java.io.Serializable;\r\nimport com.fasterxml.jackson.annotation.JsonInclude;\r\nimport com.fasterxml.jackson.annotation.JsonProperty;\r\nimport com.fasterxml.jackson.annotation.JsonInclude.Include;\r\nimport com.selimhorri.app.domain.PaymentStatus;\r\nimport lombok.AllArgsConstructor;\r\nimport lombok.Builder;\r\nimport lombok.Data;\r\nimport lombok.NoArgsConstructor;\r\n\r\n@NoArgsConstructor\r\n@AllArgsConstructor\r\n@Data\r\n@Builder\r\npublic class PaymentDto implements Serializable {\r\n\r\n    private static final long serialVersionUID = 1L;\r\n\r\n    private Integer paymentId;\r\n\r\n    private Boolean isPayed;\r\n\r\n    private PaymentStatus paymentStatus;\r\n\r\n    @JsonProperty(\"order\")\r\n    @JsonInclude(Include.NON_NULL)\r\n    private OrderDto orderDto;\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8620,
+        "packageName": "com.selimhorri.app.exception.wrapper",
+        "className": "PaymentNotFoundException",
+        "qualifiedName": "com.selimhorri.app.exception.wrapper.PaymentNotFoundException",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/payment-service/src/main/java/com/selimhorri/app/exception/wrapper/PaymentNotFoundException.java",
+        "sourceCode": "package com.selimhorri.app.exception.wrapper;\r\n\r\npublic class PaymentNotFoundException extends RuntimeException {\r\n\r\n    private static final long serialVersionUID = 1L;\r\n\r\n    public PaymentNotFoundException() {\r\n        super();\r\n    }\r\n\r\n    public PaymentNotFoundException(String message, Throwable cause) {\r\n        super(message, cause);\r\n    }\r\n\r\n    public PaymentNotFoundException(String message) {\r\n        super(message);\r\n    }\r\n\r\n    public PaymentNotFoundException(Throwable cause) {\r\n        super(cause);\r\n    }\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8621,
+        "packageName": "com.selimhorri.app.helper",
+        "className": "PaymentMappingHelper",
+        "qualifiedName": "com.selimhorri.app.helper.PaymentMappingHelper",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/payment-service/src/main/java/com/selimhorri/app/helper/PaymentMappingHelper.java",
+        "sourceCode": "package com.selimhorri.app.helper;\r\n\r\nimport com.selimhorri.app.domain.Payment;\r\nimport com.selimhorri.app.dto.OrderDto;\r\nimport com.selimhorri.app.dto.PaymentDto;\r\n\r\npublic interface PaymentMappingHelper {\r\n\r\n    public static PaymentDto map(final Payment payment) {\r\n        return PaymentDto.builder().paymentId(payment.getPaymentId()).isPayed(payment.getIsPayed()).paymentStatus(payment.getPaymentStatus()).orderDto(OrderDto.builder().orderId(payment.getOrderId()).build()).build();\r\n    }\r\n\r\n    public static Payment map(final PaymentDto paymentDto) {\r\n        return Payment.builder().paymentId(paymentDto.getPaymentId()).orderId(paymentDto.getOrderDto().getOrderId()).isPayed(paymentDto.getIsPayed()).paymentStatus(paymentDto.getPaymentStatus()).build();\r\n    }\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8624,
+        "packageName": "com.selimhorri.app.repository",
+        "className": "PaymentRepository",
+        "qualifiedName": "com.selimhorri.app.repository.PaymentRepository",
+        "classType": "REPOSITORY",
+        "filePath": "ecommerce-microservice-backend-app/payment-service/src/main/java/com/selimhorri/app/repository/PaymentRepository.java",
+        "sourceCode": "package com.selimhorri.app.repository;\r\n\r\nimport org.springframework.data.jpa.repository.JpaRepository;\r\nimport com.selimhorri.app.domain.Payment;\r\n\r\npublic interface PaymentRepository extends JpaRepository<Payment, Integer> {\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8627,
+        "packageName": "com.selimhorri.app.service",
+        "className": "PaymentService",
+        "qualifiedName": "com.selimhorri.app.service.PaymentService",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/payment-service/src/main/java/com/selimhorri/app/service/PaymentService.java",
+        "sourceCode": "package com.selimhorri.app.service;\r\n\r\nimport java.util.List;\r\nimport com.selimhorri.app.dto.PaymentDto;\r\n\r\npublic interface PaymentService {\r\n\r\n    List<PaymentDto> findAll();\r\n\r\n    PaymentDto findById(final Integer paymentId);\r\n\r\n    PaymentDto save(final PaymentDto paymentDto);\r\n\r\n    PaymentDto update(final PaymentDto paymentDto);\r\n\r\n    void deleteById(final Integer paymentId);\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8614,
+        "packageName": "com.selimhorri.app.domain",
+        "className": "PaymentStatus",
+        "qualifiedName": "com.selimhorri.app.domain.PaymentStatus",
+        "classType": "ENUM",
+        "filePath": "ecommerce-microservice-backend-app/payment-service/src/main/java/com/selimhorri/app/domain/PaymentStatus.java",
+        "sourceCode": "package com.selimhorri.app.domain;\r\n\r\nimport lombok.Getter;\r\nimport lombok.RequiredArgsConstructor;\r\n\r\n@RequiredArgsConstructor\r\n@Getter\r\npublic enum PaymentStatus {\r\n\r\n    NOT_STARTED(\"not_started\"), IN_PROGRESS(\"in_progress\"), COMPLETED(\"completed\");\r\n\r\n    private final String status;\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8613,
+        "packageName": "com.selimhorri.app.domain",
+        "className": "Payment",
+        "qualifiedName": "com.selimhorri.app.domain.Payment",
+        "classType": "ENTITY",
+        "filePath": "ecommerce-microservice-backend-app/payment-service/src/main/java/com/selimhorri/app/domain/Payment.java",
+        "sourceCode": "package com.selimhorri.app.domain;\r\n\r\nimport java.io.Serializable;\r\nimport javax.persistence.Column;\r\nimport javax.persistence.Entity;\r\nimport javax.persistence.EnumType;\r\nimport javax.persistence.Enumerated;\r\nimport javax.persistence.GeneratedValue;\r\nimport javax.persistence.GenerationType;\r\nimport javax.persistence.Id;\r\nimport javax.persistence.Table;\r\nimport lombok.AllArgsConstructor;\r\nimport lombok.Builder;\r\nimport lombok.Data;\r\nimport lombok.EqualsAndHashCode;\r\nimport lombok.NoArgsConstructor;\r\n\r\n@Entity\r\n@Table(name = \"payments\")\r\n@NoArgsConstructor\r\n@AllArgsConstructor\r\n@EqualsAndHashCode(callSuper = true)\r\n@Data\r\n@Builder\r\npublic final class Payment extends AbstractMappedEntity implements Serializable {\r\n\r\n    private static final long serialVersionUID = 1L;\r\n\r\n    @Id\r\n    @GeneratedValue(strategy = GenerationType.IDENTITY)\r\n    @Column(name = \"payment_id\", unique = true, nullable = false, updatable = false)\r\n    private Integer paymentId;\r\n\r\n    @Column(name = \"order_id\")\r\n    private Integer orderId;\r\n\r\n    @Column(name = \"is_payed\")\r\n    private Boolean isPayed;\r\n\r\n    @Enumerated(EnumType.STRING)\r\n    @Column(name = \"payment_status\")\r\n    private PaymentStatus paymentStatus;\r\n}\r\n",
+        "annotations": [
+          {
+            "id": 10664,
+            "targetType": "CLASS",
+            "category": "PERSISTENCE",
+            "annotationName": "Entity",
+            "attributes": "@Entity"
+          },
+          {
+            "id": 10665,
+            "targetType": "CLASS",
+            "category": "PERSISTENCE",
+            "annotationName": "Table",
+            "attributes": "@Table(name = \"payments\")"
+          }
+        ],
+        "methods": []
+      },
+      {
+        "id": 8612,
+        "packageName": "com.selimhorri.app.domain",
+        "className": "AbstractMappedEntity",
+        "qualifiedName": "com.selimhorri.app.domain.AbstractMappedEntity",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/payment-service/src/main/java/com/selimhorri/app/domain/AbstractMappedEntity.java",
+        "sourceCode": "package com.selimhorri.app.domain;\r\n\r\nimport java.io.Serializable;\r\nimport java.time.Instant;\r\nimport javax.persistence.Column;\r\nimport javax.persistence.MappedSuperclass;\r\nimport org.springframework.data.annotation.CreatedDate;\r\nimport org.springframework.data.annotation.LastModifiedDate;\r\nimport com.fasterxml.jackson.annotation.JsonFormat;\r\nimport com.fasterxml.jackson.annotation.JsonFormat.Shape;\r\nimport lombok.AccessLevel;\r\nimport lombok.AllArgsConstructor;\r\nimport lombok.Data;\r\nimport lombok.NoArgsConstructor;\r\n\r\n@MappedSuperclass\r\n@NoArgsConstructor(access = AccessLevel.PROTECTED)\r\n@AllArgsConstructor(access = AccessLevel.PROTECTED)\r\n@Data\r\nabstract public class AbstractMappedEntity implements Serializable {\r\n\r\n    private static final long serialVersionUID = 1L;\r\n\r\n    @CreatedDate\r\n    @JsonFormat(shape = Shape.STRING)\r\n    @Column(name = \"created_at\")\r\n    private Instant createdAt;\r\n\r\n    @LastModifiedDate\r\n    @JsonFormat(shape = Shape.STRING)\r\n    @Column(name = \"updated_at\")\r\n    private Instant updatedAt;\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      }
+    ],
+    "approvedBusinessRules": [
+      {
+        "id": 4558,
+        "methodId": 18168,
+        "ruleCode": "BR-020",
+        "description": "Khi cập nhật thanh toán, service ánh xạ dữ liệu đầu vào sang entity, lưu entity qua method save của repository rồi ánh xạ kết quả đã lưu sang PaymentDto.",
+        "reviewNote": "SOURCE_BRANCH:STMT-2\nAI category: SIDE_EFFECT. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-2"
+      },
+      {
+        "id": 4559,
+        "methodId": 18169,
+        "ruleCode": "BR-021",
+        "description": "Khi xóa thanh toán theo mã, service gọi method deleteById của repository với paymentId được cung cấp.",
+        "reviewNote": "SOURCE_BRANCH:STMT-2\nAI category: SIDE_EFFECT. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-2"
+      },
+      {
+        "id": 4560,
+        "methodId": 18165,
+        "ruleCode": "BR-022",
+        "description": "Khi lấy danh sách payment, service ánh xạ từng bản ghi thành PaymentDto, bổ sung OrderDto bằng kết quả của RestTemplate.getForObject, loại bỏ các phần tử trùng lặp và trả về danh sách không thể sửa đổi.",
+        "reviewNote": "SOURCE_BRANCH:STMT-2\nAI category: BUSINESS_LOGIC. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-2"
+      },
+      {
+        "id": 4561,
+        "methodId": 18165,
+        "ruleCode": "BR-023",
+        "description": "Khi xử lý từng payment trong danh sách, service gọi RestTemplate.getForObject với URL dịch vụ order nối thêm orderId để lấy OrderDto.",
+        "reviewNote": "SOURCE_BRANCH:STMT-2\nAI category: INTEGRATION. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-2"
+      },
+      {
+        "id": 4562,
+        "methodId": 18166,
+        "ruleCode": "BR-024",
+        "description": "Khi không tìm thấy payment theo paymentId, service ném PaymentNotFoundException với thông báo \"Payment with id: %d not found\" được định dạng bằng paymentId.",
+        "reviewNote": "SOURCE_BRANCH:STMT-2\nAI category: VALIDATION. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-2"
+      },
+      {
+        "id": 4563,
+        "methodId": 18166,
+        "ruleCode": "BR-025",
+        "description": "Khi tìm thấy payment theo paymentId, service ánh xạ payment thành PaymentDto và bổ sung OrderDto bằng kết quả của RestTemplate.getForObject.",
+        "reviewNote": "SOURCE_BRANCH:STMT-2\nAI category: BUSINESS_LOGIC. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-2"
+      },
+      {
+        "id": 4564,
+        "methodId": 18166,
+        "ruleCode": "BR-026",
+        "description": "Khi tìm thấy payment theo paymentId, service gọi RestTemplate.getForObject với URL dịch vụ order nối thêm orderId để lấy OrderDto.",
+        "reviewNote": "SOURCE_BRANCH:STMT-2\nAI category: INTEGRATION. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-2"
+      },
+      {
+        "id": 4565,
+        "methodId": 18167,
+        "ruleCode": "BR-027",
+        "description": "Khi lưu payment, service ánh xạ PaymentDto thành Payment, gọi paymentRepository.save, rồi ánh xạ bản ghi được lưu thành PaymentDto để trả về.",
+        "reviewNote": "SOURCE_BRANCH:STMT-2\nAI category: SIDE_EFFECT. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-2"
+      }
+    ],
+    "existingTests": [
+      {
+        "id": 575,
+        "filePath": "ecommerce-microservice-backend-app/api-gateway/src/test/java/com/selimhorri/app/ApiGatewayApplicationTests.java",
+        "packageName": "com.selimhorri.app",
+        "testClassName": "ApiGatewayApplicationTests",
+        "relatedClassId": 8559,
+        "relatedMethodId": null,
+        "testMethods": [],
+        "imports": [
+          "org.springframework.boot.test.context.SpringBootTest"
+        ],
+        "sourceCode": null
+      },
+      {
+        "id": 576,
+        "filePath": "ecommerce-microservice-backend-app/cloud-config/src/test/java/com/selimhorri/app/CloudConfigApplicationTests.java",
+        "packageName": "com.selimhorri.app",
+        "testClassName": "CloudConfigApplicationTests",
+        "relatedClassId": 8560,
+        "relatedMethodId": null,
+        "testMethods": [],
+        "imports": [
+          "org.springframework.boot.test.context.SpringBootTest"
+        ],
+        "sourceCode": null
+      },
+      {
+        "id": 577,
+        "filePath": "ecommerce-microservice-backend-app/favourite-service/src/test/java/com/selimhorri/app/FavouriteServiceApplicationTests.java",
+        "packageName": "com.selimhorri.app",
+        "testClassName": "FavouriteServiceApplicationTests",
+        "relatedClassId": 8575,
+        "relatedMethodId": null,
+        "testMethods": [],
+        "imports": [
+          "org.springframework.boot.test.context.SpringBootTest"
+        ],
+        "sourceCode": null
+      },
+      {
+        "id": 578,
+        "filePath": "ecommerce-microservice-backend-app/order-service/src/test/java/com/selimhorri/app/OrderServiceApplicationTests.java",
+        "packageName": "com.selimhorri.app",
+        "testClassName": "OrderServiceApplicationTests",
+        "relatedClassId": 8598,
+        "relatedMethodId": null,
+        "testMethods": [],
+        "imports": [
+          "org.springframework.boot.test.context.SpringBootTest"
+        ],
+        "sourceCode": null
+      },
+      {
+        "id": 579,
+        "filePath": "ecommerce-microservice-backend-app/payment-service/src/test/java/com/selimhorri/app/PaymentServiceApplicationTests.java",
+        "packageName": "com.selimhorri.app",
+        "testClassName": "PaymentServiceApplicationTests",
+        "relatedClassId": 8622,
+        "relatedMethodId": null,
+        "testMethods": [],
+        "imports": [
+          "org.springframework.boot.test.context.SpringBootTest"
+        ],
+        "sourceCode": null
+      },
+      {
+        "id": 580,
+        "filePath": "ecommerce-microservice-backend-app/product-service/src/test/java/com/selimhorri/app/ProductServiceApplicationTests.java",
+        "packageName": "com.selimhorri.app",
+        "testClassName": "ProductServiceApplicationTests",
+        "relatedClassId": 8644,
+        "relatedMethodId": null,
+        "testMethods": [],
+        "imports": [
+          "org.springframework.boot.test.context.SpringBootTest"
+        ],
+        "sourceCode": null
+      },
+      {
+        "id": 581,
+        "filePath": "ecommerce-microservice-backend-app/proxy-client/src/test/java/com/selimhorri/app/ProxyClientApplicationTests.java",
+        "packageName": "com.selimhorri.app",
+        "testClassName": "ProxyClientApplicationTests",
+        "relatedClassId": 8730,
+        "relatedMethodId": null,
+        "testMethods": [],
+        "imports": [
+          "org.springframework.boot.test.context.SpringBootTest"
+        ],
+        "sourceCode": null
+      },
+      {
+        "id": 582,
+        "filePath": "ecommerce-microservice-backend-app/service-discovery/src/test/java/com/selimhorri/app/ServiceDiscoveryApplicationTests.java",
+        "packageName": "com.selimhorri.app",
+        "testClassName": "ServiceDiscoveryApplicationTests",
+        "relatedClassId": 8732,
+        "relatedMethodId": null,
+        "testMethods": [],
+        "imports": [
+          "org.springframework.boot.test.context.SpringBootTest"
+        ],
+        "sourceCode": null
+      },
+      {
+        "id": 583,
+        "filePath": "ecommerce-microservice-backend-app/shipping-service/src/test/java/com/selimhorri/app/ShippingServiceApplicationTests.java",
+        "packageName": "com.selimhorri.app",
+        "testClassName": "ShippingServiceApplicationTests",
+        "relatedClassId": 8752,
+        "relatedMethodId": null,
+        "testMethods": [],
+        "imports": [
+          "org.springframework.boot.test.context.SpringBootTest"
+        ],
+        "sourceCode": null
+      },
+      {
+        "id": 584,
+        "filePath": "ecommerce-microservice-backend-app/src/test/java/com/selimhorri/app/EcommerceMicroserviceBackendApplicationTests.java",
+        "packageName": "com.selimhorri.app",
+        "testClassName": "EcommerceMicroserviceBackendApplicationTests",
+        "relatedClassId": null,
+        "relatedMethodId": null,
+        "testMethods": [],
+        "imports": [
+          "org.springframework.boot.test.context.SpringBootTest"
+        ],
+        "sourceCode": null
+      },
+      {
+        "id": 585,
+        "filePath": "ecommerce-microservice-backend-app/user-service/src/test/java/com/selimhorri/app/UserServiceApplicationTests.java",
+        "packageName": "com.selimhorri.app",
+        "testClassName": "UserServiceApplicationTests",
+        "relatedClassId": 8795,
+        "relatedMethodId": null,
+        "testMethods": [],
+        "imports": [
+          "org.springframework.boot.test.context.SpringBootTest"
+        ],
+        "sourceCode": null
+      }
+    ],
+    "supportingResources": [],
+    "contextWarnings": []
+  },
+  "response": {
+    "plans": [
+      {
+        "method_id": 18168,
+        "rule_id": 4558,
+        "covered_rule_ids": [
+          4558
+        ],
+        "title": "Cập nhật payment",
+        "description": "Kiểm tra service ánh xạ PaymentDto thành entity, lưu qua repository và ánh xạ entity đã lưu thành PaymentDto.",
+        "test_type": "HAPPY_PATH"
+      },
+      {
+        "method_id": 18169,
+        "rule_id": 4559,
+        "covered_rule_ids": [
+          4559
+        ],
+        "title": "Xóa payment theo mã",
+        "description": "Kiểm tra service gọi repository.deleteById với paymentId được cung cấp.",
+        "test_type": "HAPPY_PATH"
+      },
+      {
+        "method_id": 18165,
+        "rule_id": 4560,
+        "covered_rule_ids": [
+          4560,
+          4561
+        ],
+        "title": "Lấy danh sách payment",
+        "description": "Kiểm tra ánh xạ từng bản ghi, gọi order service theo orderId, loại bỏ phần tử trùng lặp và trả về danh sách không thể sửa đổi.",
+        "test_type": "HAPPY_PATH"
+      },
+      {
+        "method_id": 18166,
+        "rule_id": 4562,
+        "covered_rule_ids": [
+          4562
+        ],
+        "title": "Không tìm thấy payment",
+        "description": "Kiểm tra khi repository không tìm thấy payment, service ném PaymentNotFoundException với thông báo chứa paymentId được định dạng chính xác.",
+        "test_type": "EXCEPTION"
+      },
+      {
+        "method_id": 18166,
+        "rule_id": 4563,
+        "covered_rule_ids": [
+          4563,
+          4564
+        ],
+        "title": "Lấy payment theo mã",
+        "description": "Kiểm tra payment tìm thấy được ánh xạ thành PaymentDto, bổ sung OrderDto từ order service theo orderId và được trả về.",
+        "test_type": "HAPPY_PATH"
+      }
+    ]
+  }
+}

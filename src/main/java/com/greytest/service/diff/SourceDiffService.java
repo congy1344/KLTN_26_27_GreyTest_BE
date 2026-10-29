@@ -193,13 +193,14 @@ public class SourceDiffService {
 
     private Map<String, MethodSnapshotInfo> extractMethodSnapshots(SourceScanResult scanResult) {
         Map<String, MethodSnapshotInfo> resultMap = new HashMap<>();
+        var classTypes = parserHelper.determineClassTypes(scanResult.productionFiles());
 
         for (ParsedFile pf : scanResult.productionFiles()) {
             String packageName = parserHelper.getPackageName(pf.compilationUnit());
             List<TypeDeclaration<?>> typeDecls = parserHelper.findTypes(pf.compilationUnit());
 
             for (TypeDeclaration<?> typeDecl : typeDecls) {
-                ClassType classType = parserHelper.determineClassType(typeDecl);
+                ClassType classType = classTypes.get(typeDecl);
                 String className = typeDecl.getNameAsString();
                 String qualifiedClassName = typeDecl.getFullyQualifiedName().orElse(packageName.isBlank() ? className : packageName + "." + className);
 

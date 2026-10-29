@@ -26,6 +26,99 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.SimpleTransactionStatus;
 
 class IncrementalCheckpointCoordinatorTest {
+    @Test void deletedCaseChildConflictIsRecordedEvenWithoutACaseTargetKey() {
+        var fixture = new Fixture();
+        var units = mock(com.greytest.repository.UnitTestRepository.class);
+        var cases = mock(com.greytest.repository.TestCaseRepository.class);
+        org.springframework.test.util.ReflectionTestUtils.setField(fixture.coordinator, "unitTests", units);
+        org.springframework.test.util.ReflectionTestUtils.setField(fixture.coordinator, "cases", cases);
+        var unit = new com.greytest.entity.UnitTest(); unit.setId(801L); unit.setTestCaseId(701L);
+        var parent = new com.greytest.entity.TestCase(); parent.setId(701L); parent.setTestPlanId(3L);
+        when(units.findById(801L)).thenReturn(Optional.of(unit)); when(cases.findById(701L)).thenReturn(Optional.of(parent));
+        var child = new SourceUpdateItem(); child.setId(6L); child.setTargetId(801L);
+        child.setTargetType(com.greytest.entity.enums.SourceUpdateTargetType.UNIT_TEST);
+        when(fixture.items.findById(6L)).thenReturn(Optional.of(child));
+        assertThatThrownBy(() -> fixture.run(() -> fixture.coordinator.executeBatch(1L, 2L, GenerationProgressStage.TEST_CASE,
+                Set.of(3L), Path.of("candidate"), com.greytest.dto.agent.GenerationResponseDtos.TestCaseResponseDto.class,
+                ids -> { throw new GenerationConflictException(6L, "{\"action\":\"REMOVE\",\"afterData\":null}"); }, (ids, output) -> { })))
+                .isInstanceOf(GenerationConflictException.class);
+        verify(fixture.store).mark(any(), eq("TEST_CASE"), eq("3"), eq("CONFLICT"), anyString(), anyString(), contains("itemId"), anyString());
+    }
+    @Test void baselineComparisonIgnoresJsonFieldOrderButDetectsActualEdits() throws Exception {
+        var fixture = new Fixture();
+        var repository = mock(com.greytest.repository.TestPlanRepository.class);
+        var coverage = mock(com.greytest.repository.TestPlanCoveredRuleRepository.class);
+        org.springframework.test.util.ReflectionTestUtils.setField(fixture.coordinator, "plans", repository);
+        org.springframework.test.util.ReflectionTestUtils.setField(fixture.coordinator, "coveredRules", coverage);
+        var plan = new com.greytest.entity.TestPlan(); plan.setId(9L); plan.setTitle("Approved plan");
+        when(repository.findById(9L)).thenReturn(Optional.of(plan));
+        when(coverage.findByTestPlanId(9L)).thenReturn(List.of());
+        var item = new SourceUpdateItem(); item.setId(6L); item.setTargetId(9L);
+        item.setTargetType(com.greytest.entity.enums.SourceUpdateTargetType.TEST_PLAN);
+        item.setAction(com.greytest.entity.enums.SourceUpdateAction.UPDATE);
+        var original = fixture.mapper.readTree(fixture.coordinator.activeSnapshot(item));
+        var fields = new java.util.ArrayList<Map.Entry<String, com.fasterxml.jackson.databind.JsonNode>>();
+        original.fields().forEachRemaining(fields::add); java.util.Collections.reverse(fields);
+        var reordered = fixture.mapper.createObjectNode(); fields.forEach(entry -> reordered.set(entry.getKey(), entry.getValue()));
+        item.setBeforeData(reordered.toPrettyString());
+        fixture.coordinator.assertActiveArtifactUnchanged(item);
+        plan.setTitle("User changed the plan");
+        assertThatThrownBy(() -> fixture.coordinator.assertActiveArtifactUnchanged(item)).isInstanceOf(IllegalArgumentException.class);
+        plan.setTitle("Approved plan");
+        ((com.fasterxml.jackson.databind.node.ObjectNode) reordered.path("plan")).put("updatedAt", "2026-10-29T00:00:00");
+        item.setBeforeData(reordered.toString());
+        assertThatThrownBy(() -> fixture.coordinator.assertActiveArtifactUnchanged(item)).isInstanceOf(IllegalArgumentException.class);
+    }
+    @Test void planFingerprintAndFreshValidationIncludeSiblingRules() throws Exception {
+        var fixture = planFixture();
+        when(fixture.fingerprints.fingerprint(eq("test-plan"), any(), any())).thenAnswer(call -> {
+            var context = (com.greytest.dto.agent.GenerationContextDtos.TestPlanContextDto) call.getArgument(1);
+            assertThat(context.approvedBusinessRules()).hasSize(2);
+            return new GenerationFingerprintService.Fingerprint("same", "{}", true);
+        });
+        fixture.run(() -> fixture.coordinator.executeBatch(1L, 2L, GenerationProgressStage.TEST_PLAN, Set.of(1L, 2L), Path.of("candidate"),
+                com.greytest.dto.agent.GenerationResponseDtos.TestPlanResponseDto.class, ids -> planResponse(), (ids, output) -> { }));
+    }
+
+    @Test void missingSiblingPlanCheckpointRegeneratesTheWholeMethodGroup() throws Exception {
+        var fixture = planFixture();
+        var current = fixture.items.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(2L);
+        String envelope = fixture.mapper.writeValueAsString(Map.of("itemIds", List.of(4L), "revisions", Map.of("4", 0L), "outputFingerprint", "out"));
+        when(fixture.store.find(2L, "TEST_PLAN", "1")).thenReturn(Optional.of(new GenerationCheckpointStore.Checkpoint(
+                "TEST_PLAN", "1", "same", "{}", envelope, IncrementalCheckpointCoordinator.outputDigest(fixture.mapper, current), "SUCCEEDED")));
+        fixture.run(() -> fixture.coordinator.executeBatch(1L, 2L, GenerationProgressStage.TEST_PLAN, Set.of(1L, 2L), Path.of("candidate"),
+                com.greytest.dto.agent.GenerationResponseDtos.TestPlanResponseDto.class, ids -> {
+                    assertThat(ids).containsExactlyInAnyOrder(1L, 2L); return planResponse();
+                }, (ids, output) -> { }));
+    }
+
+    private static com.greytest.dto.agent.GenerationResponseDtos.TestPlanResponseDto planResponse() {
+        return new com.greytest.dto.agent.GenerationResponseDtos.TestPlanResponseDto(List.of(
+                new com.greytest.dto.agent.GenerationResponseDtos.GeneratedTestPlanDto(3L, 1L, List.of(1L, 2L), "Plan", "Shared coverage", "HAPPY_PATH")));
+    }
+
+    private Fixture planFixture() throws Exception {
+        var fixture = new Fixture();
+        var repository = mock(com.greytest.repository.BusinessRuleRepository.class);
+        org.springframework.test.util.ReflectionTestUtils.setField(fixture.coordinator, "rules", repository);
+        var rules = new java.util.ArrayList<com.greytest.dto.agent.GenerationContextDtos.BusinessRuleContextDto>();
+        for (long id : new long[] {1, 2}) {
+            var row = new com.greytest.entity.BusinessRule(); row.setId(id); row.setMethodId(3L);
+            when(repository.findById(id)).thenReturn(Optional.of(row));
+            rules.add(new com.greytest.dto.agent.GenerationContextDtos.BusinessRuleContextDto(id, 3L, "BR-" + id, "Rule", null, null, "APPROVED", false, "IF-" + id));
+        }
+        when(fixture.agent.snapshotContext(eq(GenerationProgressStage.TEST_PLAN), eq(1L), anySet(), any())).thenAnswer(call -> {
+            Set<Long> selected = call.getArgument(2);
+            return new com.greytest.dto.agent.GenerationContextDtos.TestPlanContextDto(null, null, List.of(),
+                    rules.stream().filter(rule -> selected.contains(rule.id())).toList(), List.of());
+        });
+        var item = new SourceUpdateItem(); item.setId(4L); item.setSourceUpdateId(2L); item.setUserRevision(0L);
+        item.setTargetType(com.greytest.entity.enums.SourceUpdateTargetType.TEST_PLAN);
+        item.setAction(com.greytest.entity.enums.SourceUpdateAction.UPDATE);
+        item.setAfterData(fixture.mapper.writeValueAsString(planResponse().plans().get(0)));
+        when(fixture.items.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(2L)).thenReturn(List.of(item));
+        return fixture;
+    }
     @Test void changedPhysicalCreateCannotReuseAnOtherwiseValidCheckpoint() throws Exception {
         var fixture = new Fixture();
         var repository = mock(com.greytest.repository.BusinessRuleRepository.class);
@@ -140,7 +233,7 @@ class IncrementalCheckpointCoordinatorTest {
         var recorded=Map.of("response",output,"itemIds",List.of(4L),"revisions",Map.of("4",0L),"outputFingerprint","old-factory");
         when(fixture.store.find(2L,"UNIT_TEST","3")).thenReturn(Optional.of(new GenerationCheckpointStore.Checkpoint("UNIT_TEST","3","same","{}",
             fixture.mapper.writeValueAsString(recorded),IncrementalCheckpointCoordinator.outputDigest(fixture.mapper,List.of(item)),"SUCCEEDED")));
-        when(fixture.fingerprints.outputFingerprint(any(),any())).thenReturn(new GenerationFingerprintService.Fingerprint("changed-factory","{}",true));
+        when(fixture.fingerprints.outputFingerprint(any(),any(),any())).thenReturn(new GenerationFingerprintService.Fingerprint("changed-factory","{}",true));
         var calls=new java.util.concurrent.atomic.AtomicInteger();
         fixture.run(()->fixture.coordinator.executeBatch(1L,2L,GenerationProgressStage.UNIT_TEST,Set.of(3L),Path.of("candidate"),UnitTestResponseDto.class,
             ids->{calls.incrementAndGet();return output;},(ids,result)->{}));
@@ -155,7 +248,7 @@ class IncrementalCheckpointCoordinatorTest {
         item.setTargetType(com.greytest.entity.enums.SourceUpdateTargetType.UNIT_TEST);
         item.setAfterData(fixture.mapper.writeValueAsString(output.unitTests().get(0)));
         when(fixture.items.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(2L)).thenReturn(List.of(item));
-        when(fixture.fingerprints.outputFingerprint(any(),any())).thenReturn(new GenerationFingerprintService.Fingerprint("unknown","{\"problems\":[\"unknown production call\"]}",false));
+        when(fixture.fingerprints.outputFingerprint(any(),any(),any())).thenReturn(new GenerationFingerprintService.Fingerprint("unknown","{\"problems\":[\"unknown production call\"]}",false));
         var persisted=new java.util.concurrent.atomic.AtomicBoolean();
         assertThatThrownBy(()->fixture.run(()->fixture.coordinator.executeBatch(1L,2L,GenerationProgressStage.UNIT_TEST,Set.of(3L),Path.of("candidate"),UnitTestResponseDto.class,
             ids->output,(ids,result)->persisted.set(true))))
@@ -181,7 +274,7 @@ class IncrementalCheckpointCoordinatorTest {
             when(tx.getTransaction(any())).thenReturn(new SimpleTransactionStatus());
             when(agent.snapshotContext(any(),anyLong(),anySet(),any())).thenReturn(Map.of("source","current"));
             when(fingerprints.fingerprint(anyString(),any(),any())).thenReturn(new GenerationFingerprintService.Fingerprint("same","{}",true));
-            when(fingerprints.outputFingerprint(any(),any())).thenReturn(new GenerationFingerprintService.Fingerprint("out","{}",true));
+            when(fingerprints.outputFingerprint(any(),any(),any())).thenReturn(new GenerationFingerprintService.Fingerprint("out","{}",true));
             coordinator=new IncrementalCheckpointCoordinator(store,fingerprints,items,agent,mapper,tx,jobs);
         }
         <T> T run(Supplier<T> task) { return coordinator.withRun(1L,2L,5L,task); }

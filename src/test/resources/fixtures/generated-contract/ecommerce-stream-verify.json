@@ -1,0 +1,744 @@
+{
+  "context": {
+    "project": {
+      "id": 849,
+      "name": "ecommerce-microservice-backend-app",
+      "status": "CASE_APPROVED"
+    },
+    "analysis": {
+      "totalClasses": 237,
+      "totalMethods": 444,
+      "totalEndpoints": 143,
+      "totalRelations": 11,
+      "totalControllerServiceRelations": 71,
+      "existingTestFiles": 11,
+      "totalProductionFiles": 227,
+      "parsedProductionFiles": 227,
+      "failedParseFiles": 0,
+      "failedParseFilePaths": []
+    },
+    "classes": [
+      {
+        "id": 8580,
+        "packageName": "com.selimhorri.app.service.impl",
+        "className": "FavouriteServiceImpl",
+        "qualifiedName": "com.selimhorri.app.service.impl.FavouriteServiceImpl",
+        "classType": "SERVICE",
+        "filePath": "ecommerce-microservice-backend-app/favourite-service/src/main/java/com/selimhorri/app/service/impl/FavouriteServiceImpl.java",
+        "sourceCode": "package com.selimhorri.app.service.impl;\r\n\r\nimport java.util.List;\r\nimport java.util.stream.Collectors;\r\nimport javax.transaction.Transactional;\r\nimport org.springframework.stereotype.Service;\r\nimport org.springframework.web.client.RestTemplate;\r\nimport com.selimhorri.app.constant.AppConstant;\r\nimport com.selimhorri.app.domain.id.FavouriteId;\r\nimport com.selimhorri.app.dto.FavouriteDto;\r\nimport com.selimhorri.app.dto.ProductDto;\r\nimport com.selimhorri.app.dto.UserDto;\r\nimport com.selimhorri.app.exception.wrapper.FavouriteNotFoundException;\r\nimport com.selimhorri.app.helper.FavouriteMappingHelper;\r\nimport com.selimhorri.app.repository.FavouriteRepository;\r\nimport com.selimhorri.app.service.FavouriteService;\r\nimport lombok.RequiredArgsConstructor;\r\nimport lombok.extern.slf4j.Slf4j;\r\n\r\n@Service\r\n@Transactional\r\n@Slf4j\r\n@RequiredArgsConstructor\r\npublic class FavouriteServiceImpl implements FavouriteService {\r\n\r\n    private final FavouriteRepository favouriteRepository;\r\n\r\n    private final RestTemplate restTemplate;\r\n\r\n    @Override\r\n    public List<FavouriteDto> findAll() {\r\n        log.info(\"*** FavouriteDto List, service; fetch all favourites *\");\r\n        return this.favouriteRepository.findAll().stream().map(FavouriteMappingHelper::map).map(f -> {\r\n            f.setUserDto(this.restTemplate.getForObject(AppConstant.DiscoveredDomainsApi.USER_SERVICE_API_URL + \"/\" + f.getUserId(), UserDto.class));\r\n            f.setProductDto(this.restTemplate.getForObject(AppConstant.DiscoveredDomainsApi.PRODUCT_SERVICE_API_URL + \"/\" + f.getProductId(), ProductDto.class));\r\n            return f;\r\n        }).distinct().collect(Collectors.toUnmodifiableList());\r\n    }\r\n\r\n    @Override\r\n    public FavouriteDto findById(final FavouriteId favouriteId) {\r\n        log.info(\"*** FavouriteDto, service; fetch favourite by id *\");\r\n        return this.favouriteRepository.findById(favouriteId).map(FavouriteMappingHelper::map).map(f -> {\r\n            f.setUserDto(this.restTemplate.getForObject(AppConstant.DiscoveredDomainsApi.USER_SERVICE_API_URL + \"/\" + f.getUserId(), UserDto.class));\r\n            f.setProductDto(this.restTemplate.getForObject(AppConstant.DiscoveredDomainsApi.PRODUCT_SERVICE_API_URL + \"/\" + f.getProductId(), ProductDto.class));\r\n            return f;\r\n        }).orElseThrow(() -> new FavouriteNotFoundException(String.format(\"Favourite with id: [%s] not found!\", favouriteId)));\r\n    }\r\n\r\n    @Override\r\n    public FavouriteDto save(final FavouriteDto favouriteDto) {\r\n        return FavouriteMappingHelper.map(this.favouriteRepository.save(FavouriteMappingHelper.map(favouriteDto)));\r\n    }\r\n\r\n    @Override\r\n    public FavouriteDto update(final FavouriteDto favouriteDto) {\r\n        return FavouriteMappingHelper.map(this.favouriteRepository.save(FavouriteMappingHelper.map(favouriteDto)));\r\n    }\r\n\r\n    @Override\r\n    public void deleteById(final FavouriteId favouriteId) {\r\n        this.favouriteRepository.deleteById(favouriteId);\r\n    }\r\n}\r\n",
+        "annotations": [
+          {
+            "id": 10618,
+            "targetType": "CLASS",
+            "category": "COMPONENT",
+            "annotationName": "Service",
+            "attributes": "@Service"
+          },
+          {
+            "id": 10619,
+            "targetType": "CLASS",
+            "category": "TRANSACTION",
+            "annotationName": "Transactional",
+            "attributes": "@Transactional"
+          }
+        ],
+        "methods": [
+          {
+            "id": 18101,
+            "classQualifiedName": "com.selimhorri.app.service.impl.FavouriteServiceImpl",
+            "methodName": "findAll",
+            "returnType": "List<FavouriteDto>",
+            "parameters": [],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "@Override\r\n\tpublic List<FavouriteDto> findAll() {\r\n\t\tlog.info(\"*** FavouriteDto List, service; fetch all favourites *\");\r\n\t\treturn this.favouriteRepository.findAll()\r\n\t\t\t\t.stream()\r\n\t\t\t\t\t.map(FavouriteMappingHelper::map)\r\n\t\t\t\t\t.map(f -> {\r\n\t\t\t\t\t\tf.setUserDto(this.restTemplate\r\n\t\t\t\t\t\t\t\t.getForObject(AppConstant.DiscoveredDomainsApi\r\n\t\t\t\t\t\t\t\t\t\t.USER_SERVICE_API_URL + \"/\" + f.getUserId(), UserDto.class));\r\n\t\t\t\t\t\tf.setProductDto(this.restTemplate\r\n\t\t\t\t\t\t\t\t.getForObject(AppConstant.DiscoveredDomainsApi\r\n\t\t\t\t\t\t\t\t\t\t.PRODUCT_SERVICE_API_URL + \"/\" + f.getProductId(), ProductDto.class));\r\n\t\t\t\t\t\treturn f;\r\n\t\t\t\t\t})\r\n\t\t\t\t\t.distinct()\r\n\t\t\t\t\t.collect(Collectors.toUnmodifiableList());\r\n\t}",
+            "lineStart": 33,
+            "lineEnd": 50,
+            "annotations": [],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 35,
+                "lineEnd": 35
+              },
+              {
+                "branchId": "STMT-2",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 36,
+                "lineEnd": 49
+              }
+            ]
+          },
+          {
+            "id": 18102,
+            "classQualifiedName": "com.selimhorri.app.service.impl.FavouriteServiceImpl",
+            "methodName": "findById",
+            "returnType": "FavouriteDto",
+            "parameters": [
+              {
+                "name": "favouriteId",
+                "type": "FavouriteId"
+              }
+            ],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "@Override\r\n\tpublic FavouriteDto findById(final FavouriteId favouriteId) {\r\n\t\tlog.info(\"*** FavouriteDto, service; fetch favourite by id *\");\r\n\t\treturn this.favouriteRepository.findById(favouriteId)\r\n\t\t\t\t.map(FavouriteMappingHelper::map)\r\n\t\t\t\t.map(f -> {\r\n\t\t\t\t\tf.setUserDto(this.restTemplate\r\n\t\t\t\t\t\t\t.getForObject(AppConstant.DiscoveredDomainsApi\r\n\t\t\t\t\t\t\t\t\t.USER_SERVICE_API_URL + \"/\" + f.getUserId(), UserDto.class));\r\n\t\t\t\t\tf.setProductDto(this.restTemplate\r\n\t\t\t\t\t\t\t.getForObject(AppConstant.DiscoveredDomainsApi\r\n\t\t\t\t\t\t\t\t\t.PRODUCT_SERVICE_API_URL + \"/\" + f.getProductId(), ProductDto.class));\r\n\t\t\t\t\treturn f;\r\n\t\t\t\t})\r\n\t\t\t\t.orElseThrow(() -> new FavouriteNotFoundException(\r\n\t\t\t\t\t\tString.format(\"Favourite with id: [%s] not found!\", favouriteId)));\r\n\t}",
+            "lineStart": 52,
+            "lineEnd": 68,
+            "annotations": [],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 54,
+                "lineEnd": 54
+              },
+              {
+                "branchId": "STMT-2",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 55,
+                "lineEnd": 67
+              }
+            ]
+          },
+          {
+            "id": 18103,
+            "classQualifiedName": "com.selimhorri.app.service.impl.FavouriteServiceImpl",
+            "methodName": "save",
+            "returnType": "FavouriteDto",
+            "parameters": [
+              {
+                "name": "favouriteDto",
+                "type": "FavouriteDto"
+              }
+            ],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "@Override\r\n\tpublic FavouriteDto save(final FavouriteDto favouriteDto) {\r\n\t\treturn FavouriteMappingHelper.map(this.favouriteRepository\r\n\t\t\t\t.save(FavouriteMappingHelper.map(favouriteDto)));\r\n\t}",
+            "lineStart": 70,
+            "lineEnd": 74,
+            "annotations": [],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 72,
+                "lineEnd": 73
+              }
+            ]
+          },
+          {
+            "id": 18104,
+            "classQualifiedName": "com.selimhorri.app.service.impl.FavouriteServiceImpl",
+            "methodName": "update",
+            "returnType": "FavouriteDto",
+            "parameters": [
+              {
+                "name": "favouriteDto",
+                "type": "FavouriteDto"
+              }
+            ],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "@Override\r\n\tpublic FavouriteDto update(final FavouriteDto favouriteDto) {\r\n\t\treturn FavouriteMappingHelper.map(this.favouriteRepository\r\n\t\t\t\t.save(FavouriteMappingHelper.map(favouriteDto)));\r\n\t}",
+            "lineStart": 76,
+            "lineEnd": 80,
+            "annotations": [],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 78,
+                "lineEnd": 79
+              }
+            ]
+          },
+          {
+            "id": 18105,
+            "classQualifiedName": "com.selimhorri.app.service.impl.FavouriteServiceImpl",
+            "methodName": "deleteById",
+            "returnType": "void",
+            "parameters": [
+              {
+                "name": "favouriteId",
+                "type": "FavouriteId"
+              }
+            ],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "@Override\r\n\tpublic void deleteById(final FavouriteId favouriteId) {\r\n\t\tthis.favouriteRepository.deleteById(favouriteId);\r\n\t}",
+            "lineStart": 82,
+            "lineEnd": 85,
+            "annotations": [],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 84,
+                "lineEnd": 84
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": 8563,
+        "packageName": "com.selimhorri.app.constant",
+        "className": "AppConstant",
+        "qualifiedName": "com.selimhorri.app.constant.AppConstant",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/favourite-service/src/main/java/com/selimhorri/app/constant/AppConstant.java",
+        "sourceCode": "package com.selimhorri.app.constant;\r\n\r\nimport lombok.AccessLevel;\r\nimport lombok.NoArgsConstructor;\r\n\r\n@NoArgsConstructor(access = AccessLevel.PRIVATE)\r\npublic abstract class AppConstant {\r\n\r\n    public static final String LOCAL_DATE_FORMAT = \"dd-MM-yyyy\";\r\n\r\n    public static final String LOCAL_DATE_TIME_FORMAT = \"dd-MM-yyyy__HH:mm:ss:SSSSSS\";\r\n\r\n    public static final String ZONED_DATE_TIME_FORMAT = \"dd-MM-yyyy__HH:mm:ss:SSSSSS\";\r\n\r\n    public static final String INSTANT_FORMAT = \"dd-MM-yyyy__HH:mm:ss:SSSSSS\";\r\n\r\n    @NoArgsConstructor(access = AccessLevel.PRIVATE)\r\n    public abstract class DiscoveredDomainsApi {\r\n\r\n        public static final String USER_SERVICE_HOST = \"http://USER-SERVICE/user-service\";\r\n\r\n        public static final String USER_SERVICE_API_URL = \"http://USER-SERVICE/user-service/api/users\";\r\n\r\n        public static final String PRODUCT_SERVICE_HOST = \"http://PRODUCT-SERVICE/product-service\";\r\n\r\n        public static final String PRODUCT_SERVICE_API_URL = \"http://PRODUCT-SERVICE/product-service/api/products\";\r\n\r\n        public static final String ORDER_SERVICE_HOST = \"http://ORDER-SERVICE/order-service\";\r\n\r\n        public static final String ORDER_SERVICE_API_URL = \"http://ORDER-SERVICE/order-service/api/orders\";\r\n\r\n        public static final String FAVOURITE_SERVICE_HOST = \"http://FAVOURITE-SERVICE/favourite-service\";\r\n\r\n        public static final String FAVOURITE_SERVICE_API_URL = \"http://FAVOURITE-SERVICE/favourite-service/api/favourites\";\r\n\r\n        public static final String PAYMENT_SERVICE_HOST = \"http://PAYMENT-SERVICE/payment-service\";\r\n\r\n        public static final String PAYMENT_SERVICE_API_URL = \"http://PAYMENT-SERVICE/payment-service/api/payments\";\r\n\r\n        public static final String SHIPPING_SERVICE_HOST = \"http://SHIPPING-SERVICE/shipping-service\";\r\n\r\n        public static final String SHIPPING_SERVICE_API_URL = \"http://SHIPPING-SERVICE/shipping-service/api/shippings\";\r\n    }\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8567,
+        "packageName": "com.selimhorri.app.domain.id",
+        "className": "FavouriteId",
+        "qualifiedName": "com.selimhorri.app.domain.id.FavouriteId",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/favourite-service/src/main/java/com/selimhorri/app/domain/id/FavouriteId.java",
+        "sourceCode": "package com.selimhorri.app.domain.id;\r\n\r\nimport java.io.Serializable;\r\nimport java.time.LocalDateTime;\r\nimport javax.validation.constraints.NotNull;\r\nimport org.springframework.format.annotation.DateTimeFormat;\r\nimport com.fasterxml.jackson.annotation.JsonFormat;\r\nimport com.fasterxml.jackson.annotation.JsonFormat.Shape;\r\nimport com.fasterxml.jackson.databind.annotation.JsonDeserialize;\r\nimport com.fasterxml.jackson.databind.annotation.JsonSerialize;\r\nimport com.fasterxml.jackson.datatype.jsr310.deser.LocalDateTimeDeserializer;\r\nimport com.fasterxml.jackson.datatype.jsr310.ser.LocalDateTimeSerializer;\r\nimport com.selimhorri.app.constant.AppConstant;\r\nimport lombok.AllArgsConstructor;\r\nimport lombok.Data;\r\nimport lombok.NoArgsConstructor;\r\n\r\n@NoArgsConstructor\r\n@AllArgsConstructor\r\n@Data\r\npublic class FavouriteId implements Serializable {\r\n\r\n    private static final long serialVersionUID = 1L;\r\n\r\n    @NotNull\r\n    private Integer userId;\r\n\r\n    @NotNull\r\n    private Integer productId;\r\n\r\n    @NotNull\r\n    @JsonSerialize(using = LocalDateTimeSerializer.class)\r\n    @JsonDeserialize(using = LocalDateTimeDeserializer.class)\r\n    @JsonFormat(pattern = AppConstant.LOCAL_DATE_TIME_FORMAT, shape = Shape.STRING)\r\n    @DateTimeFormat(pattern = AppConstant.LOCAL_DATE_TIME_FORMAT)\r\n    private LocalDateTime likeDate;\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8568,
+        "packageName": "com.selimhorri.app.dto",
+        "className": "FavouriteDto",
+        "qualifiedName": "com.selimhorri.app.dto.FavouriteDto",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/favourite-service/src/main/java/com/selimhorri/app/dto/FavouriteDto.java",
+        "sourceCode": "package com.selimhorri.app.dto;\r\n\r\nimport java.io.Serializable;\r\nimport java.time.LocalDateTime;\r\nimport javax.validation.constraints.NotNull;\r\nimport org.springframework.format.annotation.DateTimeFormat;\r\nimport com.fasterxml.jackson.annotation.JsonFormat;\r\nimport com.fasterxml.jackson.annotation.JsonFormat.Shape;\r\nimport com.fasterxml.jackson.annotation.JsonInclude;\r\nimport com.fasterxml.jackson.annotation.JsonProperty;\r\nimport com.fasterxml.jackson.annotation.JsonInclude.Include;\r\nimport com.fasterxml.jackson.databind.annotation.JsonDeserialize;\r\nimport com.fasterxml.jackson.databind.annotation.JsonSerialize;\r\nimport com.fasterxml.jackson.datatype.jsr310.deser.LocalDateTimeDeserializer;\r\nimport com.fasterxml.jackson.datatype.jsr310.ser.LocalDateTimeSerializer;\r\nimport com.selimhorri.app.constant.AppConstant;\r\nimport lombok.AllArgsConstructor;\r\nimport lombok.Builder;\r\nimport lombok.Data;\r\nimport lombok.NoArgsConstructor;\r\n\r\n@NoArgsConstructor\r\n@AllArgsConstructor\r\n@Data\r\n@Builder\r\npublic class FavouriteDto implements Serializable {\r\n\r\n    private static final long serialVersionUID = 1L;\r\n\r\n    @NotNull(message = \"Field must not be NULL\")\r\n    private Integer userId;\r\n\r\n    @NotNull(message = \"Field must not be NULL\")\r\n    private Integer productId;\r\n\r\n    @NotNull(message = \"Field must not be NULL\")\r\n    @JsonSerialize(using = LocalDateTimeSerializer.class)\r\n    @JsonDeserialize(using = LocalDateTimeDeserializer.class)\r\n    @JsonFormat(pattern = AppConstant.LOCAL_DATE_TIME_FORMAT, shape = Shape.STRING)\r\n    @DateTimeFormat(pattern = AppConstant.LOCAL_DATE_TIME_FORMAT)\r\n    private LocalDateTime likeDate;\r\n\r\n    @JsonProperty(\"user\")\r\n    @JsonInclude(Include.NON_NULL)\r\n    private UserDto userDto;\r\n\r\n    @JsonProperty(\"product\")\r\n    @JsonInclude(Include.NON_NULL)\r\n    private ProductDto productDto;\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8569,
+        "packageName": "com.selimhorri.app.dto",
+        "className": "ProductDto",
+        "qualifiedName": "com.selimhorri.app.dto.ProductDto",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/favourite-service/src/main/java/com/selimhorri/app/dto/ProductDto.java",
+        "sourceCode": "package com.selimhorri.app.dto;\r\n\r\nimport java.io.Serializable;\r\nimport java.util.Set;\r\nimport com.fasterxml.jackson.annotation.JsonInclude;\r\nimport com.fasterxml.jackson.annotation.JsonInclude.Include;\r\nimport lombok.AllArgsConstructor;\r\nimport lombok.Builder;\r\nimport lombok.Data;\r\nimport lombok.NoArgsConstructor;\r\n\r\n@NoArgsConstructor\r\n@AllArgsConstructor\r\n@Data\r\n@Builder\r\npublic class ProductDto implements Serializable {\r\n\r\n    private static final long serialVersionUID = 1L;\r\n\r\n    private Integer productId;\r\n\r\n    private String productTitle;\r\n\r\n    private String imageUrl;\r\n\r\n    private String sku;\r\n\r\n    private Double priceUnit;\r\n\r\n    private Integer quantity;\r\n\r\n    @JsonInclude(Include.NON_NULL)\r\n    private Set<FavouriteDto> favouriteDtos;\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8571,
+        "packageName": "com.selimhorri.app.dto",
+        "className": "UserDto",
+        "qualifiedName": "com.selimhorri.app.dto.UserDto",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/favourite-service/src/main/java/com/selimhorri/app/dto/UserDto.java",
+        "sourceCode": "package com.selimhorri.app.dto;\r\n\r\nimport java.io.Serializable;\r\nimport java.util.Set;\r\nimport com.fasterxml.jackson.annotation.JsonInclude;\r\nimport com.fasterxml.jackson.annotation.JsonInclude.Include;\r\nimport lombok.AllArgsConstructor;\r\nimport lombok.Builder;\r\nimport lombok.Data;\r\nimport lombok.NoArgsConstructor;\r\n\r\n@NoArgsConstructor\r\n@AllArgsConstructor\r\n@Data\r\n@Builder\r\npublic class UserDto implements Serializable {\r\n\r\n    private static final long serialVersionUID = 1L;\r\n\r\n    private Integer userId;\r\n\r\n    private String firstName;\r\n\r\n    private String lastName;\r\n\r\n    private String imageUrl;\r\n\r\n    private String email;\r\n\r\n    private String phone;\r\n\r\n    @JsonInclude(Include.NON_NULL)\r\n    private Set<FavouriteDto> favouriteDtos;\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8574,
+        "packageName": "com.selimhorri.app.exception.wrapper",
+        "className": "FavouriteNotFoundException",
+        "qualifiedName": "com.selimhorri.app.exception.wrapper.FavouriteNotFoundException",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/favourite-service/src/main/java/com/selimhorri/app/exception/wrapper/FavouriteNotFoundException.java",
+        "sourceCode": "package com.selimhorri.app.exception.wrapper;\r\n\r\npublic class FavouriteNotFoundException extends RuntimeException {\r\n\r\n    private static final long serialVersionUID = 1L;\r\n\r\n    public FavouriteNotFoundException() {\r\n        super();\r\n    }\r\n\r\n    public FavouriteNotFoundException(String message, Throwable cause) {\r\n        super(message, cause);\r\n    }\r\n\r\n    public FavouriteNotFoundException(String message) {\r\n        super(message);\r\n    }\r\n\r\n    public FavouriteNotFoundException(Throwable cause) {\r\n        super(cause);\r\n    }\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8576,
+        "packageName": "com.selimhorri.app.helper",
+        "className": "FavouriteMappingHelper",
+        "qualifiedName": "com.selimhorri.app.helper.FavouriteMappingHelper",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/favourite-service/src/main/java/com/selimhorri/app/helper/FavouriteMappingHelper.java",
+        "sourceCode": "package com.selimhorri.app.helper;\r\n\r\nimport com.selimhorri.app.domain.Favourite;\r\nimport com.selimhorri.app.dto.FavouriteDto;\r\nimport com.selimhorri.app.dto.ProductDto;\r\nimport com.selimhorri.app.dto.UserDto;\r\n\r\npublic interface FavouriteMappingHelper {\r\n\r\n    public static FavouriteDto map(final Favourite favourite) {\r\n        return FavouriteDto.builder().userId(favourite.getUserId()).productId(favourite.getProductId()).likeDate(favourite.getLikeDate()).userDto(UserDto.builder().userId(favourite.getUserId()).build()).productDto(ProductDto.builder().productId(favourite.getProductId()).build()).build();\r\n    }\r\n\r\n    public static Favourite map(final FavouriteDto favouriteDto) {\r\n        return Favourite.builder().userId(favouriteDto.getUserId()).productId(favouriteDto.getProductId()).likeDate(favouriteDto.getLikeDate()).build();\r\n    }\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8577,
+        "packageName": "com.selimhorri.app.repository",
+        "className": "FavouriteRepository",
+        "qualifiedName": "com.selimhorri.app.repository.FavouriteRepository",
+        "classType": "REPOSITORY",
+        "filePath": "ecommerce-microservice-backend-app/favourite-service/src/main/java/com/selimhorri/app/repository/FavouriteRepository.java",
+        "sourceCode": "package com.selimhorri.app.repository;\r\n\r\nimport org.springframework.data.jpa.repository.JpaRepository;\r\nimport com.selimhorri.app.domain.Favourite;\r\nimport com.selimhorri.app.domain.id.FavouriteId;\r\n\r\npublic interface FavouriteRepository extends JpaRepository<Favourite, FavouriteId> {\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8579,
+        "packageName": "com.selimhorri.app.service",
+        "className": "FavouriteService",
+        "qualifiedName": "com.selimhorri.app.service.FavouriteService",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/favourite-service/src/main/java/com/selimhorri/app/service/FavouriteService.java",
+        "sourceCode": "package com.selimhorri.app.service;\r\n\r\nimport java.util.List;\r\nimport com.selimhorri.app.domain.id.FavouriteId;\r\nimport com.selimhorri.app.dto.FavouriteDto;\r\n\r\npublic interface FavouriteService {\r\n\r\n    List<FavouriteDto> findAll();\r\n\r\n    FavouriteDto findById(final FavouriteId favouriteId);\r\n\r\n    FavouriteDto save(final FavouriteDto favouriteDto);\r\n\r\n    FavouriteDto update(final FavouriteDto favouriteDto);\r\n\r\n    void deleteById(final FavouriteId favouriteId);\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8566,
+        "packageName": "com.selimhorri.app.domain",
+        "className": "Favourite",
+        "qualifiedName": "com.selimhorri.app.domain.Favourite",
+        "classType": "ENTITY",
+        "filePath": "ecommerce-microservice-backend-app/favourite-service/src/main/java/com/selimhorri/app/domain/Favourite.java",
+        "sourceCode": "package com.selimhorri.app.domain;\r\n\r\nimport java.io.Serializable;\r\nimport java.time.LocalDateTime;\r\nimport javax.persistence.Column;\r\nimport javax.persistence.Entity;\r\nimport javax.persistence.Id;\r\nimport javax.persistence.IdClass;\r\nimport javax.persistence.Table;\r\nimport org.springframework.format.annotation.DateTimeFormat;\r\nimport com.fasterxml.jackson.annotation.JsonFormat;\r\nimport com.fasterxml.jackson.annotation.JsonFormat.Shape;\r\nimport com.fasterxml.jackson.databind.annotation.JsonDeserialize;\r\nimport com.fasterxml.jackson.databind.annotation.JsonSerialize;\r\nimport com.fasterxml.jackson.datatype.jsr310.deser.LocalDateTimeDeserializer;\r\nimport com.fasterxml.jackson.datatype.jsr310.ser.LocalDateTimeSerializer;\r\nimport com.selimhorri.app.constant.AppConstant;\r\nimport com.selimhorri.app.domain.id.FavouriteId;\r\nimport lombok.AllArgsConstructor;\r\nimport lombok.Builder;\r\nimport lombok.Data;\r\nimport lombok.EqualsAndHashCode;\r\nimport lombok.NoArgsConstructor;\r\n\r\n@Entity\r\n@Table(name = \"favourites\")\r\n@IdClass(FavouriteId.class)\r\n@NoArgsConstructor\r\n@AllArgsConstructor\r\n@EqualsAndHashCode(callSuper = true)\r\n@Data\r\n@Builder\r\npublic final class Favourite extends AbstractMappedEntity implements Serializable {\r\n\r\n    private static final long serialVersionUID = 1L;\r\n\r\n    @Id\r\n    @Column(name = \"user_id\", nullable = false)\r\n    private Integer userId;\r\n\r\n    @Id\r\n    @Column(name = \"product_id\", nullable = false)\r\n    private Integer productId;\r\n\r\n    @Id\r\n    @Column(name = \"like_date\", nullable = false)\r\n    @JsonSerialize(using = LocalDateTimeSerializer.class)\r\n    @JsonDeserialize(using = LocalDateTimeDeserializer.class)\r\n    @JsonFormat(pattern = AppConstant.LOCAL_DATE_TIME_FORMAT, shape = Shape.STRING)\r\n    @DateTimeFormat(pattern = AppConstant.LOCAL_DATE_TIME_FORMAT)\r\n    private LocalDateTime likeDate;\r\n}\r\n",
+        "annotations": [
+          {
+            "id": 10599,
+            "targetType": "CLASS",
+            "category": "PERSISTENCE",
+            "annotationName": "Entity",
+            "attributes": "@Entity"
+          },
+          {
+            "id": 10600,
+            "targetType": "CLASS",
+            "category": "PERSISTENCE",
+            "annotationName": "Table",
+            "attributes": "@Table(name = \"favourites\")"
+          }
+        ],
+        "methods": []
+      },
+      {
+        "id": 8565,
+        "packageName": "com.selimhorri.app.domain",
+        "className": "AbstractMappedEntity",
+        "qualifiedName": "com.selimhorri.app.domain.AbstractMappedEntity",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/favourite-service/src/main/java/com/selimhorri/app/domain/AbstractMappedEntity.java",
+        "sourceCode": "package com.selimhorri.app.domain;\r\n\r\nimport java.io.Serializable;\r\nimport java.time.Instant;\r\nimport javax.persistence.Column;\r\nimport javax.persistence.MappedSuperclass;\r\nimport org.springframework.data.annotation.CreatedDate;\r\nimport org.springframework.data.annotation.LastModifiedDate;\r\nimport com.fasterxml.jackson.annotation.JsonFormat;\r\nimport com.fasterxml.jackson.annotation.JsonFormat.Shape;\r\nimport lombok.AccessLevel;\r\nimport lombok.AllArgsConstructor;\r\nimport lombok.Data;\r\nimport lombok.NoArgsConstructor;\r\n\r\n@MappedSuperclass\r\n@NoArgsConstructor(access = AccessLevel.PROTECTED)\r\n@AllArgsConstructor(access = AccessLevel.PROTECTED)\r\n@Data\r\nabstract public class AbstractMappedEntity implements Serializable {\r\n\r\n    private static final long serialVersionUID = 1L;\r\n\r\n    @CreatedDate\r\n    @JsonFormat(shape = Shape.STRING)\r\n    @Column(name = \"created_at\")\r\n    private Instant createdAt;\r\n\r\n    @LastModifiedDate\r\n    @JsonFormat(shape = Shape.STRING)\r\n    @Column(name = \"updated_at\")\r\n    private Instant updatedAt;\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      }
+    ],
+    "approvedBusinessRules": [
+      {
+        "id": 4482,
+        "methodId": 18104,
+        "ruleCode": "BR-001",
+        "description": "Khi cập nhật favourite, service ánh xạ DTO sang entity, lưu entity qua repository.save rồi ánh xạ entity đã lưu thành DTO trả về.",
+        "reviewNote": "SOURCE_BRANCH:STMT-1\nAI category: SIDE_EFFECT. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-1"
+      },
+      {
+        "id": 4483,
+        "methodId": 18105,
+        "ruleCode": "BR-002",
+        "description": "Khi xóa favourite theo ID, service gọi favouriteRepository.deleteById với ID được cung cấp.",
+        "reviewNote": "SOURCE_BRANCH:STMT-1\nAI category: SIDE_EFFECT. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-1"
+      },
+      {
+        "id": 4484,
+        "methodId": 18101,
+        "ruleCode": "BR-003",
+        "description": "Khi lấy danh sách yêu thích, service ánh xạ từng bản ghi thành FavouriteDto, bổ sung thông tin người dùng và sản phẩm bằng các lời gọi getForObject, loại bỏ phần tử trùng lặp và trả về danh sách không thể thay đổi.",
+        "reviewNote": "SOURCE_BRANCH:STMT-2\nAI category: BUSINESS_LOGIC. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-2"
+      },
+      {
+        "id": 4485,
+        "methodId": 18102,
+        "ruleCode": "BR-004",
+        "description": "Khi tìm yêu thích theo FavouriteId mà không có kết quả, service ném FavouriteNotFoundException với thông điệp \"Favourite with id: [%s] not found!\" được định dạng theo FavouriteId.",
+        "reviewNote": "SOURCE_BRANCH:STMT-2\nAI category: VALIDATION. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-2"
+      },
+      {
+        "id": 4486,
+        "methodId": 18102,
+        "ruleCode": "BR-005",
+        "description": "Khi tìm thấy yêu thích theo FavouriteId, service ánh xạ bản ghi thành FavouriteDto và bổ sung thông tin người dùng cùng sản phẩm bằng các lời gọi getForObject.",
+        "reviewNote": "SOURCE_BRANCH:STMT-2\nAI category: INTEGRATION. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-2"
+      },
+      {
+        "id": 4487,
+        "methodId": 18103,
+        "ruleCode": "BR-006",
+        "description": "Khi lưu FavouriteDto, service ánh xạ DTO thành bản ghi, gọi save trên favouriteRepository và ánh xạ bản ghi được lưu thành FavouriteDto để trả về.",
+        "reviewNote": "SOURCE_BRANCH:STMT-1\nAI category: SIDE_EFFECT. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-1"
+      }
+    ],
+    "approvedTestPlans": [
+      {
+        "id": 2225,
+        "businessRuleId": 4482,
+        "coveredRuleIds": [
+          4482
+        ],
+        "planCode": "TP-001",
+        "title": "Cập nhật favourite",
+        "description": "Kiểm tra service ánh xạ DTO thành entity, lưu qua repository và ánh xạ entity đã lưu thành DTO trả về.",
+        "testType": "HAPPY_PATH",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2226,
+        "businessRuleId": 4483,
+        "coveredRuleIds": [
+          4483
+        ],
+        "planCode": "TP-002",
+        "title": "Xóa favourite theo ID",
+        "description": "Kiểm tra service gọi favouriteRepository.deleteById với đúng ID được cung cấp.",
+        "testType": "HAPPY_PATH",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2227,
+        "businessRuleId": 4484,
+        "coveredRuleIds": [
+          4484
+        ],
+        "planCode": "TP-003",
+        "title": "Lấy danh sách favourite",
+        "description": "Kiểm tra ánh xạ bản ghi, bổ sung thông tin người dùng và sản phẩm, loại bỏ phần tử trùng lặp và trả về danh sách không thể thay đổi.",
+        "testType": "HAPPY_PATH",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2228,
+        "businessRuleId": 4485,
+        "coveredRuleIds": [
+          4485
+        ],
+        "planCode": "TP-004",
+        "title": "Tìm favourite không tồn tại",
+        "description": "Kiểm tra service ném FavouriteNotFoundException với thông điệp được định dạng theo FavouriteId khi không tìm thấy bản ghi.",
+        "testType": "EXCEPTION",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2229,
+        "businessRuleId": 4486,
+        "coveredRuleIds": [
+          4486
+        ],
+        "planCode": "TP-005",
+        "title": "Tìm favourite theo ID",
+        "description": "Kiểm tra ánh xạ bản ghi tìm thấy thành DTO và bổ sung thông tin người dùng cùng sản phẩm bằng getForObject.",
+        "testType": "HAPPY_PATH",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2230,
+        "businessRuleId": 4487,
+        "coveredRuleIds": [
+          4487
+        ],
+        "planCode": "TP-006",
+        "title": "Lưu favourite",
+        "description": "Kiểm tra service ánh xạ DTO thành bản ghi, lưu qua repository và ánh xạ bản ghi đã lưu thành DTO trả về.",
+        "testType": "HAPPY_PATH",
+        "status": "APPROVED",
+        "isModified": false
+      }
+    ],
+    "approvedTestCases": [
+      {
+        "id": 2854,
+        "testPlanId": 2225,
+        "caseCode": "TC-1398",
+        "testType": "HAPPY_PATH",
+        "description": "Cập nhật favourite và trả về DTO ánh xạ từ entity đã lưu.",
+        "preconditions": "Khởi tạo FavouriteServiceImpl bằng FavouriteRepository mock và RestTemplate mock. Repository trả về chính entity nhận được từ save, giữ nguyên các trường userId, productId, likeDate.",
+        "testData": {
+          "input": {
+            "favouriteDto": {
+              "userId": 11,
+              "likeDate": "2025-03-08T10:15:30",
+              "productId": 22
+            }
+          },
+          "mocks": {
+            "favouriteRepository.save": {
+              "returns": {
+                "userId": 11,
+                "likeDate": "2025-03-08T10:15:30",
+                "productId": 22
+              },
+              "argument": {
+                "userId": 11,
+                "likeDate": "2025-03-08T10:15:30",
+                "productId": 22
+              }
+            }
+          }
+        },
+        "expectedResult": "Service ánh xạ DTO thành entity, gọi favouriteRepository.save với entity có userId 11, productId 22 và likeDate đã cung cấp, sau đó trả về FavouriteDto có các trường này. Theo helper ánh xạ, DTO trả về có userDto với userId 11 và productDto với productId 22; không gọi RestTemplate.",
+        "priority": "HIGH",
+        "traceSource": "BR-001 [STMT-1] -> TP-001 -> STMT-1-EXECUTABLE",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2855,
+        "testPlanId": 2226,
+        "caseCode": "TC-1399",
+        "testType": "HAPPY_PATH",
+        "description": "Xóa favourite bằng đúng FavouriteId được cung cấp.",
+        "preconditions": "Khởi tạo FavouriteServiceImpl bằng FavouriteRepository mock và RestTemplate mock.",
+        "testData": {
+          "input": {
+            "favouriteId": {
+              "userId": 11,
+              "likeDate": "2025-03-08T10:15:30",
+              "productId": 22
+            }
+          },
+          "mocks": {
+            "favouriteRepository.deleteById": {
+              "argument": {
+                "userId": 11,
+                "likeDate": "2025-03-08T10:15:30",
+                "productId": 22
+              }
+            }
+          }
+        },
+        "expectedResult": "Service gọi favouriteRepository.deleteById đúng một lần với FavouriteId có userId 11, productId 22 và likeDate đã cung cấp; method hoàn tất mà không trả về giá trị.",
+        "priority": "HIGH",
+        "traceSource": "BR-002 [STMT-1] -> TP-002 -> STMT-1-EXECUTABLE",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2856,
+        "testPlanId": 2227,
+        "caseCode": "TC-1400",
+        "testType": "HAPPY_PATH",
+        "description": "Lấy danh sách favourite, bổ sung thông tin người dùng và sản phẩm, loại bỏ bản ghi trùng và trả về danh sách không thể thay đổi.",
+        "preconditions": "Khởi tạo FavouriteServiceImpl bằng FavouriteRepository mock và RestTemplate mock. Repository trả về hai entity Favourite có cùng userId, productId và likeDate để phép distinct loại bỏ một DTO trùng lặp. Cả hai lời gọi dịch vụ ngoài trả về DTO có ID tương ứng.",
+        "testData": {
+          "input": {},
+          "mocks": {
+            "restTemplate.getForObject": {
+              "calls": [
+                {
+                  "url": "http://USER-SERVICE/user-service/api/users/11",
+                  "returns": {
+                    "userId": 11
+                  },
+                  "responseType": "UserDto"
+                },
+                {
+                  "url": "http://PRODUCT-SERVICE/product-service/api/products/22",
+                  "returns": {
+                    "productId": 22
+                  },
+                  "responseType": "ProductDto"
+                }
+              ]
+            },
+            "favouriteRepository.findAll": {
+              "returns": [
+                {
+                  "userId": 11,
+                  "likeDate": "2025-03-08T10:15:30",
+                  "productId": 22
+                },
+                {
+                  "userId": 11,
+                  "likeDate": "2025-03-08T10:15:30",
+                  "productId": 22
+                }
+              ]
+            }
+          }
+        },
+        "expectedResult": "Trả về danh sách không thể thay đổi gồm một FavouriteDto có userId 11, productId 22, likeDate 2025-03-08T10:15:30, userDto có userId 11 và productDto có productId 22. Quá trình ánh xạ gọi RestTemplate để lấy UserDto theo URL http://USER-SERVICE/user-service/api/users/11 và ProductDto theo URL http://PRODUCT-SERVICE/product-service/api/products/22. Thử sửa danh sách kết quả ném UnsupportedOperationException.",
+        "priority": "HIGH",
+        "traceSource": "BR-003 [STMT-2] -> TP-003 -> STMT-2-EXECUTABLE",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2857,
+        "testPlanId": 2228,
+        "caseCode": "TC-1401",
+        "testType": "EXCEPTION",
+        "description": "Tìm favourite theo ID không có trong repository.",
+        "preconditions": "Khởi tạo FavouriteServiceImpl bằng FavouriteRepository mock và RestTemplate mock. Repository trả về Optional.empty() cho FavouriteId được truyền vào; do không tìm thấy bản ghi, không thiết lập kết quả cho RestTemplate.",
+        "testData": {
+          "input": {
+            "favouriteId": {
+              "userId": 11,
+              "likeDate": "2025-03-08T10:15:30",
+              "productId": 22
+            }
+          },
+          "mocks": {
+            "favouriteRepository.findById": {
+              "returns": "Optional.empty()",
+              "argument": {
+                "userId": 11,
+                "likeDate": "2025-03-08T10:15:30",
+                "productId": 22
+              }
+            }
+          }
+        },
+        "expectedResult": "Ném FavouriteNotFoundException với thông điệp chính xác \"Favourite with id: [FavouriteId(userId=11, productId=22, likeDate=2025-03-08T10:15:30)] not found!\"; không gọi RestTemplate.",
+        "priority": "HIGH",
+        "traceSource": "BR-004 [STMT-2] -> TP-004 -> STMT-2-EXECUTABLE",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2858,
+        "testPlanId": 2229,
+        "caseCode": "TC-1402",
+        "testType": "HAPPY_PATH",
+        "description": "Tìm favourite theo ID, ánh xạ bản ghi và bổ sung DTO người dùng cùng sản phẩm.",
+        "preconditions": "Khởi tạo FavouriteServiceImpl bằng FavouriteRepository mock và RestTemplate mock. Repository trả về entity khớp FavouriteId; các lời gọi dịch vụ ngoài trả về UserDto và ProductDto có ID khớp với entity.",
+        "testData": {
+          "input": {
+            "favouriteId": {
+              "userId": 11,
+              "likeDate": "2025-03-08T10:15:30",
+              "productId": 22
+            }
+          },
+          "mocks": {
+            "restTemplate.getForObject": {
+              "calls": [
+                {
+                  "url": "http://USER-SERVICE/user-service/api/users/11",
+                  "returns": {
+                    "userId": 11
+                  },
+                  "responseType": "UserDto"
+                },
+                {
+                  "url": "http://PRODUCT-SERVICE/product-service/api/products/22",
+                  "returns": {
+                    "productId": 22
+                  },
+                  "responseType": "ProductDto"
+                }
+              ]
+            },
+            "favouriteRepository.findById": {
+              "returns": {
+                "userId": 11,
+                "likeDate": "2025-03-08T10:15:30",
+                "productId": 22
+              },
+              "argument": {
+                "userId": 11,
+                "likeDate": "2025-03-08T10:15:30",
+                "productId": 22
+              }
+            }
+          }
+        },
+        "expectedResult": "Trả về FavouriteDto có userId 11, productId 22, likeDate 2025-03-08T10:15:30, userDto có userId 11 và productDto có productId 22. Service gọi getForObject với URL người dùng trước, rồi URL sản phẩm, cùng các kiểu trả về UserDto.class và ProductDto.class tương ứng.",
+        "priority": "HIGH",
+        "traceSource": "BR-005 [STMT-2] -> TP-005 -> STMT-2-EXECUTABLE",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2859,
+        "testPlanId": 2230,
+        "caseCode": "TC-1403",
+        "testType": "HAPPY_PATH",
+        "description": "Lưu FavouriteDto và trả về DTO ánh xạ từ entity repository đã lưu.",
+        "preconditions": "Khởi tạo FavouriteServiceImpl bằng FavouriteRepository mock và RestTemplate mock. Repository trả về chính entity nhận được từ save, giữ nguyên các trường userId, productId, likeDate.",
+        "testData": {
+          "input": {
+            "favouriteDto": {
+              "userId": 11,
+              "likeDate": "2025-03-08T10:15:30",
+              "productId": 22
+            }
+          },
+          "mocks": {
+            "favouriteRepository.save": {
+              "returns": {
+                "userId": 11,
+                "likeDate": "2025-03-08T10:15:30",
+                "productId": 22
+              },
+              "argument": {
+                "userId": 11,
+                "likeDate": "2025-03-08T10:15:30",
+                "productId": 22
+              }
+            }
+          }
+        },
+        "expectedResult": "Service ánh xạ DTO thành entity, gọi favouriteRepository.save với entity có userId 11, productId 22 và likeDate đã cung cấp, sau đó trả về FavouriteDto có các trường này. Theo helper ánh xạ, DTO trả về có userDto với userId 11 và productDto với productId 22; không gọi RestTemplate.",
+        "priority": "HIGH",
+        "traceSource": "BR-006 [STMT-1] -> TP-006 -> STMT-1-EXECUTABLE",
+        "status": "APPROVED",
+        "isModified": false
+      }
+    ],
+    "existingApprovedTestCases": [],
+    "previousGeneratedUnitTests": [],
+    "existingTests": [],
+    "supportingResources": [],
+    "contextWarnings": []
+  },
+  "test": {
+    "case_id": 2856,
+    "test_class_name": "FavouriteServiceImplTest",
+    "test_method_name": "findAll_enrichesDeduplicatesAndReturnsImmutableList",
+    "package_name": "com.selimhorri.app.service.impl",
+    "generation_type": "NEW_TEST",
+    "source_code": "// GREYTEST_SOURCE_V1 318c767b5eab4b63c01c2ae1487b5c3efc79190729efc91e39fe0b501b38a0a9 ZWNvbW1lcmNlLW1pY3Jvc2VydmljZS1iYWNrZW5kLWFwcC9mYXZvdXJpdGUtc2VydmljZS9zcmMvbWFpbi9qYXZhL2NvbS9zZWxpbWhvcnJpL2FwcC9zZXJ2aWNlL2ltcGwvRmF2b3VyaXRlU2VydmljZUltcGwuamF2YQ==\n// GREYTEST_SOURCE_V1 5ae16bf82ceba6fae38b865f74dabed0318458536172c6d6e50b6d3c2c2a78e0 ZWNvbW1lcmNlLW1pY3Jvc2VydmljZS1iYWNrZW5kLWFwcC9mYXZvdXJpdGUtc2VydmljZS9zcmMvbWFpbi9qYXZhL2NvbS9zZWxpbWhvcnJpL2FwcC9jb25zdGFudC9BcHBDb25zdGFudC5qYXZh\n// GREYTEST_SOURCE_V1 1f29ef4bca788e309f85ab15a6b718d71ed096f4832f4f50b9487b5bf1b744e6 ZWNvbW1lcmNlLW1pY3Jvc2VydmljZS1iYWNrZW5kLWFwcC9mYXZvdXJpdGUtc2VydmljZS9zcmMvbWFpbi9qYXZhL2NvbS9zZWxpbWhvcnJpL2FwcC9kb21haW4vaWQvRmF2b3VyaXRlSWQuamF2YQ==\n// GREYTEST_SOURCE_V1 f409de7b59a1769cda92544bca7c374025dc31cda89703e235e520efe262c7f3 ZWNvbW1lcmNlLW1pY3Jvc2VydmljZS1iYWNrZW5kLWFwcC9mYXZvdXJpdGUtc2VydmljZS9zcmMvbWFpbi9qYXZhL2NvbS9zZWxpbWhvcnJpL2FwcC9kdG8vRmF2b3VyaXRlRHRvLmphdmE=\n// GREYTEST_SOURCE_V1 cd9ed8d0c5e14b7ab9c8a89823e8357873ed7554a88cc15834d7c21ef11b652e ZWNvbW1lcmNlLW1pY3Jvc2VydmljZS1iYWNrZW5kLWFwcC9mYXZvdXJpdGUtc2VydmljZS9zcmMvbWFpbi9qYXZhL2NvbS9zZWxpbWhvcnJpL2FwcC9kdG8vUHJvZHVjdER0by5qYXZh\n// GREYTEST_SOURCE_V1 bcccaee43d131ba0b31bcd1f9adb5cb3171d9967302f745e55923092e004ea1d ZWNvbW1lcmNlLW1pY3Jvc2VydmljZS1iYWNrZW5kLWFwcC9mYXZvdXJpdGUtc2VydmljZS9zcmMvbWFpbi9qYXZhL2NvbS9zZWxpbWhvcnJpL2FwcC9kdG8vVXNlckR0by5qYXZh\n// GREYTEST_SOURCE_V1 709b6423dc333c2eff0c845d34b10ba0cab6fca6b7bb767cd84c7bfe44c6e3c7 ZWNvbW1lcmNlLW1pY3Jvc2VydmljZS1iYWNrZW5kLWFwcC9mYXZvdXJpdGUtc2VydmljZS9zcmMvbWFpbi9qYXZhL2NvbS9zZWxpbWhvcnJpL2FwcC9leGNlcHRpb24vd3JhcHBlci9GYXZvdXJpdGVOb3RGb3VuZEV4Y2VwdGlvbi5qYXZh\n// GREYTEST_SOURCE_V1 4d1c3babeb51385a6381e465a394014814c622e1bab028bc5047b7370884f6ec ZWNvbW1lcmNlLW1pY3Jvc2VydmljZS1iYWNrZW5kLWFwcC9mYXZvdXJpdGUtc2VydmljZS9zcmMvbWFpbi9qYXZhL2NvbS9zZWxpbWhvcnJpL2FwcC9oZWxwZXIvRmF2b3VyaXRlTWFwcGluZ0hlbHBlci5qYXZh\n// GREYTEST_SOURCE_V1 b9952b622fd65ec77f65551a9b440938e8284ceb6d917fb919eefd1c35d81d7e ZWNvbW1lcmNlLW1pY3Jvc2VydmljZS1iYWNrZW5kLWFwcC9mYXZvdXJpdGUtc2VydmljZS9zcmMvbWFpbi9qYXZhL2NvbS9zZWxpbWhvcnJpL2FwcC9yZXBvc2l0b3J5L0Zhdm91cml0ZVJlcG9zaXRvcnkuamF2YQ==\n// GREYTEST_SOURCE_V1 fc158686a5478ef908fb5669527ee9702a04397b42bc5fd292091a86fcbd8266 ZWNvbW1lcmNlLW1pY3Jvc2VydmljZS1iYWNrZW5kLWFwcC9mYXZvdXJpdGUtc2VydmljZS9zcmMvbWFpbi9qYXZhL2NvbS9zZWxpbWhvcnJpL2FwcC9zZXJ2aWNlL0Zhdm91cml0ZVNlcnZpY2UuamF2YQ==\n// GREYTEST_SOURCE_V1 cc3f1a9ad51f14a7b567b02a5f6c56a4e74c27bd3e12b1a7908831c5235e95e6 ZWNvbW1lcmNlLW1pY3Jvc2VydmljZS1iYWNrZW5kLWFwcC9mYXZvdXJpdGUtc2VydmljZS9zcmMvbWFpbi9qYXZhL2NvbS9zZWxpbWhvcnJpL2FwcC9kb21haW4vRmF2b3VyaXRlLmphdmE=\n// GREYTEST_SOURCE_V1 81b7b8f025221deaf849d511926ffcc794e90e956bcb41b2650535bfad07bf31 ZWNvbW1lcmNlLW1pY3Jvc2VydmljZS1iYWNrZW5kLWFwcC9mYXZvdXJpdGUtc2VydmljZS9zcmMvbWFpbi9qYXZhL2NvbS9zZWxpbWhvcnJpL2FwcC9kb21haW4vQWJzdHJhY3RNYXBwZWRFbnRpdHkuamF2YQ==\npackage com.selimhorri.app.service.impl;\n\nimport static org.junit.jupiter.api.Assertions.assertEquals;\nimport static org.junit.jupiter.api.Assertions.assertThrows;\nimport static org.mockito.ArgumentMatchers.eq;\nimport static org.mockito.Mockito.verify;\nimport static org.mockito.Mockito.verifyNoMoreInteractions;\nimport static org.mockito.Mockito.when;\n\nimport java.time.LocalDateTime;\nimport java.util.Arrays;\nimport java.util.List;\n\nimport org.junit.jupiter.api.Test;\nimport org.junit.jupiter.api.extension.ExtendWith;\nimport org.mockito.InjectMocks;\nimport org.mockito.Mock;\nimport org.mockito.junit.jupiter.MockitoExtension;\nimport org.springframework.web.client.RestTemplate;\n\nimport com.selimhorri.app.constant.AppConstant;\nimport com.selimhorri.app.domain.Favourite;\nimport com.selimhorri.app.dto.FavouriteDto;\nimport com.selimhorri.app.dto.ProductDto;\nimport com.selimhorri.app.dto.UserDto;\nimport com.selimhorri.app.repository.FavouriteRepository;\n\n@ExtendWith(MockitoExtension.class)\nclass FavouriteServiceImplTest {\n\n    @Mock\n    private FavouriteRepository favouriteRepository;\n\n    @Mock\n    private RestTemplate restTemplate;\n\n    @InjectMocks\n    private FavouriteServiceImpl favouriteService;\n\n    // GreyTest trace: findAll | Ánh xạ, bổ sung thông tin, loại trùng và trả danh sách bất biến | BR-003 -> TP-003 -> TC-1400\n    @Test\n    void findAll_enrichesDeduplicatesAndReturnsImmutableList() {\n        LocalDateTime likeDate = LocalDateTime.of(2025, 3, 8, 10, 15, 30);\n        Favourite first = Favourite.builder().userId(11).productId(22).likeDate(likeDate).build();\n        Favourite second = Favourite.builder().userId(11).productId(22).likeDate(likeDate).build();\n        UserDto user = UserDto.builder().userId(11).build();\n        ProductDto product = ProductDto.builder().productId(22).build();\n        String userUrl = AppConstant.DiscoveredDomainsApi.USER_SERVICE_API_URL + \"/11\";\n        String productUrl = AppConstant.DiscoveredDomainsApi.PRODUCT_SERVICE_API_URL + \"/22\";\n        when(favouriteRepository.findAll()).thenReturn(Arrays.asList(first, second));\n        when(restTemplate.getForObject(userUrl, UserDto.class)).thenReturn(user);\n        when(restTemplate.getForObject(productUrl, ProductDto.class)).thenReturn(product);\n\n        List<FavouriteDto> result = favouriteService.findAll();\n\n        assertEquals(1, result.size());\n        FavouriteDto dto = result.get(0);\n        assertEquals(Integer.valueOf(11), dto.getUserId());\n        assertEquals(Integer.valueOf(22), dto.getProductId());\n        assertEquals(likeDate, dto.getLikeDate());\n        assertEquals(Integer.valueOf(11), dto.getUserDto().getUserId());\n        assertEquals(Integer.valueOf(22), dto.getProductDto().getProductId());\n        assertThrows(UnsupportedOperationException.class, () -> result.add(FavouriteDto.builder().build()));\n        verify(restTemplate).getForObject(eq(userUrl), eq(UserDto.class));\n        verify(restTemplate).getForObject(eq(productUrl), eq(ProductDto.class));\n        verifyNoMoreInteractions(favouriteRepository, restTemplate);\n    }\n}"
+  }
+}

@@ -1,0 +1,291 @@
+{
+  "context": {
+    "project": {
+      "id": 5,
+      "name": "spring-boot-realworld-example-app-master",
+      "status": "TEST_GENERATED"
+    },
+    "analysis": {
+      "totalClasses": 96,
+      "totalMethods": 214,
+      "totalEndpoints": 19,
+      "totalRelations": 1,
+      "totalControllerServiceRelations": 20,
+      "existingTestFiles": 23,
+      "totalProductionFiles": 93,
+      "parsedProductionFiles": 93,
+      "failedParseFiles": 0,
+      "failedParseFilePaths": []
+    },
+    "classes": [
+      {
+        "id": 165,
+        "packageName": "io.spring.application.article",
+        "className": "ArticleCommandService",
+        "qualifiedName": "io.spring.application.article.ArticleCommandService",
+        "classType": "SERVICE",
+        "filePath": "spring-boot-realworld-example-app-master/src/main/java/io/spring/application/article/ArticleCommandService.java",
+        "sourceCode": "package io.spring.application.article;\n\nimport io.spring.core.article.Article;\nimport io.spring.core.article.ArticleRepository;\nimport io.spring.core.user.User;\nimport javax.validation.Valid;\nimport lombok.AllArgsConstructor;\nimport org.springframework.stereotype.Service;\nimport org.springframework.validation.annotation.Validated;\n\n@Service\n@Validated\n@AllArgsConstructor\npublic class ArticleCommandService {\n\n    private ArticleRepository articleRepository;\n\n    public Article createArticle(@Valid NewArticleParam newArticleParam, User creator) {\n        Article article = new Article(newArticleParam.getTitle(), newArticleParam.getDescription(), newArticleParam.getBody(), newArticleParam.getTagList(), creator.getId());\n        articleRepository.save(article);\n        return article;\n    }\n\n    public Article updateArticle(Article article, @Valid UpdateArticleParam updateArticleParam) {\n        article.update(updateArticleParam.getTitle(), updateArticleParam.getDescription(), updateArticleParam.getBody());\n        articleRepository.save(article);\n        return article;\n    }\n}\n",
+        "annotations": [
+          {
+            "id": 273,
+            "targetType": "CLASS",
+            "category": "COMPONENT",
+            "annotationName": "Service",
+            "attributes": "@Service"
+          },
+          {
+            "id": 274,
+            "targetType": "CLASS",
+            "category": "VALIDATION",
+            "annotationName": "Validated",
+            "attributes": "@Validated"
+          },
+          {
+            "id": 275,
+            "targetType": "METHOD",
+            "category": "VALIDATION",
+            "annotationName": "Valid",
+            "attributes": "@Valid"
+          },
+          {
+            "id": 276,
+            "targetType": "METHOD",
+            "category": "VALIDATION",
+            "annotationName": "Valid",
+            "attributes": "@Valid"
+          }
+        ],
+        "methods": [
+          {
+            "id": 397,
+            "classQualifiedName": "io.spring.application.article.ArticleCommandService",
+            "methodName": "createArticle",
+            "returnType": "Article",
+            "parameters": [
+              {
+                "name": "newArticleParam",
+                "type": "NewArticleParam"
+              },
+              {
+                "name": "creator",
+                "type": "User"
+              }
+            ],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "public Article createArticle(@Valid NewArticleParam newArticleParam, User creator) {\n    Article article =\n        new Article(\n            newArticleParam.getTitle(),\n            newArticleParam.getDescription(),\n            newArticleParam.getBody(),\n            newArticleParam.getTagList(),\n            creator.getId());\n    articleRepository.save(article);\n    return article;\n  }",
+            "lineStart": 18,
+            "lineEnd": 28,
+            "annotations": [
+              {
+                "id": 275,
+                "targetType": "METHOD",
+                "category": "VALIDATION",
+                "annotationName": "Valid",
+                "attributes": "@Valid"
+              }
+            ],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 19,
+                "lineEnd": 25
+              },
+              {
+                "branchId": "STMT-2",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 26,
+                "lineEnd": 26
+              },
+              {
+                "branchId": "STMT-3",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 27,
+                "lineEnd": 27
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": 167,
+        "packageName": "io.spring.application.article",
+        "className": "NewArticleParam",
+        "qualifiedName": "io.spring.application.article.NewArticleParam",
+        "classType": "OTHER",
+        "filePath": "spring-boot-realworld-example-app-master/src/main/java/io/spring/application/article/NewArticleParam.java",
+        "sourceCode": "package io.spring.application.article;\n\nimport com.fasterxml.jackson.annotation.JsonRootName;\nimport java.util.List;\nimport javax.validation.constraints.NotBlank;\nimport lombok.AllArgsConstructor;\nimport lombok.Builder;\nimport lombok.Getter;\nimport lombok.NoArgsConstructor;\n\n@Getter\n@JsonRootName(\"article\")\n@NoArgsConstructor\n@AllArgsConstructor\n@Builder\npublic class NewArticleParam {\n\n    @NotBlank(message = \"can't be empty\")\n    @DuplicatedArticleConstraint\n    private String title;\n\n    @NotBlank(message = \"can't be empty\")\n    private String description;\n\n    @NotBlank(message = \"can't be empty\")\n    private String body;\n\n    private List<String> tagList;\n}\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 168,
+        "packageName": "io.spring.application.article",
+        "className": "UpdateArticleParam",
+        "qualifiedName": "io.spring.application.article.UpdateArticleParam",
+        "classType": "OTHER",
+        "filePath": "spring-boot-realworld-example-app-master/src/main/java/io/spring/application/article/UpdateArticleParam.java",
+        "sourceCode": "package io.spring.application.article;\n\nimport com.fasterxml.jackson.annotation.JsonRootName;\nimport lombok.AllArgsConstructor;\nimport lombok.Getter;\nimport lombok.NoArgsConstructor;\n\n@Getter\n@NoArgsConstructor\n@AllArgsConstructor\n@JsonRootName(\"article\")\npublic class UpdateArticleParam {\n\n    private String title = \"\";\n\n    private String body = \"\";\n\n    private String description = \"\";\n}\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 195,
+        "packageName": "io.spring.core.article",
+        "className": "Article",
+        "qualifiedName": "io.spring.core.article.Article",
+        "classType": "OTHER",
+        "filePath": "spring-boot-realworld-example-app-master/src/main/java/io/spring/core/article/Article.java",
+        "sourceCode": "package io.spring.core.article;\n\nimport static java.util.stream.Collectors.toList;\nimport io.spring.Util;\nimport java.util.HashSet;\nimport java.util.List;\nimport java.util.UUID;\nimport lombok.EqualsAndHashCode;\nimport lombok.Getter;\nimport lombok.NoArgsConstructor;\nimport org.joda.time.DateTime;\n\n@Getter\n@NoArgsConstructor\n@EqualsAndHashCode(of = { \"id\" })\npublic class Article {\n\n    private String userId;\n\n    private String id;\n\n    private String slug;\n\n    private String title;\n\n    private String description;\n\n    private String body;\n\n    private List<Tag> tags;\n\n    private DateTime createdAt;\n\n    private DateTime updatedAt;\n\n    public Article(String title, String description, String body, List<String> tagList, String userId) {\n        this(title, description, body, tagList, userId, new DateTime());\n    }\n\n    public Article(String title, String description, String body, List<String> tagList, String userId, DateTime createdAt) {\n        this.id = UUID.randomUUID().toString();\n        this.slug = toSlug(title);\n        this.title = title;\n        this.description = description;\n        this.body = body;\n        this.tags = new HashSet<>(tagList).stream().map(Tag::new).collect(toList());\n        this.userId = userId;\n        this.createdAt = createdAt;\n        this.updatedAt = createdAt;\n    }\n\n    public void update(String title, String description, String body) {\n        if (!Util.isEmpty(title)) {\n            this.title = title;\n            this.slug = toSlug(title);\n            this.updatedAt = new DateTime();\n        }\n        if (!Util.isEmpty(description)) {\n            this.description = description;\n            this.updatedAt = new DateTime();\n        }\n        if (!Util.isEmpty(body)) {\n            this.body = body;\n            this.updatedAt = new DateTime();\n        }\n    }\n\n    public static String toSlug(String title) {\n        return title.toLowerCase().replaceAll(\"[\\\\&|[\\\\uFE30-\\\\uFFA0]|\\\\’|\\\\”|\\\\s\\\\?\\\\,\\\\.]+\", \"-\");\n    }\n}\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 196,
+        "packageName": "io.spring.core.article",
+        "className": "ArticleRepository",
+        "qualifiedName": "io.spring.core.article.ArticleRepository",
+        "classType": "OTHER",
+        "filePath": "spring-boot-realworld-example-app-master/src/main/java/io/spring/core/article/ArticleRepository.java",
+        "sourceCode": "package io.spring.core.article;\n\nimport java.util.Optional;\n\npublic interface ArticleRepository {\n\n    void save(Article article);\n\n    Optional<Article> findById(String id);\n\n    Optional<Article> findBySlug(String slug);\n\n    void remove(Article article);\n}\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 205,
+        "packageName": "io.spring.core.user",
+        "className": "User",
+        "qualifiedName": "io.spring.core.user.User",
+        "classType": "OTHER",
+        "filePath": "spring-boot-realworld-example-app-master/src/main/java/io/spring/core/user/User.java",
+        "sourceCode": "package io.spring.core.user;\n\nimport io.spring.Util;\nimport java.util.UUID;\nimport lombok.EqualsAndHashCode;\nimport lombok.Getter;\nimport lombok.NoArgsConstructor;\n\n@Getter\n@NoArgsConstructor\n@EqualsAndHashCode(of = { \"id\" })\npublic class User {\n\n    private String id;\n\n    private String email;\n\n    private String username;\n\n    private String password;\n\n    private String bio;\n\n    private String image;\n\n    public User(String email, String username, String password, String bio, String image) {\n        this.id = UUID.randomUUID().toString();\n        this.email = email;\n        this.username = username;\n        this.password = password;\n        this.bio = bio;\n        this.image = image;\n    }\n\n    public void update(String email, String username, String password, String bio, String image) {\n        if (!Util.isEmpty(email)) {\n            this.email = email;\n        }\n        if (!Util.isEmpty(username)) {\n            this.username = username;\n        }\n        if (!Util.isEmpty(password)) {\n            this.password = password;\n        }\n        if (!Util.isEmpty(bio)) {\n            this.bio = bio;\n        }\n        if (!Util.isEmpty(image)) {\n            this.image = image;\n        }\n    }\n}\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 240,
+        "packageName": "io.spring",
+        "className": "Util",
+        "qualifiedName": "io.spring.Util",
+        "classType": "OTHER",
+        "filePath": "spring-boot-realworld-example-app-master/src/main/java/io/spring/Util.java",
+        "sourceCode": "package io.spring;\n\npublic class Util {\n\n    public static boolean isEmpty(String value) {\n        return value == null || value.isEmpty();\n    }\n}\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 197,
+        "packageName": "io.spring.core.article",
+        "className": "Tag",
+        "qualifiedName": "io.spring.core.article.Tag",
+        "classType": "OTHER",
+        "filePath": "spring-boot-realworld-example-app-master/src/main/java/io/spring/core/article/Tag.java",
+        "sourceCode": "package io.spring.core.article;\n\nimport java.util.UUID;\nimport lombok.Data;\nimport lombok.EqualsAndHashCode;\nimport lombok.NoArgsConstructor;\n\n@NoArgsConstructor\n@Data\n@EqualsAndHashCode(of = \"name\")\npublic class Tag {\n\n    private String id;\n\n    private String name;\n\n    public Tag(String name) {\n        this.id = UUID.randomUUID().toString();\n        this.name = name;\n    }\n}\n",
+        "annotations": [],
+        "methods": []
+      }
+    ],
+    "approvedBusinessRules": [
+      {
+        "id": 281,
+        "methodId": 397,
+        "ruleCode": "BR-022",
+        "description": "Khi tạo bài viết, service khởi tạo bài viết từ tiêu đề, mô tả, nội dung, danh sách thẻ và ID của người tạo.",
+        "reviewNote": "SOURCE_BRANCH:STMT-1\nAI category: BUSINESS_LOGIC. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-1"
+      },
+      {
+        "id": 282,
+        "methodId": 397,
+        "ruleCode": "BR-023",
+        "description": "Khi bài viết được tạo, service gọi method save của articleRepository.",
+        "reviewNote": "SOURCE_BRANCH:STMT-2\nAI category: INTEGRATION. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-2"
+      },
+      {
+        "id": 283,
+        "methodId": 397,
+        "ruleCode": "BR-024",
+        "description": "Khi tạo bài viết thành công, service trả về bài viết vừa khởi tạo.",
+        "reviewNote": "SOURCE_BRANCH:STMT-3\nAI category: BUSINESS_LOGIC. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-3"
+      }
+    ],
+    "approvedTestPlans": [
+      {
+        "id": 81,
+        "businessRuleId": 281,
+        "coveredRuleIds": [
+          281,
+          282,
+          283
+        ],
+        "planCode": "TP-039",
+        "title": "Tạo và lưu bài viết",
+        "description": "Kiểm tra bài viết được khởi tạo từ tiêu đề, mô tả, nội dung, thẻ và ID người tạo, được lưu rồi trả về.",
+        "testType": "HAPPY_PATH",
+        "status": "APPROVED",
+        "isModified": false
+      }
+    ],
+    "approvedTestCases": [
+      {
+        "id": 130,
+        "testPlanId": 81,
+        "caseCode": "TC-130",
+        "testType": "HAPPY_PATH",
+        "description": "Khi tạo bài viết, service khởi tạo bài viết từ đầy đủ dữ liệu đầu vào và ID người tạo, lưu bài viết rồi trả về chính bài viết đó.",
+        "preconditions": "articleRepository có thể được inject qua constructor. User được tạo bằng mock User với getId() trả về \"user-1\". NewArticleParam sử dụng constructor NewArticleParam(String title, String description, String body, List<String> tagList).",
+        "testData": {
+          "input": {
+            "creator": "User{id=\"user-1\"}",
+            "newArticleParam": "NewArticleParam(\"Hello World\", \"A description\", \"Article body\", [\"java\", \"spring\"])"
+          },
+          "mocks": {
+            "articleRepository.save(Article)": "void; nhận Article được tạo từ title=\"Hello World\", description=\"A description\", body=\"Article body\", tagList chứa \"java\" và \"spring\", userId=\"user-1\""
+          }
+        },
+        "expectedResult": "Article được tạo có các trường title, description, body và userId tương ứng với dữ liệu đầu vào, chứa các Tag có tên \"java\" và \"spring\", có ID được khởi tạo tự động; articleRepository.save được gọi với chính instance này và kết quả trả về là cùng instance đã được lưu.",
+        "priority": "HIGH",
+        "traceSource": "BR-022 [STMT-1], BR-023 [STMT-2], BR-024 [STMT-3] -> TP-039 -> STMT-1, STMT-2, STMT-3",
+        "status": "APPROVED",
+        "isModified": false
+      }
+    ],
+    "existingApprovedTestCases": [],
+    "previousGeneratedUnitTests": [],
+    "existingTests": [],
+    "supportingResources": [],
+    "contextWarnings": []
+  },
+  "response": {
+    "unit_tests": [
+      {
+        "case_id": 130,
+        "test_class_name": "ArticleCommandServiceTest",
+        "test_method_name": "createArticle_CreatesSavesAndReturnsArticle",
+        "package_name": "io.spring.application.article",
+        "generation_type": "NEW_TEST",
+        "source_code": "package io.spring.application.article;\n\nimport static org.junit.jupiter.api.Assertions.assertEquals;\nimport static org.junit.jupiter.api.Assertions.assertNotNull;\nimport static org.junit.jupiter.api.Assertions.assertSame;\nimport static org.mockito.ArgumentMatchers.any;\nimport static org.mockito.Mockito.verify;\nimport static org.mockito.Mockito.when;\n\nimport io.spring.core.article.Article;\nimport io.spring.core.article.ArticleRepository;\nimport io.spring.core.article.Tag;\nimport io.spring.core.user.User;\nimport java.util.Arrays;\nimport java.util.List;\nimport org.junit.jupiter.api.Test;\nimport org.junit.jupiter.api.extension.ExtendWith;\nimport org.mockito.ArgumentCaptor;\nimport org.mockito.InjectMocks;\nimport org.mockito.Mock;\nimport org.mockito.junit.jupiter.MockitoExtension;\n\n@ExtendWith(MockitoExtension.class)\nclass ArticleCommandServiceTest {\n\n    @Mock\n    private ArticleRepository articleRepository;\n\n    @InjectMocks\n    private ArticleCommandService articleCommandService;\n\n    // GreyTest trace: createArticle | article creation and save | BR-022, BR-023, BR-024 -> TP-039 -> TC-130\n    @Test\n    void createArticle_CreatesSavesAndReturnsArticle() {\n        // Arrange\n        User creator = org.mockito.Mockito.mock(User.class);\n        when(creator.getId()).thenReturn(\"user-1\");\n        NewArticleParam param = new NewArticleParam(\n                \"Hello World\", \"A description\", \"Article body\", Arrays.asList(\"java\", \"spring\"));\n        ArgumentCaptor<Article> savedArticleCaptor = ArgumentCaptor.forClass(Article.class);\n\n        // Act\n        Article result = articleCommandService.createArticle(param, creator);\n\n        // Assert\n        verify(articleRepository).save(any(Article.class));\n        Article savedArticle = savedArticleCaptor.getValue();\n        assertSame(savedArticle, result);\n        assertEquals(\"Hello World\", result.getTitle());\n        assertEquals(\"A description\", result.getDescription());\n        assertEquals(\"Article body\", result.getBody());\n        assertEquals(\"user-1\", result.getUserId());\n        assertNotNull(result.getId());\n\n        List<Tag> tags = result.getTags();\n        assertEquals(2, tags.size());\n        assertEquals(2, tags.stream().map(Tag::getName).distinct().count());\n        assertEquals(java.util.Set.of(\"java\", \"spring\"),\n                tags.stream().map(Tag::getName).collect(java.util.stream.Collectors.toSet()));\n    }\n}"
+      }
+    ]
+  }
+}

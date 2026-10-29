@@ -131,7 +131,7 @@ public class OpenAiLlmClient implements LlmClient {
 
         try {
             long startedAt = System.nanoTime();
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> response = LlmHttpTransport.send(httpClient, request, timeout);
             if (response.statusCode() < 200 || response.statusCode() >= 300) {
                 int status = response.statusCode();
                 throw new LlmResponseException("OpenAI API lỗi HTTP "

@@ -36,6 +36,7 @@ final class GeneratedFixtureMutationValidator {
         if (targets.size() != 1) return List.of();
         var target = targets.get(0);
         List<String> problems = new ArrayList<>();
+        validateMutatingAnswers(context, method, test, problems);
         // shortcut: Chỉ theo dõi list nhận trực tiếp từ collaborator; alias/helper cần chạy test thật.
         for (var variable : target.findAll(VariableDeclarator.class)) {
             if (!isList(variable) || rebound(variable, target)
@@ -85,6 +86,106 @@ final class GeneratedFixtureMutationValidator {
         return problems;
     }
 
+    private static void validateMutatingAnswers(UnitTestContextDto context, MethodContextDto target,
+            CompilationUnit test, List<String> problems) {
+        for (var method : test.findAll(MethodDeclaration.class)) {
+            for (var stub : method.findAll(MethodCallExpr.class)) {
+                if (!stub.getNameAsString().equals("thenAnswer") || stub.getArguments().size() != 1
+                        || !stub.getArgument(0).isLambdaExpr() || stub.getScope().filter(Expression::isMethodCallExpr).isEmpty()) continue;
+                var when = stub.getScope().orElseThrow().asMethodCallExpr();
+                if (!isMockitoWhen(when, test) || when.getArguments().size() != 1 || !when.getArgument(0).isMethodCallExpr()) continue;
+                var invocation = when.getArgument(0).asMethodCallExpr();
+                if (invocation.getArguments().size() != 1) continue;
+                var dependency = invocation.getScope().map(e -> declaration(e, method)).orElse(null);
+                if (dependency == null) continue;
+                var answer = stub.getArgument(0).asLambdaExpr();
+                if (answer.getParameters().size() != 1 || !answer.getBody().isBlockStmt()
+                        || answer.getBody().asBlockStmt().getStatements().stream().anyMatch(s -> !s.isExpressionStmt() && !s.isReturnStmt())) continue;
+                for (var entity : answer.findAll(VariableDeclarator.class)) {
+                    var initial = entity.getInitializer().filter(Expression::isMethodCallExpr).map(Expression::asMethodCallExpr);
+                    if (initial.isEmpty() || !initial.get().getNameAsString().equals("getArgument")
+                            || !initial.get().getArguments().toString().equals("[0]")
+                            || !initial.get().getScope().map(Object::toString).orElse("").equals(answer.getParameter(0).getNameAsString())
+                            || answer.findAll(com.github.javaparser.ast.stmt.ReturnStmt.class).stream()
+                                    .noneMatch(r -> r.getExpression().map(Object::toString).orElse("").equals(entity.getNameAsString()))) continue;
+                    for (var mutation : answer.findAll(MethodCallExpr.class)) {
+                        String setter = mutation.getNameAsString();
+                        if (!setter.startsWith("set") || setter.length() <= 3 || mutation.getArguments().size() != 1
+                                || mutation.getScope().map(e -> declaration(e, method)).orElse(null) != entity
+                                || !mutation.getArgument(0).isLiteralExpr()
+                                || mutation.getParentNode().flatMap(Node::getParentNode).filter(answer.getBody()::equals).isEmpty()
+                                || answer.findAll(MethodCallExpr.class).stream().filter(c -> c.getNameAsString().equals(setter)).count() != 1
+                                || method.findAll(MethodCallExpr.class).stream().anyMatch(c -> c.getNameAsString().equals(setter) && !answer.isAncestorOf(c))) continue;
+                        String property = Character.toLowerCase(setter.charAt(3)) + setter.substring(4);
+                        if (!GeneratedRepositoryFixtureValidator.hasDirectProperty(context, test, entity.getType(), property)) continue;
+                        // Không suy luận trạng thái cuối nếu production/helper còn sửa cùng thuộc tính.
+                        var parser = new JavaParser(new ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_21));
+                        boolean sourceMayChange = context.classes().stream().map(c -> c.validationSourceCode())
+                                .filter(java.util.Objects::nonNull).map(parser::parse).anyMatch(parsed -> !parsed.isSuccessful()
+                                        || parsed.getResult().stream().flatMap(u -> u.findAll(MethodCallExpr.class).stream())
+                                                .anyMatch(c -> c.getNameAsString().equals(setter)));
+                        if (sourceMayChange) continue;
+                        for (var verification : method.findAll(MethodCallExpr.class)) {
+                            if (!verification.getNameAsString().equals(invocation.getNameAsString())
+                                    || verification.getArguments().size() != 1
+                                    || verification.getScope().filter(Expression::isMethodCallExpr).isEmpty()) continue;
+                            var verify = verification.getScope().orElseThrow().asMethodCallExpr();
+                            if (!isMockitoCall(verify, "verify", test) || verify.getArguments().size() != 1
+                                    || declaration(verify.getArgument(0), method) != dependency || !before(stub, verify)) continue;
+                            boolean act = method.findAll(MethodCallExpr.class).stream().anyMatch(call ->
+                                    call.getNameAsString().equals(target.methodName()) && before(stub, call) && before(call, verify)
+                                            && !insideDeferredCode(call, method));
+                            if (!act) continue;
+                            for (var capture : verification.getArguments().stream().filter(Expression::isMethodCallExpr).map(Expression::asMethodCallExpr).toList()) {
+                                if (!capture.getNameAsString().equals("capture") || capture.getScope().isEmpty()) continue;
+                                var captor = declaration(capture.getScope().orElseThrow(), method);
+                                if (captor == null) continue;
+                                for (var assertion : method.findAll(MethodCallExpr.class)) {
+                                    if (!before(verify, assertion) || insideDeferredCode(assertion, method)) continue;
+                                    Expression actual; Expression expected;
+                                    if (assertion.getNameAsString().equals("assertEquals") && assertion.getArguments().size() >= 2) {
+                                        expected = assertion.getArgument(0); actual = assertion.getArgument(1);
+                                    } else if (assertion.getNameAsString().equals("assertNull") && !assertion.getArguments().isEmpty()) {
+                                        expected = new com.github.javaparser.ast.expr.NullLiteralExpr(); actual = assertion.getArgument(0);
+                                    } else continue;
+                                    if (!expected.isLiteralExpr() || !actual.isMethodCallExpr()) continue;
+                                    var getter = actual.asMethodCallExpr();
+                                    if (!getter.getNameAsString().equals("get" + setter.substring(3))
+                                            || getter.getScope().filter(Expression::isMethodCallExpr).isEmpty()) continue;
+                                    var read = getter.getScope().orElseThrow().asMethodCallExpr();
+                                    if (read.getNameAsString().equals("getValue") && read.getScope()
+                                            .map(e -> declaration(e, method)).orElse(null) == captor
+                                            && differentLiterals(expected, mutation.getArgument(0))) {
+                                        problems.add("Mutable captor contract: " + getter + " observes the same entity after thenAnswer mutates "
+                                                + setter + ". Capture/assert the pre-save value inside the Answer before mutation, or assert its final value. "
+                                                + "Preserve approved inputs and output assertions.");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private static boolean differentLiterals(Expression left, Expression right) {
+        String expected = literalValue(left);
+        String actual = literalValue(right);
+        return expected != null && actual != null && !expected.equals(actual);
+    }
+
+    private static String literalValue(Expression value) {
+        if (value.isNullLiteralExpr()) return "null";
+        if (value.isStringLiteralExpr()) return "string:" + value.asStringLiteralExpr().asString();
+        if (value.isBooleanLiteralExpr()) return "boolean:" + value.asBooleanLiteralExpr().getValue();
+        try {
+            if (value.isIntegerLiteralExpr()) return "number:" + value.asIntegerLiteralExpr().asNumber();
+            if (value.isLongLiteralExpr()) return "number:" + value.asLongLiteralExpr().asNumber();
+        } catch (RuntimeException ignored) { return null; }
+        return null;
+    }
+
     private static boolean before(Node first, Node second) {
         return first.getBegin().isPresent() && second.getBegin().isPresent()
                 && first.getBegin().orElseThrow().isBefore(second.getBegin().orElseThrow());
@@ -102,16 +203,20 @@ final class GeneratedFixtureMutationValidator {
     }
 
     private static boolean isMockitoWhen(MethodCallExpr when, CompilationUnit unit) {
-        if (!when.getNameAsString().equals("when")) return false;
+        return isMockitoCall(when, "when", unit);
+    }
+
+    static boolean isMockitoCall(MethodCallExpr when, String name, CompilationUnit unit) {
+        if (!when.getNameAsString().equals(name)) return false;
         if (when.getScope().isPresent()) {
             String scope = when.getScope().orElseThrow().toString();
             return scope.equals("org.mockito.Mockito") || scope.equals("Mockito") && unit.getImports().stream()
                     .anyMatch(i -> !i.isStatic() && i.getNameAsString().equals("org.mockito.Mockito"));
         }
-        return unit.findAll(MethodDeclaration.class).stream().noneMatch(m -> m.getNameAsString().equals("when"))
+        return unit.findAll(MethodDeclaration.class).stream().noneMatch(m -> m.getNameAsString().equals(name))
                 && unit.getImports().stream().anyMatch(i -> i.isStatic()
                         && (i.isAsterisk() && i.getNameAsString().equals("org.mockito.Mockito")
-                        || i.getNameAsString().equals("org.mockito.Mockito.when")));
+                        || i.getNameAsString().equals("org.mockito.Mockito." + name)));
     }
 
     private static VariableDeclarator declaration(Expression expression, MethodDeclaration method) {

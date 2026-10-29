@@ -103,7 +103,7 @@ public class GenerationContextBuilder {
     public static final int MAX_UNIT_TEST_RETRY_CASES = 2;
     private static final int MAX_UNIT_TEST_REFERENCES = 10;
     // Giữ prompt có giới hạn nhưng phải báo thiếu context thay vì âm thầm bỏ dependency.
-    private static final int MAX_UNIT_TEST_SUPPORTING_CLASSES = 25;
+    private static final int MAX_SUPPORTING_SOURCE_CHARS = 100_000;
     private static final int MAX_GENERATION_RELATIONS = 40;
     private static final int MAX_GENERATION_DEPENDENCIES = 40;
     // ponytail: chỉ kèm vài callee Service để giữ prompt có giới hạn; tăng khi benchmark chứng minh cần.
@@ -812,7 +812,7 @@ public class GenerationContextBuilder {
         List<ClassContextDto> result = new ArrayList<>(classes(analysis, targetMethodIds, true));
         Set<String> targetModules = result.stream().map(type -> ServiceScopeResolver.modulePath(type.filePath()))
                 .collect(java.util.stream.Collectors.toSet());
-        int targetCount = result.size();
+        int supportingSourceChars = 0;
         Set<String> included = result.stream().map(ClassContextDto::qualifiedName)
                 .collect(java.util.stream.Collectors.toSet());
         Map<String, String> includedPaths = result.stream().collect(java.util.stream.Collectors.toMap(
@@ -845,10 +845,11 @@ public class GenerationContextBuilder {
                     }
                     continue;
                 }
-                if (result.size() - targetCount >= MAX_UNIT_TEST_SUPPORTING_CLASSES) {
-                    throw new LlmResponseException("Generation context requires more than "
-                            + MAX_UNIT_TEST_SUPPORTING_CLASSES + " supporting production classes; "
-                            + "cannot omit required types. Generate a smaller group of Test Cases.");
+                supportingSourceChars += candidate.sourceCode().length();
+                if (supportingSourceChars > MAX_SUPPORTING_SOURCE_CHARS) {
+                    throw new LlmResponseException("Required supporting production source exceeds "
+                            + MAX_SUPPORTING_SOURCE_CHARS + " characters; cannot omit required types. "
+                            + "Generate a smaller group of source methods, rules or cases.");
                 }
                 included.add(candidate.qualifiedName());
                 includedPaths.put(candidate.qualifiedName(), candidate.filePath() == null ? "" : candidate.filePath());

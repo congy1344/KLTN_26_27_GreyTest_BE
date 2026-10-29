@@ -9,6 +9,8 @@ import java.util.regex.Pattern;
 public final class TextSanitizer {
 
     private static final Pattern CHINESE_PATTERN = Pattern.compile("[\\u4e00-\\u9fa5]+");
+    private static final Pattern LITERAL_PATTERN = Pattern.compile(
+            "```[\\s\\S]*?```|`[^`\\r\\n]*`|\"(?:\\\\.|[^\"\\\\])*\"|(?<![\\p{L}\\p{N}_])'(?:\\\\.|[^'\\\\\\r\\n])*'");
 
     private TextSanitizer() {}
 
@@ -21,6 +23,19 @@ public final class TextSanitizer {
             return text;
         }
 
+        // Literal là dữ liệu của hợp đồng kiểm thử, chỉ làm sạch phần văn xuôi bên ngoài.
+        var literals = LITERAL_PATTERN.matcher(text);
+        var result = new StringBuilder();
+        int end = 0;
+        while (literals.find()) {
+            result.append(cleanProse(text.substring(end, literals.start())));
+            result.append(literals.group());
+            end = literals.end();
+        }
+        return result.append(cleanProse(text.substring(end))).toString().trim();
+    }
+
+    private static String cleanProse(String text) {
         String cleaned = text
                 .replace("抛出异常", " ném ra ngoại lệ ")
                 .replace("抛出", " ném ra ")
@@ -43,7 +58,6 @@ public final class TextSanitizer {
         // Chuẩn hóa khoảng trắng kép và khoảng trắng trước dấu câu
         return cleaned
                 .replaceAll("[ \\t]+", " ")
-                .replaceAll(" +([.,;:?!])", "$1")
-                .trim();
+                .replaceAll(" +([.,;:?!])", "$1");
     }
 }

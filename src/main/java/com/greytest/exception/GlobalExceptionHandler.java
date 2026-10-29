@@ -11,12 +11,35 @@ import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import com.greytest.dto.ErrorResponse;
 import com.greytest.service.agent.LlmResponseException;
+import com.greytest.service.LlmBatchExecutor;
+import com.greytest.service.generation.GenerationConflictException;
 
 import lombok.extern.slf4j.Slf4j;
 
 @Slf4j
 @RestControllerAdvice
 public class GlobalExceptionHandler {
+
+    @ExceptionHandler(org.springframework.web.server.ResponseStatusException.class)
+    public ResponseEntity<ErrorResponse> handleStatus(org.springframework.web.server.ResponseStatusException e) {
+        String code = e.getStatusCode().value() == 409 ? "CONFLICT" : "REQUEST_ERROR";
+        return ResponseEntity.status(e.getStatusCode())
+                .body(new ErrorResponse(code, e.getReason() == null ? "Request failed" : e.getReason()));
+    }
+
+    @ExceptionHandler(GenerationConflictException.class)
+    public ResponseEntity<ErrorResponse> handleGenerationConflict(GenerationConflictException e) {
+        return ResponseEntity.status(HttpStatus.CONFLICT)
+                .body(new ErrorResponse("GENERATION_CONFLICT", e.getMessage()));
+    }
+
+    @ExceptionHandler(LlmBatchExecutor.BatchExecutionException.class)
+    public ResponseEntity<ErrorResponse> handleBatchFailure(LlmBatchExecutor.BatchExecutionException e) {
+        var cause = LlmBatchExecutor.originalFailure(e);
+        if (cause instanceof GenerationConflictException conflict) return handleGenerationConflict(conflict);
+        if (cause instanceof LlmResponseException provider) return handleLlmResponse(provider);
+        return handleAll(e);
+    }
 
     @ExceptionHandler(ProjectNotFoundException.class)
     public ResponseEntity<ErrorResponse> handleNotFound(ProjectNotFoundException e) {

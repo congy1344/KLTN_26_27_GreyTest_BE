@@ -26,10 +26,19 @@ public final class GenerationValidationGate {
     }
 
     public static Optional<String> validateTestCases(TestCaseContextDto context, TestCaseResponseDto response) {
-        return SourceMockingSupport.validateTestCases(context, response);
+        var setup = SourceMockingSupport.validateTestCases(context, response);
+        return setup.isPresent() ? setup : UpstreamSourceEvidenceValidator.cases(context, response);
+    }
+
+    public static Optional<String> validatePrerequisites(Object context) {
+        return UpstreamSourceEvidenceValidator.prerequisites(context);
     }
 
     public static Optional<String> validateReferences(Object context, Object response) {
+        // PostgreSQL không lưu được NUL; phản hồi phải được sửa trước transaction, không xóa dữ liệu ngầm.
+        if (response != null && response.toString().indexOf('\0') >= 0) return Optional.of(
+                "Response contains U+0000, which PostgreSQL text/JSONB cannot store. Regenerate the complete response without accidental NUL characters. "
+                + "If an approved input intentionally requires this code point, use literal Java escape text and explicitly state its encoding; preserve the intended input and outcome.");
         if (context instanceof BusinessRuleGenerationContextDto c && response instanceof BusinessRuleResponseDto result) {
             var targets = c.classes().stream().flatMap(javaClass -> javaClass.methods().stream())
                     .map(MethodContextDto::id).collect(Collectors.toSet());
@@ -37,24 +46,37 @@ public final class GenerationValidationGate {
             for (var rule : result.rules()) {
                 if (!targets.contains(rule.methodId())) return Optional.of("method_id=" + rule.methodId() + " is outside the selected source methods.");
             }
+            return UpstreamSourceEvidenceValidator.businessRules(c, result);
         } else if (context instanceof TestPlanContextDto c && response instanceof TestPlanResponseDto result) {
             var rules = c.approvedBusinessRules().stream().collect(Collectors.toMap(BusinessRuleContextDto::id,
                     item -> item, (left, right) -> left));
+            Set<Long> allCovered = new HashSet<>();
             for (var plan : result.plans()) {
                 Set<Long> covered = new HashSet<>(plan.coveredRuleIds());
                 covered.add(plan.ruleId());
+                allCovered.addAll(covered);
                 for (Long ruleId : covered) {
                     var rule = rules.get(ruleId);
                     if (rule == null || !Objects.equals(rule.methodId(), plan.methodId())) {
-                        return Optional.of("method_id=" + plan.methodId() + " has an unknown or unrelated rule_id=" + ruleId + ".");
+                        var allowed = rules.values().stream().sorted(Comparator.comparing(BusinessRuleContextDto::id))
+                                .collect(Collectors.groupingBy(BusinessRuleContextDto::methodId, TreeMap::new,
+                                        Collectors.mapping(BusinessRuleContextDto::id, Collectors.toList())));
+                        return Optional.of("method_id=" + plan.methodId() + " has an unknown or unrelated rule_id=" + ruleId
+                                + ". Allowed approved rule IDs by method_id: " + allowed + ".");
                     }
                 }
             }
+            var missing = rules.keySet().stream().filter(id -> !allCovered.contains(id)).sorted().toList();
+            if (!missing.isEmpty()) return Optional.of("Missing test plans for approved rule IDs " + missing
+                    + ". Regenerate the complete plans array; preserve every approved rule and method_id.");
         } else if (context instanceof TestCaseContextDto c && response instanceof TestCaseResponseDto result) {
             var plans = c.approvedTestPlans().stream().map(TestPlanContextItemDto::id).collect(Collectors.toSet());
             for (var item : result.cases()) {
                 if (!plans.contains(item.planId())) return Optional.of("plan_id=" + item.planId() + " is outside the selected approved plans.");
             }
+            var covered = result.cases().stream().map(GeneratedTestCaseDto::planId).collect(Collectors.toSet());
+            var missing = plans.stream().filter(id -> !covered.contains(id)).sorted().toList();
+            if (!missing.isEmpty()) return Optional.of("Missing test cases for approved plan IDs " + missing + ".");
         }
         return Optional.empty();
     }

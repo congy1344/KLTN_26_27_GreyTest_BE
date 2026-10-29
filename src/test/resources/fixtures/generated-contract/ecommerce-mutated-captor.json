@@ -1,0 +1,842 @@
+{
+  "context": {
+    "project": {
+      "id": 849,
+      "name": "ecommerce-microservice-backend-app",
+      "status": "CASE_APPROVED"
+    },
+    "analysis": {
+      "totalClasses": 237,
+      "totalMethods": 444,
+      "totalEndpoints": 143,
+      "totalRelations": 11,
+      "totalControllerServiceRelations": 71,
+      "existingTestFiles": 11,
+      "totalProductionFiles": 227,
+      "parsedProductionFiles": 227,
+      "failedParseFiles": 0,
+      "failedParseFilePaths": []
+    },
+    "classes": [
+      {
+        "id": 8605,
+        "packageName": "com.selimhorri.app.service.impl",
+        "className": "CartServiceImpl",
+        "qualifiedName": "com.selimhorri.app.service.impl.CartServiceImpl",
+        "classType": "SERVICE",
+        "filePath": "ecommerce-microservice-backend-app/order-service/src/main/java/com/selimhorri/app/service/impl/CartServiceImpl.java",
+        "sourceCode": "package com.selimhorri.app.service.impl;\r\n\r\nimport java.util.List;\r\nimport java.util.stream.Collectors;\r\nimport javax.transaction.Transactional;\r\nimport org.springframework.stereotype.Service;\r\nimport org.springframework.web.client.RestTemplate;\r\nimport com.selimhorri.app.constant.AppConstant;\r\nimport com.selimhorri.app.dto.CartDto;\r\nimport com.selimhorri.app.dto.UserDto;\r\nimport com.selimhorri.app.exception.wrapper.CartNotFoundException;\r\nimport com.selimhorri.app.helper.CartMappingHelper;\r\nimport com.selimhorri.app.repository.CartRepository;\r\nimport com.selimhorri.app.service.CartService;\r\nimport lombok.RequiredArgsConstructor;\r\nimport lombok.extern.slf4j.Slf4j;\r\n\r\n@Service\r\n@Transactional\r\n@Slf4j\r\n@RequiredArgsConstructor\r\npublic class CartServiceImpl implements CartService {\r\n\r\n    private final CartRepository cartRepository;\r\n\r\n    private final RestTemplate restTemplate;\r\n\r\n    @Override\r\n    public List<CartDto> findAll() {\r\n        log.info(\"*** CartDto List, service; fetch all carts *\");\r\n        return this.cartRepository.findAll().stream().map(CartMappingHelper::map).map(c -> {\r\n            c.setUserDto(this.restTemplate.getForObject(AppConstant.DiscoveredDomainsApi.USER_SERVICE_API_URL + \"/\" + c.getUserDto().getUserId(), UserDto.class));\r\n            return c;\r\n        }).distinct().collect(Collectors.toUnmodifiableList());\r\n    }\r\n\r\n    @Override\r\n    public CartDto findById(final Integer cartId) {\r\n        log.info(\"*** CartDto, service; fetch cart by id *\");\r\n        return this.cartRepository.findById(cartId).map(CartMappingHelper::map).map(c -> {\r\n            c.setUserDto(this.restTemplate.getForObject(AppConstant.DiscoveredDomainsApi.USER_SERVICE_API_URL + \"/\" + c.getUserDto().getUserId(), UserDto.class));\r\n            return c;\r\n        }).orElseThrow(() -> new CartNotFoundException(String.format(\"Cart with id: %d not found\", cartId)));\r\n    }\r\n\r\n    @Override\r\n    public CartDto save(final CartDto cartDto) {\r\n        log.info(\"*** CartDto, service; save cart *\");\r\n        return CartMappingHelper.map(this.cartRepository.save(CartMappingHelper.map(cartDto)));\r\n    }\r\n\r\n    @Override\r\n    public CartDto update(final CartDto cartDto) {\r\n        log.info(\"*** CartDto, service; update cart *\");\r\n        return CartMappingHelper.map(this.cartRepository.save(CartMappingHelper.map(cartDto)));\r\n    }\r\n\r\n    @Override\r\n    public CartDto update(final Integer cartId, final CartDto cartDto) {\r\n        log.info(\"*** CartDto, service; update cart with cartId *\");\r\n        return CartMappingHelper.map(this.cartRepository.save(CartMappingHelper.map(this.findById(cartId))));\r\n    }\r\n\r\n    @Override\r\n    public void deleteById(final Integer cartId) {\r\n        log.info(\"*** Void, service; delete cart by id *\");\r\n        this.cartRepository.deleteById(cartId);\r\n    }\r\n}\r\n",
+        "annotations": [
+          {
+            "id": 10660,
+            "targetType": "CLASS",
+            "category": "COMPONENT",
+            "annotationName": "Service",
+            "attributes": "@Service"
+          },
+          {
+            "id": 10661,
+            "targetType": "CLASS",
+            "category": "TRANSACTION",
+            "annotationName": "Transactional",
+            "attributes": "@Transactional"
+          }
+        ],
+        "methods": [
+          {
+            "id": 18135,
+            "classQualifiedName": "com.selimhorri.app.service.impl.CartServiceImpl",
+            "methodName": "findById",
+            "returnType": "CartDto",
+            "parameters": [
+              {
+                "name": "cartId",
+                "type": "Integer"
+              }
+            ],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "@Override\r\n\tpublic CartDto findById(final Integer cartId) {\r\n\t\tlog.info(\"*** CartDto, service; fetch cart by id *\");\r\n\t\treturn this.cartRepository.findById(cartId)\r\n\t\t\t\t.map(CartMappingHelper::map)\r\n\t\t\t\t.map(c -> {\r\n\t\t\t\t\tc.setUserDto(this.restTemplate.getForObject(AppConstant.DiscoveredDomainsApi\r\n\t\t\t\t\t\t\t.USER_SERVICE_API_URL + \"/\" + c.getUserDto().getUserId(), UserDto.class));\r\n\t\t\t\t\treturn c;\r\n\t\t\t\t})\r\n\t\t\t\t.orElseThrow(() -> new CartNotFoundException(String\r\n\t\t\t\t\t\t.format(\"Cart with id: %d not found\", cartId)));\r\n\t}",
+            "lineStart": 46,
+            "lineEnd": 58,
+            "annotations": [],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 48,
+                "lineEnd": 48
+              },
+              {
+                "branchId": "STMT-2",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 49,
+                "lineEnd": 57
+              }
+            ]
+          },
+          {
+            "id": 18136,
+            "classQualifiedName": "com.selimhorri.app.service.impl.CartServiceImpl",
+            "methodName": "save",
+            "returnType": "CartDto",
+            "parameters": [
+              {
+                "name": "cartDto",
+                "type": "CartDto"
+              }
+            ],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "@Override\r\n\tpublic CartDto save(final CartDto cartDto) {\r\n\t\tlog.info(\"*** CartDto, service; save cart *\");\r\n\t\treturn CartMappingHelper.map(this.cartRepository\r\n\t\t\t\t.save(CartMappingHelper.map(cartDto)));\r\n\t}",
+            "lineStart": 60,
+            "lineEnd": 65,
+            "annotations": [],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 62,
+                "lineEnd": 62
+              },
+              {
+                "branchId": "STMT-2",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 63,
+                "lineEnd": 64
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": 8606,
+        "packageName": "com.selimhorri.app.service.impl",
+        "className": "OrderServiceImpl",
+        "qualifiedName": "com.selimhorri.app.service.impl.OrderServiceImpl",
+        "classType": "SERVICE",
+        "filePath": "ecommerce-microservice-backend-app/order-service/src/main/java/com/selimhorri/app/service/impl/OrderServiceImpl.java",
+        "sourceCode": "package com.selimhorri.app.service.impl;\r\n\r\nimport java.util.List;\r\nimport java.util.stream.Collectors;\r\nimport javax.transaction.Transactional;\r\nimport org.springframework.stereotype.Service;\r\nimport com.selimhorri.app.dto.OrderDto;\r\nimport com.selimhorri.app.exception.wrapper.OrderNotFoundException;\r\nimport com.selimhorri.app.helper.OrderMappingHelper;\r\nimport com.selimhorri.app.repository.OrderRepository;\r\nimport com.selimhorri.app.service.OrderService;\r\nimport lombok.RequiredArgsConstructor;\r\nimport lombok.extern.slf4j.Slf4j;\r\n\r\n@Service\r\n@Transactional\r\n@Slf4j\r\n@RequiredArgsConstructor\r\npublic class OrderServiceImpl implements OrderService {\r\n\r\n    private final OrderRepository orderRepository;\r\n\r\n    @Override\r\n    public List<OrderDto> findAll() {\r\n        log.info(\"*** OrderDto List, service; fetch all orders *\");\r\n        return this.orderRepository.findAll().stream().map(OrderMappingHelper::map).distinct().collect(Collectors.toUnmodifiableList());\r\n    }\r\n\r\n    @Override\r\n    public OrderDto findById(final Integer orderId) {\r\n        log.info(\"*** OrderDto, service; fetch order by id *\");\r\n        return this.orderRepository.findById(orderId).map(OrderMappingHelper::map).orElseThrow(() -> new OrderNotFoundException(String.format(\"Order with id: %d not found\", orderId)));\r\n    }\r\n\r\n    @Override\r\n    public OrderDto save(final OrderDto orderDto) {\r\n        log.info(\"*** OrderDto, service; save order *\");\r\n        return OrderMappingHelper.map(this.orderRepository.save(OrderMappingHelper.map(orderDto)));\r\n    }\r\n\r\n    @Override\r\n    public OrderDto update(final OrderDto orderDto) {\r\n        log.info(\"*** OrderDto, service; update order *\");\r\n        return OrderMappingHelper.map(this.orderRepository.save(OrderMappingHelper.map(orderDto)));\r\n    }\r\n\r\n    @Override\r\n    public OrderDto update(final Integer orderId, final OrderDto orderDto) {\r\n        log.info(\"*** OrderDto, service; update order with orderId *\");\r\n        return OrderMappingHelper.map(this.orderRepository.save(OrderMappingHelper.map(this.findById(orderId))));\r\n    }\r\n\r\n    @Override\r\n    public void deleteById(final Integer orderId) {\r\n        log.info(\"*** Void, service; delete order by id *\");\r\n        this.orderRepository.delete(OrderMappingHelper.map(this.findById(orderId)));\r\n    }\r\n}\r\n",
+        "annotations": [
+          {
+            "id": 10662,
+            "targetType": "CLASS",
+            "category": "COMPONENT",
+            "annotationName": "Service",
+            "attributes": "@Service"
+          },
+          {
+            "id": 10663,
+            "targetType": "CLASS",
+            "category": "TRANSACTION",
+            "annotationName": "Transactional",
+            "attributes": "@Transactional"
+          }
+        ],
+        "methods": [
+          {
+            "id": 18140,
+            "classQualifiedName": "com.selimhorri.app.service.impl.OrderServiceImpl",
+            "methodName": "findAll",
+            "returnType": "List<OrderDto>",
+            "parameters": [],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "@Override\r\n\tpublic List<OrderDto> findAll() {\r\n\t\tlog.info(\"*** OrderDto List, service; fetch all orders *\");\r\n\t\treturn this.orderRepository.findAll()\r\n\t\t\t\t.stream()\r\n\t\t\t\t\t.map(OrderMappingHelper::map)\r\n\t\t\t\t\t.distinct()\r\n\t\t\t\t\t.collect(Collectors.toUnmodifiableList());\r\n\t}",
+            "lineStart": 27,
+            "lineEnd": 35,
+            "annotations": [],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 29,
+                "lineEnd": 29
+              },
+              {
+                "branchId": "STMT-2",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 30,
+                "lineEnd": 34
+              }
+            ]
+          },
+          {
+            "id": 18141,
+            "classQualifiedName": "com.selimhorri.app.service.impl.OrderServiceImpl",
+            "methodName": "findById",
+            "returnType": "OrderDto",
+            "parameters": [
+              {
+                "name": "orderId",
+                "type": "Integer"
+              }
+            ],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "@Override\r\n\tpublic OrderDto findById(final Integer orderId) {\r\n\t\tlog.info(\"*** OrderDto, service; fetch order by id *\");\r\n\t\treturn this.orderRepository.findById(orderId)\r\n\t\t\t\t.map(OrderMappingHelper::map)\r\n\t\t\t\t.orElseThrow(() -> new OrderNotFoundException(String\r\n\t\t\t\t\t\t.format(\"Order with id: %d not found\", orderId)));\r\n\t}",
+            "lineStart": 37,
+            "lineEnd": 44,
+            "annotations": [],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 39,
+                "lineEnd": 39
+              },
+              {
+                "branchId": "STMT-2",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 40,
+                "lineEnd": 43
+              }
+            ]
+          },
+          {
+            "id": 18142,
+            "classQualifiedName": "com.selimhorri.app.service.impl.OrderServiceImpl",
+            "methodName": "save",
+            "returnType": "OrderDto",
+            "parameters": [
+              {
+                "name": "orderDto",
+                "type": "OrderDto"
+              }
+            ],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "@Override\r\n\tpublic OrderDto save(final OrderDto orderDto) {\r\n\t\tlog.info(\"*** OrderDto, service; save order *\");\r\n\t\treturn OrderMappingHelper.map(this.orderRepository\r\n\t\t\t\t.save(OrderMappingHelper.map(orderDto)));\r\n\t}",
+            "lineStart": 46,
+            "lineEnd": 51,
+            "annotations": [],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 48,
+                "lineEnd": 48
+              },
+              {
+                "branchId": "STMT-2",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 49,
+                "lineEnd": 50
+              }
+            ]
+          },
+          {
+            "id": 18143,
+            "classQualifiedName": "com.selimhorri.app.service.impl.OrderServiceImpl",
+            "methodName": "update",
+            "returnType": "OrderDto",
+            "parameters": [
+              {
+                "name": "orderDto",
+                "type": "OrderDto"
+              }
+            ],
+            "throwsList": [],
+            "visibility": "PUBLIC",
+            "sourceCode": "@Override\r\n\tpublic OrderDto update(final OrderDto orderDto) {\r\n\t\tlog.info(\"*** OrderDto, service; update order *\");\r\n\t\treturn OrderMappingHelper.map(this.orderRepository\r\n\t\t\t\t.save(OrderMappingHelper.map(orderDto)));\r\n\t}",
+            "lineStart": 53,
+            "lineEnd": 58,
+            "annotations": [],
+            "endpoints": [],
+            "branches": [
+              {
+                "branchId": "STMT-1",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 55,
+                "lineEnd": 55
+              },
+              {
+                "branchId": "STMT-2",
+                "kind": "STATEMENT",
+                "outcome": "EXECUTABLE",
+                "condition": "executable statement",
+                "lineStart": 56,
+                "lineEnd": 57
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": 8583,
+        "packageName": "com.selimhorri.app.constant",
+        "className": "AppConstant",
+        "qualifiedName": "com.selimhorri.app.constant.AppConstant",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/order-service/src/main/java/com/selimhorri/app/constant/AppConstant.java",
+        "sourceCode": "package com.selimhorri.app.constant;\r\n\r\nimport lombok.AccessLevel;\r\nimport lombok.NoArgsConstructor;\r\n\r\n@NoArgsConstructor(access = AccessLevel.PRIVATE)\r\npublic abstract class AppConstant {\r\n\r\n    public static final String LOCAL_DATE_FORMAT = \"dd-MM-yyyy\";\r\n\r\n    public static final String LOCAL_DATE_TIME_FORMAT = \"dd-MM-yyyy__HH:mm:ss:SSSSSS\";\r\n\r\n    public static final String ZONED_DATE_TIME_FORMAT = \"dd-MM-yyyy__HH:mm:ss:SSSSSS\";\r\n\r\n    public static final String INSTANT_FORMAT = \"dd-MM-yyyy__HH:mm:ss:SSSSSS\";\r\n\r\n    @NoArgsConstructor(access = AccessLevel.PRIVATE)\r\n    public abstract class DiscoveredDomainsApi {\r\n\r\n        public static final String USER_SERVICE_HOST = \"http://USER-SERVICE/user-service\";\r\n\r\n        public static final String USER_SERVICE_API_URL = \"http://USER-SERVICE/user-service/api/users\";\r\n\r\n        public static final String PRODUCT_SERVICE_HOST = \"http://PRODUCT-SERVICE/product-service\";\r\n\r\n        public static final String PRODUCT_SERVICE_API_URL = \"http://PRODUCT-SERVICE/product-service/api/products\";\r\n\r\n        public static final String ORDER_SERVICE_HOST = \"http://ORDER-SERVICE/order-service\";\r\n\r\n        public static final String ORDER_SERVICE_API_URL = \"http://ORDER-SERVICE/order-service/api/orders\";\r\n\r\n        public static final String FAVOURITE_SERVICE_HOST = \"http://FAVOURITE-SERVICE/favourite-service\";\r\n\r\n        public static final String FAVOURITE_SERVICE_API_URL = \"http://FAVOURITE-SERVICE/favourite-service/api/favourites\";\r\n\r\n        public static final String PAYMENT_SERVICE_HOST = \"http://PAYMENT-SERVICE/payment-service\";\r\n\r\n        public static final String PAYMENT_SERVICE_API_URL = \"http://PAYMENT-SERVICE/payment-service/api/payments\";\r\n\r\n        public static final String SHIPPING_SERVICE_HOST = \"http://SHIPPING-SERVICE/shipping-service\";\r\n\r\n        public static final String SHIPPING_SERVICE_API_URL = \"http://SHIPPING-SERVICE/shipping-service/api/shippings\";\r\n    }\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8588,
+        "packageName": "com.selimhorri.app.dto",
+        "className": "CartDto",
+        "qualifiedName": "com.selimhorri.app.dto.CartDto",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/order-service/src/main/java/com/selimhorri/app/dto/CartDto.java",
+        "sourceCode": "package com.selimhorri.app.dto;\r\n\r\nimport java.io.Serializable;\r\nimport java.util.Set;\r\nimport com.fasterxml.jackson.annotation.JsonInclude;\r\nimport com.fasterxml.jackson.annotation.JsonProperty;\r\nimport com.fasterxml.jackson.annotation.JsonInclude.Include;\r\nimport lombok.AllArgsConstructor;\r\nimport lombok.Builder;\r\nimport lombok.Data;\r\nimport lombok.NoArgsConstructor;\r\n\r\n@NoArgsConstructor\r\n@AllArgsConstructor\r\n@Data\r\n@Builder\r\npublic class CartDto implements Serializable {\r\n\r\n    private static final long serialVersionUID = 1L;\r\n\r\n    private Integer cartId;\r\n\r\n    private Integer userId;\r\n\r\n    @JsonInclude(Include.NON_NULL)\r\n    private Set<OrderDto> orderDtos;\r\n\r\n    @JsonProperty(\"user\")\r\n    @JsonInclude(Include.NON_NULL)\r\n    private UserDto userDto;\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8591,
+        "packageName": "com.selimhorri.app.dto",
+        "className": "UserDto",
+        "qualifiedName": "com.selimhorri.app.dto.UserDto",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/order-service/src/main/java/com/selimhorri/app/dto/UserDto.java",
+        "sourceCode": "package com.selimhorri.app.dto;\r\n\r\nimport java.io.Serializable;\r\nimport com.fasterxml.jackson.annotation.JsonInclude;\r\nimport com.fasterxml.jackson.annotation.JsonProperty;\r\nimport com.fasterxml.jackson.annotation.JsonInclude.Include;\r\nimport lombok.AllArgsConstructor;\r\nimport lombok.Builder;\r\nimport lombok.Data;\r\nimport lombok.NoArgsConstructor;\r\n\r\n@NoArgsConstructor\r\n@AllArgsConstructor\r\n@Data\r\n@Builder\r\npublic class UserDto implements Serializable {\r\n\r\n    private static final long serialVersionUID = 1L;\r\n\r\n    private Integer userId;\r\n\r\n    private String firstName;\r\n\r\n    private String lastName;\r\n\r\n    private String imageUrl;\r\n\r\n    private String email;\r\n\r\n    private String phone;\r\n\r\n    @JsonProperty(\"cart\")\r\n    @JsonInclude(Include.NON_NULL)\r\n    private CartDto cartDto;\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8594,
+        "packageName": "com.selimhorri.app.exception.wrapper",
+        "className": "CartNotFoundException",
+        "qualifiedName": "com.selimhorri.app.exception.wrapper.CartNotFoundException",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/order-service/src/main/java/com/selimhorri/app/exception/wrapper/CartNotFoundException.java",
+        "sourceCode": "package com.selimhorri.app.exception.wrapper;\r\n\r\npublic class CartNotFoundException extends RuntimeException {\r\n\r\n    private static final long serialVersionUID = 1L;\r\n\r\n    public CartNotFoundException() {\r\n        super();\r\n    }\r\n\r\n    public CartNotFoundException(String message, Throwable cause) {\r\n        super(message, cause);\r\n    }\r\n\r\n    public CartNotFoundException(String message) {\r\n        super(message);\r\n    }\r\n\r\n    public CartNotFoundException(Throwable cause) {\r\n        super(cause);\r\n    }\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8596,
+        "packageName": "com.selimhorri.app.helper",
+        "className": "CartMappingHelper",
+        "qualifiedName": "com.selimhorri.app.helper.CartMappingHelper",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/order-service/src/main/java/com/selimhorri/app/helper/CartMappingHelper.java",
+        "sourceCode": "package com.selimhorri.app.helper;\r\n\r\nimport com.selimhorri.app.domain.Cart;\r\nimport com.selimhorri.app.dto.CartDto;\r\nimport com.selimhorri.app.dto.UserDto;\r\n\r\npublic interface CartMappingHelper {\r\n\r\n    public static CartDto map(final Cart cart) {\r\n        return CartDto.builder().cartId(cart.getCartId()).userId(cart.getUserId()).userDto(UserDto.builder().userId(cart.getUserId()).build()).build();\r\n    }\r\n\r\n    public static Cart map(final CartDto cartDto) {\r\n        return Cart.builder().cartId(cartDto.getCartId()).userId(cartDto.getUserId()).build();\r\n    }\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8600,
+        "packageName": "com.selimhorri.app.repository",
+        "className": "CartRepository",
+        "qualifiedName": "com.selimhorri.app.repository.CartRepository",
+        "classType": "REPOSITORY",
+        "filePath": "ecommerce-microservice-backend-app/order-service/src/main/java/com/selimhorri/app/repository/CartRepository.java",
+        "sourceCode": "package com.selimhorri.app.repository;\r\n\r\nimport org.springframework.data.jpa.repository.JpaRepository;\r\nimport com.selimhorri.app.domain.Cart;\r\n\r\npublic interface CartRepository extends JpaRepository<Cart, Integer> {\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8604,
+        "packageName": "com.selimhorri.app.service",
+        "className": "CartService",
+        "qualifiedName": "com.selimhorri.app.service.CartService",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/order-service/src/main/java/com/selimhorri/app/service/CartService.java",
+        "sourceCode": "package com.selimhorri.app.service;\r\n\r\nimport java.util.List;\r\nimport com.selimhorri.app.dto.CartDto;\r\n\r\npublic interface CartService {\r\n\r\n    List<CartDto> findAll();\r\n\r\n    CartDto findById(final Integer cartId);\r\n\r\n    CartDto save(final CartDto cartDto);\r\n\r\n    CartDto update(final CartDto cartDto);\r\n\r\n    CartDto update(final Integer cartId, final CartDto cartDto);\r\n\r\n    void deleteById(final Integer cartId);\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8589,
+        "packageName": "com.selimhorri.app.dto",
+        "className": "OrderDto",
+        "qualifiedName": "com.selimhorri.app.dto.OrderDto",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/order-service/src/main/java/com/selimhorri/app/dto/OrderDto.java",
+        "sourceCode": "package com.selimhorri.app.dto;\r\n\r\nimport java.io.Serializable;\r\nimport java.time.LocalDateTime;\r\nimport org.springframework.format.annotation.DateTimeFormat;\r\nimport com.fasterxml.jackson.annotation.JsonFormat;\r\nimport com.fasterxml.jackson.annotation.JsonFormat.Shape;\r\nimport com.fasterxml.jackson.annotation.JsonInclude;\r\nimport com.fasterxml.jackson.annotation.JsonProperty;\r\nimport com.fasterxml.jackson.annotation.JsonInclude.Include;\r\nimport com.fasterxml.jackson.databind.annotation.JsonDeserialize;\r\nimport com.fasterxml.jackson.databind.annotation.JsonSerialize;\r\nimport com.fasterxml.jackson.datatype.jsr310.deser.LocalDateTimeDeserializer;\r\nimport com.fasterxml.jackson.datatype.jsr310.ser.LocalDateTimeSerializer;\r\nimport com.selimhorri.app.constant.AppConstant;\r\nimport lombok.AllArgsConstructor;\r\nimport lombok.Builder;\r\nimport lombok.Data;\r\nimport lombok.NoArgsConstructor;\r\n\r\n@NoArgsConstructor\r\n@AllArgsConstructor\r\n@Data\r\n@Builder\r\npublic class OrderDto implements Serializable {\r\n\r\n    private static final long serialVersionUID = 1L;\r\n\r\n    private Integer orderId;\r\n\r\n    @JsonSerialize(using = LocalDateTimeSerializer.class)\r\n    @JsonDeserialize(using = LocalDateTimeDeserializer.class)\r\n    @JsonFormat(pattern = AppConstant.LOCAL_DATE_TIME_FORMAT, shape = Shape.STRING)\r\n    @DateTimeFormat(pattern = AppConstant.LOCAL_DATE_TIME_FORMAT)\r\n    private LocalDateTime orderDate;\r\n\r\n    private String orderDesc;\r\n\r\n    private Double orderFee;\r\n\r\n    @JsonProperty(\"cart\")\r\n    @JsonInclude(Include.NON_NULL)\r\n    private CartDto cartDto;\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8595,
+        "packageName": "com.selimhorri.app.exception.wrapper",
+        "className": "OrderNotFoundException",
+        "qualifiedName": "com.selimhorri.app.exception.wrapper.OrderNotFoundException",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/order-service/src/main/java/com/selimhorri/app/exception/wrapper/OrderNotFoundException.java",
+        "sourceCode": "package com.selimhorri.app.exception.wrapper;\r\n\r\npublic class OrderNotFoundException extends RuntimeException {\r\n\r\n    private static final long serialVersionUID = 1L;\r\n\r\n    public OrderNotFoundException() {\r\n        super();\r\n    }\r\n\r\n    public OrderNotFoundException(String message, Throwable cause) {\r\n        super(message, cause);\r\n    }\r\n\r\n    public OrderNotFoundException(String message) {\r\n        super(message);\r\n    }\r\n\r\n    public OrderNotFoundException(Throwable cause) {\r\n        super(cause);\r\n    }\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8597,
+        "packageName": "com.selimhorri.app.helper",
+        "className": "OrderMappingHelper",
+        "qualifiedName": "com.selimhorri.app.helper.OrderMappingHelper",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/order-service/src/main/java/com/selimhorri/app/helper/OrderMappingHelper.java",
+        "sourceCode": "package com.selimhorri.app.helper;\r\n\r\nimport com.selimhorri.app.domain.Cart;\r\nimport com.selimhorri.app.domain.Order;\r\nimport com.selimhorri.app.dto.CartDto;\r\nimport com.selimhorri.app.dto.OrderDto;\r\n\r\npublic interface OrderMappingHelper {\r\n\r\n    public static OrderDto map(final Order order) {\r\n        return OrderDto.builder().orderId(order.getOrderId()).orderDate(order.getOrderDate()).orderDesc(order.getOrderDesc()).orderFee(order.getOrderFee()).cartDto(CartDto.builder().cartId(order.getCart().getCartId()).build()).build();\r\n    }\r\n\r\n    public static Order map(final OrderDto orderDto) {\r\n        return Order.builder().orderId(orderDto.getOrderId()).orderDate(orderDto.getOrderDate()).orderDesc(orderDto.getOrderDesc()).orderFee(orderDto.getOrderFee()).cart(Cart.builder().cartId(orderDto.getCartDto().getCartId()).build()).build();\r\n    }\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8601,
+        "packageName": "com.selimhorri.app.repository",
+        "className": "OrderRepository",
+        "qualifiedName": "com.selimhorri.app.repository.OrderRepository",
+        "classType": "REPOSITORY",
+        "filePath": "ecommerce-microservice-backend-app/order-service/src/main/java/com/selimhorri/app/repository/OrderRepository.java",
+        "sourceCode": "package com.selimhorri.app.repository;\r\n\r\nimport org.springframework.data.jpa.repository.JpaRepository;\r\nimport com.selimhorri.app.domain.Order;\r\n\r\npublic interface OrderRepository extends JpaRepository<Order, Integer> {\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8607,
+        "packageName": "com.selimhorri.app.service",
+        "className": "OrderService",
+        "qualifiedName": "com.selimhorri.app.service.OrderService",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/order-service/src/main/java/com/selimhorri/app/service/OrderService.java",
+        "sourceCode": "package com.selimhorri.app.service;\r\n\r\nimport java.util.List;\r\nimport com.selimhorri.app.dto.OrderDto;\r\n\r\npublic interface OrderService {\r\n\r\n    List<OrderDto> findAll();\r\n\r\n    OrderDto findById(final Integer orderId);\r\n\r\n    OrderDto save(final OrderDto orderDto);\r\n\r\n    OrderDto update(final OrderDto orderDto);\r\n\r\n    OrderDto update(final Integer orderId, final OrderDto orderDto);\r\n\r\n    void deleteById(final Integer orderId);\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      },
+      {
+        "id": 8586,
+        "packageName": "com.selimhorri.app.domain",
+        "className": "Cart",
+        "qualifiedName": "com.selimhorri.app.domain.Cart",
+        "classType": "ENTITY",
+        "filePath": "ecommerce-microservice-backend-app/order-service/src/main/java/com/selimhorri/app/domain/Cart.java",
+        "sourceCode": "package com.selimhorri.app.domain;\r\n\r\nimport java.io.Serializable;\r\nimport java.util.Set;\r\nimport javax.persistence.CascadeType;\r\nimport javax.persistence.Column;\r\nimport javax.persistence.Entity;\r\nimport javax.persistence.FetchType;\r\nimport javax.persistence.GeneratedValue;\r\nimport javax.persistence.GenerationType;\r\nimport javax.persistence.Id;\r\nimport javax.persistence.OneToMany;\r\nimport javax.persistence.Table;\r\nimport com.fasterxml.jackson.annotation.JsonIgnore;\r\nimport lombok.AllArgsConstructor;\r\nimport lombok.Builder;\r\nimport lombok.Data;\r\nimport lombok.EqualsAndHashCode;\r\nimport lombok.NoArgsConstructor;\r\n\r\n@Entity\r\n@Table(name = \"carts\")\r\n@NoArgsConstructor\r\n@AllArgsConstructor\r\n@EqualsAndHashCode(callSuper = true, exclude = { \"orders\" })\r\n@Data\r\n@Builder\r\npublic final class Cart extends AbstractMappedEntity implements Serializable {\r\n\r\n    private static final long serialVersionUID = 1L;\r\n\r\n    @Id\r\n    @GeneratedValue(strategy = GenerationType.IDENTITY)\r\n    @Column(name = \"cart_id\", unique = true, nullable = false, updatable = false)\r\n    private Integer cartId;\r\n\r\n    @Column(name = \"user_id\")\r\n    private Integer userId;\r\n\r\n    @JsonIgnore\r\n    @OneToMany(mappedBy = \"cart\", fetch = FetchType.LAZY, cascade = CascadeType.ALL)\r\n    private Set<Order> orders;\r\n}\r\n",
+        "annotations": [
+          {
+            "id": 10620,
+            "targetType": "CLASS",
+            "category": "PERSISTENCE",
+            "annotationName": "Entity",
+            "attributes": "@Entity"
+          },
+          {
+            "id": 10621,
+            "targetType": "CLASS",
+            "category": "PERSISTENCE",
+            "annotationName": "Table",
+            "attributes": "@Table(name = \"carts\")"
+          }
+        ],
+        "methods": []
+      },
+      {
+        "id": 8587,
+        "packageName": "com.selimhorri.app.domain",
+        "className": "Order",
+        "qualifiedName": "com.selimhorri.app.domain.Order",
+        "classType": "ENTITY",
+        "filePath": "ecommerce-microservice-backend-app/order-service/src/main/java/com/selimhorri/app/domain/Order.java",
+        "sourceCode": "package com.selimhorri.app.domain;\r\n\r\nimport java.io.Serializable;\r\nimport java.time.LocalDateTime;\r\nimport javax.persistence.Column;\r\nimport javax.persistence.Entity;\r\nimport javax.persistence.FetchType;\r\nimport javax.persistence.GeneratedValue;\r\nimport javax.persistence.GenerationType;\r\nimport javax.persistence.Id;\r\nimport javax.persistence.JoinColumn;\r\nimport javax.persistence.ManyToOne;\r\nimport javax.persistence.Table;\r\nimport org.springframework.format.annotation.DateTimeFormat;\r\nimport com.fasterxml.jackson.annotation.JsonFormat;\r\nimport com.fasterxml.jackson.annotation.JsonFormat.Shape;\r\nimport com.fasterxml.jackson.databind.annotation.JsonDeserialize;\r\nimport com.fasterxml.jackson.databind.annotation.JsonSerialize;\r\nimport com.fasterxml.jackson.datatype.jsr310.deser.LocalDateTimeDeserializer;\r\nimport com.fasterxml.jackson.datatype.jsr310.ser.LocalDateTimeSerializer;\r\nimport com.selimhorri.app.constant.AppConstant;\r\nimport lombok.AllArgsConstructor;\r\nimport lombok.Builder;\r\nimport lombok.Data;\r\nimport lombok.EqualsAndHashCode;\r\nimport lombok.NoArgsConstructor;\r\n\r\n@Entity\r\n@Table(name = \"orders\")\r\n@NoArgsConstructor\r\n@AllArgsConstructor\r\n@EqualsAndHashCode(callSuper = true, exclude = { \"cart\" })\r\n@Data\r\n@Builder\r\npublic final class Order extends AbstractMappedEntity implements Serializable {\r\n\r\n    private static final long serialVersionUID = 1L;\r\n\r\n    @Id\r\n    @GeneratedValue(strategy = GenerationType.IDENTITY)\r\n    @Column(name = \"order_id\", unique = true, nullable = false, updatable = false)\r\n    private Integer orderId;\r\n\r\n    @JsonSerialize(using = LocalDateTimeSerializer.class)\r\n    @JsonDeserialize(using = LocalDateTimeDeserializer.class)\r\n    @JsonFormat(pattern = AppConstant.LOCAL_DATE_TIME_FORMAT, shape = Shape.STRING)\r\n    @DateTimeFormat(pattern = AppConstant.LOCAL_DATE_TIME_FORMAT)\r\n    @Column(name = \"order_date\")\r\n    private LocalDateTime orderDate;\r\n\r\n    @Column(name = \"order_desc\")\r\n    private String orderDesc;\r\n\r\n    @Column(name = \"order_fee\", columnDefinition = \"decimal\")\r\n    private Double orderFee;\r\n\r\n    @ManyToOne(fetch = FetchType.EAGER)\r\n    @JoinColumn(name = \"cart_id\")\r\n    private Cart cart;\r\n}\r\n",
+        "annotations": [
+          {
+            "id": 10622,
+            "targetType": "CLASS",
+            "category": "PERSISTENCE",
+            "annotationName": "Entity",
+            "attributes": "@Entity"
+          },
+          {
+            "id": 10623,
+            "targetType": "CLASS",
+            "category": "PERSISTENCE",
+            "annotationName": "Table",
+            "attributes": "@Table(name = \"orders\")"
+          }
+        ],
+        "methods": []
+      },
+      {
+        "id": 8585,
+        "packageName": "com.selimhorri.app.domain",
+        "className": "AbstractMappedEntity",
+        "qualifiedName": "com.selimhorri.app.domain.AbstractMappedEntity",
+        "classType": "OTHER",
+        "filePath": "ecommerce-microservice-backend-app/order-service/src/main/java/com/selimhorri/app/domain/AbstractMappedEntity.java",
+        "sourceCode": "package com.selimhorri.app.domain;\r\n\r\nimport java.io.Serializable;\r\nimport java.time.Instant;\r\nimport javax.persistence.Column;\r\nimport javax.persistence.MappedSuperclass;\r\nimport org.springframework.data.annotation.CreatedDate;\r\nimport org.springframework.data.annotation.LastModifiedDate;\r\nimport com.fasterxml.jackson.annotation.JsonFormat;\r\nimport com.fasterxml.jackson.annotation.JsonFormat.Shape;\r\nimport lombok.AccessLevel;\r\nimport lombok.AllArgsConstructor;\r\nimport lombok.Data;\r\nimport lombok.NoArgsConstructor;\r\n\r\n@MappedSuperclass\r\n@NoArgsConstructor(access = AccessLevel.PROTECTED)\r\n@AllArgsConstructor(access = AccessLevel.PROTECTED)\r\n@Data\r\nabstract public class AbstractMappedEntity implements Serializable {\r\n\r\n    private static final long serialVersionUID = 1L;\r\n\r\n    @CreatedDate\r\n    @JsonFormat(shape = Shape.STRING)\r\n    @Column(name = \"created_at\")\r\n    private Instant createdAt;\r\n\r\n    @LastModifiedDate\r\n    @JsonFormat(shape = Shape.STRING)\r\n    @Column(name = \"updated_at\")\r\n    private Instant updatedAt;\r\n}\r\n",
+        "annotations": [],
+        "methods": []
+      }
+    ],
+    "approvedBusinessRules": [
+      {
+        "id": 4528,
+        "methodId": 18135,
+        "ruleCode": "BR-012",
+        "description": "Khi tìm giỏ hàng theo `cartId`, service gọi `getForObject` để lấy thông tin người dùng theo `userId` và gán vào giỏ hàng nếu tìm thấy; nếu không tìm thấy, service ném `CartNotFoundException` với thông điệp `Cart with id: %d not found` được định dạng theo `cartId`.",
+        "reviewNote": "SOURCE_BRANCH:STMT-2\nAI category: VALIDATION. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-2"
+      },
+      {
+        "id": 4529,
+        "methodId": 18136,
+        "ruleCode": "BR-013",
+        "description": "Khi lưu giỏ hàng, service chuyển `CartDto` thành entity, gọi `save` trên repository rồi chuyển entity được trả về thành `CartDto`.",
+        "reviewNote": "SOURCE_BRANCH:STMT-2\nAI category: SIDE_EFFECT. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-2"
+      },
+      {
+        "id": 4530,
+        "methodId": 18143,
+        "ruleCode": "BR-014",
+        "description": "Khi cập nhật đơn hàng bằng OrderDto, service ánh xạ dữ liệu sang Order, gọi save và ánh xạ kết quả thành OrderDto.",
+        "reviewNote": "SOURCE_BRANCH:STMT-2\nAI category: SIDE_EFFECT. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-2"
+      },
+      {
+        "id": 4533,
+        "methodId": 18140,
+        "ruleCode": "BR-017",
+        "description": "Khi lấy toàn bộ đơn hàng, service ánh xạ kết quả thành OrderDto, loại bỏ các phần tử trùng lặp và trả về danh sách không thể sửa đổi.",
+        "reviewNote": "SOURCE_BRANCH:STMT-2\nAI category: BUSINESS_LOGIC. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-2"
+      },
+      {
+        "id": 4534,
+        "methodId": 18141,
+        "ruleCode": "BR-018",
+        "description": "Khi tìm đơn hàng theo orderId, service ánh xạ đơn hàng tìm thấy thành OrderDto; nếu không tìm thấy, ném OrderNotFoundException với thông báo \"Order with id: %d not found\" được định dạng bằng orderId.",
+        "reviewNote": "SOURCE_BRANCH:STMT-2\nAI category: VALIDATION. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-2"
+      },
+      {
+        "id": 4535,
+        "methodId": 18142,
+        "ruleCode": "BR-019",
+        "description": "Khi lưu OrderDto, service ánh xạ DTO sang thực thể Order, gọi orderRepository.save và ánh xạ kết quả thành OrderDto.",
+        "reviewNote": "SOURCE_BRANCH:STMT-2\nAI category: SIDE_EFFECT. User review/chỉnh sửa trước khi approve.",
+        "source": "AI_GENERATED",
+        "status": "APPROVED",
+        "isModified": false,
+        "sourceBranchId": "STMT-2"
+      }
+    ],
+    "approvedTestPlans": [
+      {
+        "id": 2240,
+        "businessRuleId": 4535,
+        "coveredRuleIds": [
+          4535
+        ],
+        "planCode": "TP-007",
+        "title": "Lưu đơn hàng từ OrderDto",
+        "description": "Kiểm tra service ánh xạ OrderDto sang Order, gọi repository.save và ánh xạ thực thể đã lưu thành OrderDto.",
+        "testType": "HAPPY_PATH",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2241,
+        "businessRuleId": 4530,
+        "coveredRuleIds": [
+          4530
+        ],
+        "planCode": "TP-008",
+        "title": "Cập nhật đơn hàng từ OrderDto",
+        "description": "Kiểm tra service ánh xạ OrderDto sang Order, gọi repository.save và ánh xạ thực thể đã lưu thành OrderDto.",
+        "testType": "HAPPY_PATH",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2271,
+        "businessRuleId": 4528,
+        "coveredRuleIds": [
+          4528
+        ],
+        "planCode": "TP-015",
+        "title": "Tìm giỏ hàng theo cartId",
+        "description": "Kiểm tra giỏ hàng tìm thấy được bổ sung thông tin người dùng theo userId; nếu không tìm thấy, ném CartNotFoundException với thông báo được định dạng theo cartId.",
+        "testType": "BOUNDARY",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2272,
+        "businessRuleId": 4529,
+        "coveredRuleIds": [
+          4529
+        ],
+        "planCode": "TP-016",
+        "title": "Lưu giỏ hàng",
+        "description": "Kiểm tra service ánh xạ CartDto thành entity, lưu entity qua repository và ánh xạ entity trả về thành CartDto.",
+        "testType": "HAPPY_PATH",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2273,
+        "businessRuleId": 4533,
+        "coveredRuleIds": [
+          4533
+        ],
+        "planCode": "TP-017",
+        "title": "Truy xuất danh sách đơn hàng",
+        "description": "Kiểm tra service ánh xạ toàn bộ đơn hàng thành OrderDto, loại bỏ phần tử trùng lặp và trả về danh sách không thể sửa đổi.",
+        "testType": "HAPPY_PATH",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2274,
+        "businessRuleId": 4534,
+        "coveredRuleIds": [
+          4534
+        ],
+        "planCode": "TP-018",
+        "title": "Tìm đơn hàng theo orderId",
+        "description": "Kiểm tra đơn hàng tìm thấy được ánh xạ thành OrderDto; nếu không tìm thấy, ném OrderNotFoundException với thông báo được định dạng bằng orderId.",
+        "testType": "BOUNDARY",
+        "status": "APPROVED",
+        "isModified": false
+      }
+    ],
+    "approvedTestCases": [
+      {
+        "id": 2860,
+        "testPlanId": 2271,
+        "caseCode": "TC-1404",
+        "testType": "HAPPY_PATH",
+        "description": "Tìm thấy giỏ hàng và bổ sung thông tin người dùng theo userId.",
+        "preconditions": "CartRepository là mock có thể được inject qua constructor CartServiceImpl(CartRepository, RestTemplate). Repository trả về Optional<Cart> chứa entity có cartId = 17 và userId = 42. RestTemplate trả về UserDto có userId = 42 cho lời gọi getForObject(\"http://USER-SERVICE/user-service/api/users/42\", UserDto.class).",
+        "testData": {
+          "input": {
+            "cartId": 17
+          },
+          "mocks": {
+            "cartRepository.findById(17)": "Optional<Cart> chứa Cart.builder().cartId(17).userId(42).build()",
+            "restTemplate.getForObject(\"http://USER-SERVICE/user-service/api/users/42\", UserDto.class)": "UserDto.builder().userId(42).firstName(\"An\").lastName(\"Nguyen\").build()"
+          }
+        },
+        "expectedResult": "Trả về CartDto có cartId = 17, userId = 42 và userDto là thông tin UserDto nhận được từ lời gọi getForObject. Không ném ngoại lệ.",
+        "priority": "HIGH",
+        "traceSource": "BR-012 [STMT-2] -> TP-015 -> STMT-2",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2861,
+        "testPlanId": 2271,
+        "caseCode": "TC-1405",
+        "testType": "EXCEPTION",
+        "description": "Không tìm thấy giỏ hàng theo cartId.",
+        "preconditions": "CartRepository là mock được inject qua constructor CartServiceImpl(CartRepository, RestTemplate) và trả về Optional.empty() cho cartId = 17. Nhánh không tìm thấy kết thúc bằng ngoại lệ trước khi gọi RestTemplate.",
+        "testData": {
+          "input": {
+            "cartId": 17
+          },
+          "mocks": {
+            "cartRepository.findById(17)": "Optional.empty()"
+          }
+        },
+        "expectedResult": "Ném CartNotFoundException với thông điệp chính xác \"Cart with id: 17 not found\".",
+        "priority": "HIGH",
+        "traceSource": "BR-012 [STMT-2] -> TP-015 -> STMT-2",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2862,
+        "testPlanId": 2272,
+        "caseCode": "TC-1406",
+        "testType": "HAPPY_PATH",
+        "description": "Lưu giỏ hàng sau khi chuyển CartDto thành entity.",
+        "preconditions": "CartRepository là mock được inject qua constructor CartServiceImpl(CartRepository, RestTemplate). Khi nhận entity có cartId = 17 và userId = 42, repository trả về chính entity đó để giữ các trường được gửi lên.",
+        "testData": {
+          "input": {
+            "cartDto": {
+              "cartId": 17,
+              "userId": 42
+            }
+          },
+          "mocks": {
+            "cartRepository.save(Cart.builder().cartId(17).userId(42).build())": "Trả về entity Cart nhận vào, có cartId = 17 và userId = 42."
+          }
+        },
+        "expectedResult": "Trả về CartDto có cartId = 17 và userId = 42. Mapper tạo userDto có userId = 42; orderDtos là null. Service chuyển CartDto thành Cart, gọi repository.save rồi ánh xạ entity trả về thành CartDto.",
+        "priority": "HIGH",
+        "traceSource": "BR-013 [STMT-2] -> TP-016 -> STMT-2",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2863,
+        "testPlanId": 2273,
+        "caseCode": "TC-1407",
+        "testType": "HAPPY_PATH",
+        "description": "Ánh xạ danh sách đơn hàng, loại bỏ phần tử trùng lặp và trả về danh sách không thể sửa đổi.",
+        "preconditions": "OrderRepository là mock được inject qua constructor OrderServiceImpl(OrderRepository). Repository trả về danh sách gồm hai Order có cùng orderId, orderDate, orderDesc, orderFee và cùng trạng thái timestamp; mỗi Order có Cart với cartId = 17. Hai Order bằng nhau theo equals của entity, nên distinct loại bỏ một phần tử. Các trường của OrderDto được ánh xạ từ Order; cartDto.cartId được ánh xạ từ Order.cart.cartId.",
+        "testData": {
+          "input": {},
+          "mocks": {
+            "orderRepository.findAll()": "List<Order> gồm Order.builder().orderId(31).orderDate(LocalDateTime.parse(\"2024-05-06T10:15:30\")).orderDesc(\"Đơn hàng\").orderFee(25.5).cart(Cart.builder().cartId(17).build()).build() và một Order bằng entity đó."
+          }
+        },
+        "expectedResult": "Trả về danh sách không thể sửa đổi gồm đúng một OrderDto có orderId = 31, orderDate = 2024-05-06T10:15:30, orderDesc = \"Đơn hàng\", orderFee = 25.5 và cartDto.cartId = 17. Thử thêm phần tử vào danh sách trả về ném UnsupportedOperationException.",
+        "priority": "HIGH",
+        "traceSource": "BR-017 [STMT-2] -> TP-017 -> STMT-2",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2864,
+        "testPlanId": 2274,
+        "caseCode": "TC-1408",
+        "testType": "HAPPY_PATH",
+        "description": "Tìm thấy đơn hàng và ánh xạ thành OrderDto.",
+        "preconditions": "OrderRepository là mock được inject qua constructor OrderServiceImpl(OrderRepository). Repository trả về Optional<Order> chứa Order có Cart khác null; Cart có cartId = 17.",
+        "testData": {
+          "input": {
+            "orderId": 31
+          },
+          "mocks": {
+            "orderRepository.findById(31)": "Optional<Order> chứa Order.builder().orderId(31).orderDate(LocalDateTime.parse(\"2024-05-06T10:15:30\")).orderDesc(\"Đơn hàng\").orderFee(25.5).cart(Cart.builder().cartId(17).build()).build()"
+          }
+        },
+        "expectedResult": "Trả về OrderDto có orderId = 31, orderDate = 2024-05-06T10:15:30, orderDesc = \"Đơn hàng\", orderFee = 25.5 và cartDto.cartId = 17.",
+        "priority": "HIGH",
+        "traceSource": "BR-018 [STMT-2] -> TP-018 -> STMT-2",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2865,
+        "testPlanId": 2274,
+        "caseCode": "TC-1409",
+        "testType": "EXCEPTION",
+        "description": "Không tìm thấy đơn hàng theo orderId.",
+        "preconditions": "OrderRepository là mock được inject qua constructor OrderServiceImpl(OrderRepository) và trả về Optional.empty() cho orderId = 31. Mapper không được gọi vì không có entity để ánh xạ.",
+        "testData": {
+          "input": {
+            "orderId": 31
+          },
+          "mocks": {
+            "orderRepository.findById(31)": "Optional.empty()"
+          }
+        },
+        "expectedResult": "Ném OrderNotFoundException với thông điệp chính xác \"Order with id: 31 not found\".",
+        "priority": "HIGH",
+        "traceSource": "BR-018 [STMT-2] -> TP-018 -> STMT-2",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2866,
+        "testPlanId": 2240,
+        "caseCode": "TC-1410",
+        "testType": "HAPPY_PATH",
+        "description": "Lưu đơn hàng từ OrderDto và trả về DTO được ánh xạ từ thực thể đã lưu.",
+        "preconditions": "OrderServiceImpl được khởi tạo với mock OrderRepository. Repository trả về chính thực thể Order nhận được từ save, giữ nguyên các trường đã gửi và cung cấp orderId do persistence tạo ra.",
+        "testData": {
+          "input": {
+            "orderDto": {
+              "cartDto": {
+                "cartId": 31
+              },
+              "orderId": null,
+              "orderFee": 25.5,
+              "orderDate": "2025-03-08T10:15:30",
+              "orderDesc": "Đơn hàng mới"
+            }
+          },
+          "mocks": {
+            "orderRepository.save": {
+              "trả về": "Thực thể Order đã nhận, với orderId=501; orderDate=2025-03-08T10:15:30, orderDesc=Đơn hàng mới, orderFee=25.5 và cart.cartId=31 được giữ nguyên."
+            }
+          }
+        },
+        "expectedResult": "Service ánh xạ OrderDto sang Order, gọi orderRepository.save một lần và ánh xạ thực thể trả về thành OrderDto có orderId=501, orderDate=2025-03-08T10:15:30, orderDesc=Đơn hàng mới, orderFee=25.5 và cartDto.cartId=31.",
+        "priority": "HIGH",
+        "traceSource": "BR-019 [STMT-2] -> TP-007 -> STMT-2",
+        "status": "APPROVED",
+        "isModified": false
+      },
+      {
+        "id": 2867,
+        "testPlanId": 2241,
+        "caseCode": "TC-1411",
+        "testType": "HAPPY_PATH",
+        "description": "Cập nhật đơn hàng bằng OrderDto và trả về DTO được ánh xạ từ thực thể đã lưu.",
+        "preconditions": "OrderServiceImpl được khởi tạo với mock OrderRepository. Repository trả về chính thực thể Order nhận được từ save, giữ nguyên các trường đã gửi.",
+        "testData": {
+          "input": {
+            "orderDto": {
+              "cartDto": {
+                "cartId": 32
+              },
+              "orderId": 502,
+              "orderFee": 40.0,
+              "orderDate": "2025-03-08T10:15:30",
+              "orderDesc": "Đơn hàng đã cập nhật"
+            }
+          },
+          "mocks": {
+            "orderRepository.save": {
+              "trả về": "Thực thể Order đã nhận; orderId=502, orderDate=2025-03-08T10:15:30, orderDesc=Đơn hàng đã cập nhật, orderFee=40.0 và cart.cartId=32 được giữ nguyên."
+            }
+          }
+        },
+        "expectedResult": "Service ánh xạ OrderDto sang Order, gọi orderRepository.save một lần và ánh xạ thực thể trả về thành OrderDto có orderId=502, orderDate=2025-03-08T10:15:30, orderDesc=Đơn hàng đã cập nhật, orderFee=40.0 và cartDto.cartId=32.",
+        "priority": "HIGH",
+        "traceSource": "BR-014 [STMT-2] -> TP-008 -> STMT-2",
+        "status": "APPROVED",
+        "isModified": false
+      }
+    ],
+    "existingApprovedTestCases": [],
+    "previousGeneratedUnitTests": [],
+    "existingTests": [],
+    "supportingResources": [],
+    "contextWarnings": []
+  },
+  "test": {
+    "case_id": 2866,
+    "test_class_name": "OrderServiceImplTest",
+    "test_method_name": "save_mapsAndReturnsPersistedOrder",
+    "package_name": "com.selimhorri.app.service.impl",
+    "generation_type": "NEW_TEST",
+    "source_code": "// GREYTEST_SOURCE_V1 ee558e6a4f3c07ecbe57fb4855cf1fae58c321240be1c1d8520ad69f5d67b23d ZWNvbW1lcmNlLW1pY3Jvc2VydmljZS1iYWNrZW5kLWFwcC9vcmRlci1zZXJ2aWNlL3NyYy9tYWluL2phdmEvY29tL3NlbGltaG9ycmkvYXBwL3NlcnZpY2UvaW1wbC9DYXJ0U2VydmljZUltcGwuamF2YQ==\n// GREYTEST_SOURCE_V1 180cff340d25ce2a0001c9b836d26efc9c1efbdc27667420e1a170d1bef13487 ZWNvbW1lcmNlLW1pY3Jvc2VydmljZS1iYWNrZW5kLWFwcC9vcmRlci1zZXJ2aWNlL3NyYy9tYWluL2phdmEvY29tL3NlbGltaG9ycmkvYXBwL3NlcnZpY2UvaW1wbC9PcmRlclNlcnZpY2VJbXBsLmphdmE=\n// GREYTEST_SOURCE_V1 5ae16bf82ceba6fae38b865f74dabed0318458536172c6d6e50b6d3c2c2a78e0 ZWNvbW1lcmNlLW1pY3Jvc2VydmljZS1iYWNrZW5kLWFwcC9vcmRlci1zZXJ2aWNlL3NyYy9tYWluL2phdmEvY29tL3NlbGltaG9ycmkvYXBwL2NvbnN0YW50L0FwcENvbnN0YW50LmphdmE=\n// GREYTEST_SOURCE_V1 f364a8659f3a0fbd222df4a5c242a8a7589cb244e651d7c52aa99581dd687a87 ZWNvbW1lcmNlLW1pY3Jvc2VydmljZS1iYWNrZW5kLWFwcC9vcmRlci1zZXJ2aWNlL3NyYy9tYWluL2phdmEvY29tL3NlbGltaG9ycmkvYXBwL2R0by9DYXJ0RHRvLmphdmE=\n// GREYTEST_SOURCE_V1 c57d37952aac7b6db63bb87b1ebebfa895150fcc3eb7f542d76a76e36ddc86bc ZWNvbW1lcmNlLW1pY3Jvc2VydmljZS1iYWNrZW5kLWFwcC9vcmRlci1zZXJ2aWNlL3NyYy9tYWluL2phdmEvY29tL3NlbGltaG9ycmkvYXBwL2R0by9Vc2VyRHRvLmphdmE=\n// GREYTEST_SOURCE_V1 7a285f5bc7bc19923f1a877806e2a6ff10e3cb9e688e9b6e4e0f6f680c358614 ZWNvbW1lcmNlLW1pY3Jvc2VydmljZS1iYWNrZW5kLWFwcC9vcmRlci1zZXJ2aWNlL3NyYy9tYWluL2phdmEvY29tL3NlbGltaG9ycmkvYXBwL2V4Y2VwdGlvbi93cmFwcGVyL0NhcnROb3RGb3VuZEV4Y2VwdGlvbi5qYXZh\n// GREYTEST_SOURCE_V1 793d4eb6f0272d85fafcae05e969e63d47e9312bacc54d2d5a88f26549d9dba0 ZWNvbW1lcmNlLW1pY3Jvc2VydmljZS1iYWNrZW5kLWFwcC9vcmRlci1zZXJ2aWNlL3NyYy9tYWluL2phdmEvY29tL3NlbGltaG9ycmkvYXBwL2hlbHBlci9DYXJ0TWFwcGluZ0hlbHBlci5qYXZh\n// GREYTEST_SOURCE_V1 eaa01aaf26f39ccd977ffca20c731260a92ba75a674cd381a9968ac9beab9270 ZWNvbW1lcmNlLW1pY3Jvc2VydmljZS1iYWNrZW5kLWFwcC9vcmRlci1zZXJ2aWNlL3NyYy9tYWluL2phdmEvY29tL3NlbGltaG9ycmkvYXBwL3JlcG9zaXRvcnkvQ2FydFJlcG9zaXRvcnkuamF2YQ==\n// GREYTEST_SOURCE_V1 0c84bf1a3bf8907f3c8e5e493cc54e2bbccaff3aabff92a5035b8d219258e2f9 ZWNvbW1lcmNlLW1pY3Jvc2VydmljZS1iYWNrZW5kLWFwcC9vcmRlci1zZXJ2aWNlL3NyYy9tYWluL2phdmEvY29tL3NlbGltaG9ycmkvYXBwL3NlcnZpY2UvQ2FydFNlcnZpY2UuamF2YQ==\n// GREYTEST_SOURCE_V1 dcd6d07ba850d14f06e2da51d12b2bb15e4c813c2440ad87dd6cbaf9f80f3b84 ZWNvbW1lcmNlLW1pY3Jvc2VydmljZS1iYWNrZW5kLWFwcC9vcmRlci1zZXJ2aWNlL3NyYy9tYWluL2phdmEvY29tL3NlbGltaG9ycmkvYXBwL2R0by9PcmRlckR0by5qYXZh\n// GREYTEST_SOURCE_V1 5c42426c753db7836ec10e521972041d22db722c104656f3544e1aefd065b037 ZWNvbW1lcmNlLW1pY3Jvc2VydmljZS1iYWNrZW5kLWFwcC9vcmRlci1zZXJ2aWNlL3NyYy9tYWluL2phdmEvY29tL3NlbGltaG9ycmkvYXBwL2V4Y2VwdGlvbi93cmFwcGVyL09yZGVyTm90Rm91bmRFeGNlcHRpb24uamF2YQ==\n// GREYTEST_SOURCE_V1 61e4fb755b0344a94bf0d56a849b3416a2f047feb9dcb3093e17d52f23875347 ZWNvbW1lcmNlLW1pY3Jvc2VydmljZS1iYWNrZW5kLWFwcC9vcmRlci1zZXJ2aWNlL3NyYy9tYWluL2phdmEvY29tL3NlbGltaG9ycmkvYXBwL2hlbHBlci9PcmRlck1hcHBpbmdIZWxwZXIuamF2YQ==\n// GREYTEST_SOURCE_V1 488010716fa5780f8ffdd10c31b085072d81fdbf5b906689bb1180b845cfbf52 ZWNvbW1lcmNlLW1pY3Jvc2VydmljZS1iYWNrZW5kLWFwcC9vcmRlci1zZXJ2aWNlL3NyYy9tYWluL2phdmEvY29tL3NlbGltaG9ycmkvYXBwL3JlcG9zaXRvcnkvT3JkZXJSZXBvc2l0b3J5LmphdmE=\n// GREYTEST_SOURCE_V1 5d520f798527d308f0c86f2244967d82210409be70c9e15ebe8455957bda5e31 ZWNvbW1lcmNlLW1pY3Jvc2VydmljZS1iYWNrZW5kLWFwcC9vcmRlci1zZXJ2aWNlL3NyYy9tYWluL2phdmEvY29tL3NlbGltaG9ycmkvYXBwL3NlcnZpY2UvT3JkZXJTZXJ2aWNlLmphdmE=\n// GREYTEST_SOURCE_V1 0d6e70e4959d197802cd3d8c42e570f6082a839a4268500700382f911e102721 ZWNvbW1lcmNlLW1pY3Jvc2VydmljZS1iYWNrZW5kLWFwcC9vcmRlci1zZXJ2aWNlL3NyYy9tYWluL2phdmEvY29tL3NlbGltaG9ycmkvYXBwL2RvbWFpbi9DYXJ0LmphdmE=\n// GREYTEST_SOURCE_V1 8b08f2725cb193fcccfb685a7763bf4574a305b4c8c48facb973977124948757 ZWNvbW1lcmNlLW1pY3Jvc2VydmljZS1iYWNrZW5kLWFwcC9vcmRlci1zZXJ2aWNlL3NyYy9tYWluL2phdmEvY29tL3NlbGltaG9ycmkvYXBwL2RvbWFpbi9PcmRlci5qYXZh\n// GREYTEST_SOURCE_V1 81b7b8f025221deaf849d511926ffcc794e90e956bcb41b2650535bfad07bf31 ZWNvbW1lcmNlLW1pY3Jvc2VydmljZS1iYWNrZW5kLWFwcC9vcmRlci1zZXJ2aWNlL3NyYy9tYWluL2phdmEvY29tL3NlbGltaG9ycmkvYXBwL2RvbWFpbi9BYnN0cmFjdE1hcHBlZEVudGl0eS5qYXZh\npackage com.selimhorri.app.service.impl;\n\nimport static org.junit.jupiter.api.Assertions.assertEquals;\nimport static org.mockito.ArgumentMatchers.any;\nimport static org.mockito.Mockito.verify;\nimport static org.mockito.Mockito.when;\n\nimport java.time.LocalDateTime;\n\nimport com.selimhorri.app.domain.Cart;\nimport com.selimhorri.app.domain.Order;\nimport com.selimhorri.app.dto.CartDto;\nimport com.selimhorri.app.dto.OrderDto;\nimport com.selimhorri.app.repository.OrderRepository;\nimport org.junit.jupiter.api.Test;\nimport org.junit.jupiter.api.extension.ExtendWith;\nimport org.mockito.ArgumentCaptor;\nimport org.mockito.InjectMocks;\nimport org.mockito.Mock;\nimport org.mockito.junit.jupiter.MockitoExtension;\n\n@ExtendWith(MockitoExtension.class)\nclass OrderServiceImplTest {\n    @Mock private OrderRepository orderRepository;\n    @InjectMocks private OrderServiceImpl orderService;\n\n    @Test\n    // GreyTest trace: save | DTO converted, repository saves, saved entity mapped to DTO | BR-019 -> TP-007 -> TC-1410\n    void save_mapsAndReturnsPersistedOrder() {\n        // Arrange\n        LocalDateTime date = LocalDateTime.parse(\"2025-03-08T10:15:30\");\n        OrderDto input = OrderDto.builder().orderId(null).orderDate(date).orderDesc(\"Đơn hàng mới\").orderFee(25.5).cartDto(CartDto.builder().cartId(31).build()).build();\n        when(orderRepository.save(any(Order.class))).thenAnswer(invocation -> {\n            Order entity = invocation.getArgument(0);\n            entity.setOrderId(501);\n            return entity;\n        });\n\n        // Act\n        OrderDto result = orderService.save(input);\n\n        // Assert\n        assertEquals(501, result.getOrderId());\n        assertEquals(date, result.getOrderDate());\n        assertEquals(\"Đơn hàng mới\", result.getOrderDesc());\n        assertEquals(Double.valueOf(25.5), result.getOrderFee());\n        assertEquals(31, result.getCartDto().getCartId());\n        ArgumentCaptor<Order> captor = ArgumentCaptor.forClass(Order.class);\n        verify(orderRepository).save(captor.capture());\n        assertEquals(null, captor.getValue().getOrderId());\n        assertEquals(31, captor.getValue().getCart().getCartId());\n    }\n}"
+  }
+}

@@ -64,6 +64,76 @@ import java.util.Map;
 
 @ExtendWith(MockitoExtension.class)
 class IncrementalGenerationServiceTest {
+    @Test void proposesUnitTestRemovalWhenAnExistingCaseIsRemoved() {
+        useArtifactRepositories();
+        AuthUser user = prepareUpdate("{\"affectedTestPlanIds\":[601]}");
+        SourceUpdate update = sourceUpdateRepository.findByIdAndProjectId(200L, 10L).orElseThrow();
+        var snapshot = java.nio.file.Path.of("candidate");
+        when(sourceUpdateService.getCandidateSourcePath(update)).thenReturn(snapshot);
+        TestCase stale = new TestCase(); stale.setId(701L); stale.setTestPlanId(601L); stale.setStatus(ReviewStatus.APPROVED);
+        when(testCaseRepository.findByTestPlanId(601L)).thenReturn(List.of(stale));
+        UnitTest child = new UnitTest(); child.setId(801L); child.setTestCaseId(701L);
+        when(unitTestRepository.findByTestCaseIdIn(List.of(701L))).thenReturn(List.of(child));
+        SourceUpdateItem childDraft = proposal(SourceUpdateTargetType.UNIT_TEST, 801L);
+        when(sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(200L)).thenReturn(List.of(childDraft));
+        when(sourceUpdateItemRepository.findBySourceUpdateIdAndTargetTypeAndTargetId(200L, SourceUpdateTargetType.UNIT_TEST, 801L))
+                .thenReturn(Optional.of(childDraft));
+        when(aiAgentService.generateSnapshotTestCases(10L, Set.of(601L), snapshot)).thenReturn(new TestCaseResponseDto(List.of()));
+        service.generateIncrementalStage(10L, 200L, GenerationProgressStage.TEST_CASE, user);
+        assertThat(childDraft.getAction()).isEqualTo(SourceUpdateAction.REMOVE);
+        assertThat(childDraft.getAfterData()).isNull();
+        verify(unitTestRepository, org.mockito.Mockito.never()).delete(any());
+    }
+    @Test
+    void regeneratesRetainedTestsWithStaleSourceMetadataWithoutChangingTheirOracle(
+            @org.junit.jupiter.api.io.TempDir java.nio.file.Path candidate) throws Exception {
+        useArtifactRepositories();
+        AuthUser user = prepareUpdate("{\"affectedTestCaseIds\":[401]}");
+        SourceUpdate update = sourceUpdateRepository.findByIdAndProjectId(200L, 10L).orElseThrow();
+        when(sourceUpdateService.getCandidateSourcePath(update)).thenReturn(candidate);
+        java.nio.file.Files.writeString(candidate.resolve("Service.java"),
+                "class Service { int changed() { return 2; } int stable() { return 3; } }");
+        String other = "class Other { int value() { return 4; } }";
+        java.nio.file.Files.writeString(candidate.resolve("Other.java"), other);
+        List<TestCase> approved = java.util.stream.LongStream.rangeClosed(401, 404).mapToObj(id -> {
+            TestCase testCase = new TestCase(); testCase.setId(id); testCase.setStatus(ReviewStatus.APPROVED);
+            testCase.setTestPlanId(601L);
+            testCase.setExpectedResult("Unchanged approved expectation"); return testCase;
+        }).toList();
+        org.mockito.Mockito.lenient().when(testCaseRepository.findByProjectId(10L)).thenReturn(approved);
+        var plan = new com.greytest.entity.TestPlan(); plan.setId(601L); plan.setStatus(ReviewStatus.APPROVED);
+        org.mockito.Mockito.lenient().when(testPlanRepository.findByProjectId(10L)).thenReturn(List.of(plan));
+        UnitTest stale = sourceStampedUnit(502L, 402L, "Service.java", "class Service { int changed() { return 1; } int stable() { return 3; } }");
+        UnitTest aligned = sourceStampedUnit(503L, 403L, "Other.java", other);
+        UnitTest removed = sourceStampedUnit(504L, 404L, "Service.java", "class Service {} ");
+        org.mockito.Mockito.lenient().when(unitTestRepository.findByTestCaseIdIn(any()))
+                .thenReturn(List.of(stale, aligned, removed));
+        SourceUpdateItem deletion = proposal(SourceUpdateTargetType.TEST_CASE, 404L);
+        deletion.setAction(SourceUpdateAction.REMOVE); deletion.setReviewStatus(SourceUpdateReviewStatus.ACCEPTED);
+        when(sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(200L)).thenReturn(List.of(deletion));
+        when(aiAgentService.generateSnapshotUnitTests(eq(10L), any(), eq(candidate)))
+                .thenReturn(new UnitTestResponseDto(List.of()));
+
+        service.generateIncrementalStage(10L, 200L, GenerationProgressStage.UNIT_TEST, user);
+
+        org.mockito.ArgumentCaptor<Set<Long>> targets = org.mockito.ArgumentCaptor.captor();
+        verify(aiAgentService).generateSnapshotUnitTests(eq(10L), targets.capture(), eq(candidate));
+        assertThat(targets.getValue()).containsExactlyInAnyOrder(401L, 402L);
+        assertThat(approved).allSatisfy(testCase -> assertThat(testCase.getExpectedResult())
+                .isEqualTo("Unchanged approved expectation"));
+        verify(testCaseRepository, org.mockito.Mockito.never()).save(any());
+        verify(unitTestRepository, org.mockito.Mockito.never()).save(any());
+    }
+
+    private UnitTest sourceStampedUnit(Long id, Long caseId, String path, String productionSource) {
+        UnitTest test = new UnitTest(); test.setId(id); test.setTestCaseId(caseId);
+        String encoded = java.util.Base64.getEncoder().encodeToString(path.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        test.setSourceCode(com.greytest.service.agent.GenerationSourceFingerprint.PREFIX
+                + com.greytest.service.agent.GenerationSourceFingerprint.hash(productionSource) + " " + encoded
+                + "\nclass ServiceTest { void testValue() {} }");
+        return test;
+    }
+
     @Test void unauthorizedGenerationDoesNotClaimOrChangeAnotherProjectsLease() {
         var checkpoint=org.mockito.Mockito.mock(com.greytest.service.generation.IncrementalCheckpointCoordinator.class);
         org.springframework.test.util.ReflectionTestUtils.setField(service,"checkpoints",checkpoint);

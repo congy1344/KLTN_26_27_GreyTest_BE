@@ -57,18 +57,34 @@ public class UnitTestFileService {
         for (UnitTest test : tests) {
             byFile.computeIfAbsent(test.getFilePath(), key -> new ArrayList<>()).add(test);
         }
-        Set<String> usedClasses = tests.stream().map(test -> test.getPackageName() + "." + test.getTestClassName())
+        Set<String> usedClasses = tests.stream().map(test -> (test.getPackageName() + "." + test.getTestClassName()).toLowerCase(java.util.Locale.ROOT))
                 .collect(Collectors.toCollection(HashSet::new));
+        Set<String> usedPaths = new HashSet<>();
         List<MergedFile> files = new ArrayList<>();
         for (var group : byFile.values()) {
-            files.addAll(mergeCompatibleFixtures(group, usedClasses));
+            for (var merged : mergeCompatibleFixtures(group, usedClasses)) {
+                // Windows ghi đè hai file chỉ khác hoa/thường; giữ riêng class cho từng fixture.
+                while (!usedPaths.add(merged.filePath().replace('\\', '/').toLowerCase(java.util.Locale.ROOT))) {
+                    merged = renameVariant(merged, group.get(0), usedClasses);
+                }
+                files.add(merged);
+            }
         }
         return files;
     }
 
     private List<MergedFile> mergeCompatibleFixtures(List<UnitTest> tests, Set<String> usedClasses) {
-        MergedFile combined = merge(tests);
-        if (tests.size() < 2 || allFixturesCompatible(tests)) return List.of(combined);
+        try {
+            return splitCompatibleFixtures(tests, usedClasses);
+        } catch (StorageException exception) {
+            throw exception;
+        } catch (RuntimeException exception) {
+            throw new StorageException("Không gộp được Unit Test thành file Java chạy được", exception);
+        }
+    }
+
+    private List<MergedFile> splitCompatibleFixtures(List<UnitTest> tests, Set<String> usedClasses) {
+        if (tests.size() < 2 || allFixturesCompatible(tests)) return List.of(merge(tests));
         // Không chọn ngầm setUp/field của record đầu: mỗi biến thể giữ fixture riêng.
         List<List<UnitTest>> variants = new ArrayList<>();
         var ordered = new ArrayList<>(tests);
@@ -101,7 +117,13 @@ public class UnitTestFileService {
         Map<String, String> leftBindings = fixtureStaticBindings(base, left, first.getTestMethodName());
         Map<String, String> rightBindings = fixtureStaticBindings(next, right, second.getTestMethodName());
         Map<String, String> conflicts = new LinkedHashMap<>();
-        next.getImports().forEach(imp -> addImport(base, left, next, right, imp, conflicts));
+        try {
+            next.getImports().forEach(imp -> addImport(base, left, next, right, imp, conflicts));
+        } catch (StorageException exception) {
+            // Giữ binding của từng record khi cùng tên static member thuộc các owner khác nhau.
+            if (exception.getMessage() != null && exception.getMessage().startsWith("Xung dot static import:")) return false;
+            throw exception;
+        }
         qualifyConflictingTypes(right, conflicts);
         Map<String, String> leftFields = fixtureFields(left);
         Map<String, String> rightFields = fixtureFields(right);
@@ -229,7 +251,7 @@ public class UnitTestFileService {
         String stem = oldName + "_GreyTest_" + suffix;
         String name = stem;
         int collision = 2;
-        while (!usedClasses.add(file.packageName() + "." + name)) name = stem + "_" + collision++;
+        while (!usedClasses.add((file.packageName() + "." + name).toLowerCase(java.util.Locale.ROOT))) name = stem + "_" + collision++;
         String newName = name;
         TypeDeclaration<?> type = typeByName(unit, oldName);
         type.setName(newName);
@@ -382,9 +404,9 @@ public class UnitTestFileService {
                 if not defined GREYTEST_JVM_ARGS set "GREYTEST_JVM_ARGS=-Djdk.attach.allowAttachSelf=true -XX:+EnableDynamicAgentLoading"
 
                 if not "!GREYTEST_JUNCTION_RUN!"=="1" (
-                  powershell -NoProfile -ExecutionPolicy Bypass -Command "if ($env:GT_SRC_DIR -match '[^\\x00-\\x7F]') { exit 1 } else { exit 0 }" >nul 2>&1
+                  powershell -NoProfile -ExecutionPolicy Bypass -Command "$gradle = (Test-Path -LiteralPath 'build.gradle') -or (Test-Path -LiteralPath 'build.gradle.kts'); $nested = $false; if ($gradle -and -not ((Test-Path -LiteralPath 'settings.gradle') -or (Test-Path -LiteralPath 'settings.gradle.kts'))) { for ($p = [IO.Directory]::GetParent($env:GT_SRC_DIR); $null -ne $p; $p = $p.Parent) { if ((Test-Path -LiteralPath (Join-Path $p.FullName 'settings.gradle')) -or (Test-Path -LiteralPath (Join-Path $p.FullName 'settings.gradle.kts'))) { $nested = $true; break } } }; if ($env:GT_SRC_DIR -match '[^\\x00-\\x7F]' -or ($gradle -and -not $nested -and $env:GT_SRC_DIR.Length -gt 120)) { exit 1 } else { exit 0 }" >nul 2>&1
                   if errorlevel 1 (
-                    echo [GreyTest] Cảnh báo: Đường dẫn thư mục chứa ký tự có dấu/Unicode: "!GT_SRC_DIR!"
+                    echo [GreyTest] Cảnh báo: Đường dẫn Unicode hoặc quá dài cho build tool Windows: "!GT_SRC_DIR!"
                     echo [GreyTest] Đang tự động tạo Junction ASCII tạm thời để build tool [gradlew/mvnw] hoạt động ổn định...
                     if exist "pom.xml" (
                       call :resolveMaven

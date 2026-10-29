@@ -225,16 +225,18 @@ class UnitTestFileServiceTest {
     }
 
     @Test
-    void rejectsConflictingStaticImports() {
+    void separatesConflictingStaticImportsWithoutChangingTheirBindings() {
         String source1 = "package com.example; import static a.Assertions.assertThat; "
                 + "class UserServiceTest { void first(){ assertThat(true); } }";
         String source2 = "package com.example; import static b.Assertions.assertThat; "
                 + "class UserServiceTest { void second(){ assertThat(true); } }";
 
-        org.assertj.core.api.Assertions.assertThatThrownBy(() -> service.mergeByClass(List.of(
-                test(1L, "first", source1), test(2L, "second", source2))))
-                .isInstanceOf(com.greytest.exception.StorageException.class)
-                .hasMessageContaining("static");
+        var files = service.mergeByClass(List.of(test(1L, "first", source1), test(2L, "second", source2)));
+        assertThat(files).hasSize(2);
+        assertThat(files.get(0).sourceCode()).contains("import static a.Assertions.assertThat;")
+                .doesNotContain("import static b.Assertions.assertThat;");
+        assertThat(files.get(1).sourceCode()).contains("import static b.Assertions.assertThat;")
+                .doesNotContain("import static a.Assertions.assertThat;");
     }
 
     @Test

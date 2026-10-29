@@ -5,6 +5,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.Locale;
 
 import com.github.javaparser.JavaParser;
 import com.github.javaparser.ParserConfiguration;
@@ -32,8 +33,10 @@ final class GeneratedTestApiValidator {
     private final Map<String, String> sourcePaths = new HashMap<>();
     private final List<com.greytest.dto.agent.GenerationContextDtos.ResourceEvidenceDto> resources;
     private final List<String> contextWarnings;
+    private final UnitTestContextDto context;
 
-    private GeneratedTestApiValidator(UnitTestContextDto context) {
+    GeneratedTestApiValidator(UnitTestContextDto context) {
+        this.context = context;
         resources = context.supportingResources() == null ? List.of() : context.supportingResources();
         contextWarnings = context.contextWarnings() == null ? List.of() : context.contextWarnings();
         if (context.classes() == null) return;
@@ -50,14 +53,239 @@ final class GeneratedTestApiValidator {
     }
 
     static List<String> validate(UnitTestContextDto context, CompilationUnit test) {
+        return validate(context, test, null);
+    }
+
+    static List<String> validate(UnitTestContextDto context, CompilationUnit test, Long caseId) {
         var validator = new GeneratedTestApiValidator(context);
         List<String> problems = new ArrayList<>();
+        validator.validateMissingProjectImports(test, problems);
+        validator.validateUninitializedSpies(test, problems);
         test.findAll(ObjectCreationExpr.class).forEach(creation -> validator.validateConstructor(creation, test, problems));
         test.findAll(MethodCallExpr.class).forEach(call -> {
             validator.validateCall(call, test, problems);
             validator.validateNullAssertion(call, test, problems);
+            validator.validateBigDecimalAssertion(call, test, caseId, problems);
+            validator.validateUncapturedRead(call, test, problems);
+            validator.validateReferenceIdentity(call, test, problems);
         });
         return problems;
+    }
+
+    private void validateUninitializedSpies(CompilationUnit test, List<String> problems) {
+        for (var field : test.findAll(com.github.javaparser.ast.body.FieldDeclaration.class)) {
+            boolean spy = Boolean.TRUE.equals(GeneratedUnitTestSemanticValidator.isMockitoSpyDependency(field, test));
+            if (!spy || !field.getElementType().isClassOrInterfaceType()
+                    || field.getAnnotations().stream().anyMatch(a -> a.getName().getIdentifier().equals("InjectMocks"))) continue;
+            for (var variable : field.getVariables()) {
+                if (!variable.getType().isClassOrInterfaceType()
+                        || variable.getInitializer().filter(e -> !e.isNullLiteralExpr()).isPresent()) continue;
+                var owner = field.findAncestor(ClassOrInterfaceDeclaration.class).orElse(null);
+                if (owner == null || !owner.getExtendedTypes().isEmpty()) continue;
+                // Constructor/instance initializer chạy trước MockitoExtension, khác với BeforeEach.
+                boolean assignedBeforeExtension = owner.findAll(com.github.javaparser.ast.expr.AssignExpr.class).stream()
+                        .filter(a -> a.findAncestor(ClassOrInterfaceDeclaration.class).filter(owner::equals).isPresent()
+                                && a.findAncestor(com.github.javaparser.ast.expr.LambdaExpr.class).isEmpty())
+                        .filter(a -> a.findAncestor(com.github.javaparser.ast.body.ConstructorDeclaration.class).isPresent()
+                                || a.findAncestor(com.github.javaparser.ast.body.InitializerDeclaration.class).filter(i -> !i.isStatic()).isPresent())
+                        .anyMatch(a -> Set.of(variable.getNameAsString(), "this." + variable.getNameAsString()).contains(a.getTarget().toString())
+                                && !a.getValue().isNullLiteralExpr());
+                if (assignedBeforeExtension) continue;
+                List<String> errors = new ArrayList<>();
+                validateConstructor(new ObjectCreationExpr().setType(variable.getType().asClassOrInterfaceType().clone()), test, errors);
+                errors.forEach(error -> problems.add("Uninitialized @Spy '" + variable.getNameAsString() + "': " + error
+                        + " Mockito constructs this field before @BeforeEach. Construct the real collaborator explicitly with its verified dependencies."));
+            }
+        }
+    }
+
+    private void validateReferenceIdentity(MethodCallExpr call, CompilationUnit test, List<String> problems) {
+        if (!call.getNameAsString().equals("assertSame") || call.getArguments().size() < 2 || call.getArguments().size() > 3) return;
+        String junit = junitAssertionsOwner(call, test);
+        if (junit == null) return;
+        int first = junit.equals("org.junit.Assert") ? call.getArguments().size() - 2 : 0;
+        var left = declaredValueType(call.getArgument(first), test);
+        var right = declaredValueType(call.getArgument(first + 1), test);
+        if (left == null || right == null) return;
+        var a = declaration(left.type(), left.unit());
+        var b = declaration(right.type(), right.unit());
+        // Hai class cụ thể chỉ kế thừa Object không thể là cùng một instance.
+        if (a != null && b != null && a != b && !a.isInterface() && !b.isInterface()
+                && a.getExtendedTypes().isEmpty() && b.getExtendedTypes().isEmpty()) {
+            problems.add("Impossible reference identity: " + a.getNameAsString() + " and " + b.getNameAsString()
+                    + " are unrelated concrete source classes. Preserve approved mapped DTO fields; do not assert entity-to-DTO identity.");
+        }
+    }
+
+    private void validateMissingProjectImports(CompilationUnit test, List<String> problems) {
+        if (context.classes() == null || test.getPackageDeclaration().isEmpty() || test.findAll(ClassOrInterfaceDeclaration.class).stream()
+                .anyMatch(type -> !type.getExtendedTypes().isEmpty() || !type.getImplementedTypes().isEmpty())) return;
+        // Wildcard chưa resolve có thể cung cấp kiểu lồng; không kết luận thiếu import từ tên đơn.
+        if (test.getImports().stream().anyMatch(item -> item.isAsterisk() && (!item.isStatic()
+                || !Set.of("org.mockito.Mockito", "org.mockito.ArgumentMatchers", "org.junit.Assert", "org.junit.jupiter.api.Assertions")
+                        .contains(item.getNameAsString())))) return;
+        Set<String> reported = new java.util.HashSet<>();
+        for (var reference : test.findAll(ClassOrInterfaceType.class)) {
+            String name = reference.getNameWithScope();
+            if (reference.getScope().isPresent() || qualifiedType(reference, test) != null
+                    || test.findAll(com.github.javaparser.ast.type.TypeParameter.class).stream().anyMatch(type -> type.getNameAsString().equals(name))
+                    || test.findAll(com.github.javaparser.ast.body.TypeDeclaration.class).stream().anyMatch(type -> type.getNameAsString().equals(name))
+                    || test.getImports().stream().anyMatch(item -> !item.isAsterisk() && item.getName().getIdentifier().equals(name))) continue;
+            String local = test.getPackageDeclaration().map(p -> p.getNameAsString() + ".").orElse("") + name;
+            var candidates = context.classes().stream().filter(type -> name.equals(type.className()) && declarations.containsKey(type.qualifiedName()))
+                    .map(type -> type.qualifiedName()).distinct().toList();
+            if (!candidates.isEmpty() && !candidates.contains(local) && reported.add(name)) {
+                problems.add("Missing project type import for '" + name + "'. The supplied source declares " + candidates
+                        + ". Use the exact source-supported import or fully qualified name in this complete test file; do not rely on imports from other generated cases.");
+            }
+        }
+    }
+
+    ClassOrInterfaceDeclaration declaration(String qualifiedName) {
+        return declarations.get(qualifiedName);
+    }
+
+    ClassOrInterfaceDeclaration declaration(Type type, CompilationUnit unit) {
+        return type != null && type.isClassOrInterfaceType() ? declarations.get(qualifiedType(type.asClassOrInterfaceType(), unit)) : null;
+    }
+
+    private void validateBigDecimalAssertion(MethodCallExpr call, CompilationUnit test, Long caseId, List<String> problems) {
+        if (!call.getNameAsString().equals("assertEquals") || call.getArguments().size() < 2
+                || call.getArguments().size() > 3) return;
+        String junit = junitAssertionsOwner(call, test);
+        if (junit == null) return;
+        int first = junit.equals("org.junit.Assert") ? call.getArguments().size() - 2 : 0;
+        Expression expected = call.getArgument(first);
+        Expression actual = call.getArgument(first + 1);
+        boolean stringRepresentation = expected.isStringLiteralExpr() && actual.isMethodCallExpr()
+                && Set.of("toString", "toPlainString", "toEngineeringString").contains(actual.asMethodCallExpr().getNameAsString())
+                && actual.asMethodCallExpr().getArguments().isEmpty() && actual.asMethodCallExpr().getScope().isPresent();
+        if (stringRepresentation) actual = actual.asMethodCallExpr().getScope().orElseThrow();
+        SourceValueType actualType = declaredValueType(actual, test);
+        if (!(stringRepresentation || isBigDecimalLiteral(expected, test)) || actualType == null || !actualType.type().isClassOrInterfaceType()
+                || !"java.math.BigDecimal".equals(qualifiedType(actualType.type().asClassOrInterfaceType(), actualType.unit()))) return;
+        if (requiresExactDecimalComparison(caseId, actual)) return;
+        // Không thêm ràng buộc scale vào oracle chỉ yêu cầu giá trị số, dù source hiện tại có thể tình cờ khớp.
+        problems.add("BigDecimal numeric assertion contract for Test Case " + caseId + ": " + call
+                + " compares both value and scale, but its approved contract has no explicit decimal representation requirement. "
+                + "Preserve the approved input and expected numeric value; use assertNotNull(actual) and "
+                + "assertEquals(0, expected.compareTo(actual)) instead. Do not change fixtures, production or the business expectation to make the test pass.");
+    }
+
+    private boolean isBigDecimalLiteral(Expression value, CompilationUnit test) {
+        if (value.isEnclosedExpr()) return isBigDecimalLiteral(value.asEnclosedExpr().getInner(), test);
+        if (value.isObjectCreationExpr()) {
+            return "java.math.BigDecimal".equals(qualifiedType(value.asObjectCreationExpr().getType(), test));
+        }
+        Expression owner;
+        if (value.isFieldAccessExpr() && Set.of("ZERO", "ONE", "TEN").contains(value.asFieldAccessExpr().getNameAsString())) {
+            owner = value.asFieldAccessExpr().getScope();
+        } else if (value.isMethodCallExpr() && value.asMethodCallExpr().getNameAsString().equals("valueOf")
+                && value.asMethodCallExpr().getScope().isPresent()) {
+            owner = value.asMethodCallExpr().getScope().get();
+        } else return false;
+        if (expressionType(owner, test) != null) return false;
+        var parsed = new JavaParser().parseClassOrInterfaceType(owner.toString()).getResult();
+        return parsed.isPresent() && "java.math.BigDecimal".equals(qualifiedType(parsed.get(), test));
+    }
+
+    private boolean requiresExactDecimalComparison(Long caseId, Expression actual) {
+        if (caseId == null || context.approvedTestCases() == null) return true;
+        var approved = context.approvedTestCases().stream().filter(item -> caseId.equals(item.id())).findFirst().orElse(null);
+        if (approved == null || approved.expectedResult() == null || approved.expectedResult().isBlank()) return true;
+        List<String> contract = new ArrayList<>();
+        contract.add(approved.description());
+        contract.add(approved.preconditions());
+        contract.add(approved.expectedResult());
+        if (approved.testData() != null) contract.add(approved.testData().toString());
+        Set<Long> ruleIds = new java.util.HashSet<>();
+        if (context.approvedTestPlans() != null) {
+            context.approvedTestPlans().stream().filter(plan -> java.util.Objects.equals(approved.testPlanId(), plan.id()))
+                    .forEach(plan -> {
+                        contract.add(plan.title());
+                        contract.add(plan.description());
+                        ruleIds.add(plan.businessRuleId());
+                        if (plan.coveredRuleIds() != null) ruleIds.addAll(plan.coveredRuleIds());
+                    });
+        }
+        if (context.approvedBusinessRules() != null) {
+            context.approvedBusinessRules().stream().filter(rule -> ruleIds.contains(rule.id()))
+                    .forEach(rule -> contract.add(rule.description()));
+        }
+        // shortcut: Chỉ nhận dấu hiệu biểu diễn rõ trong hợp đồng đã duyệt; không suy scale từ ký hiệu 0.00 hay @Column.
+        Expression subjectValue = actual;
+        if (actual.isNameExpr()) {
+            var method = actual.findAncestor(MethodDeclaration.class).orElse(null);
+            if (method != null) {
+                String alias = actual.asNameExpr().getNameAsString();
+                var locals = method.findAll(VariableDeclarator.class).stream().filter(v -> v.getNameAsString().equals(alias)).toList();
+                if (locals.size() == 1) {
+                    var local = locals.get(0);
+                    var statement = local.getParentNode().flatMap(Node::getParentNode).filter(ExpressionStmt.class::isInstance).orElse(null);
+                    var block = statement == null ? null : statement.getParentNode().filter(BlockStmt.class::isInstance).map(BlockStmt.class::cast).orElse(null);
+                    boolean reassigned = method.findAll(com.github.javaparser.ast.expr.AssignExpr.class).stream()
+                            .anyMatch(assignment -> assignment.getTarget().isNameExpr() && assignment.getTarget().asNameExpr().getNameAsString().equals(alias));
+                    if (!reassigned && block != null && block.isAncestorOf(actual) && local.getRange().isPresent() && actual.getRange().isPresent()
+                            && local.getRange().get().end.isBefore(actual.getRange().get().begin) && local.getInitializer().isPresent()) {
+                        subjectValue = local.getInitializer().get();
+                    }
+                }
+            }
+        }
+        boolean subjectKnown = subjectValue.isFieldAccessExpr() || subjectValue.isMethodCallExpr()
+                && subjectValue.asMethodCallExpr().getArguments().isEmpty()
+                && subjectValue.asMethodCallExpr().getNameAsString().startsWith("get");
+        String name = subjectValue.isMethodCallExpr() ? subjectValue.asMethodCallExpr().getNameAsString()
+                : subjectValue.isNameExpr() ? subjectValue.asNameExpr().getNameAsString()
+                : subjectValue.isFieldAccessExpr() ? subjectValue.asFieldAccessExpr().getNameAsString() : "";
+        if (name.startsWith("get") && name.length() > 3) name = name.substring(3);
+        String field = name.isEmpty() ? "(?!)" : java.util.Arrays.stream(name.replaceAll("(?<=[a-z0-9])(?=[A-Z])", " ").split("[\\s_]+"))
+                .map(part -> java.util.regex.Pattern.quote(part.toLowerCase(Locale.ROOT))).collect(java.util.stream.Collectors.joining("\\s*"));
+        String subject = "(?:\\b" + field + "\\b|\\bamount\\b|\\bmoney\\b|\\bcurrency\\b|số\\s+tiền)";
+        String modifiers = "(?:(?:must|should|shall|is|be|have|has|the|a|exactly|always|textual|text|string|decimal|được|phải)\\s+){0,8}";
+        String representation = "(?:representation|format(?:ted|ting)?|biểu\\s+diễn|định\\s+dạng)";
+        var fieldRepresentation = java.util.regex.Pattern.compile(subject + "(?:['’]s)?\\s+" + modifiers + representation
+                + "|(?:(?:textual|text|string|decimal)\\s+)?" + representation + "\\s+(?:of|for|của|cho)\\s+" + subject);
+        return contract.stream().filter(java.util.Objects::nonNull).map(text -> text.toLowerCase(Locale.ROOT))
+                .anyMatch(text -> text.matches("(?s).*(\\bscale\\b|\\bprecision\\b|\\bround(?:ing|ed)?\\b|decimal places?|decimal digits?"
+                        + "|thập phân|làm tròn|chữ\\s+số\\s+sau\\s+dấu\\s+(?:phẩy|chấm)|decimal\\s+(?:representation|format|text)"
+                        + "|bigdecimal\\.(?:zero|one|ten)|bigdecimal\\s*\\(|setscale|striptrailingzeros).*$")
+                        || fieldRepresentation.matcher(text).find()
+                        // Chưa gắn được giá trị với property thì không ép bỏ một oracle biểu diễn đã duyệt.
+                        || !subjectKnown && text.matches("(?s).*(representation|format(?:ted|ting)?|biểu diễn|định dạng).*$"));
+    }
+
+    private void validateUncapturedRead(MethodCallExpr call, CompilationUnit test, List<String> problems) {
+        if (!call.getNameAsString().equals("getValue") || !call.getArguments().isEmpty()
+                || call.getScope().filter(Expression::isNameExpr).isEmpty()
+                || call.findAncestor(com.github.javaparser.ast.expr.LambdaExpr.class).isPresent()) return;
+        Expression scope = call.getScope().orElseThrow();
+        var type = expressionType(scope, test);
+        if (type == null || !type.isClassOrInterfaceType()
+                || !"org.mockito.ArgumentCaptor".equals(qualifiedType(type.asClassOrInterfaceType(), test))) return;
+        var method = call.findAncestor(MethodDeclaration.class).orElse(null);
+        if (method == null) return;
+        String name = scope.asNameExpr().getNameAsString();
+        var locals = method.findAll(VariableDeclarator.class).stream().filter(v -> v.getNameAsString().equals(name)).toList();
+        if (locals.size() != 1 || locals.get(0).getInitializer().filter(Expression::isMethodCallExpr).isEmpty()) return;
+        var local = locals.get(0);
+        var statement = local.getParentNode().flatMap(Node::getParentNode).filter(ExpressionStmt.class::isInstance).orElse(null);
+        var block = statement == null ? null : statement.getParentNode().filter(BlockStmt.class::isInstance).map(BlockStmt.class::cast).orElse(null);
+        if (block == null || !block.isAncestorOf(call) || local.getRange().isEmpty() || call.getRange().isEmpty()
+                || !local.getRange().get().end.isBefore(call.getRange().get().begin)) return;
+        var factory = locals.get(0).getInitializer().orElseThrow().asMethodCallExpr();
+        if (!factory.getNameAsString().equals("forClass") || factory.getScope().isEmpty()
+                || expressionType(factory.getScope().get(), test) != null) return;
+        var owner = new JavaParser().parseClassOrInterfaceType(factory.getScope().get().toString()).getResult();
+        if (owner.isEmpty() || !"org.mockito.ArgumentCaptor".equals(qualifiedType(owner.get(), test))) return;
+        // Chỉ kết luận với captor mới tạo, không truyền hoặc alias sang code khác có thể capture.
+        boolean readsOnly = method.findAll(com.github.javaparser.ast.expr.NameExpr.class).stream()
+                .filter(ref -> ref.getNameAsString().equals(name)).allMatch(ref -> ref.getParentNode()
+                        .filter(MethodCallExpr.class::isInstance).map(MethodCallExpr.class::cast)
+                        .filter(read -> read.getScope().filter(ref::equals).isPresent()
+                                && Set.of("getValue", "getAllValues").contains(read.getNameAsString())).isPresent());
+        if (readsOnly) problems.add("ArgumentCaptor '" + name + "' is read by getValue() but never captures an argument. "
+                + "Use verify(mock).method(" + name + ".capture()) before reading, or use same(result) for an approved identity requirement. Preserve the approved assertions.");
     }
 
     private void validateNullAssertion(MethodCallExpr call, CompilationUnit test, List<String> problems) {
@@ -85,7 +313,7 @@ final class GeneratedTestApiValidator {
         }
     }
 
-    private String junitAssertionsOwner(MethodCallExpr call, CompilationUnit test) {
+    String junitAssertionsOwner(MethodCallExpr call, CompilationUnit test) {
         Set<String> owners = Set.of("org.junit.Assert", "org.junit.jupiter.api.Assertions");
         if (call.getScope().isPresent()) {
             String scope = call.getScope().get().toString();
@@ -103,6 +331,8 @@ final class GeneratedTestApiValidator {
                 .filter(ClassOrInterfaceDeclaration.class::isInstance).map(ClassOrInterfaceDeclaration.class::cast)
                 .anyMatch(owner -> !owner.getExtendedTypes().isEmpty() || !owner.getImplementedTypes().isEmpty())) return null;
         var importedOwners = test.getImports().stream().filter(imported -> imported.isStatic())
+                // Mockito không khai báo assertion JUnit; wildcard này không tạo xung đột assertEquals/assertNull.
+                .filter(imported -> !imported.isAsterisk() || !imported.getNameAsString().equals("org.mockito.Mockito"))
                 .filter(imported -> imported.isAsterisk() || imported.getName().getIdentifier().equals(call.getNameAsString()))
                 .map(imported -> imported.isAsterisk() ? imported.getNameAsString()
                         : imported.getName().getQualifier().map(Object::toString).orElse(""))
@@ -257,7 +487,7 @@ final class GeneratedTestApiValidator {
         }
     }
 
-    private boolean lombok(NodeWithAnnotations<?> type, CompilationUnit unit, String name) {
+    boolean lombok(NodeWithAnnotations<?> type, CompilationUnit unit, String name) {
         return type.getAnnotations().stream().anyMatch(annotation -> {
             String declared = annotation.getNameAsString();
             return declared.equals("lombok." + name) || declared.equals("lombok.experimental." + name)
@@ -363,6 +593,18 @@ final class GeneratedTestApiValidator {
         if (actual == null || !actual.isClassOrInterfaceType() || !expected.isClassOrInterfaceType()) return;
         var expectedClass = expected.asClassOrInterfaceType();
         var actualClass = actual.asClassOrInterfaceType();
+        String expectedName = qualifiedType(expectedClass, expectedUnit);
+        String actualName = qualifiedType(actualClass, actualUnit);
+        var expectedDeclaration = declarations.get(expectedName);
+        var actualDeclaration = declarations.get(actualName);
+        // Hai class source khác nhau và actual chỉ kế thừa Object thì không thể gán cho nhau.
+        if (expectedDeclaration != null && actualDeclaration != null && !expectedName.equals(actualName)
+                && !expectedDeclaration.isInterface() && !actualDeclaration.isInterface()
+                && actualDeclaration.getExtendedTypes().isEmpty()) {
+            problems.add("Source type contract for " + method + ": expected " + expectedName + ", got " + actualName
+                    + ". Use the declared production parameter/return type; these source classes are not assignable.");
+            return;
+        }
         if (expectedClass.getTypeArguments().filter(arguments -> !arguments.isEmpty()).isEmpty()
                 || actualClass.getTypeArguments().filter(arguments -> !arguments.isEmpty()).isEmpty()) return;
         String raw = qualifiedType(expectedClass, expectedUnit);
@@ -390,7 +632,7 @@ final class GeneratedTestApiValidator {
         return raw + "<" + String.join(",", arguments) + ">";
     }
 
-    private Type expressionType(Expression expression, CompilationUnit test) {
+    Type expressionType(Expression expression, CompilationUnit test) {
         if (insideAnonymousClass(expression)) return null;
         if (expression.isObjectCreationExpr()) return expression.asObjectCreationExpr().getType();
         if (expression.isEnclosedExpr()) return expressionType(expression.asEnclosedExpr().getInner(), test);
@@ -426,7 +668,7 @@ final class GeneratedTestApiValidator {
                 .map(VariableDeclarator::getType).findFirst().orElse(null);
     }
 
-    private String qualifiedType(ClassOrInterfaceType type, CompilationUnit unit) {
+    String qualifiedType(ClassOrInterfaceType type, CompilationUnit unit) {
         String name = type.getNameWithScope();
         if (name.contains(".") && Character.isLowerCase(name.charAt(0))) return name;
         if (unit.findAll(com.github.javaparser.ast.type.TypeParameter.class).stream()

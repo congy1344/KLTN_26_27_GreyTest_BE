@@ -145,18 +145,18 @@ public class IncrementalCheckpointCoordinator {
                 && item.getTargetType()!=com.greytest.entity.enums.SourceUpdateTargetType.METHOD && item.getBeforeData()==null)
             throw new IllegalArgumentException("Artifact tạm thiếu snapshot ban đầu; hãy tiếp tục sinh để giải quyết xung đột "+item.getId());
         String current=activeSnapshot(item);
-        boolean same=item.getAction()==com.greytest.entity.enums.SourceUpdateAction.CREATE
-            ? Objects.equals(temporaryContent(item.getBeforeData()),temporaryContent(current)) : Objects.equals(item.getBeforeData(),current);
+        boolean temporary=item.getAction()==com.greytest.entity.enums.SourceUpdateAction.CREATE;
+        boolean same=Objects.equals(artifactContent(item.getBeforeData(),temporary),artifactContent(current,temporary));
         if(item.getBeforeData()!=null && !same)
             throw new IllegalArgumentException("Artifact đang hoạt động đã được chỉnh sửa sau khi tạo đề xuất "+item.getId()+"; cần giải quyết xung đột trước Apply");
     }
 
-    private JsonNode temporaryContent(String snapshot) {
+    private JsonNode artifactContent(String snapshot,boolean temporary) {
         if(snapshot==null) return null;
         try {
             var content=mapper.readTree(snapshot);
             // Timestamp VM có thể nhiều chữ số hơn PostgreSQL; provenance so nội dung và trạng thái thực tế.
-            if(content instanceof com.fasterxml.jackson.databind.node.ObjectNode row) {
+            if(temporary && content instanceof com.fasterxml.jackson.databind.node.ObjectNode row) {
                 row.remove(List.of("createdAt","updatedAt"));
                 if(row.path("plan") instanceof com.fasterxml.jackson.databind.node.ObjectNode plan) plan.remove(List.of("createdAt","updatedAt"));
             }
@@ -235,6 +235,13 @@ public class IncrementalCheckpointCoordinator {
 
     /** Apply kiểm tra lại input và output hiện thời; cache không được xem như quyết định duyệt. */
     public void assertReadyForApply(Long updateId) {
+        com.greytest.service.agent.GenerationContextBuilder.withInputSnapshot(() -> {
+            assertReadyWithInputs(updateId);
+            return null;
+        });
+    }
+
+    private void assertReadyWithInputs(Long updateId) {
         var update=updates.findById(updateId).orElseThrow();
         GenerationImpactValidator.parse(mapper,update.getImpactSummary());
         assertTemporaryArtifactsUnchanged(updateId);
@@ -246,14 +253,15 @@ public class IncrementalCheckpointCoordinator {
                 var marker=store.find(updateId,stage.name(),"__stage__").filter(c->"SUCCEEDED".equals(c.state()))
                     .orElseThrow(()->new IllegalArgumentException("Chưa hoàn tất stage "+stage));
                 try {
-                    for(var target:mapper.readTree(marker.outputJson()).path("targets")) {
-                        Long id=target.asLong();
+                    Set<Long> targets=new LinkedHashSet<>();
+                    mapper.readTree(marker.outputJson()).path("targets").forEach(target->targets.add(target.asLong()));
+                    for(Long id:targets) {
                         var checkpoint=store.find(updateId,stage.name(),id.toString()).filter(c->"SUCCEEDED".equals(c.state())).orElseThrow();
-                        Object context=agent.snapshotContext(stage,update.getProjectId(),Set.of(id),source);
+                        Object context=targetContext(stage,update.getProjectId(),id,targets,source);
                         var fp=fingerprints.fingerprint(prompt(stage),context,source);
                         if(!fp.value().equals(checkpoint.fingerprint())) throw new IllegalArgumentException("Input đã thay đổi ở "+stage+" "+id+"; hãy tiếp tục sinh");
                         Object output=responseFromItems(stage,current.stream().filter(i->belongs(stage,i,id)).toList());
-                        var outputFp=fingerprints.outputFingerprint(output,source);
+                        var outputFp=fingerprints.outputFingerprint(output,source,context);
                         var envelope=mapper.readTree(checkpoint.outputJson());
                         if(!outputFp.reusable() || !outputFp.value().equals(envelope.path("outputFingerprint").asText()))
                             throw new IllegalArgumentException("Dependency của output đã thay đổi ở "+stage+" "+id+"; hãy tiếp tục sinh");
@@ -280,9 +288,11 @@ public class IncrementalCheckpointCoordinator {
         run.targets().computeIfAbsent(stage,ignored->ConcurrentHashMap.newKeySet()).addAll(ids);
         long started=System.nanoTime();
         Map<Long,GenerationFingerprintService.Fingerprint> inputs=new LinkedHashMap<>();
+        Map<Long,Object> contexts=new LinkedHashMap<>();
         Set<Long> pending=new LinkedHashSet<>();
         for(Long id:ids.stream().sorted().toList()) {
-            Object context=agent.snapshotContext(stage,projectId,Set.of(id),source);
+            Object context=targetContext(stage,projectId,id,ids,source);
+            contexts.put(id,context);
             var fp=fingerprints.fingerprint(prompt(stage),context,source); inputs.put(id,fp);
             var saved=store.find(updateId,stage.name(),id.toString());
             boolean reusable=false;
@@ -296,7 +306,7 @@ public class IncrementalCheckpointCoordinator {
                     boolean resolved="BLOCKED".equals(saved.get().state()) && envelope.hasNonNull("resolution");
                     if(resolved) current=items.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId).stream().filter(i->belongs(stage,i,id)).toList();
                     boolean exact=outputDigest(mapper,current).equals(saved.get().outputDigest());
-                    var outputFp=fingerprints.outputFingerprint(envelope.path("response"),source);
+                    var outputFp=fingerprints.outputFingerprint(envelope.path("response"),source,context);
                     exact=exact && outputFp.reusable() && outputFp.value().equals(envelope.path("outputFingerprint").asText());
                     boolean reviewed=!current.isEmpty() && current.stream().allMatch(i-> {
                         long oldRevision=envelope.path("revisions").path(i.getId().toString()).asLong(Long.MAX_VALUE);
@@ -312,17 +322,22 @@ public class IncrementalCheckpointCoordinator {
                     } else if((!expected.isEmpty() && current.size()==expected.size() && reviewed) || (resolved && !current.isEmpty())) {
                         R output=responseType.cast(responseFromItems(stage,current));
                         agent.validateSnapshotOutput(stage,projectId,context,output,source);
-                        if(!fingerprints.outputFingerprint(output,source).reusable()) throw new LlmResponseException("Output dependencies remain unresolved");
+                        if(!fingerprints.outputFingerprint(output,source,context).reusable()) throw new LlmResponseException("Output dependencies remain unresolved");
                         var validatedItems=current;
                         transaction.executeWithoutResult(status->store.complete(run.lease(),stage.name(),id.toString(),fp.value(),fp.provenance(),
-                            envelope(output,validatedItems,source),outputDigest(mapper,validatedItems)));
+                            envelope(output,validatedItems,source,context),outputDigest(mapper,validatedItems)));
                         reusable=true;
                     }
                 } catch(Exception invalid) { GenerationJobContext.increment("checkpoint.invalid"); }
             }
-            if(reusable) GenerationJobContext.increment("checkpoint.skip");
-            else pending.add(id);
+            if(!reusable) pending.add(id);
         }
+        if(stage==GenerationProgressStage.TEST_PLAN && !pending.isEmpty()) {
+            Set<Long> pendingMethods=new HashSet<>();
+            for(Long id:pending) pendingMethods.add(rules.findById(id).orElseThrow().getMethodId());
+            for(Long id:ids) if(pendingMethods.contains(rules.findById(id).orElseThrow().getMethodId())) pending.add(id);
+        }
+        for(Long id:ids) if(!pending.contains(id)) GenerationJobContext.increment("checkpoint.skip");
         if(pending.isEmpty()) {
             GenerationJobContext.increment("batch.skip");
             GenerationJobContext.recordDuration(stage.name(),System.nanoTime()-started); return null;
@@ -352,7 +367,7 @@ public class IncrementalCheckpointCoordinator {
                 assertTemporaryArtifactsUnchanged(updateId);
                 com.greytest.service.agent.GenerationContextBuilder.withInputSnapshot(()-> {
                 for(Long id:eligible) {
-                    var fresh=fingerprints.fingerprint(prompt(stage),agent.snapshotContext(stage,projectId,Set.of(id),source),source);
+                    var fresh=fingerprints.fingerprint(prompt(stage),targetContext(stage,projectId,id,ids,source),source);
                     if(!fresh.value().equals(inputs.get(id).value())) throw new LlmResponseException("Generation input changed while AI was running; retry required");
                 }
                 return null;
@@ -367,14 +382,14 @@ public class IncrementalCheckpointCoordinator {
                     if(produced.isEmpty() || emptyOutput(subset))
                         throw new LlmResponseException("Output incomplete for "+stage+" target "+id);
                     var fp=inputs.get(id);
-                    var outputFp=fingerprints.outputFingerprint(subset,source);
+                    var outputFp=fingerprints.outputFingerprint(subset,source,contexts.get(id));
                     if(outputFp.reusable()) {
                         store.complete(run.lease(),stage.name(),id.toString(),fp.value(),fp.provenance(),
-                            envelope(subset,produced,source),outputDigest(mapper,produced));
+                            envelope(subset,produced,source,contexts.get(id)),outputDigest(mapper,produced));
                     } else {
                         unresolvedOutputs.add(id);
                         store.mark(run.lease(),stage.name(),id.toString(),"BLOCKED",fp.value(),fp.provenance(),
-                            envelope(subset,produced,source),"Chưa xác minh được dependency của output: "+outputFp.provenance());
+                            envelope(subset,produced,source,contexts.get(id)),"Chưa xác minh được dependency của output: "+outputFp.provenance());
                     }
                 }
             });
@@ -435,12 +450,12 @@ public class IncrementalCheckpointCoordinator {
         } catch(java.io.IOException invalid) { return false; }
     }
 
-    private String envelope(Object response,List<SourceUpdateItem> produced,Path source) {
+    private String envelope(Object response,List<SourceUpdateItem> produced,Path source,Object context) {
         Map<String,Long> revisions=new TreeMap<>();
         Map<String,String> digests=new TreeMap<>();
         produced.forEach(item->revisions.put(item.getId().toString(),item.getUserRevision()==null ? 0L : item.getUserRevision()));
         produced.forEach(item->digests.put(item.getId().toString(),outputDigest(mapper,List.of(item))));
-        var outputFp=fingerprints.outputFingerprint(response,source);
+        var outputFp=fingerprints.outputFingerprint(response,source,context);
         return json(Map.of("response",response,"itemIds",produced.stream().map(SourceUpdateItem::getId).toList(),"revisions",revisions,"itemDigests",digests,
             "outputFingerprint",outputFp.value(),"outputProvenance",outputFp.provenance(),"outputReusable",outputFp.reusable()));
     }
@@ -479,6 +494,17 @@ public class IncrementalCheckpointCoordinator {
             default -> throw new LlmResponseException("Unsupported kept artifact");
         };
         return mapper.valueToTree(output);
+    }
+
+    /** Checkpoint TP giữ trọn nhóm BR của method để cùng phạm vi với plan phủ nhiều rule. */
+    private Object targetContext(GenerationProgressStage stage,Long projectId,Long id,Set<Long> targets,Path source) {
+        Set<Long> selected=Set.of(id);
+        if(stage==GenerationProgressStage.TEST_PLAN) {
+            Long methodId=rules.findById(id).orElseThrow().getMethodId();
+            selected=targets.stream().filter(target->Objects.equals(methodId,rules.findById(target).orElseThrow().getMethodId()))
+                    .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
+        }
+        return agent.snapshotContext(stage,projectId,selected,source);
     }
 
     private boolean belongs(GenerationProgressStage stage,SourceUpdateItem item,Long id) {

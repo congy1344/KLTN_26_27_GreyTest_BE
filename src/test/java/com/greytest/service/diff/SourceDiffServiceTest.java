@@ -16,6 +16,21 @@ import com.greytest.service.analysis.JavaParserHelper;
 
 class SourceDiffServiceTest {
     @Test
+    void keepsConcreteServiceClassificationInSourceUpdates(@TempDir Path root) throws IOException {
+        Path base = root.resolve("base/src/main/java/demo");
+        Path candidate = root.resolve("candidate/src/main/java/demo");
+        for (Path directory : List.of(base, candidate)) {
+            Files.createDirectories(directory);
+            Files.writeString(directory.resolve("Tokens.java"), "package demo; @org.springframework.stereotype.Service interface Tokens { String token(); }");
+            Files.writeString(directory.resolve("DefaultTokens.java"), "package demo; @org.springframework.stereotype.Component class DefaultTokens implements Tokens { public String token() { return \""
+                    + (directory.equals(base) ? "before" : "after") + "\"; } }");
+        }
+        assertThat(diffService.compareSnapshots(root.resolve("base"), root.resolve("candidate")))
+                .filteredOn(item -> item.className().equals("DefaultTokens"))
+                .singleElement().satisfies(item -> assertThat(item.isServiceMethod()).isTrue());
+    }
+
+    @Test
     void scansCandidateExactlyOnce(@TempDir Path tempDir) throws IOException {
         Path base = Files.createDirectory(tempDir.resolve("base"));
         Path candidate = Files.createDirectory(tempDir.resolve("candidate"));

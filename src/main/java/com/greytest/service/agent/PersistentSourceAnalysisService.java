@@ -21,7 +21,7 @@ import com.greytest.service.agent.SnapshotAnalysisLoader.ParsedSnapshot;
 /** Lưu analysis source bất biến theo digest/version, tách biệt identity và artifact trong CSDL. */
 @Service
 public class PersistentSourceAnalysisService {
-    private static final int FORMAT_VERSION = 1;
+    private static final int FORMAT_VERSION = 2;
     private final SourceRevisionRepository revisions;
     private final ObjectMapper json;
 
