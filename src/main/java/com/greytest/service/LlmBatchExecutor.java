@@ -109,10 +109,9 @@ public class LlmBatchExecutor {
 
         Locale locale = LocaleContextHolder.getLocale();
         Object completionLock = new Object();
-        List<java.util.concurrent.BlockingQueue<BatchTask<I>>> queues = new ArrayList<>(workerCount);
-        for (int w = 0; w < workerCount; w++) queues.add(new java.util.concurrent.LinkedBlockingQueue<>());
+        java.util.concurrent.BlockingQueue<BatchTask<I>> queue = new java.util.concurrent.LinkedBlockingQueue<>();
         for (int i = 0; i < inputs.size(); i++) {
-            queues.get(i % workerCount).offer(new BatchTask<>(i, i + 1, inputs.get(i)));
+            queue.offer(new BatchTask<>(i, i + 1, inputs.get(i)));
         }
 
         List<O> outputs = java.util.Collections.synchronizedList(new ArrayList<>(java.util.Collections.nCopies(inputs.size(), null)));
@@ -121,13 +120,11 @@ public class LlmBatchExecutor {
 
         List<CompletableFuture<Void>> workers = new ArrayList<>(workerCount);
         for (int w = 0; w < workerCount; w++) {
-            final int workerIndex = w;
             CompletableFuture<Void> workerFuture = CompletableFuture.supplyAsync(GenerationJobContext.wrap(() -> {
                 LocaleContextHolder.setLocale(locale);
-                var queue = queues.get(workerIndex);
                 try {
                     while (remainingTasks.get() > 0) {
-                        if (fatalError.get() != null || (shouldStop != null && shouldStop.getAsBoolean())) {
+                        if (shouldStop != null && shouldStop.getAsBoolean()) {
                             break;
                         }
                         BatchTask<I> task;
@@ -138,7 +135,7 @@ public class LlmBatchExecutor {
                             break;
                         }
                         if (task == null) {
-                            if (fatalError.get() != null || (shouldStop != null && shouldStop.getAsBoolean())) break;
+                            if (shouldStop != null && shouldStop.getAsBoolean()) break;
                             continue;
                         }
 
@@ -147,13 +144,11 @@ public class LlmBatchExecutor {
                             output = GenerationJobContext.withLlmCallBudget(task.remainingBudget, () -> worker.apply(task.input));
                         } catch (BatchExecutionException exception) {
                             recordFailure(fatalError, exception);
-                            for (var q : queues) q.clear();
                             remainingTasks.decrementAndGet();
                             continue;
                         } catch (LlmResponseException exception) {
                             if (!exception.isRetryable() || task.attempt >= retryAttempts) {
                                 recordFailure(fatalError, new BatchExecutionException(task.batchNumber, exception));
-                                for (var q : queues) q.clear();
                                 remainingTasks.decrementAndGet();
                             } else {
                                 task.attempt++;
@@ -167,7 +162,6 @@ public class LlmBatchExecutor {
                             continue;
                         } catch (RuntimeException exception) {
                             recordFailure(fatalError, new BatchExecutionException(task.batchNumber, exception));
-                            for (var q : queues) q.clear();
                             remainingTasks.decrementAndGet();
                             continue;
                         }
@@ -180,7 +174,6 @@ public class LlmBatchExecutor {
                             remainingTasks.decrementAndGet();
                         } catch (RuntimeException callbackException) {
                             recordFailure(fatalError, new BatchExecutionException(task.batchNumber, callbackException));
-                            for (var q : queues) q.clear();
                             remainingTasks.decrementAndGet();
                         }
                     }
