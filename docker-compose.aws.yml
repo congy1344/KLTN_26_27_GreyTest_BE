@@ -26,7 +26,7 @@ services:
         max-file: "3"
 
   backend:
-    image: greytest-backend:${RELEASE_TAG:?Set RELEASE_TAG for this release}
+    image: ${BACKEND_IMAGE:-greytest-backend:${RELEASE_TAG:?Set RELEASE_TAG for this installation}}
     build:
       context: .
       dockerfile: Dockerfile.aws
@@ -90,7 +90,7 @@ services:
         max-file: "3"
 
   web:
-    image: greytest-frontend:${RELEASE_TAG:?Set RELEASE_TAG for this release}
+    image: ${FRONTEND_IMAGE:-greytest-frontend:${RELEASE_TAG:?Set RELEASE_TAG for this installation}}
     build:
       context: ../frontend
     restart: unless-stopped

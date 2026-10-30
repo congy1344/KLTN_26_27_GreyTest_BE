@@ -1,0 +1,22 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {"Effect": "Allow", "Action": "ecr:GetAuthorizationToken", "Resource": "*"},
+    {
+      "Effect": "Allow",
+      "Action": ["ecr:DescribeImages", "ecr:BatchCheckLayerAvailability", "ecr:GetDownloadUrlForLayer", "ecr:BatchGetImage", "ecr:InitiateLayerUpload", "ecr:UploadLayerPart", "ecr:CompleteLayerUpload", "ecr:PutImage"],
+      "Resource": [
+        "arn:aws:ecr:ap-southeast-2:REPLACE_ACCOUNT_ID:repository/greytest/backend",
+        "arn:aws:ecr:ap-southeast-2:REPLACE_ACCOUNT_ID:repository/greytest/frontend"
+      ]
+    },
+    {
+      "Effect": "Allow", "Action": "ssm:SendCommand",
+      "Resource": [
+        "arn:aws:ssm:ap-southeast-2::document/AWS-RunShellScript",
+        "arn:aws:ec2:ap-southeast-2:REPLACE_ACCOUNT_ID:instance/REPLACE_INSTANCE_ID"
+      ]
+    },
+    {"Effect": "Allow", "Action": "ssm:GetCommandInvocation", "Resource": "*"}
+  ]
+}

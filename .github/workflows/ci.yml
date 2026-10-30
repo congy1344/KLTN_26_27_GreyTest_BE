@@ -2,14 +2,19 @@ name: GreyTest Backend CI
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main, master, dev ]
   pull_request:
-    branches: [ main, master ]
+    branches: [ main, master, dev ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build-and-test:
     name: Build & Test (Java 17 / Maven)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
 
     services:
       postgres:
@@ -31,13 +36,14 @@ jobs:
       SPRING_DATASOURCE_USERNAME: greytest
       SPRING_DATASOURCE_PASSWORD: greytest_password
       GREYTEST_AUTH_TOKEN_SECRET: test-only-token-secret-at-least-32-bytes
+      LLM_PROVIDER: mock
 
     steps:
       - name: Checkout Source Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
         with:
           java-version: '17'
           distribution: 'temurin'
@@ -49,5 +55,69 @@ jobs:
       - name: Run Tests
         run: mvn test
 
+      - name: Verify deployment scripts without AWS
+        run: python3 -m unittest discover -s scripts/deployment/tests -p 'test_*.py' -v
+
       - name: Package Application JAR
         run: mvn package -DskipTests
+
+  publish-and-deploy:
+    name: Publish backend and deploy if enabled
+    needs: build-and-test
+    if: >-
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      github.ref == 'refs/heads/main' && vars.AWS_ROLE_ARN != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    concurrency:
+      group: aws-backend-deployment
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION || 'ap-southeast-2' }}
+      AWS_PAGER: ''
+      ECR_REPOSITORY: greytest/backend
+    steps:
+      - name: Checkout tested commit
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Authenticate to AWS with OIDC
+        uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: greytest-backend-${{ github.run_id }}
+      - name: Publish immutable Linux image
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          account=$(aws sts get-caller-identity --query Account --output text)
+          registry="$account.dkr.ecr.$AWS_REGION.amazonaws.com"
+          image="$registry/$ECR_REPOSITORY:sha-$GITHUB_SHA"
+          if ! aws ecr describe-images --repository-name "$ECR_REPOSITORY" --image-ids "imageTag=sha-$GITHUB_SHA" >/dev/null 2>&1; then
+            aws ecr get-login-password | docker login --username AWS --password-stdin "$registry"
+            schema=$(git ls-tree -r HEAD -- src/main/resources/db/migration | sha256sum | cut -d ' ' -f 1)
+            docker build --platform linux/amd64 -f Dockerfile.aws --label "com.greytest.schema-sha256=$schema" --label "org.opencontainers.image.revision=$GITHUB_SHA" -t "$image" .
+            docker push "$image"
+          fi
+          printf 'image=%s\n' "$image" >> "$GITHUB_OUTPUT"
+          printf 'Published image: %s\n' "$image" >> "$GITHUB_STEP_SUMMARY"
+      - name: Deploy current main through Session Manager
+        if: vars.AWS_DEPLOY_ENABLED == 'true'
+        env:
+          AWS_INSTANCE_ID: ${{ vars.AWS_INSTANCE_ID }}
+          DEPLOY_SERVICE: backend
+          DEPLOY_IMAGE: ${{ steps.image.outputs.image }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          current=$(git ls-remote origin refs/heads/main | cut -f 1)
+          if [[ "$current" != "$GITHUB_SHA" ]]; then
+            echo 'A newer main commit exists; skip deploying this older image.'
+            exit 0
+          fi
+          python3 .github/scripts/deploy-ssm.py
