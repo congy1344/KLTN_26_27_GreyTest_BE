@@ -58,6 +58,10 @@ final class SnapshotModuleAliases {
                 Map<String, JsonNode> resources = new TreeMap<>();
                 manifest.path("resources").fields().forEachRemaining(entry -> resources.put(resource(entry.getKey()), entry.getValue()));
                 manifest.set("resources", mapper.valueToTree(resources));
+                // Diagnostic chứa module identity cũng phải dùng alias, tránh báo đổi source chỉ vì thư mục ZIP.
+                var problems = new java.util.TreeSet<String>();
+                manifest.path("problems").forEach(diagnostic -> problems.add(problem(diagnostic.asText())));
+                manifest.set("problems", mapper.valueToTree(problems));
                 String normalized = manifest.toString();
                 String digest = java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256")
                         .digest(normalized.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
@@ -69,7 +73,14 @@ final class SnapshotModuleAliases {
         return result;
     }
 
+    private String problem(String problem) {
+        int separator = problem.indexOf(": ");
+        return separator < 0 ? problem
+                : problem.substring(0, separator + 2) + key(problem.substring(separator + 2));
+    }
     private String key(String key) {
+        String constructor = "resolved-constructor-reference:";
+        if (key.startsWith(constructor)) return constructor + key(key.substring(constructor.length()));
         String dispatch = "dispatch-source-contract:";
         if (key.startsWith(dispatch)) return dispatch + key(key.substring(dispatch.length()));
         String candidate = "dispatch-candidate:";

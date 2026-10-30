@@ -13,6 +13,8 @@ import com.greytest.dto.agent.GenerationResponseDtos.*;
 /** Đối chiếu literal exception với biểu thức/constructor thật, không sửa chuỗi để khớp. */
 final class SourceExceptionMessageEvidence {
     private static final Pattern MESSAGE = Pattern.compile("(?iuU)(?:thông\\s+(?:điệp|báo)|message)[^\"“`\\n]{0,80}[\"“`]([^\"”`]+)[\"”`]");
+    private static final Pattern CONSTRUCTOR = Pattern.compile(
+            "`?\\b(?:new\\s+)?((?:[\\w$]+\\.)*[\\w$]*(?:Exception|Error))\\s*\\((?:\"(?:\\\\.|[^\"\\\\])*\"|[^()\"\\r\\n])*\\)`?");
     private static final Set<String> STANDARD = Set.of("java.lang.Exception", "java.lang.RuntimeException", "java.lang.Throwable",
             "java.lang.IllegalArgumentException", "java.lang.IllegalStateException", "java.lang.NullPointerException",
             "java.lang.UnsupportedOperationException", "java.lang.ArithmeticException", "java.lang.Error");
@@ -49,6 +51,7 @@ final class SourceExceptionMessageEvidence {
 
     Optional<String> validate(List<ClassContextDto> classes, Long methodId, String description, Map<String, Object> input, boolean requireProof) {
         if (description == null) return Optional.empty();
+        description = messageNarrative(description);
         var dto = classes.stream().flatMap(c -> c.methods().stream()).filter(m -> Objects.equals(m.id(), methodId)).findFirst().orElse(null);
         if (dto == null) return Optional.empty();
         var method = index.method(dto);
@@ -121,6 +124,21 @@ final class SourceExceptionMessageEvidence {
                     + "and unchanged inputs at test runtime, without quoting a rendered message or its format template. Do not reduce an approved message requirement to exception type alone.");
         }
         return Optional.empty();
+    }
+
+    private static String messageNarrative(String description) {
+        var claim = MESSAGE.matcher(description);
+        while (claim.find()) {
+            var constructor = CONSTRUCTOR.matcher(description);
+            // Chỉ bỏ tham số khi quote bị bắt nằm trong constructor, không sửa literal message thực tế.
+            if (constructor.find(claim.start()) && constructor.start() < claim.start(1)
+                    && constructor.end() > claim.start(1)) {
+                description = description.substring(0, constructor.start()) + constructor.group(1)
+                        + description.substring(constructor.end());
+                claim = MESSAGE.matcher(description);
+            }
+        }
+        return description;
     }
 
     private boolean optionalSupplier(ObjectCreationExpr creation, SourceEvidenceIndex.SourceType owner) {

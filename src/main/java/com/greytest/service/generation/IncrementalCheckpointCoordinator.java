@@ -209,7 +209,7 @@ public class IncrementalCheckpointCoordinator {
             try {
                 var item=items.findById(conflict.itemId()).orElseThrow();
                 var stage=GenerationProgressStage.valueOf(item.getTargetType().name());
-                var output=mapper.readTree(item.getAfterData());
+                var output=item.getAfterData()==null ? mapper.createObjectNode() : mapper.readTree(item.getAfterData());
                 Set<String> targets=new LinkedHashSet<>();
                 String field=switch(stage) { case BUSINESS_RULE->"method_id"; case TEST_PLAN->"rule_id";
                     case TEST_CASE->"plan_id"; case UNIT_TEST->"case_id"; };
@@ -425,10 +425,12 @@ public class IncrementalCheckpointCoordinator {
         if(belongs(stage,item,id)) return true;
         try {
             JsonNode value=item.getAfterData()==null ? mapper.createObjectNode() : mapper.readTree(item.getAfterData());
-            Long caseId=value.hasNonNull("case_id") ? value.path("case_id").asLong()
-                : item.getTargetKey()!=null && item.getTargetKey().startsWith("case:") ? Long.valueOf(item.getTargetKey().substring(5)) : null;
+            Long caseId = value.hasNonNull("case_id") ? Long.valueOf(value.path("case_id").asLong())
+                : (item.getTargetKey() != null && item.getTargetKey().startsWith("case:")) ? Long.valueOf(item.getTargetKey().substring(5)) : null;
             if(stage==GenerationProgressStage.TEST_CASE) {
-                Long targetCase=caseId!=null ? caseId : item.getTargetType()==com.greytest.entity.enums.SourceUpdateTargetType.TEST_CASE ? item.getTargetId() : null;
+                Long targetCase=caseId!=null ? caseId : item.getTargetType()==com.greytest.entity.enums.SourceUpdateTargetType.TEST_CASE ? item.getTargetId()
+                    : item.getTargetType()==com.greytest.entity.enums.SourceUpdateTargetType.UNIT_TEST && unitTests!=null && item.getTargetId()!=null
+                        ? unitTests.findById(item.getTargetId()).map(com.greytest.entity.UnitTest::getTestCaseId).orElse(null) : null;
                 return targetCase!=null && cases.findById(targetCase).map(c->Objects.equals(c.getTestPlanId(),id)).orElse(false);
             }
             if(stage==GenerationProgressStage.UNIT_TEST) return Objects.equals(caseId,id);
@@ -478,7 +480,7 @@ public class IncrementalCheckpointCoordinator {
     private JsonNode effectiveOutput(SourceUpdateItem item) throws java.io.IOException {
         boolean kept=item.getAction()==com.greytest.entity.enums.SourceUpdateAction.KEEP
             || item.getReviewStatus()==com.greytest.entity.enums.SourceUpdateReviewStatus.REJECTED;
-        if(!kept) return mapper.readTree(item.getAfterData());
+        if(!kept) return item.getAfterData()==null ? null : mapper.readTree(item.getAfterData());
         if(item.getAction()==com.greytest.entity.enums.SourceUpdateAction.CREATE) return null;
         if(item.getTargetId()==null) throw new LlmResponseException("Kept artifact has no active identity");
         Object output=switch(item.getTargetType()) {

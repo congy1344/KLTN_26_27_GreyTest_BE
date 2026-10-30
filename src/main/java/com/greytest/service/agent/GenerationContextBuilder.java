@@ -96,10 +96,10 @@ public class GenerationContextBuilder {
     // Gom toi da ba method cung Service de giam so request nhung van giu prompt gon.
     public static final int MAX_GENERATION_METHODS = 3;
     public static final int MAX_TEST_PLAN_METHODS = 8;
-    // ponytail: batch co dinh giu moi request gon gang, 8 item/batch toi uu toc do va quota
-    public static final int MAX_TEST_CASE_PLANS = 8;
-    // ponytail: Unit Test gom 8 case/batch de giam so lan goi mang
-    public static final int MAX_UNIT_TEST_CASES = 8;
+    // ponytail: batch co dinh giu moi request gon gang, 4 item/batch toi uu toc do va quota
+    public static final int MAX_TEST_CASE_PLANS = 4;
+    // ponytail: Unit Test gom 4 case/batch giup AI sinh nhanh va giam thoi gian cho
+    public static final int MAX_UNIT_TEST_CASES = 4;
     public static final int MAX_UNIT_TEST_RETRY_CASES = 2;
     private static final int MAX_UNIT_TEST_REFERENCES = 10;
     // Giữ prompt có giới hạn nhưng phải báo thiếu context thay vì âm thầm bỏ dependency.
@@ -1089,6 +1089,7 @@ public class GenerationContextBuilder {
                 .collect(java.util.stream.Collectors.toMap(BusinessRuleContextDto::id, rule -> rule));
         overlay(projectId, com.greytest.entity.enums.SourceUpdateTargetType.BUSINESS_RULE, rules, (old, item) -> {
             var value = readDraft(item, com.greytest.dto.agent.GenerationResponseDtos.GeneratedBusinessRuleDto.class);
+            if (value == null) return old;
             if (!java.util.Objects.equals(old.methodId(), value.methodId())) throw new IllegalArgumentException("Draft rule changed its source method");
             return new BusinessRuleContextDto(old.id(), old.methodId(), old.ruleCode(), value.description(),
                     old.reviewNote(), old.source(), old.status(), old.isModified(), value.branchId());
@@ -1186,6 +1187,7 @@ public class GenerationContextBuilder {
                 .collect(java.util.stream.Collectors.toMap(TestPlanContextItemDto::id, plan -> plan));
         overlay(projectId, com.greytest.entity.enums.SourceUpdateTargetType.TEST_PLAN, contexts, (old, item) -> {
             var value = readDraft(item, com.greytest.dto.agent.GenerationResponseDtos.GeneratedTestPlanDto.class);
+            if (value == null) return old;
             if (!java.util.Objects.equals(old.businessRuleId(), value.ruleId())) throw new IllegalArgumentException("Draft plan changed its parent rule");
             var effectiveRules = businessRules(projectId);
             var covered = value.coveredRuleIds() == null ? List.of(value.ruleId()) : value.coveredRuleIds();
@@ -1232,6 +1234,7 @@ public class GenerationContextBuilder {
                 .collect(java.util.stream.Collectors.toMap(TestCaseContextItemDto::id, testCase -> testCase));
         overlay(projectId, com.greytest.entity.enums.SourceUpdateTargetType.TEST_CASE, contexts, (old, item) -> {
             var value = readDraft(item, com.greytest.dto.agent.GenerationResponseDtos.GeneratedTestCaseDto.class);
+            if (value == null) return old;
             if (!java.util.Objects.equals(old.testPlanId(), value.planId())) throw new IllegalArgumentException("Draft case changed its parent plan");
             return new TestCaseContextItemDto(old.id(), old.testPlanId(), old.caseCode(), value.testType(), value.description(),
                     value.preconditions(), value.testData(), value.expectedResult(), value.priority(), value.traceSource(), old.status(), old.isModified());
@@ -1261,12 +1264,20 @@ public class GenerationContextBuilder {
                 if (type == com.greytest.entity.enums.SourceUpdateTargetType.TEST_CASE) continue;
                 throw new IllegalArgumentException("Draft artifact is outside the selected project");
             }
-            if (item.getAction() == com.greytest.entity.enums.SourceUpdateAction.REMOVE) contexts.remove(item.getTargetId());
-            else contexts.put(item.getTargetId(), apply.apply(previous, item));
+            if (item.getAction() == com.greytest.entity.enums.SourceUpdateAction.REMOVE) {
+                contexts.remove(item.getTargetId());
+            } else {
+                if (item.getAfterData() == null || item.getAfterData().isBlank()) continue;
+                T updated = apply.apply(previous, item);
+                if (updated != null) contexts.put(item.getTargetId(), updated);
+            }
         }
     }
 
     private <T> T readDraft(com.greytest.entity.SourceUpdateItem item, Class<T> type) {
+        if (item == null || item.getAfterData() == null || item.getAfterData().isBlank()) {
+            return null;
+        }
         try {
             return objectMapper.readValue(item.getAfterData(), type);
         } catch (Exception exception) {

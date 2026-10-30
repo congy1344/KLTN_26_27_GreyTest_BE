@@ -306,6 +306,29 @@ class GenerationFingerprintServiceTest {
         assertThat(service.outputFingerprint(response, root).value()).isNotEqualTo(before.value());
     }
 
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {
+        "when(subject.target(1)).thenAnswer(invocation -> invocation.getArgument(0));",
+        "doAnswer(invocation -> invocation.getArgument(0)).when(subject).target(1);"
+    })
+    void mockitoAnswerLambdaTracksProductionCallsWithoutRequiringMockitoOnParserClasspath(String setup) throws Exception {
+        String source = "package example; import static org.mockito.fixture.Missing.when; import static org.mockito.fixture.Missing.doAnswer; "
+                + "class SubjectTest { Subject subject = new Subject(); void testTarget() { " + setup + " } }";
+        var response = Map.of("unit_tests", List.of(Map.of("source_code", source)));
+        var before = service.outputFingerprint(response, root);
+        assertThat(before.reusable()).as(before.provenance()).isTrue();
+        write("src/main/java/example/Subject.java", subject("return helper(value);", "return value + 2;", "return 9;"));
+        assertThat(service.outputFingerprint(response, root).value()).isNotEqualTo(before.value());
+        String invalid = source.replace("invocation.getArgument(0)", "subject.missingProductionApi()");
+        assertThat(service.outputFingerprint(Map.of("source_code", invalid), root).reusable()).isFalse();
+    }
+
+    @Test void ordinaryLambdaCannotClaimMockitoInvocationApis() throws Exception {
+        write("src/main/java/example/Invocation.java", "package example; class Invocation {}");
+        write("src/main/java/example/Factory.java", "package example; class Factory { interface Callback { Object answer(Invocation invocation); } static void register(Callback callback) {} }");
+        String source = "package example; class SubjectTest { void testTarget() { Factory.register(invocation -> invocation.getArgument(0)); } }";
+        assertThat(service.outputFingerprint(Map.of("source_code", source), root).reusable()).isFalse();
+    }
     @Test void reflectiveProductionApiCannotBeReusedWithoutResolution() {
         String source = "package example; class SubjectTest { Subject subject = new Subject(); void testTarget() { org.springframework.test.util.ReflectionTestUtils.invokeMethod(subject, \"other\"); } }";
         assertThat(service.outputFingerprint(Map.of("unit_tests", List.of(Map.of("source_code", source))), root).reusable()).isFalse();

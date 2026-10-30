@@ -78,11 +78,33 @@ final class GeneratedOutputDependencyResolver {
                 index.outputMethod(owner, call.getNameAsString(), null, call.getArguments().size(), call, dependencies, visited, problems);
                 return;
             }
-            if (knownExternal(call, unit) || ownTestHelper(call, unit)) return;
+            if (knownMockitoInvocation(call, unit) || knownExternal(call, unit) || ownTestHelper(call, unit)) return;
             problems.add("unresolved output call: " + call.getNameAsString());
         }
     }
 
+    /** Chỉ nhận InvocationOnMock từ lambda Answer của Mockito, không bỏ qua API production trong lambda. */
+    private boolean knownMockitoInvocation(MethodCallExpr call, CompilationUnit unit) {
+        if (!Set.of("getArgument", "getArguments", "getMock", "getMethod", "callRealMethod").contains(call.getNameAsString())
+                || call.getScope().filter(Expression::isNameExpr).isEmpty()) return false;
+        String name = call.getScope().orElseThrow().asNameExpr().getNameAsString();
+        for (var node = call.getParentNode().orElse(null); node != null; node = node.getParentNode().orElse(null)) {
+            if (!(node instanceof com.github.javaparser.ast.expr.LambdaExpr lambda)) continue;
+            var parameter = lambda.getParameters().stream().filter(p -> p.getNameAsString().equals(name)).findFirst();
+            if (parameter.isEmpty()) continue;
+            if (lambda.getParameters().size() != 1) return false;
+            String type = parameter.orElseThrow().getTypeAsString();
+            if (!parameter.orElseThrow().getType().isUnknownType()
+                    && !type.equals("org.mockito.invocation.InvocationOnMock")
+                    && !(type.equals("InvocationOnMock") && unit.getImports().stream().anyMatch(i -> !i.isStatic()
+                            && i.getNameAsString().equals("org.mockito.invocation.InvocationOnMock")))) return false;
+            var parent = lambda.getParentNode().orElse(null);
+            return parent instanceof MethodCallExpr answer
+                    && Set.of("thenAnswer", "doAnswer").contains(answer.getNameAsString())
+                    && knownExternal(answer, unit);
+        }
+        return false;
+    }
     private boolean knownSpringFixture(MethodCallExpr call, CompilationUnit unit) {
         if (!Set.of("setField", "getField").contains(call.getNameAsString())) return false;
         String fixture = "org.springframework.test.util.ReflectionTestUtils";
@@ -157,10 +179,28 @@ final class GeneratedOutputDependencyResolver {
                 if (!imported.isStatic() && imported.getName().getIdentifier().equals(qualifier)
                         && testFramework(imported.getNameAsString())) return true;
             }
+            if (isTestFrameworkVariable(scope, unit)) return true;
             return testFramework(qualifier);
         }
         return unit.getImports().stream().anyMatch(imported -> imported.isStatic() && testFramework(imported.getNameAsString())
                 && (imported.isAsterisk() || imported.getName().getIdentifier().equals(call.getNameAsString())));
+    }
+
+    private boolean isTestFrameworkVariable(Expression scope, CompilationUnit unit) {
+        if (!scope.isNameExpr()) return false;
+        String varName = scope.asNameExpr().getNameAsString();
+        for (var declarator : unit.findAll(com.github.javaparser.ast.body.VariableDeclarator.class)) {
+            if (declarator.getNameAsString().equals(varName)) {
+                String typeName = declarator.getType().asString();
+                if (typeName.contains("<")) typeName = typeName.substring(0, typeName.indexOf('<')).trim();
+                for (var imported : unit.getImports()) {
+                    if (!imported.isStatic() && imported.getName().getIdentifier().equals(typeName)
+                            && testFramework(imported.getNameAsString())) return true;
+                }
+                return testFramework(typeName) || typeName.equals("ArgumentCaptor");
+            }
+        }
+        return false;
     }
 
     private boolean testFramework(String name) {

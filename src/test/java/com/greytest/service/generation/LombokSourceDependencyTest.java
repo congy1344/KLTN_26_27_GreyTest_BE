@@ -60,10 +60,17 @@ class LombokSourceDependencyTest {
     }
 
     @Test void unsupportedSurfaceAnnotationsRemainUnresolved() throws Exception {
-        for (String annotation : java.util.List.of("@lombok.Builder", "@lombok.experimental.FieldDefaults(makeFinal=true)")) {
+        for (String annotation : java.util.List.of("@lombok.experimental.FieldDefaults(makeFinal=true)", "@lombok.experimental.FieldNameConstants")) {
             write("Patient", "package example; @lombok.Data " + annotation + " public class Patient { private String name; }");
             assertThat(fingerprint("Patient p = new Patient();").reusable()).as(annotation).isFalse();
         }
+    }
+
+    @Test void builderResolvesFluentChainAndBuild() throws Exception {
+        write("Patient", "package example; @lombok.Data @lombok.Builder @lombok.NoArgsConstructor @lombok.AllArgsConstructor public class Patient { private String name; }");
+        var fp = fingerprint("Patient p = Patient.builder().name(\"Alice\").build();");
+        assertThat(fp.reusable()).isTrue();
+        assertThat(fp.provenance()).doesNotContain("unresolved");
     }
 
     @Test void booleanGetterAliasesCannotCreateAnAbsentAccessor() throws Exception {

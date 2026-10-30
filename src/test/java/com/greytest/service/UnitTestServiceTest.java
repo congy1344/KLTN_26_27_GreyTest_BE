@@ -113,28 +113,28 @@ class UnitTestServiceTest {
         plan.setProjectId(1L);
         plan.setBusinessRuleId(10L);
         plan.setStatus(ReviewStatus.APPROVED);
-        List<TestCase> approved = LongStream.rangeClosed(1, 9).mapToObj(id -> approvedCase(id, 20L)).toList();
+        List<TestCase> approved = LongStream.rangeClosed(1, 5).mapToObj(id -> approvedCase(id, 20L)).toList();
         when(projects.findById(1L)).thenReturn(Optional.of(project));
         when(projects.findByIdForUpdate(1L)).thenReturn(Optional.of(project));
         when(cases.findAll()).thenReturn(approved);
         when(plans.findById(20L)).thenReturn(Optional.of(plan));
-        when(cases.findById(9L)).thenReturn(Optional.of(approved.get(8)));
+        when(cases.findById(5L)).thenReturn(Optional.of(approved.get(4)));
         when(ai.generateUnitTests(org.mockito.ArgumentMatchers.eq(1L), org.mockito.ArgumentMatchers.anySet()))
                 .thenAnswer(invocation -> {
                     Set<Long> ids = invocation.getArgument(1);
                     if(ids.contains(1L)) return new UnitTestResponseDto(List.of(), ids.stream()
                             .map(id -> new com.greytest.dto.agent.GenerationResponseDtos.BlockedUnitTestDto(id, "TC-" + id, "Uncontrollable random branch"))
                             .toList());
-                    return new UnitTestResponseDto(List.of(generated(9L, validSource("ServiceTest", "case9"))));
+                    return new UnitTestResponseDto(List.of(generated(5L, validSource("ServiceTest", "case5"))));
                 });
         when(units.saveAll(org.mockito.ArgumentMatchers.anyList())).thenAnswer(invocation -> invocation.getArgument(0));
 
-        assertThat(service.generate(1L)).singleElement().extracting("testCaseId").isEqualTo(9L);
+        assertThat(service.generate(1L)).singleElement().extracting("testCaseId").isEqualTo(5L);
 
-        verify(ai).validateUnitTestPrerequisites(1L, LongStream.rangeClosed(1, 9).boxed().collect(java.util.stream.Collectors.toSet()));
+        verify(ai).validateUnitTestPrerequisites(1L, LongStream.rangeClosed(1, 5).boxed().collect(java.util.stream.Collectors.toSet()));
         verify(ai, org.mockito.Mockito.times(2)).generateUnitTests(org.mockito.ArgumentMatchers.eq(1L), org.mockito.ArgumentMatchers.anySet());
         verify(generationProgress).partialAfterCommit(org.mockito.ArgumentMatchers.eq(1L),
-                org.mockito.ArgumentMatchers.eq(com.greytest.dto.GenerationProgressStage.UNIT_TEST), org.mockito.ArgumentMatchers.contains("8 Test Case"));
+                org.mockito.ArgumentMatchers.eq(com.greytest.dto.GenerationProgressStage.UNIT_TEST), org.mockito.ArgumentMatchers.contains("4 Test Case"));
         assertThat(project.getStatus()).isEqualTo(ProjectStatus.CASE_APPROVED);
     }
 
@@ -333,9 +333,9 @@ class UnitTestServiceTest {
 
         assertThat(result).hasSize(11);
         ArgumentCaptor<Set<Long>> batches = ArgumentCaptor.forClass(Set.class);
-        verify(ai, org.mockito.Mockito.times(2)).generateUnitTests(
+        verify(ai, org.mockito.Mockito.times(3)).generateUnitTests(
                 org.mockito.ArgumentMatchers.eq(1L), batches.capture());
-        assertThat(batches.getAllValues()).extracting(Set::size).containsExactly(8, 3);
+        assertThat(batches.getAllValues()).extracting(Set::size).containsExactly(4, 4, 3);
         verify(generationProgress).completeAfterCommit(
                 org.mockito.ArgumentMatchers.eq(1L),
                 org.mockito.ArgumentMatchers.eq(com.greytest.dto.GenerationProgressStage.UNIT_TEST),
@@ -351,7 +351,7 @@ class UnitTestServiceTest {
         plan.setStatus(ReviewStatus.APPROVED);
         plan.setId(20L);
         plan.setProjectId(1L);
-        List<TestCase> approved = LongStream.rangeClosed(1, 5).mapToObj(id -> {
+        List<TestCase> approved = LongStream.rangeClosed(1, 4).mapToObj(id -> {
             TestCase testCase = new TestCase();
             testCase.setId(id);
             testCase.setTestPlanId(20L);
@@ -366,7 +366,7 @@ class UnitTestServiceTest {
         when(ai.generateUnitTests(org.mockito.ArgumentMatchers.eq(1L), org.mockito.ArgumentMatchers.<Set<Long>>any()))
                 .thenAnswer(invocation -> {
                     Set<Long> ids = invocation.getArgument(1);
-                    if (ids.size() == 5) {
+                    if (ids.size() == 4) {
                         return new UnitTestResponseDto(List.of(
                                 generated(1L, validSource("ServiceTest", "case1")),
                                 generated(2L, "package demo; class ServiceTest { void broken(")));
@@ -379,16 +379,16 @@ class UnitTestServiceTest {
 
         var result = service.generate(1L);
 
-        assertThat(result).extracting("testCaseId").containsExactlyInAnyOrder(1L, 2L, 3L, 4L, 5L);
+        assertThat(result).extracting("testCaseId").containsExactlyInAnyOrder(1L, 2L, 3L, 4L);
         ArgumentCaptor<Set<Long>> requests = ArgumentCaptor.forClass(Set.class);
         verify(ai, org.mockito.Mockito.times(3)).generateUnitTests(
                 org.mockito.ArgumentMatchers.eq(1L), requests.capture());
         assertThat(requests.getAllValues()).containsExactly(
-                Set.of(1L, 2L, 3L, 4L, 5L), Set.of(2L, 3L), Set.of(4L, 5L));
+                Set.of(1L, 2L, 3L, 4L), Set.of(2L), Set.of(3L, 4L));
         verify(generationProgress).log(
                 org.mockito.ArgumentMatchers.eq(1L),
                 org.mockito.ArgumentMatchers.eq(com.greytest.dto.GenerationProgressStage.UNIT_TEST),
-                org.mockito.ArgumentMatchers.contains("[2, 3, 4, 5]"));
+                org.mockito.ArgumentMatchers.contains("[2, 3, 4]"));
     }
 
     @Test
@@ -523,7 +523,7 @@ class UnitTestServiceTest {
         plan.setStatus(ReviewStatus.APPROVED);
         plan.setId(20L);
         plan.setProjectId(1L);
-        List<TestCase> approved = LongStream.rangeClosed(1, 5).mapToObj(id -> {
+        List<TestCase> approved = LongStream.rangeClosed(1, 4).mapToObj(id -> {
             TestCase testCase = new TestCase();
             testCase.setId(id);
             testCase.setTestPlanId(20L);
@@ -537,7 +537,7 @@ class UnitTestServiceTest {
         when(ai.generateUnitTests(org.mockito.ArgumentMatchers.eq(1L), org.mockito.ArgumentMatchers.<Set<Long>>any()))
                 .thenAnswer(invocation -> {
                     Set<Long> ids = invocation.getArgument(1);
-                    if (ids.equals(Set.of(1L, 2L)) || ids.equals(Set.of(3L))) {
+                    if (ids.equals(Set.of(1L)) || ids.equals(Set.of(2L))) {
                         return new UnitTestResponseDto(ids.stream()
                                 .map(id -> generated(id, validSource("ServiceTest", "case" + id)))
                                 .toList());
@@ -548,7 +548,7 @@ class UnitTestServiceTest {
         assertThatThrownBy(() -> service.generate(1L))
                 .isInstanceOf(LlmResponseException.class)
                 .hasMessageContaining("giới hạn 4")
-                .hasMessageContaining("4");
+                .hasMessageContaining("3");
         verify(ai, org.mockito.Mockito.times(5)).generateUnitTests(
                 org.mockito.ArgumentMatchers.eq(1L), org.mockito.ArgumentMatchers.<Set<Long>>any());
         verify(units, never()).saveAll(org.mockito.ArgumentMatchers.anyList());
@@ -563,7 +563,7 @@ class UnitTestServiceTest {
         plan.setStatus(ReviewStatus.APPROVED);
         plan.setId(20L);
         plan.setProjectId(1L);
-        List<TestCase> approved = LongStream.rangeClosed(1, 6).mapToObj(id -> {
+        List<TestCase> approved = LongStream.rangeClosed(1, 3).mapToObj(id -> {
             TestCase testCase = new TestCase();
             testCase.setId(id);
             testCase.setTestPlanId(20L);
@@ -577,7 +577,7 @@ class UnitTestServiceTest {
         when(ai.generateUnitTests(org.mockito.ArgumentMatchers.eq(1L), org.mockito.ArgumentMatchers.<Set<Long>>any()))
                 .thenAnswer(invocation -> {
                     Set<Long> ids = invocation.getArgument(1);
-                    if (ids.contains(6L)) throw new LlmResponseException("timeout");
+                    if (ids.contains(3L)) throw new LlmResponseException("timeout");
                     return new UnitTestResponseDto(ids.stream()
                             .map(id -> new GeneratedUnitTestDto(id, "ServiceTest", "case" + id,
                                     "demo", "NEW_TEST", validSource("ServiceTest", "case" + id)))
@@ -781,8 +781,8 @@ class UnitTestServiceTest {
                 org.mockito.ArgumentMatchers.eq(Set.of(0)),
                 org.mockito.ArgumentMatchers.contains("batch 2/2"));
         assertThat(labels.getValue()).contains(
-                "Sinh Unit Test - batch 1/2: TC-1, TC-2, TC-3, TC-4, TC-5, TC-6, TC-7, TC-8",
-                "Sinh Unit Test - batch 2/2: TC-9");
+                "Sinh Unit Test - batch 1/2: TC-1, TC-2, TC-3, TC-4",
+                "Sinh Unit Test - batch 2/2: TC-5");
     }
 
     @Test

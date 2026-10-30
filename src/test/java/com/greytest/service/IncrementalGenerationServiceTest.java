@@ -6,6 +6,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.lenient;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.time.LocalDateTime;
@@ -76,7 +77,7 @@ class IncrementalGenerationServiceTest {
         when(unitTestRepository.findByTestCaseIdIn(List.of(701L))).thenReturn(List.of(child));
         SourceUpdateItem childDraft = proposal(SourceUpdateTargetType.UNIT_TEST, 801L);
         when(sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(200L)).thenReturn(List.of(childDraft));
-        when(sourceUpdateItemRepository.findBySourceUpdateIdAndTargetTypeAndTargetId(200L, SourceUpdateTargetType.UNIT_TEST, 801L))
+        lenient().when(sourceUpdateItemRepository.findBySourceUpdateIdAndTargetTypeAndTargetId(200L, SourceUpdateTargetType.UNIT_TEST, 801L))
                 .thenReturn(Optional.of(childDraft));
         when(aiAgentService.generateSnapshotTestCases(10L, Set.of(601L), snapshot)).thenReturn(new TestCaseResponseDto(List.of()));
         service.generateIncrementalStage(10L, 200L, GenerationProgressStage.TEST_CASE, user);
@@ -312,6 +313,33 @@ class IncrementalGenerationServiceTest {
         }
     }
 
+    @Test
+    void checkpointFailureKeepsDraftsButNeverMarksCandidateReadyToApply() {
+        var checkpoint = org.mockito.Mockito.mock(com.greytest.service.generation.IncrementalCheckpointCoordinator.class);
+        org.springframework.test.util.ReflectionTestUtils.setField(service, "checkpoints", checkpoint);
+        Project project = new Project(); project.setId(10L);
+        when(projectRepository.findById(10L)).thenReturn(Optional.of(project));
+        SourceUpdate update = new SourceUpdate(); update.setId(200L); update.setProjectId(10L);
+        update.setStatus(SourceUpdateStatus.ANALYZED); update.setImpactSummary("{\"changedMethods\":[],\"affectedServiceMethods\":[],\"affectedBusinessRuleIds\":[],\"affectedTestPlanIds\":[],\"affectedTestCaseIds\":[],\"affectedUnitTestIds\":[]}");
+        when(sourceUpdateRepository.findByIdAndProjectId(200L, 10L)).thenReturn(Optional.of(update));
+        when(checkpoint.withRun(eq(10L), eq(200L), org.mockito.ArgumentMatchers.<Long>isNull(), any()))
+                .thenAnswer(call -> ((java.util.function.Supplier<?>) call.getArgument(3)).get());
+        when(checkpoint.changeStatus(eq(200L), any())).thenAnswer(call -> {
+            update.setStatus(call.getArgument(1)); return update;
+        });
+        var existing = new SourceUpdateItem(); existing.setId(50L);
+        org.mockito.Mockito.lenient().when(sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(200L))
+                .thenReturn(List.of(existing));
+        doThrow(new IllegalArgumentException("Cache response must be valid JSON"))
+                .when(checkpoint).beginStage(200L, GenerationProgressStage.TEST_CASE);
+
+        assertThatThrownBy(() -> service.generateIncrementalStage(10L, 200L, GenerationProgressStage.TEST_CASE, new AuthUser()))
+                .isInstanceOf(IllegalArgumentException.class).hasMessage("Cache response must be valid JSON");
+
+        assertThat(update.getStatus()).isEqualTo(SourceUpdateStatus.FAILED);
+        verify(sourceUpdateItemRepository, org.mockito.Mockito.never()).delete(any());
+        verify(sourceUpdateItemRepository, org.mockito.Mockito.never()).deleteAll(any());
+    }
     @BeforeEach
     void setUp() {
         service = new IncrementalGenerationService(

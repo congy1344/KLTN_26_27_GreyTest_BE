@@ -17,6 +17,7 @@ import com.github.javaparser.JavaParser;
 import com.github.javaparser.ParserConfiguration;
 import com.github.javaparser.ast.CompilationUnit;
 import com.github.javaparser.ast.Node;
+import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration;
 import com.github.javaparser.ast.body.MethodDeclaration;
 import com.github.javaparser.ast.body.TypeDeclaration;
 import com.github.javaparser.ast.expr.MethodCallExpr;
@@ -42,6 +43,8 @@ final class SourceDependencyIndex {
     private final Path root;
     private final Map<String, CompilationUnit> units = new TreeMap<>();
     private final Map<String, List<TypeDeclaration<?>>> types = new TreeMap<>();
+    private final Map<Node, String> relativePaths = new java.util.IdentityHashMap<>();
+    private final Map<TypeDeclaration<?>, String> typeIdentities = new java.util.IdentityHashMap<>();
     private final Map<String, CombinedTypeSolver> solvers = new TreeMap<>();
     private final ParserDependencyClasspath.Snapshot classpath;
     private CombinedTypeSolver cachedOutputSolver;
@@ -76,7 +79,11 @@ final class SourceDependencyIndex {
             unit.setStorage(root.resolve(entry.getKey()));
             units.put(entry.getKey(), unit);
             for (TypeDeclaration<?> type : unit.findAll(TypeDeclaration.class)) {
-                type.getFullyQualifiedName().ifPresent(name -> types.computeIfAbsent(name, ignored -> new ArrayList<>()).add(type));
+                type.getFullyQualifiedName().ifPresent(name -> {
+                    types.computeIfAbsent(name, ignored -> new ArrayList<>()).add(type);
+                    relativePaths.put(type, entry.getKey());
+                    typeIdentities.put(type, ServiceScopeResolver.modulePath(entry.getKey()) + ":" + name);
+                });
             }
         }
         LombokSourceSymbols.expand(root, units);
@@ -314,7 +321,10 @@ final class SourceDependencyIndex {
             } catch (RuntimeException | LinkageError exception) { problems.add("unresolved constructor: " + identity(owner)); }
         }
         for (MethodReferenceExpr reference : body.findAll(MethodReferenceExpr.class)) {
-            if (!visitConstructorReference(reference, owner, result, visited, problems)) problems.add("unresolved method reference: " + key);
+            if (!visitConstructorReference(reference, owner, result, visited, problems)
+                    && !visitMethodReference(reference, owner, result, visited, problems)) {
+                problems.add("unresolved method reference: " + key);
+            }
         }
     }
 
@@ -377,6 +387,47 @@ final class SourceDependencyIndex {
         } catch (RuntimeException | LinkageError unresolved) { return false; }
     }
 
+    private boolean visitMethodReference(MethodReferenceExpr reference, TypeDeclaration<?> caller, Map<String, String> result,
+            Set<String> visited, List<String> problems) {
+        try {
+            var resolved = reference.resolve();
+            String declaringType = resolved.declaringType().getQualifiedName();
+            TypeDeclaration<?> targetType = exactType(declaringType, caller, problems);
+            if (targetType != null) {
+                var candidates = targetType.getMethodsByName(reference.getIdentifier());
+                if (!candidates.isEmpty()) {
+                    visitContract(targetType, result, visited, problems, false);
+                    visitMethod(candidates.get(0), result, visited, problems);
+                    return true;
+                }
+            }
+            result.put("resolved-call:" + resolved.getQualifiedSignature(), "external-or-source");
+            return true;
+        } catch (RuntimeException | LinkageError unresolved) {
+            if (reference.getScope() != null) {
+                String scopeName = reference.getScope().toString();
+                CompilationUnit unit = caller.findCompilationUnit().orElse(null);
+                String qualified = scopeName;
+                if (unit != null && !scopeName.contains(".")) {
+                    qualified = unit.getImports().stream()
+                            .filter(i -> !i.isStatic() && i.getName().getIdentifier().equals(scopeName))
+                            .map(i -> i.getNameAsString()).findFirst()
+                            .orElseGet(() -> unit.getPackageDeclaration().map(p -> p.getNameAsString() + ".").orElse("") + scopeName);
+                }
+                TypeDeclaration<?> targetType = exactType(qualified, caller, problems);
+                if (targetType != null) {
+                    var candidates = targetType.getMethodsByName(reference.getIdentifier());
+                    if (!candidates.isEmpty()) {
+                        visitContract(targetType, result, visited, problems, false);
+                        visitMethod(candidates.get(0), result, visited, problems);
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+    }
+
     private boolean sameResolvedSignature(MethodDeclaration method, String signature) {
         try { return method.resolve().getSignature().equals(signature); }
         catch (RuntimeException | LinkageError exception) { return false; }
@@ -424,7 +475,41 @@ final class SourceDependencyIndex {
         try {
             TypeDeclaration<?> sourceType = exactType(annotation.resolve().getQualifiedName(), owner, problems);
             if (sourceType != null) visitContract(sourceType, result, visited, problems, true);
-        } catch (RuntimeException | LinkageError exception) { problems.add("unresolved annotation: " + annotation.getNameAsString()); }
+        } catch (RuntimeException | LinkageError exception) {
+            if (!isKnownExternalAnnotation(annotation, owner)) {
+                problems.add("unresolved annotation: " + annotation.getNameAsString());
+            }
+        }
+    }
+
+    private boolean isKnownExternalAnnotation(AnnotationExpr annotation, TypeDeclaration<?> owner) {
+        String name = annotation.getNameAsString();
+        if (name.contains(".")) return isExternalPrefix(name);
+        CompilationUnit unit = owner.findCompilationUnit().orElse(null);
+        if (unit != null) {
+            for (var imported : unit.getImports()) {
+                if (!imported.isStatic() && imported.getName().getIdentifier().equals(name)) {
+                    return isExternalPrefix(imported.getNameAsString());
+                }
+            }
+            if (unit.getImports().stream().anyMatch(i -> !i.isStatic() && i.isAsterisk()
+                    && isExternalPrefix(i.getNameAsString()))) {
+                return true;
+            }
+        }
+        return Set.of("Entity", "Table", "Column", "Id", "GeneratedValue", "ManyToOne", "OneToMany",
+                "JoinColumn", "MappedSuperclass", "Transactional", "Service", "Repository", "Component",
+                "Controller", "RestController", "Data", "Getter", "Setter", "NoArgsConstructor",
+                "AllArgsConstructor", "RequiredArgsConstructor", "Builder", "EqualsAndHashCode",
+                "ToString", "Slf4j", "Override", "Deprecated", "SuppressWarnings").contains(name);
+    }
+
+    private static boolean isExternalPrefix(String qualifiedName) {
+        return qualifiedName.startsWith("java.") || qualifiedName.startsWith("javax.") || qualifiedName.startsWith("jakarta.")
+                || qualifiedName.startsWith("org.springframework.") || qualifiedName.startsWith("lombok.")
+                || qualifiedName.startsWith("org.hibernate.") || qualifiedName.startsWith("org.junit.")
+                || qualifiedName.startsWith("org.mockito.") || qualifiedName.startsWith("com.fasterxml.jackson.")
+                || qualifiedName.startsWith("org.slf4j.");
     }
 
     TypeDeclaration<?> outputType(String name, List<String> problems) {
@@ -437,6 +522,9 @@ final class SourceDependencyIndex {
             var available = candidates.stream().filter(type -> classpath.sourceAvailable(module, ServiceScopeResolver.modulePath(relative(type)))).toList();
             if (!candidates.isEmpty() && available.isEmpty()) problems.add("unresolved source outside analysis module classpath: " + name);
             candidates = available;
+        } else if (module != null && candidates.size() > 1) {
+            var local = candidates.stream().filter(type -> ServiceScopeResolver.modulePath(relative(type)).equals(module)).toList();
+            if (local.size() == 1) return local.get(0);
         }
         if (candidates.size() > 1) problems.add("unresolved output module: " + name);
         return candidates.size() == 1 ? candidates.get(0) : null;
@@ -460,7 +548,8 @@ final class SourceDependencyIndex {
 
     CombinedTypeSolver outputSolver(String module) {
         if (classpath.configured() && !solvers.containsKey(module)) throw new IllegalArgumentException("Missing authoritative output module");
-        return classpath.configured() ? solvers.get(module) : outputSolver();
+        if (module != null && solvers.containsKey(module)) return solvers.get(module);
+        return outputSolver();
     }
 
     void releaseUncachedFacades() {
@@ -476,8 +565,17 @@ final class SourceDependencyIndex {
     void outputModule(String module) { analysisModule = module; }
 
     List<TypeDeclaration<?>> dispatchTypes(TypeDeclaration<?> caller) {
-        String module = analysisModule == null ? ServiceScopeResolver.modulePath(relative(caller)) : analysisModule;
-        return sourceTypes().stream().filter(type -> classpath.sourceAvailable(module, ServiceScopeResolver.modulePath(relative(type)))).toList();
+        if (classpath.configured()) {
+            String module = analysisModule == null ? ServiceScopeResolver.modulePath(relative(caller)) : analysisModule;
+            return sourceTypes().stream().filter(type -> classpath.sourceAvailable(module, ServiceScopeResolver.modulePath(relative(type)))).toList();
+        }
+        if (analysisModule != null && !analysisModule.equals(".")) {
+            return sourceTypes().stream().filter(type -> {
+                String candidateModule = ServiceScopeResolver.modulePath(relative(type));
+                return candidateModule.equals(analysisModule) || candidateModule.equals(".");
+            }).toList();
+        }
+        return sourceTypes();
     }
 
 
@@ -485,6 +583,26 @@ final class SourceDependencyIndex {
             Map<String, String> result, Set<String> visited, List<String> problems) {
         var methods = owner.getMethodsByName(name).stream().filter(method -> signature != null
                 ? sameResolvedSignature(method, signature) : method.getParameters().size() == arity).toList();
+        if (methods.isEmpty() && owner.isClassOrInterfaceDeclaration()) {
+            var decl = owner.asClassOrInterfaceDeclaration();
+            if (isSpringDataRepositoryMethod(decl, name, arity)) {
+                outputContract(owner, result, visited, problems);
+                result.put("resolved-call:org.springframework.data.repository.CrudRepository." + name, "external-or-source");
+                return;
+            }
+            for (var ext : decl.getExtendedTypes()) {
+                TypeDeclaration<?> parent = exactType(ext.getNameWithScope(), owner, problems);
+                if (parent != null) {
+                    var inherited = parent.getMethodsByName(name).stream().filter(method -> signature != null
+                            ? sameResolvedSignature(method, signature) : method.getParameters().size() == arity).toList();
+                    if (inherited.size() == 1) {
+                        outputContract(owner, result, visited, problems);
+                        outputMethod(parent, name, signature, arity, call, result, visited, problems);
+                        return;
+                    }
+                }
+            }
+        }
         if (methods.size() != 1) { problems.add("unresolved output overload: " + identity(owner) + "#" + name); return; }
         if (signature == null && LombokSourceSymbols.isGenerated(methods.get(0))) {
             problems.add("unresolved generated output call: " + identity(owner) + "#" + name); return;
@@ -496,6 +614,21 @@ final class SourceDependencyIndex {
                 && (call == null || call.getScope().filter(scope -> scope.isObjectCreationExpr()).isEmpty())) {
             new SourceDispatchResolver(this).visit(owner, method, owner, result, visited, problems);
         }
+    }
+
+    private boolean isSpringDataRepositoryMethod(ClassOrInterfaceDeclaration decl, String name, int arity) {
+        boolean isRepo = decl.isInterface() && (decl.getNameAsString().endsWith("Repository")
+                || decl.getExtendedTypes().stream().anyMatch(t -> t.getNameAsString().contains("Repository")));
+        if (!isRepo) return false;
+        return switch (name) {
+            case "findById", "existsById", "deleteById", "getById", "getReferenceById", "getOne" -> arity == 1;
+            case "save", "saveAndFlush" -> arity == 1;
+            case "saveAll", "findAllById", "deleteAllById", "deleteAll" -> arity <= 1;
+            case "delete" -> arity == 1;
+            case "count", "flush" -> arity == 0;
+            case "findAll" -> arity <= 2;
+            default -> false;
+        };
     }
 
     synchronized List<ClassContextDto> resourceClasses(Map<String, String> dependencyEvidence) {
@@ -607,6 +740,7 @@ final class SourceDependencyIndex {
     }
 
     private Map<String, String> buildContracts(String module) {
+        GenerationJobContext.increment("dependencyBuildReads");
         Map<String, String> result = new TreeMap<>();
             Path directory = module.equals(".") ? root : root.resolve(safeRelative(module));
             while (directory != null && directory.startsWith(root)) {
@@ -641,8 +775,15 @@ final class SourceDependencyIndex {
         if (!path.normalize().startsWith(root) || Files.isSymbolicLink(path) || !path.toRealPath().startsWith(root)) throw new IllegalArgumentException("Unsafe source path");
     }
     private static String safeRelative(String path) { return com.greytest.service.agent.GenerationSourceFingerprint.safePath(path); }
-    String relative(Node node) { return root.relativize(node.findCompilationUnit().orElseThrow().getStorage().orElseThrow().getPath()).toString().replace('\\', '/'); }
-    String identity(TypeDeclaration<?> type) { return ServiceScopeResolver.modulePath(relative(type)) + ":" + type.getFullyQualifiedName().orElseThrow(); }
+    String relative(Node node) {
+        String cached = relativePaths.get(node);
+        return cached != null ? cached : root.relativize(node.findCompilationUnit().orElseThrow()
+                .getStorage().orElseThrow().getPath()).toString().replace('\\', '/');
+    }
+    String identity(TypeDeclaration<?> type) {
+        String cached = typeIdentities.get(type);
+        return cached != null ? cached : ServiceScopeResolver.modulePath(relative(type)) + ":" + type.getFullyQualifiedName().orElseThrow();
+    }
     List<TypeDeclaration<?>> sourceTypes() { return types.values().stream().flatMap(List::stream).toList(); }
     private static String simple(String type) { return type.replace("java.lang.", "").replace(" ", ""); }
     private static String digest(Node node) {

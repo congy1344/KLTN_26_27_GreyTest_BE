@@ -330,6 +330,12 @@ class UnitTestFileServiceTest {
                 .contains("GREYTEST_JUNCTION_RUN", "New-Item -ItemType Junction")
                 .contains("có dấu [ví dụ: mẫu, sửa], hãy dùng junction ASCII")
                 .doesNotContain("có dấu (ví dụ: mẫu, sửa)", "co dau (vi du: mau, sua)");
+        String cmdScript = entries.get("run-greytest-coverage.cmd");
+        int junctionRedirectIndex = cmdScript.indexOf("Chuyển hướng thực thi qua Junction:");
+        int parentPomInstallIndex = cmdScript.indexOf("Phát hiện module con của dự án Maven multi-module");
+        assertThat(parentPomInstallIndex)
+                .withFailMessage("Parent POM installation must happen after junction redirection, never before creating the junction")
+                .isGreaterThan(junctionRedirectIndex);
         assertThat(entries.get("run-greytest-coverage.sh"))
                 .contains("jacoco-maven-plugin:0.8.15:prepare-agent")
                 .contains("-Djacoco.propertyName=greytestJacocoArgLine")
