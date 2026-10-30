@@ -2,7 +2,7 @@
 
 Ngày chuẩn bị: 30/10/2026. Region: **Sydney `ap-southeast-2`**. Dùng hướng dẫn này thay bước upload bundle thủ công; không cài cả hai quy trình lên cùng installation.
 
-**Trạng thái:** cấu hình được chuẩn bị trong PR; chưa tạo ECR/OIDC/role hoặc xác minh deploy AWS thật. Chỉ bật auto deploy sau khi cài lần đầu và kiểm tra website. Code local chưa commit/push không được build.
+**Trạng thái:** cấu hình được chuẩn bị trong PR; chưa xác minh publish/deploy AWS thật. Account hiện tại báo Feature unavailable khi mở IAM Identity providers. Vì vậy hướng dẫn dùng IAM user truy cập lập trình với quyền giới hạn, không cần OIDC hoặc Activate advanced features. Chỉ bật auto deploy sau khi cài lần đầu và kiểm tra website. Code local chưa commit/push không được build.
 
 ## 1. Luồng cập nhật
 
@@ -10,8 +10,8 @@ Ngày chuẩn bị: 30/10/2026. Region: **Sydney `ap-southeast-2`**. Dùng hư�
 | --- | --- |
 | Commit local, chưa push | Không deploy |
 | Push/PR dev hoặc PR main | Test/build, không deploy |
-| Main chưa đặt AWS_ROLE_ARN | Test/build, chưa publish |
-| Main có role, AWS_DEPLOY_ENABLED=false/chưa đặt | Test/build → publish image ECR |
+| Main chưa bật AWS_PUBLISH_ENABLED | Test/build, chưa publish |
+| Main đã cấu hình credentials, AWS_PUBLISH_ENABLED=true và AWS_DEPLOY_ENABLED=false/chưa đặt | Test/build → publish image ECR |
 | Main có AWS_DEPLOY_ENABLED=true | Test/build → publish → SSM cập nhật service EC2 |
 | Backend đổi migration DB | Publish, nhưng dừng auto deploy để backup và xử lý thủ công |
 
@@ -45,31 +45,49 @@ ECR private có phí lưu trữ và có thể có phí truyền dữ liệu, tí
 
 Không cấp quyền push ECR hoặc AdministratorAccess cho EC2.
 
-## 4. Tạo GitHub OIDC provider và deploy role
+## 4. Tạo IAM user cho CI/CD, giữ Free plan
 
-1. IAM → Identity providers → Add provider → **OpenID Connect**.
-2. Provider URL: `https://token.actions.githubusercontent.com`; Audience: `sts.amazonaws.com`. Nếu provider đã có, dùng lại.
-3. IAM → Policies → Create policy → JSON: dùng [github-deploy-policy.json](iam/github-deploy-policy.json).
-4. Thay mọi `REPLACE_ACCOUNT_ID` và `REPLACE_INSTANCE_ID` bằng account/EC2 đích; lưu `GreyTestGithubDeployPolicy`.
-5. IAM → Roles → Create role → **Custom trust policy**: dùng [github-trust.json](iam/github-trust.json), thay account ID.
-6. Attach `GreyTestGithubDeployPolicy`, đặt tên role `GreyTestGithubDeploy`, tạo và copy Role ARN.
+AWS báo Feature unavailable tại Identity providers thì không làm bước OIDC cũ. [Activate advanced features](https://docs.aws.amazon.com/accounts/latest/reference/activate-advanced-features.html) yêu cầu nâng gói và không thể hoàn tác. [AWS cho phép IAM user truy cập lập trình](https://docs.aws.amazon.com/accounts/latest/reference/sign-up-for-aws.html) trong trải nghiệm mới; không tạo user đăng nhập Console.
 
-Trust chỉ chấp nhận main của hai repo GreyTest. Hai repo tạo ngày 20/06/2026 nên template dùng subject theo tên repo; nếu đã opt-in immutable/custom OIDC subject thì cần cập nhật đúng subject thực tế, không dùng wildcard để chữa AccessDenied. Workflow không gắn GitHub Environment vì environment thay đổi subject.
+1. IAM → **Users → Create user**, User name: `greytest-github-deploy`. Không chọn **Provide user access to the AWS Management Console**.
+2. Next → có thể để chưa gắn permission → Next → Create user. User chưa có quyền sử dụng cho tới khi hoàn tất policy dưới đây.
+3. Mở user vừa tạo → **Permissions → Add permissions → Create inline policy → JSON**. Dùng [github-deploy-policy.json](iam/github-deploy-policy.json).
+4. Thay mọi `REPLACE_ACCOUNT_ID` bằng account ID 12 số và `REPLACE_INSTANCE_ID` bằng EC2 đích; Next → policy name `GreyTestGithubDeployPolicy` → Create policy.
+5. Trong user → **Security credentials → Access keys → Create access key**. Chọn trường hợp **Application running outside AWS**, xác nhận khuyến nghị và tạo key. Không dùng root access key.
+6. Chỉ lưu Access key ID/Secret access key vào password manager và GitHub Environment Secrets ở bước 5. Secret chỉ hiện lúc tạo; không gửi vào chat, ảnh, code, .env trong Git hoặc Repository Variables. Không đưa key này vào EC2; EC2 vẫn dùng instance role ở bước 3.
 
-Role cho phép CI main thực thi lệnh trên đúng EC2 qua SSM; bảo vệ quyền push/merge main và sửa workflow. Không đưa AWS access key, file .pem, mật khẩu DB hay API key AI vào GitHub. Instance role chỉ pull; GitHub role chỉ push/pull hai ECR repos và gửi lệnh tới instance được chỉ định. GetCommandInvocation dùng Resource `*` vì API không hỗ trợ scope instance.
+User chỉ push/pull hai ECR repos và gửi lệnh tới đúng EC2, không được AdministratorAccess hoặc quyền tạo IAM users/keys. GetCommandInvocation dùng Resource `*` vì API không hỗ trợ scope instance. Quyền SendCommand cho phép thực thi lệnh trên EC2 đích; chỉ người tin cậy được sửa workflow/main hoặc Environment.
 
-## 5. Bật publish trên GitHub, chưa bật deploy
+Khác OIDC, access key không tự hết hạn. Định kỳ thay key; khi thay cần cập nhật Secrets ở cả hai repo rồi kiểm chứng trước khi xóa key cũ. Khi kết thúc demo, vô hiệu hóa/xóa key và tắt publish/deploy. Nếu IAM user hoặc tạo key cũng bị chặn thì dừng, không nâng plan chỉ để đi tiếp. Khi account hỗ trợ OIDC, có thể chuyển lại dùng credentials tạm thời sau khi review.
 
-Sau khi các PR CI/CD đã review/merge vào main, vào **cả hai repo → Settings → Secrets and variables → Actions → Variables → New repository variable**:
+## 5. Cấu hình GitHub Environment và bật publish, chưa bật deploy
+
+Sau khi các PR đã review/merge, làm trong **cả hai repo**:
+
+1. **Settings → Environments → New environment**, đặt đúng tên **`aws-production`**.
+2. **Deployment branches and tags → Selected branches and tags → Add deployment branch or tag rule**: Ref type **Branch**, Name pattern **`main`**. Không chọn No restriction, không dùng wildcard hoặc Protected branches only khi chưa có branch protection. Không thêm rule cho dev/PR/tag.
+3. Trong **Environment secrets → Add secret**, lưu hai giá trị từ IAM user:
+
+| Secret name | Nội dung |
+| --- | --- |
+| AWS_ACCESS_KEY_ID | Access key ID |
+| AWS_SECRET_ACCESS_KEY | Secret access key |
+
+Keys chỉ có trong deployment job sau khi Environment cho phép branch main. Không đặt hai keys vào Repository Variables hoặc source. Repo hiện là public nên Environment secrets và branch restrictions có trên GitHub Free; nếu đổi repo thành private phải kiểm tra gói GitHub trước.
+
+Không bật required reviewers/wait timer nếu muốn deploy tự động sau khi merge main. Vẫn bảo vệ quyền push/merge main. Chưa chạy workflow cho tới khi Environment, branch rule và secrets đã đủ.
+
+Sau đó vào **Settings → Secrets and variables → Actions → Variables → New repository variable** (Repository Variables, không phải Environment variables):
 
 | Name | Value |
 | --- | --- |
 | AWS_REGION | `ap-southeast-2` |
-| AWS_ROLE_ARN | ARN `arn:aws:iam::ACCOUNT_ID:role/GreyTestGithubDeploy` |
+| AWS_ACCOUNT_ID | Account ID 12 số, giữ số 0 đầu nếu có |
 | AWS_INSTANCE_ID | Instance ID `i-...` của GreyTest |
+| AWS_PUBLISH_ENABLED | **`true`** sau khi Environment/secrets/policy đã đủ |
 | AWS_DEPLOY_ENABLED | **`false`** |
 
-Đây là Variables, không phải secrets. Vào Actions → GreyTest Backend CI → Run workflow → branch main. Chạy tương tự Frontend CI. Khi test/build đạt, bước Publish ghi image URI ở run Summary:
+Đây là Variables, không phải secrets; không cần AWS_ROLE_ARN. Vào Actions → GreyTest Backend CI → Run workflow → branch main. Chạy tương tự Frontend CI. Khi test/build đạt, bước Publish ghi image URI ở run Summary:
 
 ```text
 ACCOUNT_ID.dkr.ecr.ap-southeast-2.amazonaws.com/greytest/backend:sha-BACKEND_COMMIT
@@ -161,14 +179,17 @@ sudo docker compose -p greytest-aws --env-file /opt/greytest/config/.env -f /opt
 
 Nếu pull chưa xong vì IAM/login lỗi, đăng nhập ECR bằng instance role trong root shell rồi compose pull; không in registry password. Muốn rollback thủ công: tắt auto deploy hai repo, đợi command đang chạy hoàn tất, chọn URI cũ đã biết và dùng `sudo /opt/greytest/bin/deploy-image.sh backend IMAGE_URI` hoặc `web IMAGE_URI`; vẫn chịu schema/health gate. Không rollback schema bằng đổi image.
 
-Giữ image đang chạy và một bản rollback trên EC2; chỉ xóa image cũ theo tag/digest đã đối chiếu inventory, không system prune/down -v. Theo dõi disk ECR/EC2 và budget. Dùng [CI backup/restore](aws-ci-recovery.md), không dùng phần backup/restore dành cho bundle thủ công của runbook. Lưu backup ngoài EC2 và xuất trước khi Free plan hết hạn/credit cạn. Việc IAM/OIDC, ECR push/pull, SSM deploy thật, TLS và recovery trên cloud chỉ được xác nhận sau khi thực thi; unit tests CLI giả không thay thế kiểm chứng AWS.
+Giữ image đang chạy và một bản rollback trên EC2; chỉ xóa image cũ theo tag/digest đã đối chiếu inventory, không system prune/down -v. Theo dõi disk ECR/EC2 và budget. Dùng [CI backup/restore](aws-ci-recovery.md), không dùng phần backup/restore dành cho bundle thủ công của runbook. Lưu backup ngoài EC2 và xuất trước khi Free plan hết hạn/credit cạn. Việc IAM/access-key authentication, ECR push/pull, SSM deploy thật, TLS và recovery trên cloud chỉ được xác nhận sau khi thực thi; unit tests CLI giả không thay thế kiểm chứng AWS.
 
 ## Nguồn
 
-- [GitHub OIDC với AWS](https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-in-aws)
+- [AWS giới hạn trải nghiệm đăng ký mới](https://docs.aws.amazon.com/accounts/latest/reference/sign-up-for-aws.html)
+- [Advanced features yêu cầu nâng account](https://docs.aws.amazon.com/accounts/latest/reference/activate-advanced-features.html)
+- [AWS action: non-OIDC credentials](https://github.com/aws-actions/configure-aws-credentials#non-oidc-authentication-options)
+- [GitHub Environment secrets và branch restrictions](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments)
 - [AWS SendCommand](https://docs.aws.amazon.com/systems-manager/latest/userguide/example_ssm_SendCommand_section.html)
 - [Compose interpolation](https://docs.docker.com/reference/compose-file/interpolation/)
 - [ECR pricing](https://aws.amazon.com/ecr/pricing/)
 - [Dịch vụ Free plan mới](https://docs.aws.amazon.com/accounts/latest/reference/supported-services-sign-up-new.html)
 
-ECR/IAM/STS/Systems Manager có trong danh sách dịch vụ được hỗ trợ của Free plan mới tại ngày chuẩn bị. Điều này không xác nhận quyền/credit thực tế hoặc báo giá account của bạn.
+ECR/IAM/STS/Systems Manager có trong danh sách dịch vụ được hỗ trợ của Free plan mới tại ngày chuẩn bị, nhưng không phải mọi tính năng IAM đều được mở (account này chặn Identity providers). Điều này không xác nhận mọi quyền/credit thực tế hoặc báo giá account của bạn.
