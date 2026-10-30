@@ -1,6 +1,8 @@
+> Tự động deploy khi push main: dùng [hướng dẫn CI/CD](aws-auto-deploy.md). Runbook này dành cho bundle thủ công. Installation CI/CD dùng [CI recovery](aws-ci-recovery.md) cho backup/restore; không dùng phần backup/restore bundle bên dưới.
+
 # GreyTest — Runbook deploy EC2 bằng Docker Compose
 
-Ngày 22/10/2026. Đọc [các bước AWS Console](aws-console-steps.md) để xác minh Free plan, credit, Singapore và tạo EC2 trước. Hướng dẫn này không chứng minh cloud đã triển khai; kết quả thực chạy được ghi trong release evidence.
+Ngày 22/10/2026. Đọc [các bước AWS Console](aws-console-steps.md) để xác minh Free plan, credit, Sydney và tạo EC2 trước. Hướng dẫn này không chứng minh cloud đã triển khai; kết quả thực chạy được ghi trong release evidence.
 
 Đã kiểm chứng image Linux, pipeline mock, persistence và restore riêng tại local; xem [báo cáo ngày 22/10/2026](local-verification-20261022.md) để biết kết quả và giới hạn trước khi triển khai cloud.
 
@@ -523,7 +525,7 @@ Làm mục 8 vào project/volumes mới, kiểm chứng đầy đủ rồi opera
 ## 12. Bằng chứng nghiệm thu cần lưu
 
 - Hai full commit IDs/link, release tag, checksum bundle, kết quả test/build/reviewer.
-- Free plan/credit/expiry và Singapore được xác minh; inventory tài nguyên, domain, active project, email budget.
+- Free plan/credit/expiry và Sydney được xác minh; inventory tài nguyên, domain, active project, email budget.
 - Smoke HTTPS và luồng user/owner/ADMIN/HITL/export/coverage thực tế; ghi rõ mock hay provider thật.
 - RAM/CPU credit/disk trong workload demo, cold start và reboot.
 - Backup ngoài VM, restore DB/storage thành công, thời gian khôi phục và giới hạn mất dữ liệu rollback.

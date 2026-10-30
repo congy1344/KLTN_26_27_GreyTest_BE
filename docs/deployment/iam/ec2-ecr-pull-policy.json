@@ -1,0 +1,14 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {"Effect": "Allow", "Action": "ecr:GetAuthorizationToken", "Resource": "*"},
+    {
+      "Effect": "Allow",
+      "Action": ["ecr:BatchCheckLayerAvailability", "ecr:GetDownloadUrlForLayer", "ecr:BatchGetImage"],
+      "Resource": [
+        "arn:aws:ecr:ap-southeast-2:REPLACE_ACCOUNT_ID:repository/greytest/backend",
+        "arn:aws:ecr:ap-southeast-2:REPLACE_ACCOUNT_ID:repository/greytest/frontend"
+      ]
+    }
+  ]
+}
