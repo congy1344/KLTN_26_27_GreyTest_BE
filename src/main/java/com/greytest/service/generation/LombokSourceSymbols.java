@@ -29,9 +29,18 @@ final class LombokSourceSymbols {
     private static final DataKey<Boolean> GENERATED = new DataKey<>() {};
     private static final DataKey<String> UNSUPPORTED = new DataKey<>() {};
     private static final Set<String> SUPPORTED = Set.of("lombok.Data", "lombok.Getter", "lombok.Setter",
-            "lombok.NoArgsConstructor", "lombok.AllArgsConstructor", "lombok.RequiredArgsConstructor", "lombok.NonNull", "lombok.extern.slf4j.Slf4j");
+            "lombok.NoArgsConstructor", "lombok.AllArgsConstructor", "lombok.RequiredArgsConstructor", "lombok.NonNull", "lombok.extern.slf4j.Slf4j",
+            "lombok.Builder", "lombok.EqualsAndHashCode", "lombok.ToString");
 
     private LombokSourceSymbols() { }
+
+    private static boolean isSupportedAnnotation(AnnotationExpr a, CompilationUnit unit) {
+        String qualified = qualify(a, unit);
+        if (!SUPPORTED.contains(qualified)) return false;
+        if (a.isMarkerAnnotationExpr()) return true;
+        return Set.of("lombok.NoArgsConstructor", "lombok.AllArgsConstructor", "lombok.RequiredArgsConstructor",
+                "lombok.Builder", "lombok.EqualsAndHashCode", "lombok.ToString").contains(qualified);
+    }
 
     static void expand(Path root, Map<String, CompilationUnit> units) {
         Set<String> declared = units.values().stream().flatMap(unit -> unit.findAll(com.github.javaparser.ast.body.TypeDeclaration.class).stream())
@@ -43,7 +52,7 @@ final class LombokSourceSymbols {
                 var lombokAnnotations = type.findAll(AnnotationExpr.class).stream().filter(a -> qualify(a, unit).startsWith("lombok.")).toList();
                 if (lombokAnnotations.isEmpty()) continue;
                 if (type.getParentNode().filter(CompilationUnit.class::isInstance).isEmpty() || hasConfiguration(root.resolve(entry.getKey()).getParent())
-                        || lombokAnnotations.stream().anyMatch(a -> !SUPPORTED.contains(qualify(a, unit)) || !a.isMarkerAnnotationExpr() || declared.contains(qualify(a, unit)))) {
+                        || lombokAnnotations.stream().anyMatch(a -> !isSupportedAnnotation(a, unit) || declared.contains(qualify(a, unit)))) {
                     type.setData(UNSUPPORTED, "unresolved Lombok configuration: " + type.getNameAsString()); continue;
                 }
                 boolean data = marker(type.getAnnotations(), unit, "lombok.Data");
@@ -81,29 +90,92 @@ final class LombokSourceSymbols {
                         }
                     }
                 }
-                boolean noArgs = marker(type.getAnnotations(), unit, "lombok.NoArgsConstructor");
-                boolean allArgs = marker(type.getAnnotations(), unit, "lombok.AllArgsConstructor");
-                boolean requiredArgs = marker(type.getAnnotations(), unit, "lombok.RequiredArgsConstructor");
-                boolean constructorAnnotation = has(type.getAnnotations(), unit, "lombok.NoArgsConstructor")
-                        || has(type.getAnnotations(), unit, "lombok.AllArgsConstructor") || has(type.getAnnotations(), unit, "lombok.RequiredArgsConstructor");
+                boolean noArgs = has(type.getAnnotations(), unit, "lombok.NoArgsConstructor");
+                boolean allArgs = has(type.getAnnotations(), unit, "lombok.AllArgsConstructor");
+                boolean requiredArgs = has(type.getAnnotations(), unit, "lombok.RequiredArgsConstructor");
+                boolean constructorAnnotation = noArgs || allArgs || requiredArgs;
                 if (data && !constructorAnnotation && type.getConstructors().isEmpty()) requiredArgs = true;
-                if (noArgs && required.stream().noneMatch(v -> v.findAncestor(FieldDeclaration.class).orElseThrow().isFinal())) constructor(type, List.of());
-                if (allArgs) constructor(type, all);
-                if (requiredArgs) constructor(type, required);
+                if (noArgs && required.stream().noneMatch(v -> v.findAncestor(FieldDeclaration.class).orElseThrow().isFinal()))
+                    constructor(type, List.of(), constructorModifier(findAnnotation(type.getAnnotations(), unit, "lombok.NoArgsConstructor")));
+                if (allArgs)
+                    constructor(type, all, constructorModifier(findAnnotation(type.getAnnotations(), unit, "lombok.AllArgsConstructor")));
+                if (requiredArgs)
+                    constructor(type, required, constructorModifier(findAnnotation(type.getAnnotations(), unit, "lombok.RequiredArgsConstructor")));
                 if (marker(type.getAnnotations(), unit, "lombok.extern.slf4j.Slf4j") && type.getFieldByName("log").isEmpty()) {
                     var field = type.addField("org.slf4j.Logger", "log", Modifier.Keyword.PRIVATE, Modifier.Keyword.STATIC, Modifier.Keyword.FINAL);
                     field.getVariable(0).setInitializer(StaticJavaParser.parseExpression("org.slf4j.LoggerFactory.getLogger(" + type.getNameAsString() + ".class)"));
                     generated(field);
                 }
+                boolean builder = has(type.getAnnotations(), unit, "lombok.Builder");
+                if (builder) {
+                    String builderClassName = type.getNameAsString() + "Builder";
+                    if (type.getMethodsByName("builder").isEmpty()) {
+                        var bMethod = new MethodDeclaration().setName("builder")
+                                .setType(builderClassName).setModifiers(Modifier.Keyword.PUBLIC, Modifier.Keyword.STATIC);
+                        bMethod.setBody(new BlockStmt().addStatement(new ReturnStmt(StaticJavaParser.parseExpression("new " + builderClassName + "()"))));
+                        generated(bMethod); type.addMember(bMethod);
+                    }
+                    if (type.getMembers().stream().noneMatch(m -> m.isClassOrInterfaceDeclaration()
+                            && m.asClassOrInterfaceDeclaration().getNameAsString().equals(builderClassName))) {
+                        var bClass = new ClassOrInterfaceDeclaration().setName(builderClassName)
+                                .setModifiers(Modifier.Keyword.PUBLIC, Modifier.Keyword.STATIC);
+                        for (VariableDeclarator var : all) {
+                            String fname = var.getNameAsString();
+                            var fluentMethod = new MethodDeclaration().setName(fname).setType(builderClassName).setModifiers(Modifier.Keyword.PUBLIC);
+                            fluentMethod.addParameter(var.getType().clone(), fname);
+                            fluentMethod.setBody(new BlockStmt().addStatement(new ReturnStmt(new ThisExpr())));
+                            generated(fluentMethod); bClass.addMember(fluentMethod);
+                        }
+                        var buildMethod = new MethodDeclaration().setName("build").setType(type.getNameAsString()).setModifiers(Modifier.Keyword.PUBLIC);
+                        buildMethod.setBody(new BlockStmt().addStatement(new ReturnStmt(StaticJavaParser.parseExpression("new " + type.getNameAsString() + "()"))));
+                        generated(buildMethod); bClass.addMember(buildMethod);
+                        generated(bClass); type.addMember(bClass);
+                    }
+                }
+                boolean equalsAndHashCode = has(type.getAnnotations(), unit, "lombok.EqualsAndHashCode");
+                if ((data || equalsAndHashCode) && type.getMethodsByName("equals").isEmpty()) {
+                    var eq = new MethodDeclaration().setName("equals").setType("boolean").setModifiers(Modifier.Keyword.PUBLIC);
+                    eq.addParameter("Object", "o");
+                    eq.setBody(new BlockStmt().addStatement(new ReturnStmt(StaticJavaParser.parseExpression("o == this"))));
+                    generated(eq); type.addMember(eq);
+                }
+                if ((data || equalsAndHashCode) && type.getMethodsByName("hashCode").isEmpty()) {
+                    var hc = new MethodDeclaration().setName("hashCode").setType("int").setModifiers(Modifier.Keyword.PUBLIC);
+                    hc.setBody(new BlockStmt().addStatement(new ReturnStmt(StaticJavaParser.parseExpression("0"))));
+                    generated(hc); type.addMember(hc);
+                }
+                if ((data || has(type.getAnnotations(), unit, "lombok.ToString")) && type.getMethodsByName("toString").isEmpty()) {
+                    var ts = new MethodDeclaration().setName("toString").setType("String").setModifiers(Modifier.Keyword.PUBLIC);
+                    ts.setBody(new BlockStmt().addStatement(new ReturnStmt(StaticJavaParser.parseExpression("\"\""))));
+                    generated(ts); type.addMember(ts);
+                }
             }
         }
     }
 
-    private static void constructor(ClassOrInterfaceDeclaration type, List<VariableDeclarator> fields) {
+    private static Modifier.Keyword constructorModifier(AnnotationExpr annotation) {
+        if (annotation != null && annotation.isNormalAnnotationExpr()) {
+            for (var pair : annotation.asNormalAnnotationExpr().getPairs()) {
+                if (pair.getNameAsString().equals("access")) {
+                    String val = pair.getValue().toString();
+                    if (val.contains("PROTECTED")) return Modifier.Keyword.PROTECTED;
+                    if (val.contains("PRIVATE")) return Modifier.Keyword.PRIVATE;
+                }
+            }
+        }
+        return Modifier.Keyword.PUBLIC;
+    }
+
+    private static AnnotationExpr findAnnotation(List<AnnotationExpr> annotations, CompilationUnit unit, String name) {
+        return annotations.stream().filter(a -> matches(a, unit, name)).findFirst().orElse(null);
+    }
+
+    private static void constructor(ClassOrInterfaceDeclaration type, List<VariableDeclarator> fields, Modifier.Keyword modifier) {
         boolean exists = type.getConstructors().stream().anyMatch(c -> c.getParameters().size() == fields.size()
                 && java.util.stream.IntStream.range(0, fields.size()).allMatch(i -> c.getParameter(i).getType().equals(fields.get(i).getType())));
         if (exists) return;
-        var constructor = new ConstructorDeclaration().setName(type.getNameAsString()).setModifiers(Modifier.Keyword.PUBLIC);
+        var constructor = new ConstructorDeclaration().setName(type.getNameAsString());
+        if (modifier != null) constructor.setModifiers(modifier);
         var body = new BlockStmt();
         for (var field : fields) {
             String name = field.getNameAsString(); constructor.addParameter(field.getType().clone(), name);
@@ -127,16 +199,37 @@ final class LombokSourceSymbols {
     private static boolean matches(AnnotationExpr annotation, CompilationUnit unit, String name) {
         String actual = annotation.getNameAsString();
         if (actual.equals(name)) return true;
-        if (!actual.equals(name.substring(name.lastIndexOf('.') + 1))) return false;
-        return unit.getImports().stream().anyMatch(i -> !i.isStatic() && !i.isAsterisk() && i.getNameAsString().equals(name));
+        String simple = name.substring(name.lastIndexOf('.') + 1);
+        if (!actual.equals(simple)) return false;
+        if (unit.getImports().stream().anyMatch(i -> !i.isStatic() && !i.isAsterisk() && i.getNameAsString().equals(name))) return true;
+        String pkg = name.substring(0, name.lastIndexOf('.'));
+        boolean wildcard = unit.getImports().stream().anyMatch(i -> !i.isStatic() && i.isAsterisk() && i.getNameAsString().equals(pkg));
+        if (!wildcard) return false;
+        return unit.findAll(com.github.javaparser.ast.body.TypeDeclaration.class).stream().noneMatch(t -> t.getNameAsString().equals(simple));
     }
+    private static final Set<String> LOMBOK_ANNOTATIONS = Set.of(
+            "Data", "Getter", "Setter", "NoArgsConstructor", "AllArgsConstructor", "RequiredArgsConstructor",
+            "NonNull", "Builder", "EqualsAndHashCode", "ToString", "Value", "Cleanup", "Synchronized",
+            "SneakyThrows", "With", "Slf4j", "CommonsLog", "Log", "Log4j", "Log4j2");
+
     private static String qualify(AnnotationExpr annotation, CompilationUnit unit) {
         String name = annotation.getNameAsString();
         if (name.contains(".")) return name;
-        return unit.getImports().stream().filter(i -> !i.isStatic() && i.getName().getIdentifier().equals(name))
-                .map(i -> i.getNameAsString()).findFirst().orElseGet(() -> unit.getImports().stream()
-                        .filter(i -> !i.isStatic() && i.isAsterisk() && i.getNameAsString().startsWith("lombok"))
-                        .map(i -> "lombok.unresolved." + name).findFirst().orElse(name));
+        for (var imported : unit.getImports()) {
+            if (!imported.isStatic() && !imported.isAsterisk() && imported.getName().getIdentifier().equals(name)) {
+                return imported.getNameAsString();
+            }
+        }
+        for (var imported : unit.getImports()) {
+            if (!imported.isStatic() && imported.isAsterisk() && imported.getNameAsString().startsWith("lombok")) {
+                if (!LOMBOK_ANNOTATIONS.contains(name)) continue;
+                boolean shadowed = unit.findAll(com.github.javaparser.ast.body.TypeDeclaration.class).stream()
+                        .anyMatch(t -> t.getNameAsString().equals(name));
+                if (shadowed) return "shadowed." + name;
+                return imported.getNameAsString() + "." + name;
+            }
+        }
+        return name;
     }
     static String unsupported(Node node) { return node.containsData(UNSUPPORTED) ? node.getData(UNSUPPORTED) : null; }
     static boolean isData(com.github.javaparser.ast.body.TypeDeclaration<?> type) {

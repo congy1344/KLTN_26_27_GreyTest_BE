@@ -18,6 +18,7 @@ final class SourceDispatchResolver {
 
     void visit(TypeDeclaration<?> contract, MethodDeclaration declaration, TypeDeclaration<?> caller,
             Map<String, String> dependencies, Set<String> visited, List<String> problems) {
+        if (isObjectMethod(declaration)) return;
         List<String> ancestryProblems = new ArrayList<>();
         try {
         List<TypeDeclaration<?>> matches = new ArrayList<>();
@@ -27,7 +28,11 @@ final class SourceDispatchResolver {
             if (!candidate.isClassOrInterfaceDeclaration()) continue;
             var type = candidate.asClassOrInterfaceDeclaration();
             if (type.isInterface() || type.isAbstract()) continue;
-            if (assignable(candidate, contract, new HashSet<>(), ancestryProblems)) matches.add(candidate);
+            List<String> candidateProblems = new ArrayList<>();
+            if (assignable(candidate, contract, new HashSet<>(), candidateProblems)) {
+                matches.add(candidate);
+            }
+            ancestryProblems.addAll(candidateProblems);
         }
         String dispatchKey = index.identity(contract) + "#" + declaration.getSignature();
         if (matches.isEmpty()) {
@@ -44,6 +49,14 @@ final class SourceDispatchResolver {
             }
             if (overrides.isEmpty() && declaration.getBody().isPresent()) return;
         }
+        boolean anyOverride = false;
+        for (TypeDeclaration<?> impl : matches) {
+            if (!overrides(impl, declaration, ancestryProblems).isEmpty()) {
+                anyOverride = true;
+                break;
+            }
+        }
+        if (!anyOverride && declaration.getBody().isPresent()) return;
         problems.add("unresolved dynamic dispatch: " + dispatchKey);
         for (TypeDeclaration<?> implementation : matches) {
             Map<String, String> possible = new TreeMap<>();
@@ -61,7 +74,20 @@ final class SourceDispatchResolver {
     }
 
     private List<MethodDeclaration> overrides(TypeDeclaration<?> type, MethodDeclaration contract, List<String> problems) {
-        return inheritedMethods(type,contract,new HashSet<>(),true,problems);
+        TypeDeclaration<?> declaring = contract.findAncestor(TypeDeclaration.class).orElse(null);
+        String declaringIdentity = declaring != null ? index.identity(declaring) : null;
+        return inheritedMethods(type, contract, new HashSet<>(), true, problems).stream()
+                .filter(m -> {
+                    if (m == contract) return false;
+                    if (declaringIdentity != null) {
+                        TypeDeclaration<?> mDeclaring = m.findAncestor(TypeDeclaration.class).orElse(null);
+                        if (mDeclaring != null && index.identity(mDeclaring).equals(declaringIdentity)) {
+                            return false;
+                        }
+                    }
+                    return true;
+                })
+                .toList();
     }
 
     private List<MethodDeclaration> inheritedMethods(TypeDeclaration<?> type,MethodDeclaration contract,Set<String> visited,boolean exact,List<String> problems) {
@@ -120,5 +146,13 @@ final class SourceDispatchResolver {
         } catch (RuntimeException | LinkageError exception) {
             problems.add("unresolved dispatch parent: " + index.identity(caller) + "#" + reference.getNameWithScope()); return null;
         }
+    }
+
+    private boolean isObjectMethod(MethodDeclaration method) {
+        String name = method.getNameAsString();
+        int params = method.getParameters().size();
+        return (name.equals("equals") && params == 1)
+                || (name.equals("hashCode") && params == 0)
+                || (name.equals("toString") && params == 0);
     }
 }

@@ -401,7 +401,7 @@ public class AIAgentService {
         for (int attempt = 1; attempt <= EXHAUSTED_POOL_MAX_ATTEMPTS; attempt++) {
             boolean validatingResponse = false;
             try {
-                if ("business-rule".equals(promptName)) GenerationJobContext.reserveLlmCall();
+                GenerationJobContext.reserveLlmCall();
                 GenerationJobContext.increment("llm.calls");
                 long llmStarted=System.nanoTime();
                 String response;
@@ -429,7 +429,8 @@ public class AIAgentService {
                     var provenance=generationJson.createObjectNode();
                     provenance.put("formatVersion",1); provenance.put("input",fingerprint.provenance());
                     provenance.put("outputFingerprint",outputFingerprint.value()); provenance.put("outputProvenance",outputFingerprint.provenance());
-                    persistentCache.putValidated(projectId,promptName,fingerprint.value(),response,provenance.toString());
+                    // Cache chỉ lưu JSON từ DTO đã validate, không lưu Markdown do LLM trả về.
+                    persistentCache.putValidated(projectId,promptName,fingerprint.value(),generationJson.valueToTree(parsed).toString(),provenance.toString());
                 } else if (fingerprints==null && responseCache != null) {
                     responseCache.putAfterSuccessfulTransaction(prompt, response);
                 }
@@ -455,9 +456,9 @@ public class AIAgentService {
                             + "If current behavior contradicts the approved outcome, preserve that assertion to expose the business defect; never force a passing test.";
                     continue;
                 }
-                boolean budgetExhausted = "business-rule".equals(promptName) && GenerationJobContext.llmCallBudgetExhausted();
+                boolean budgetExhausted = GenerationJobContext.llmCallBudgetExhausted();
                 if (budgetExhausted) GenerationJobContext.log(
-                        "Batch BR đã hết số lần thử. Các BR đã lưu được giữ lại; hãy dùng Tiếp tục sinh để bổ sung phần thiếu.");
+                        "Batch AI đã hết số lần thử. Các kết quả đã lưu được giữ lại; hãy dùng Tiếp tục sinh để bổ sung phần thiếu.");
                 if (!exception.isRetryable() || exception.getRetryAfterMillis() > MAX_RETRY_DELAY_MILLIS
                         || attempt >= maxAttemptsFor(exception) || budgetExhausted) {
                     if (budgetExhausted || (validatingResponse && exception.isRetryable() && attempt >= maxAttemptsFor(exception))) {
@@ -638,8 +639,9 @@ public class AIAgentService {
         String reason = isSharedPoolExhausted(exception)
                 ? "Provider AI đang tạm hết tài nguyên dùng chung."
                 : "Lần gọi AI tạm thời thất bại.";
-        GenerationJobContext.log(reason + " Hệ thống sẽ tự thử lại sau khoảng "
-                + Math.max(1, Math.round(delay / 1_000.0)) + " giây.");
+        GenerationJobContext.log(reason + " Hệ thống sẽ tự thử lại lần "
+                + (attempt + 1) + "/" + maxAttemptsFor(exception) + " sau khoảng "
+                + Math.max(1, Math.round(delay / 1_000.0)) + " giây. Nguyên nhân: " + exception.getMessage());
         try {
             Thread.sleep(delay);
         } catch (InterruptedException interrupted) {

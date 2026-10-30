@@ -197,9 +197,9 @@ class TestCaseServiceTest {
 
         assertThat(result).hasSize(11);
         ArgumentCaptor<Set<Long>> batches = ArgumentCaptor.forClass(Set.class);
-        verify(ai, org.mockito.Mockito.times(2)).generateTestCases(
+        verify(ai, org.mockito.Mockito.times(3)).generateTestCases(
                 org.mockito.ArgumentMatchers.eq(1L), batches.capture());
-        assertThat(batches.getAllValues()).extracting(Set::size).containsExactly(8, 3);
+        assertThat(batches.getAllValues()).extracting(Set::size).containsExactly(4, 4, 3);
         assertThat(batches.getAllValues().stream().flatMap(Set::stream))
                 .containsExactlyInAnyOrderElementsOf(LongStream.rangeClosed(1, 11).boxed().toList());
     }
@@ -235,9 +235,9 @@ class TestCaseServiceTest {
         var result = service.generate(1L);
 
         ArgumentCaptor<Set<Long>> batches = ArgumentCaptor.forClass(Set.class);
-        verify(ai, org.mockito.Mockito.times(2)).generateTestCases(
+        verify(ai, org.mockito.Mockito.times(3)).generateTestCases(
                 org.mockito.ArgumentMatchers.eq(1L), batches.capture());
-        assertThat(batches.getAllValues()).extracting(Set::size).containsExactly(8, 3);
+        assertThat(batches.getAllValues()).extracting(Set::size).containsExactly(4, 4, 3);
         assertThat(batches.getAllValues().stream().flatMap(Set::stream))
                 .containsExactlyInAnyOrderElementsOf(LongStream.rangeClosed(1, 11).boxed().toList());
     }
@@ -268,7 +268,7 @@ class TestCaseServiceTest {
                 org.mockito.ArgumentMatchers.eq(Set.of(0)),
                 org.mockito.ArgumentMatchers.contains("batch 2/2"));
         assertThat(labels.getValue()).contains(
-                "Sinh Test Case - batch 1/2: 8 plan",
+                "Sinh Test Case - batch 1/2: 4 plan",
                 "Sinh Test Case - batch 2/2: 1 plan");
     }
 

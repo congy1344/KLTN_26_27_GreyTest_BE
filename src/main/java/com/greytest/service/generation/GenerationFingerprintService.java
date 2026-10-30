@@ -164,29 +164,34 @@ public class GenerationFingerprintService {
     /** So sánh dependency giữa hai snapshot, dùng lại AST đã parse bởi bước diff. */
     public static Map<String, Fingerprint> sourceFingerprints(List<ClassContextDto> classes, Path root,
             Map<String, CompilationUnit> parsedUnits) {
-        SourceDependencyIndex index = SourceDependencyIndex.load(root, parsedUnits);
-        ObjectMapper mapper = new ObjectMapper();
-        Map<String, Fingerprint> result = new TreeMap<>();
-        for (ClassContextDto owner : classes) {
-            for (MethodContextDto method : owner.methods()) {
-                var single = new ClassContextDto(owner.id(), owner.packageName(), owner.className(), owner.qualifiedName(),
-                        owner.classType(), owner.filePath(), null, owner.annotations(), List.of(method));
-                List<String> problems = new ArrayList<>();
-                Map<String, Object> manifest = new TreeMap<>();
-                manifest.put("format", VERSION);
-                var dependencies = index.dependencies(List.of(single), problems);
-                manifest.put("sourceDependencies", dependencies);
-                manifest.put("resources", index.sourceResources(dependencies, problems));
-                manifest.put("problems", problems.stream().distinct().sorted().toList());
-                String evidence = mapper.valueToTree(manifest).toString();
-                String parameters = method.parameters() == null ? "" : method.parameters().stream()
-                        .map(com.greytest.dto.MethodParamDto::type).collect(java.util.stream.Collectors.joining(","));
-                String key = ServiceScopeResolver.modulePath(owner.filePath()) + ":" + owner.qualifiedName()
-                        + "#" + method.methodName() + "(" + parameters + ")";
-                result.put(key, new Fingerprint(hash(evidence), evidence, problems.isEmpty()));
-            }
+        // Mỗi snapshot dùng chung dữ liệu build/resource, rồi giải phóng scope sau khi diff.
+        try (var scope = com.greytest.service.GenerationJobContext.openScope(com.greytest.service.GenerationJobContext.actorUserId())) {
+            return com.greytest.service.agent.GenerationContextBuilder.withInputSnapshot(() -> {
+                SourceDependencyIndex index = SourceDependencyIndex.load(root, parsedUnits);
+                ObjectMapper mapper = new ObjectMapper();
+                Map<String, Fingerprint> result = new TreeMap<>();
+                for (ClassContextDto owner : classes) {
+                    for (MethodContextDto method : owner.methods()) {
+                        var single = new ClassContextDto(owner.id(), owner.packageName(), owner.className(), owner.qualifiedName(),
+                                owner.classType(), owner.filePath(), null, owner.annotations(), List.of(method));
+                        List<String> problems = new ArrayList<>();
+                        Map<String, Object> manifest = new TreeMap<>();
+                        manifest.put("format", VERSION);
+                        var dependencies = index.dependencies(List.of(single), problems);
+                        manifest.put("sourceDependencies", dependencies);
+                        manifest.put("resources", index.sourceResources(dependencies, problems));
+                        manifest.put("problems", problems.stream().distinct().sorted().toList());
+                        String evidence = mapper.valueToTree(manifest).toString();
+                        String parameters = method.parameters() == null ? "" : method.parameters().stream()
+                                .map(com.greytest.dto.MethodParamDto::type).collect(java.util.stream.Collectors.joining(","));
+                        String key = ServiceScopeResolver.modulePath(owner.filePath()) + ":" + owner.qualifiedName()
+                                + "#" + method.methodName() + "(" + parameters + ")";
+                        result.put(key, new Fingerprint(hash(evidence), evidence, problems.isEmpty()));
+                    }
+                }
+                return result;
+            });
         }
-        return result;
     }
 
     private List<ClassContextDto> targets(List<ClassContextDto> classes, JsonNode input) {

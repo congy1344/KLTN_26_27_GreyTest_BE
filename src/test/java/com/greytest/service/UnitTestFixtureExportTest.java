@@ -18,6 +18,15 @@ import com.greytest.dto.UnitTestFileDto;
 import com.greytest.entity.UnitTest;
 
 class UnitTestFixtureExportTest {
+    @Test
+    void fixtureVariantsAreDiscoveredByDefaultMavenTestPatterns() {
+        var files = service.mergeByClass(List.of(
+                test(1L, "check", fixture("int value = 1;", "", "assertEquals(1, value);")),
+                test(2L, "check", fixture("int value = 2;", "", "assertEquals(2, value);"))));
+        assertThat(files).hasSize(2);
+        assertThat(files).allSatisfy(file -> assertThat(file.testClassName())
+                .as("Maven Surefire default test discovery").matches("Test.*|.*Test|.*Tests|.*TestCase"));
+    }
     private final UnitTestFileService service = new UnitTestFileService();
 
     @Test
@@ -99,9 +108,9 @@ class UnitTestFixtureExportTest {
         String refs = "assertEquals(UserServiceTest.class, new UserServiceTest().getClass());";
         var first = test(1L, "check", fixture("int value = 1;", "public UserServiceTest() {}", refs));
         var second = test(2L, "check", fixture("int value = 2;", "public UserServiceTest() {}", refs));
-        var reserved = test(3L, "check", "package com.example; public class UserServiceTest_GreyTest_1 {}");
-        reserved.setTestClassName("UserServiceTest_GreyTest_1");
-        reserved.setFilePath("src/test/java/com/example/UserServiceTest_GreyTest_1.java");
+        var reserved = test(3L, "check", "package com.example; public class UserServiceTest_GreyTest_1Test {}");
+        reserved.setTestClassName("UserServiceTest_GreyTest_1Test");
+        reserved.setFilePath("src/test/java/com/example/UserServiceTest_GreyTest_1Test.java");
 
         var files = service.mergeByClass(List.of(first, second, reserved));
         var reversed = service.mergeByClass(List.of(reserved, second, first));

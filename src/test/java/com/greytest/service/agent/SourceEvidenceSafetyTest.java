@@ -9,6 +9,46 @@ import com.greytest.dto.agent.GenerationResponseDtos.GeneratedTestCaseDto;
 /** Kiểm tra không biến suy luận thiếu bằng chứng thành lỗi giả của BR/TC. */
 class SourceEvidenceSafetyTest {
     @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"", "`", "new ", "`new "})
+    void distinguishesConstructorArgumentsFromTheRenderedExceptionMessage(String constructorPrefix) {
+        var classes = resourceNotFoundSources();
+        String claim = "Method ném ResourceNotFoundException với message được tạo bởi constructor "
+                + constructorPrefix + "ResourceNotFoundException(\"Appointment\", \"id\", 999L)"
+                + (constructorPrefix.startsWith("`") ? "`" : "")
+                + ", tức chuỗi \"Appointment not found with id: '999'\".";
+        assertThat(new SourceExceptionMessageEvidence(classes).validate(classes, 1L, claim, Map.of("id", 999), true))
+                .isEmpty();
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"", "`", "new ", "`new "})
+    void stillRejectsAnIncorrectMessageAfterAConstructorDescription(String constructorPrefix) {
+        var classes = resourceNotFoundSources();
+        String claim = "ResourceNotFoundException với message được tạo bởi constructor "
+                + constructorPrefix + "ResourceNotFoundException(\"Appointment\", \"id\", 999L)"
+                + (constructorPrefix.startsWith("`") ? "`" : "") + ", tức chuỗi \"Appointment missing\".";
+        assertThat(new SourceExceptionMessageEvidence(classes).validate(classes, 1L, claim, Map.of("id", 999), true))
+                .hasValueSatisfying(error -> assertThat(error).contains("quoted message \"Appointment missing\""));
+    }
+
+    @Test
+    void preservesConstructorLikeTextInsideTheActualMessage() {
+        var classes = sources("void run() { throw new IllegalArgumentException(\"ResourceNotFoundException(Appointment)\"); }", "");
+        var evidence = new SourceExceptionMessageEvidence(classes);
+        assertThat(evidence.validate(classes, 1L,
+                "IllegalArgumentException message \"ResourceNotFoundException(Appointment)\"", Map.of(), true)).isEmpty();
+        assertThat(evidence.validate(classes, 1L,
+                "IllegalArgumentException message \"ResourceNotFoundException(Other)\"", Map.of(), true)).isPresent();
+    }
+
+    private List<ClassContextDto> resourceNotFoundSources() {
+        return sources("void run(Long id) { throw new ResourceNotFoundException(\"Appointment\", \"id\", id); }",
+                "static class ResourceNotFoundException extends RuntimeException { "
+                + "ResourceNotFoundException(String resourceName, String fieldName, Object fieldValue) { "
+                + "super(String.format(\"%s not found with %s: '%s'\", resourceName, fieldName, fieldValue)); } }");
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(strings = {"IllegalArgumentException message does not contain \"other\"",
             "IllegalArgumentException có thông điệp không chứa \"other\""})
     void verifiesAnExplicitNegativeSubstringAgainstAKnownMessage(String claim) {

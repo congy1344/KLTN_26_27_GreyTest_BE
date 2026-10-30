@@ -139,7 +139,7 @@ public class UnitTestFileService {
     }
 
     private Map<String, String> fixtureStaticBindings(CompilationUnit unit, TypeDeclaration<?> type, String testMethodName) {
-        var fixture = type.clone();
+        TypeDeclaration<?> fixture = type.clone();
         fixture.getMethods().stream().filter(method -> method.getNameAsString().equals(testMethodName))
                 .toList().forEach(MethodDeclaration::remove);
         Map<String, String> bindings = new LinkedHashMap<>();
@@ -156,7 +156,7 @@ public class UnitTestFileService {
     }
 
     private String classHeader(TypeDeclaration<?> type) {
-        var header = type.clone();
+        TypeDeclaration<?> header = type.clone();
         header.getMembers().clear();
         header.getAnnotations().clear();
         return canonical(header);
@@ -164,9 +164,9 @@ public class UnitTestFileService {
 
     private Map<String, String> fixtureFields(TypeDeclaration<?> type) {
         Map<String, String> fields = new LinkedHashMap<>();
-        for (var field : type.getFields()) {
-            for (var variable : field.getVariables()) {
-                var single = field.clone();
+        for (FieldDeclaration field : type.getFields()) {
+            for (VariableDeclarator variable : field.getVariables()) {
+                FieldDeclaration single = field.clone();
                 single.getVariables().clear();
                 single.getVariables().add(variable.clone());
                 fields.put(variable.getNameAsString(), canonical(single));
@@ -177,11 +177,11 @@ public class UnitTestFileService {
 
     private Map<String, String> fixtureMethods(TypeDeclaration<?> type, String testMethodName) {
         Map<String, String> methods = new LinkedHashMap<>();
-        for (var method : type.getMethods()) {
+        for (MethodDeclaration method : type.getMethods()) {
             if (testMethodName != null && (method.getNameAsString().equals(testMethodName) || method.getAnnotations().stream()
                     .anyMatch(annotation -> Set.of("Test", "ParameterizedTest", "RepeatedTest", "TestFactory", "TestTemplate")
                             .contains(annotation.getName().getIdentifier())))) continue;
-            var normalized = method.clone();
+            MethodDeclaration normalized = method.clone();
             String signature = methodSignature(method);
             String[] parameterTypes = signature.substring(signature.indexOf('(') + 1, signature.length() - 1).split(",");
             for (int i = 0; i < normalized.getParameters().size(); i++) {
@@ -249,9 +249,10 @@ public class UnitTestFileService {
         String suffix = first.getTestCaseId() == null
                 ? GenerationSourceFingerprint.hash(first.getSourceCode()).substring(0, 12) : first.getTestCaseId().toString();
         String stem = oldName + "_GreyTest_" + suffix;
-        String name = stem;
+        // Giữ hậu tố Test để Maven/Gradle phát hiện cả các fixture đã tách.
+        String name = stem + "Test";
         int collision = 2;
-        while (!usedClasses.add((file.packageName() + "." + name).toLowerCase(java.util.Locale.ROOT))) name = stem + "_" + collision++;
+        while (!usedClasses.add((file.packageName() + "." + name).toLowerCase(java.util.Locale.ROOT))) name = stem + "_" + collision++ + "Test";
         String newName = name;
         TypeDeclaration<?> type = typeByName(unit, oldName);
         type.setName(newName);
@@ -400,6 +401,7 @@ public class UnitTestFileService {
 
                 set "GT_SRC_DIR=%%~dp0"
                 if "!GT_SRC_DIR:~-1!"=="\\" set "GT_SRC_DIR=!GT_SRC_DIR:~0,-1!"
+                if not defined GT_ORIGINAL_DIR set "GT_ORIGINAL_DIR=!GT_SRC_DIR!"
 
                 if not defined GREYTEST_JVM_ARGS set "GREYTEST_JVM_ARGS=-Djdk.attach.allowAttachSelf=true -XX:+EnableDynamicAgentLoading"
 
@@ -408,20 +410,11 @@ public class UnitTestFileService {
                   if errorlevel 1 (
                     echo [GreyTest] Cảnh báo: Đường dẫn Unicode hoặc quá dài cho build tool Windows: "!GT_SRC_DIR!"
                     echo [GreyTest] Đang tự động tạo Junction ASCII tạm thời để build tool [gradlew/mvnw] hoạt động ổn định...
-                    if exist "pom.xml" (
-                      call :resolveMaven
-                      if errorlevel 1 goto :junctionFailed
-                    )
+                    set "GT_TARGET_DIR=!GT_SRC_DIR!"
+                    set "GT_EXEC_SUBDIR="
                     if exist "pom.xml" if exist "!GT_SRC_DIR!\\..\\pom.xml" (
-                      echo [GreyTest] Phát hiện module con của dự án Maven multi-module. Đang cài đặt parent POM vào local repository...
-                      pushd "!GT_SRC_DIR!\\.."
-                      call "!MAVEN_COMMAND!" -N install -DskipTests
-                      set "GT_PARENT_EXIT=!ERRORLEVEL!"
-                      popd
-                      if not "!GT_PARENT_EXIT!"=="0" (
-                        echo [GreyTest] ERROR: Maven parent POM installation failed. Review the Maven output above.
-                        goto :junctionFailed
-                      )
+                      for %%%%P in ("!GT_SRC_DIR!\\..") do set "GT_TARGET_DIR=%%%%~fP"
+                      for %%%%S in ("!GT_SRC_DIR!") do set "GT_EXEC_SUBDIR=\\%%%%~nxS"
                     )
                     set "GT_JUNC_BASE=%%TEMP%%\\greytest-junctions"
                     powershell -NoProfile -ExecutionPolicy Bypass -Command "if ($env:GT_JUNC_BASE -match '[^\\x00-\\x7F]') { exit 1 } else { exit 0 }" >nul 2>&1
@@ -431,16 +424,17 @@ public class UnitTestFileService {
                     )
                     if not exist "!GT_JUNC_BASE!" mkdir "!GT_JUNC_BASE!" >nul 2>&1
                     set "GT_JUNC_DIR=!GT_JUNC_BASE!\\gt-run-!RANDOM!-!RANDOM!"
-                    powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; New-Item -ItemType Junction -Path $env:GT_JUNC_DIR -Target $env:GT_SRC_DIR | Out-Null" >nul 2>&1
+                    set "GT_RUN_DIR=!GT_JUNC_DIR!!GT_EXEC_SUBDIR!"
+                    powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; New-Item -ItemType Junction -Path $env:GT_JUNC_DIR -Target $env:GT_TARGET_DIR | Out-Null" >nul 2>&1
                     if errorlevel 1 (
                       echo [GreyTest] ERROR: Could not create temporary ASCII junction under "!GT_JUNC_BASE!".
                       goto :junctionFailed
                     )
-                    if exist "!GT_JUNC_DIR!\\run-greytest-coverage.cmd" (
-                      echo [GreyTest] Chuyển hướng thực thi qua Junction: "!GT_JUNC_DIR!"
+                    if exist "!GT_RUN_DIR!\\run-greytest-coverage.cmd" (
+                      echo [GreyTest] Chuyển hướng thực thi qua Junction: "!GT_RUN_DIR!"
                       set "GREYTEST_JUNCTION_RUN=1"
-                      pushd "!GT_JUNC_DIR!"
-                      call "!GT_JUNC_DIR!\\run-greytest-coverage.cmd" %%*
+                      pushd "!GT_RUN_DIR!"
+                      call "!GT_RUN_DIR!\\run-greytest-coverage.cmd" %%*
                       set "GT_EXIT=!ERRORLEVEL!"
                       popd
                       rmdir "!GT_JUNC_DIR!" >nul 2>&1
@@ -477,6 +471,18 @@ public class UnitTestFileService {
                 :maven
                 call :resolveMaven
                 if errorlevel 1 exit /b 1
+
+                if exist "..\\pom.xml" (
+                  echo [GreyTest] Phát hiện module con của dự án Maven multi-module. Đang cài đặt parent POM vào local repository...
+                  pushd ".."
+                  call "!MAVEN_COMMAND!" -N install -DskipTests
+                  set "GT_PARENT_EXIT=!ERRORLEVEL!"
+                  popd
+                  if not "!GT_PARENT_EXIT!"=="0" (
+                    echo [GreyTest] ERROR: Maven parent POM installation failed. Review the Maven output above.
+                    exit /b 1
+                  )
+                )
 
                 echo [GreyTest] Running tests and generating JaCoCo XML...
                 call "%%MAVEN_COMMAND%%" clean test-compile ^
@@ -630,7 +636,7 @@ public class UnitTestFileService {
     private String windowsLocalMavenResolver() {
         return """
                 :findLocalMaven
-                for %%G in ("%GT_SRC_DIR%" "%GT_SRC_DIR%\\.." "%GT_SRC_DIR%\\..\\..") do (
+                for %%G in ("%GT_SRC_DIR%" "%GT_SRC_DIR%\\.." "%GT_SRC_DIR%\\..\\.." "!GT_ORIGINAL_DIR!" "!GT_ORIGINAL_DIR!\\.." "!GT_ORIGINAL_DIR!\\..\\..") do (
                   for /d %%M in ("%%~fG\\.tools\\apache-maven-*") do (
                     if exist "%%~fM\\bin\\mvn.cmd" (
                       call "%%~fM\\bin\\mvn.cmd" -v >nul 2>&1

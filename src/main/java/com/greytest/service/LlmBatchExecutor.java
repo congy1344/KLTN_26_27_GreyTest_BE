@@ -30,7 +30,7 @@ import com.greytest.service.agent.LlmResponseException;
 @Service
 public class LlmBatchExecutor {
 
-    private static final long MAX_RETRY_DELAY_MILLIS = 60_000L;
+    private static final long MAX_RETRY_DELAY_MILLIS = 2_000L;
 
     private final int concurrency;
     private final int retryAttempts;
@@ -38,8 +38,24 @@ public class LlmBatchExecutor {
     private final ExecutorService executor;
     private final AuthUserRepository users;
 
+    private static final class BatchTask<I> {
+        final int index;
+        final int batchNumber;
+        final I input;
+        int attempt;
+        final AtomicInteger remainingBudget;
+
+        BatchTask(int index, int batchNumber, I input) {
+            this.index = index;
+            this.batchNumber = batchNumber;
+            this.input = input;
+            this.attempt = 0;
+            this.remainingBudget = new AtomicInteger(3);
+        }
+    }
+
     public LlmBatchExecutor(int concurrency) {
-        this(concurrency, 2, 500L);
+        this(concurrency, 2, 200L);
     }
 
     public LlmBatchExecutor(int concurrency, AuthUserRepository users) {
@@ -54,7 +70,7 @@ public class LlmBatchExecutor {
     public LlmBatchExecutor(
             @Value("${greytest.llm-batch.concurrency:4}") int concurrency,
             @Value("${greytest.llm-batch.retry-attempts:2}") int retryAttempts,
-            @Value("${greytest.llm-batch.retry-delay-millis:500}") long retryDelayMillis,
+            @Value("${greytest.llm-batch.retry-delay-millis:200}") long retryDelayMillis,
             AuthUserRepository users) {
         if (concurrency <= 0) throw new IllegalArgumentException("LLM batch concurrency phải lớn hơn 0.");
         if (retryAttempts < 0) throw new IllegalArgumentException("LLM batch retry attempts không được âm.");
@@ -89,66 +105,105 @@ public class LlmBatchExecutor {
             BiConsumer<Integer, O> onCompleted) {
         if (inputs.isEmpty()) return List.of();
         int batchConcurrency = concurrencyForActor();
-        if (batchConcurrency == 1 || inputs.size() == 1) {
-            List<O> outputs = new ArrayList<>(inputs.size());
-            for (int index = 0; index < inputs.size(); index++) {
-                if (shouldStop != null && shouldStop.getAsBoolean()) {
-                    break;
-                }
-                O output = executeBatch(index + 1, inputs.get(index), worker, onCompleted);
-                outputs.add(output);
-            }
-            return outputs;
-        }
+        int workerCount = Math.min(inputs.size(), batchConcurrency);
 
         Locale locale = LocaleContextHolder.getLocale();
-        AtomicBoolean failed = new AtomicBoolean();
         Object completionLock = new Object();
-        // Giữ phần lưu kết quả tuần tự để không cấp trùng mã khi AI trả về đồng thời.
-        BiConsumer<Integer, O> serialCompletion = (batchNumber, output) -> {
-            synchronized (completionLock) {
-                onCompleted.accept(batchNumber, output);
-            }
-        };
-        List<CompletableFuture<O>> futures = new ArrayList<>(inputs.size());
-        for (int index = 0; index < inputs.size(); index++) {
-            I input = inputs.get(index);
-            int batchNumber = index + 1;
-            Supplier<O> contextualTask = GenerationJobContext.wrap(() -> {
+        java.util.concurrent.BlockingQueue<BatchTask<I>> queue = new java.util.concurrent.LinkedBlockingQueue<>();
+        for (int i = 0; i < inputs.size(); i++) {
+            queue.offer(new BatchTask<>(i, i + 1, inputs.get(i)));
+        }
+
+        List<O> outputs = java.util.Collections.synchronizedList(new ArrayList<>(java.util.Collections.nCopies(inputs.size(), null)));
+        AtomicInteger remainingTasks = new AtomicInteger(inputs.size());
+        java.util.concurrent.atomic.AtomicReference<RuntimeException> fatalError = new java.util.concurrent.atomic.AtomicReference<>();
+
+        List<CompletableFuture<Void>> workers = new ArrayList<>(workerCount);
+        for (int w = 0; w < workerCount; w++) {
+            CompletableFuture<Void> workerFuture = CompletableFuture.supplyAsync(GenerationJobContext.wrap(() -> {
                 LocaleContextHolder.setLocale(locale);
                 try {
-                    if (failed.get() || (shouldStop != null && shouldStop.getAsBoolean())) {
-                        return null;
+                    while (remainingTasks.get() > 0) {
+                        if (fatalError.get() != null || (shouldStop != null && shouldStop.getAsBoolean())) {
+                            break;
+                        }
+                        BatchTask<I> task;
+                        try {
+                            task = queue.poll(30, java.util.concurrent.TimeUnit.MILLISECONDS);
+                        } catch (InterruptedException ie) {
+                            Thread.currentThread().interrupt();
+                            break;
+                        }
+                        if (task == null) {
+                            continue;
+                        }
+
+                        O output;
+                        try {
+                            output = GenerationJobContext.withLlmCallBudget(task.remainingBudget, () -> worker.apply(task.input));
+                        } catch (BatchExecutionException exception) {
+                            recordFailure(fatalError, exception);
+                            remainingTasks.decrementAndGet();
+                            continue;
+                        } catch (LlmResponseException exception) {
+                            if (!exception.isRetryable() || task.attempt >= retryAttempts) {
+                                recordFailure(fatalError, new BatchExecutionException(task.batchNumber, exception));
+                                remainingTasks.decrementAndGet();
+                            } else {
+                                task.attempt++;
+                                GenerationJobContext.log("Batch " + task.batchNumber
+                                        + " gặp lỗi tạm thời từ AI; tự động đưa lại vào hàng đợi thử lại lần "
+                                        + (task.attempt + 1) + "/" + (retryAttempts + 1)
+                                        + ". Nguyên nhân: " + exception.getMessage());
+                                waitBeforeRetry(task.batchNumber, exception);
+                                queue.offer(task);
+                            }
+                            continue;
+                        } catch (RuntimeException exception) {
+                            recordFailure(fatalError, new BatchExecutionException(task.batchNumber, exception));
+                            remainingTasks.decrementAndGet();
+                            continue;
+                        }
+
+                        try {
+                            synchronized (completionLock) {
+                                onCompleted.accept(task.batchNumber, output);
+                            }
+                            outputs.set(task.index, output);
+                            remainingTasks.decrementAndGet();
+                        } catch (RuntimeException callbackException) {
+                            recordFailure(fatalError, new BatchExecutionException(task.batchNumber, callbackException));
+                            remainingTasks.decrementAndGet();
+                        }
                     }
-                    return executeBatch(batchNumber, input, worker, serialCompletion);
-                } catch (RuntimeException exception) {
-                    // Chỉ dừng batch chờ sau khi worker đã hết retry, giữ các batch đang chạy.
-                    failed.set(true);
-                    throw exception;
+                    return null;
                 } finally {
                     LocaleContextHolder.resetLocaleContext();
                 }
-            });
-            // Chỉ xếp batch tiếp theo khi một vị trí của gói đã trống; không giữ thread để chờ.
-            CompletableFuture<?> ready = index < batchConcurrency
-                    ? CompletableFuture.completedFuture(null)
-                    : futures.get(index - batchConcurrency).handle((output, failure) -> null);
-            futures.add(ready.thenApplyAsync(ignored -> contextualTask.get(), executor));
+            }), executor);
+            workers.add(workerFuture);
         }
 
-        List<O> outputs = new ArrayList<>(inputs.size());
         try {
-            CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new)).join();
-            for (CompletableFuture<O> future : futures) {
-                O res = future.join();
-                if (res != null) outputs.add(res);
-            }
-            return outputs;
+            CompletableFuture.allOf(workers.toArray(CompletableFuture[]::new)).join();
         } catch (CompletionException exception) {
             Throwable cause = exception.getCause();
             if (cause instanceof RuntimeException runtimeException) throw runtimeException;
             throw exception;
         }
+
+        if (fatalError.get() != null) {
+            throw fatalError.get();
+        }
+
+        return outputs.stream().filter(java.util.Objects::nonNull).toList();
+    }
+
+    /** Giữ lỗi riêng của mọi batch để giao diện không gán lỗi đầu tiên cho các batch khác. */
+    private static void recordFailure(java.util.concurrent.atomic.AtomicReference<RuntimeException> failures,
+            RuntimeException failure) {
+        RuntimeException first = failures.compareAndExchange(null, failure);
+        if (first != null && first != failure) first.addSuppressed(failure);
     }
 
     private int concurrencyForActor() {

@@ -112,11 +112,19 @@ public final class GenerationJobContext {
 
     /** Giữ ngân sách riêng cho batch, dùng chung qua các tầng retry và correction. */
     public static <T> T withLlmCallBudget(int limit, Supplier<T> task) {
+        return withLlmCallBudget(new java.util.concurrent.atomic.AtomicInteger(limit), task);
+    }
+
+    public static <T> T withLlmCallBudget(java.util.concurrent.atomic.AtomicInteger budgetHolder, Supplier<T> task) {
         if (LLM_CALLS_REMAINING.get() != null) return task.get();
-        LLM_CALLS_REMAINING.set(limit);
+        LLM_CALLS_REMAINING.set(budgetHolder != null ? budgetHolder.get() : 3);
         try {
             return task.get();
         } finally {
+            Integer remaining = LLM_CALLS_REMAINING.get();
+            if (remaining != null && budgetHolder != null) {
+                budgetHolder.set(remaining);
+            }
             LLM_CALLS_REMAINING.remove();
         }
     }
@@ -126,7 +134,7 @@ public final class GenerationJobContext {
         Integer remaining = LLM_CALLS_REMAINING.get();
         if (remaining == null) return;
         if (remaining <= 0) {
-            throw new LlmResponseException("Batch BR đã hết ngân sách gọi AI. Các batch đã lưu được giữ lại; hãy tiếp tục phần còn thiếu.");
+            throw new LlmResponseException("Batch AI đã hết ngân sách gọi AI. Các batch đã lưu được giữ lại; hãy tiếp tục phần còn thiếu.");
         }
         LLM_CALLS_REMAINING.set(remaining - 1);
     }
@@ -151,6 +159,19 @@ public final class GenerationJobContext {
     public static void log(String message) {
         Consumer<String> consumer = LOG_CONSUMER.get();
         if (consumer != null) consumer.accept(message);
+    }
+
+    /** Mỗi stage cập nhật source cần nhận log retry đúng stage và khôi phục callback của job ngoài. */
+    public static <T> T withLogConsumer(Consumer<String> consumer, Supplier<T> task) {
+        if (consumer == null) return task.get();
+        Consumer<String> previous = LOG_CONSUMER.get();
+        LOG_CONSUMER.set(consumer);
+        try {
+            return task.get();
+        } finally {
+            if (previous == null) LOG_CONSUMER.remove();
+            else LOG_CONSUMER.set(previous);
+        }
     }
 
     public static void clear() {

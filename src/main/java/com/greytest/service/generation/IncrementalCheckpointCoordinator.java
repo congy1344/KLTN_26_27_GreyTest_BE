@@ -209,7 +209,7 @@ public class IncrementalCheckpointCoordinator {
             try {
                 var item=items.findById(conflict.itemId()).orElseThrow();
                 var stage=GenerationProgressStage.valueOf(item.getTargetType().name());
-                var output=mapper.readTree(item.getAfterData());
+                var output=item.getAfterData()==null ? mapper.createObjectNode() : mapper.readTree(item.getAfterData());
                 Set<String> targets=new LinkedHashSet<>();
                 String field=switch(stage) { case BUSINESS_RULE->"method_id"; case TEST_PLAN->"rule_id";
                     case TEST_CASE->"plan_id"; case UNIT_TEST->"case_id"; };
@@ -485,7 +485,7 @@ public class IncrementalCheckpointCoordinator {
     private JsonNode effectiveOutput(SourceUpdateItem item) throws java.io.IOException {
         boolean kept=item.getAction()==com.greytest.entity.enums.SourceUpdateAction.KEEP
             || item.getReviewStatus()==com.greytest.entity.enums.SourceUpdateReviewStatus.REJECTED;
-        if(!kept) return mapper.readTree(item.getAfterData());
+        if(!kept) return item.getAfterData()==null ? null : mapper.readTree(item.getAfterData());
         if(item.getAction()==com.greytest.entity.enums.SourceUpdateAction.CREATE) return null;
         if(item.getTargetId()==null) throw new LlmResponseException("Kept artifact has no active identity");
         Object output=switch(item.getTargetType()) {

@@ -16,6 +16,27 @@ import com.greytest.service.analysis.JavaParserHelper;
 
 class SourceDiffServiceTest {
     @Test
+    void readsEachModuleBuildOncePerSnapshotAndRefreshesItForNextComparison(@TempDir Path root) throws IOException {
+        Path base = Files.createDirectories(root.resolve("base/src/main/java/demo"));
+        Path candidate = Files.createDirectories(root.resolve("candidate/src/main/java/demo"));
+        String source = "package demo; @org.springframework.stereotype.Service class Sample { int one() { return 1; } int two() { return 2; } }";
+        Files.writeString(base.resolve("Sample.java"), source);
+        Files.writeString(candidate.resolve("Sample.java"), source);
+        Path candidateBuild = root.resolve("candidate/pom.xml");
+        Files.writeString(root.resolve("base/pom.xml"), "<project/>");
+        Files.writeString(candidateBuild, "<project/>");
+        try (var scope = com.greytest.service.GenerationJobContext.openScope(null)) {
+            assertThat(diffService.compareSnapshots(root.resolve("base"), root.resolve("candidate")))
+                    .allSatisfy(item -> assertThat(item.diffType()).isEqualTo(MethodDiffType.UNCHANGED));
+            assertThat(com.greytest.service.GenerationJobContext.metrics()).containsEntry("dependencyBuildReads", 2L);
+
+            Files.writeString(candidateBuild, "<project><properties><java.version>21</java.version></properties></project>");
+            assertThat(diffService.compareSnapshots(root.resolve("base"), root.resolve("candidate")))
+                    .allSatisfy(item -> assertThat(item.diffType()).isEqualTo(MethodDiffType.MODIFIED));
+            assertThat(com.greytest.service.GenerationJobContext.metrics()).containsEntry("dependencyBuildReads", 4L);
+        }
+    }
+    @Test
     void keepsConcreteServiceClassificationInSourceUpdates(@TempDir Path root) throws IOException {
         Path base = root.resolve("base/src/main/java/demo");
         Path candidate = root.resolve("candidate/src/main/java/demo");

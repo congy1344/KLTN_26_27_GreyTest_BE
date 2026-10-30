@@ -97,6 +97,22 @@ public class IncrementalGenerationService {
     private final LlmBatchExecutor batchExecutor;
     @Autowired(required = false)
     private com.greytest.service.generation.IncrementalCheckpointCoordinator checkpoints;
+    @Autowired(required = false)
+    private GenerationProgressService progressService;
+
+    private void startProgressSafely(Long projectId, GenerationProgressStage stage, List<String> stepLabels, String message) {
+        if (progressService == null) return;
+        try {
+            for (GenerationProgressStage s : GenerationProgressStage.values()) {
+                if (s != stage) {
+                    progressService.completeIfActive(projectId, s, "Chuyển sang " + stage);
+                }
+            }
+            progressService.start(projectId, stage, stepLabels, message);
+        } catch (Exception e) {
+            log.warn("Không thể khởi tạo progressService cho {}: {}", stage, e.getMessage());
+        }
+    }
 
     @Autowired
     public IncrementalGenerationService(
@@ -232,18 +248,27 @@ public class IncrementalGenerationService {
         try {
             ImpactSummaryDto impact = parseImpactSummary(update.getImpactSummary());
             if(checkpoints!=null) checkpoints.beginStage(updateId,stage);
-            switch (stage) {
-                case BUSINESS_RULE -> generateIncrementalBusinessRules(projectId, updateId, impact);
-                case TEST_PLAN -> generateIncrementalTestPlans(projectId, updateId, impact, sourceUpdateService.getCandidateSourcePath(update));
-                case TEST_CASE -> generateIncrementalTestCases(projectId, updateId, impact, sourceUpdateService.getCandidateSourcePath(update));
-                case UNIT_TEST -> generateIncrementalUnitTests(projectId, update, impact);
-            }
+            SourceUpdate generatingUpdate = update;
+            GenerationJobContext.withLogConsumer(progressService == null ? null
+                    : message -> progressService.log(projectId, stage, message), () -> {
+                switch (stage) {
+                    case BUSINESS_RULE -> generateIncrementalBusinessRules(projectId, updateId, impact);
+                    case TEST_PLAN -> generateIncrementalTestPlans(projectId, updateId, impact, sourceUpdateService.getCandidateSourcePath(generatingUpdate));
+                    case TEST_CASE -> generateIncrementalTestCases(projectId, updateId, impact, sourceUpdateService.getCandidateSourcePath(generatingUpdate));
+                    case UNIT_TEST -> generateIncrementalUnitTests(projectId, generatingUpdate, impact);
+                }
+                return null;
+            });
             if(checkpoints!=null) checkpoints.completeStage(updateId,stage);
 
             update.setStatus(SourceUpdateStatus.READY_TO_APPLY);
             update = checkpoints==null ? sourceUpdateRepository.save(update) : checkpoints.changeStatus(updateId,SourceUpdateStatus.READY_TO_APPLY);
         } catch (Exception ex) {
             log.error("Lỗi khi sinh tăng dần stage {}: {}", stage, ex.getMessage(), ex);
+            if (progressService != null) {
+                failBatchProgress(projectId, stage, ex);
+                progressService.fail(projectId, stage, "Lỗi sinh " + stage + ": " + ex.getMessage());
+            }
             // Batch executor có thể bọc lỗi nghiệp vụ; còn case bị chặn thì tuyệt đối không mở Apply.
             for (Throwable cause = ex; cause != null; cause = cause.getCause()) {
                 if (cause instanceof TestFeasibilityBlockedException blocked) {
@@ -253,7 +278,9 @@ public class IncrementalGenerationService {
                 }
             }
             List<SourceUpdateItem> items = sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId);
-            update.setStatus(items.isEmpty() ? SourceUpdateStatus.ANALYZED : SourceUpdateStatus.READY_TO_APPLY);
+            // Draft được giữ để review, nhưng pipeline lỗi không được báo sẵn sàng Apply.
+            update.setStatus(checkpoints != null ? SourceUpdateStatus.FAILED
+                    : items.isEmpty() ? SourceUpdateStatus.ANALYZED : SourceUpdateStatus.READY_TO_APPLY);
             if(checkpoints==null) sourceUpdateRepository.save(update); else checkpoints.changeStatus(updateId,update.getStatus());
             throw ex;
         } finally {
@@ -264,21 +291,48 @@ public class IncrementalGenerationService {
         return sourceUpdateMapper.toUpdateDto(update, items);
     }
 
+    private void failBatchProgress(Long projectId, GenerationProgressStage stage, Throwable failure) {
+        for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+            if (cause instanceof LlmBatchExecutor.BatchExecutionException batch) {
+                progressService.failStep(projectId, stage, batch.batchNumber() - 1,
+                        "Lỗi batch " + batch.batchNumber() + ": " + batch.originalFailure().getMessage());
+            }
+            for (Throwable suppressed : cause.getSuppressed()) failBatchProgress(projectId, stage, suppressed);
+        }
+    }
+
     private void generateIncrementalBusinessRules(Long projectId, Long updateId, ImpactSummaryDto impact) {
         List<Set<Long>> batches = checkpoints==null ? resolveTargetMethodBatches(projectId,updateId,impact)
             : checkpoints.mutate(()->resolveTargetMethodBatches(projectId,updateId,impact));
 
         if (batches.isEmpty()) {
             log.info("Không có target method nào cần sinh lại BR cho project {}", projectId);
+            if (progressService != null) {
+                progressService.log(projectId, GenerationProgressStage.BUSINESS_RULE, "Không có method nào cần cập nhật Business Rule.");
+            }
             return;
         }
+
+        int totalBatches = batches.size();
+        List<String> stepLabels = new ArrayList<>();
+        for (int i = 0; i < totalBatches; i++) {
+            stepLabels.add("Sinh Business Rule - batch " + (i + 1) + "/" + totalBatches + ": " + batches.get(i).size() + " method(s)");
+        }
+        startProgressSafely(projectId, GenerationProgressStage.BUSINESS_RULE, stepLabels, "Bắt đầu sinh tăng dần Business Rule (" + totalBatches + " batches)");
 
         AtomicInteger nextBrNumber=new AtomicInteger(nextBusinessRuleNumber(projectId));
         var snapshot=checkpoints==null ? null : sourceUpdateService.getCandidateSourcePath(
                 sourceUpdateRepository.findByIdAndProjectId(updateId,projectId).orElseThrow());
         LlmBatchExecutor.mapOrSequential(batchExecutor, batches, methodIds -> {
+            int currentBatch = batches.indexOf(methodIds);
+            if (progressService != null) {
+                progressService.setStepStatus(projectId, GenerationProgressStage.BUSINESS_RULE, currentBatch,
+                        com.greytest.dto.GenerationProgressStepStatus.RUNNING);
+                progressService.log(projectId, GenerationProgressStage.BUSINESS_RULE,
+                        "Gọi AI Agent sinh Business Rule - batch " + (currentBatch + 1) + "/" + totalBatches + " (" + methodIds.size() + " method)");
+            }
             log.info("Gọi AI Agent sinh Business Rules cho batch {} methodIds: {}", methodIds.size(), methodIds);
-            return executeBatch(projectId,updateId,GenerationProgressStage.BUSINESS_RULE,methodIds,snapshot,
+            var result = executeBatch(projectId,updateId,GenerationProgressStage.BUSINESS_RULE,methodIds,snapshot,
                     BusinessRuleResponseDto.class,
                     ids->snapshot==null ? aiAgentService.generateBusinessRules(projectId,ids)
                         : aiAgentService.generateSnapshotBusinessRules(projectId,ids,snapshot),
@@ -288,7 +342,15 @@ public class IncrementalGenerationService {
                                         .filter(rule -> rule != null && ids.contains(rule.methodId())).toList());
                         persistBusinessRules(projectId,updateId,selected,nextBrNumber);
                     });
+            if (progressService != null) {
+                progressService.advanceStep(projectId, GenerationProgressStage.BUSINESS_RULE, currentBatch,
+                        "Hoàn thành batch " + (currentBatch + 1) + "/" + totalBatches);
+            }
+            return result;
         });
+        if (progressService != null) {
+            progressService.complete(projectId, GenerationProgressStage.BUSINESS_RULE, "Hoàn tất sinh Business Rule.");
+        }
     }
 
     private void persistBusinessRules(Long projectId,Long updateId,BusinessRuleResponseDto response,AtomicInteger nextBrNumber) {
@@ -366,22 +428,47 @@ public class IncrementalGenerationService {
 
         if (ruleIds.isEmpty()) {
             log.info("Không có Business Rule nào cần sinh Test Plan tăng dần cho project {}", projectId);
+            if (progressService != null) {
+                progressService.log(projectId, GenerationProgressStage.TEST_PLAN, "Không có Business Rule nào cần cập nhật Test Plan.");
+            }
             return;
         }
 
         List<Set<Long>> ruleBatches = partitionRuleIdsByMethod(projectId, ruleIds);
+        int totalBatches = ruleBatches.size();
+        List<String> stepLabels = new ArrayList<>();
+        for (int i = 0; i < totalBatches; i++) {
+            stepLabels.add("Sinh Test Plan - batch " + (i + 1) + "/" + totalBatches + ": " + ruleBatches.get(i).size() + " rule(s)");
+        }
+        startProgressSafely(projectId, GenerationProgressStage.TEST_PLAN, stepLabels, "Bắt đầu sinh tăng dần Test Plan (" + totalBatches + " batches)");
+
         AtomicInteger nextTpNumber = new AtomicInteger(nextTestPlanNumber(projectId));
         List<TestPlanResponseDto> responses = LlmBatchExecutor.mapOrSequential(
                 batchExecutor,
                 ruleBatches,
                 batch -> {
+                    int currentBatch = ruleBatches.indexOf(batch);
+                    if (progressService != null) {
+                        progressService.setStepStatus(projectId, GenerationProgressStage.TEST_PLAN, currentBatch,
+                                com.greytest.dto.GenerationProgressStepStatus.RUNNING);
+                        progressService.log(projectId, GenerationProgressStage.TEST_PLAN,
+                                "Gọi AI Agent sinh Test Plan - batch " + (currentBatch + 1) + "/" + totalBatches + " (" + batch.size() + " rule)");
+                    }
                     log.info("Gọi AI Agent sinh Test Plan cho {} ruleIds: {}", batch.size(), batch);
-                    return executeBatch(projectId,updateId,GenerationProgressStage.TEST_PLAN,batch,snapshot,
+                    var res = executeBatch(projectId,updateId,GenerationProgressStage.TEST_PLAN,batch,snapshot,
                         TestPlanResponseDto.class,ids->snapshot == null ? aiAgentService.generateTestPlan(projectId,ids)
                                 : aiAgentService.generateSnapshotTestPlan(projectId,ids,snapshot),
                         (ids,response)->persistTestPlans(projectId,updateId,response,nextTpNumber));
+                    if (progressService != null) {
+                        progressService.advanceStep(projectId, GenerationProgressStage.TEST_PLAN, currentBatch,
+                                "Hoàn thành batch " + (currentBatch + 1) + "/" + totalBatches);
+                    }
+                    return res;
                 });
 
+        if (progressService != null) {
+            progressService.complete(projectId, GenerationProgressStage.TEST_PLAN, "Hoàn tất sinh Test Plan.");
+        }
         if (responses.isEmpty()) {
             log.info("AI không trả về Test Plan cho project {}", projectId);
         }
@@ -444,16 +531,45 @@ public class IncrementalGenerationService {
                 .filter(i -> i.getTargetType() == SourceUpdateTargetType.TEST_PLAN && i.getAction() == SourceUpdateAction.CREATE)
                 .filter(i->i.getReviewStatus()!=SourceUpdateReviewStatus.REJECTED)
                 .map(SourceUpdateItem::getTargetId).filter(Objects::nonNull).forEach(planIds::add);
-        if (planIds.isEmpty()) return;
+        if (planIds.isEmpty()) {
+            if (progressService != null) {
+                progressService.log(projectId, GenerationProgressStage.TEST_CASE, "Không có Test Plan nào cần cập nhật Test Case.");
+            }
+            return;
+        }
 
         List<Set<Long>> planBatches = partitionIds(planIds, GenerationContextBuilder.MAX_TEST_CASE_PLANS);
+        int totalBatches = planBatches.size();
+        List<String> stepLabels = new ArrayList<>();
+        for (int i = 0; i < totalBatches; i++) {
+            stepLabels.add("Sinh Test Case - batch " + (i + 1) + "/" + totalBatches + ": " + planBatches.get(i).size() + " plan(s)");
+        }
+        startProgressSafely(projectId, GenerationProgressStage.TEST_CASE, stepLabels, "Bắt đầu sinh tăng dần Test Case (" + totalBatches + " batches)");
+
         AtomicInteger nextCaseNumber = new AtomicInteger(nextTestCaseNumber(projectId));
         List<TestCaseResponseDto> responses = LlmBatchExecutor.mapOrSequential(
                 batchExecutor, planBatches,
-                batch -> executeBatch(projectId,updateId,GenerationProgressStage.TEST_CASE,batch,snapshot,
+                batch -> {
+                    int currentBatch = planBatches.indexOf(batch);
+                    if (progressService != null) {
+                        progressService.setStepStatus(projectId, GenerationProgressStage.TEST_CASE, currentBatch,
+                                com.greytest.dto.GenerationProgressStepStatus.RUNNING);
+                        progressService.log(projectId, GenerationProgressStage.TEST_CASE,
+                                "Gọi AI Agent sinh Test Case - batch " + (currentBatch + 1) + "/" + totalBatches + " (" + batch.size() + " plan)");
+                    }
+                    var res = executeBatch(projectId,updateId,GenerationProgressStage.TEST_CASE,batch,snapshot,
                         TestCaseResponseDto.class,ids->snapshot == null ? aiAgentService.generateTestCases(projectId,ids)
                                 : aiAgentService.generateSnapshotTestCases(projectId,ids,snapshot),
-                        (ids,response)->persistTestCases(projectId,updateId,ids,response,nextCaseNumber)));
+                        (ids,response)->persistTestCases(projectId,updateId,ids,response,nextCaseNumber));
+                    if (progressService != null) {
+                        progressService.advanceStep(projectId, GenerationProgressStage.TEST_CASE, currentBatch,
+                                "Hoàn thành batch " + (currentBatch + 1) + "/" + totalBatches);
+                    }
+                    return res;
+                });
+        if (progressService != null) {
+            progressService.complete(projectId, GenerationProgressStage.TEST_CASE, "Hoàn tất sinh Test Case.");
+        }
         if (responses.isEmpty()) log.info("AI không trả về Test Case cho project {}", projectId);
     }
 
@@ -584,15 +700,35 @@ public class IncrementalGenerationService {
         caseIds.removeAll(removedCaseIds);
         for (Long unitId : removedUnitIds) unitTestRepository.findById(unitId)
                 .map(UnitTest::getTestCaseId).ifPresent(caseIds::remove);
-        if (caseIds.isEmpty()) return;
+        if (caseIds.isEmpty()) {
+            if (progressService != null) {
+                progressService.log(projectId, GenerationProgressStage.UNIT_TEST, "Không có Test Case nào cần cập nhật Unit Test.");
+            }
+            return;
+        }
 
         List<Set<Long>> caseBatches = partitionIds(caseIds, GenerationContextBuilder.MAX_UNIT_TEST_CASES);
+        int totalBatches = caseBatches.size();
+        List<String> stepLabels = new ArrayList<>();
+        for (int i = 0; i < totalBatches; i++) {
+            stepLabels.add("Sinh Unit Test - batch " + (i + 1) + "/" + totalBatches + ": " + caseBatches.get(i).size() + " case(s)");
+        }
+        startProgressSafely(projectId, GenerationProgressStage.UNIT_TEST, stepLabels, "Bắt đầu sinh tăng dần Unit Test (" + totalBatches + " batches)");
+
         Map<Long, BlockedUnitTestDto> blockedCases = new java.util.concurrent.ConcurrentHashMap<>();
         List<UnitTestResponseDto> responses;
         try {
             responses = LlmBatchExecutor.mapOrSequential(
                 batchExecutor, caseBatches,
-                batch -> executeBatch(projectId,updateId,GenerationProgressStage.UNIT_TEST,batch,
+                batch -> {
+                    int currentBatch = caseBatches.indexOf(batch);
+                    if (progressService != null) {
+                        progressService.setStepStatus(projectId, GenerationProgressStage.UNIT_TEST, currentBatch,
+                                com.greytest.dto.GenerationProgressStepStatus.RUNNING);
+                        progressService.log(projectId, GenerationProgressStage.UNIT_TEST,
+                                "Gọi AI Agent sinh Unit Test - batch " + (currentBatch + 1) + "/" + totalBatches + " (" + batch.size() + " case)");
+                    }
+                    var res = executeBatch(projectId,updateId,GenerationProgressStage.UNIT_TEST,batch,
                         sourceUpdateService.getCandidateSourcePath(update),UnitTestResponseDto.class,
                         ids->aiAgentService.generateSnapshotUnitTests(projectId,ids,sourceUpdateService.getCandidateSourcePath(update)),
                         (ids,response) -> {
@@ -604,7 +740,16 @@ public class IncrementalGenerationService {
                         }
                     }
                     persistUnitTests(updateId, ids, response);
-                }));
+                });
+                    if (progressService != null) {
+                        progressService.advanceStep(projectId, GenerationProgressStage.UNIT_TEST, currentBatch,
+                                "Hoàn thành batch " + (currentBatch + 1) + "/" + totalBatches);
+                    }
+                    return res;
+                });
+            if (progressService != null) {
+                progressService.complete(projectId, GenerationProgressStage.UNIT_TEST, "Hoàn tất sinh Unit Test.");
+            }
         } catch (RuntimeException failure) {
             if (!blockedCases.isEmpty()) throw blockedSnapshotFailure(blockedCases, failure);
             throw failure;

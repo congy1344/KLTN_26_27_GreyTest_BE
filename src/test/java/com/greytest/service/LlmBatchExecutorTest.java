@@ -186,4 +186,23 @@ class LlmBatchExecutorTest {
         assertThat(peakCallbacks.get()).isEqualTo(1);
         assertThat(saved).containsExactlyInAnyOrder(1, 2, 3);
     }
+
+    @Test
+    void closedLoopAutoRequeuesFailedBatchAndContinuesWithoutDelayingOtherBatches() {
+        executor = new LlmBatchExecutor(2, 2, 0);
+        AtomicInteger item2Attempts = new AtomicInteger();
+        List<Integer> executionOrder = java.util.Collections.synchronizedList(new ArrayList<>());
+
+        List<String> outputs = executor.map(List.of(1, 2, 3), input -> {
+            executionOrder.add(input);
+            if (input == 2 && item2Attempts.getAndIncrement() == 0) {
+                throw new LlmResponseException("temporary failure", true);
+            }
+            return "res-" + input;
+        });
+
+        // Batch 2 gặp lỗi lần 1 được đưa về đuôi hàng đợi; Batch 3 vẫn chạy và Batch 2 thử lại thành công
+        assertThat(outputs).containsExactly("res-1", "res-2", "res-3");
+        assertThat(executionOrder).contains(1, 2, 3, 2);
+    }
 }

@@ -11,6 +11,42 @@ import com.greytest.dto.diff.MethodDiffType;
 import com.greytest.service.analysis.JavaParserHelper;
 
 class DependencySourceDiffTest {
+    @Test void zipWrapperAliasPreservesUnchangedConstructorReferences() throws Exception {
+        String caller = "package example; @org.springframework.stereotype.Service class Caller { java.util.List<Result> target(java.util.List<Input> values) { return values.stream().map(Result::new).collect(java.util.stream.Collectors.toList()); } }";
+        String input = "package example; class Input { int value; }";
+        String result = "package example; public class Result { int value; public Result(Input input) { this.value = input.value; } }";
+        for (var source : java.util.Map.of("Caller", caller, "Input", input, "Result", result).entrySet()) {
+            write("base", "outer/module/src/main/java/example/" + source.getKey() + ".java", source.getValue());
+            candidate("module/src/main/java/example/" + source.getKey() + ".java", source.getValue());
+        }
+        assertThat(method(compare(), "Caller", "target").diffType()).isEqualTo(MethodDiffType.UNCHANGED);
+    }
+    @Test void zipWrapperAliasDoesNotTreatIdenticalDependencyDiagnosticsAsSourceChanges() throws Exception {
+        String common = "package example; @org.springframework.stereotype.Service class Caller { private Client client; int unchanged() { return client.read(); } int modified() { return %s; } %s }";
+        String dependency = "package example; class Client { private MissingTransport transport; int read() { return transport.fetch(); } }";
+        write("base", "outer/module/src/main/java/example/Caller.java", common.formatted("1", "int removed() { return 3; }"));
+        write("base", "outer/module/src/main/java/example/Client.java", dependency);
+        candidate("module/src/main/java/example/Caller.java", common.formatted("2", "int added() { return 4; }"));
+        candidate("module/src/main/java/example/Client.java", dependency);
+
+        var diffs = compare();
+        assertThat(method(diffs, "Caller", "unchanged").diffType()).isEqualTo(MethodDiffType.UNCHANGED);
+        assertThat(method(diffs, "Caller", "modified").diffType()).isEqualTo(MethodDiffType.MODIFIED);
+        assertThat(method(diffs, "Caller", "added").diffType()).isEqualTo(MethodDiffType.ADDED);
+        assertThat(method(diffs, "Caller", "removed").diffType()).isEqualTo(MethodDiffType.DELETED);
+    }
+
+    @Test void zipWrapperAliasStillDetectsChangedUnresolvedDependencyCalls() throws Exception {
+        String caller = "package example; @org.springframework.stereotype.Service class Caller { private Client client; int target() { return client.read(); } int independent() { return 7; } }";
+        write("base", "outer/module/src/main/java/example/Caller.java", caller);
+        candidate("module/src/main/java/example/Caller.java", caller);
+        write("base", "outer/module/src/main/java/example/Client.java", "package example; class Client { private MissingTransport transport; int read() { return transport.fetch(); } }");
+        candidate("module/src/main/java/example/Client.java", "package example; class Client { private MissingTransport transport; int read() { return transport.fetchOther(); } }");
+
+        var diffs = compare();
+        assertThat(method(diffs, "Caller", "target").diffType()).isEqualTo(MethodDiffType.MODIFIED);
+        assertThat(method(diffs, "Caller", "independent").diffType()).isEqualTo(MethodDiffType.UNCHANGED);
+    }
     @TempDir Path temp;
     private final SourceDiffService service = new SourceDiffService(new JavaParserHelper());
 
