@@ -97,6 +97,21 @@ class BusinessRuleRepairRegressionTest {
         verify(client, times(2)).complete(anyString(), any(LlmRequestOptions.class));
     }
 
+    @Test
+    void businessRuleCoveringMultipleDecisionsPassesValidation(@TempDir Path logs) throws Exception {
+        List<GeneratedBusinessRuleDto> rules = new ArrayList<>(correctedResponse().rules());
+        // Thay 2 rule riêng cho TERNARY-1 và TERNARY-2 bằng 1 rule gộp bao phủ cả 2 nhánh
+        rules.removeIf(rule -> "TERNARY-1".equals(rule.branchId()) || "TERNARY-2".equals(rule.branchId()));
+        rules.add(new GeneratedBusinessRuleDto(95434L,
+                "Service xác định hạng theo chi tiêu: PLATINUM nếu >= 5000, GOLD nếu >= 1000, STANDARD nếu < 1000.",
+                "BUSINESS_LOGIC", "TERNARY-1, TERNARY-2"));
+
+        var agent = agent(mock(GenerationContextBuilder.class), mock(LlmClient.class), logs);
+        // Không ném exception vì cả TERNARY-1 và TERNARY-2 đều được bao phủ
+        agent.validateSnapshotOutput(GenerationProgressStage.BUSINESS_RULE, 377L, context(),
+                new BusinessRuleResponseDto(rules), null);
+    }
+
     private AIAgentService agent(GenerationContextBuilder contexts, LlmClient client, Path logs) {
         return new AIAgentService(contexts, new PromptManager(mapper), client, parser,
                 new AiContextLogService(mapper, logs.toString(), false, false));

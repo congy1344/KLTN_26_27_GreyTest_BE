@@ -52,7 +52,10 @@ public class UnitTestExportProvenanceService {
             GenerationJobContext.bind(actor, ignored -> { });
             return GenerationJobContext.withValue("greytest.export-read-only", Boolean.TRUE,
                     () -> com.greytest.service.agent.GenerationContextBuilder.withInputSnapshot(
-                            () -> tests.stream().map(test -> prepareOne(projectId, test, sourceRoot)).toList()));
+                            () -> tests.stream().map(test -> {
+                                if (sourceRoot != null && test.getSourceCode() != null && test.getSourceCode().contains(GenerationSourceFingerprint.PREFIX)) { agent.validateExistingUnitTest(projectId, test, sourceRoot); }
+                                return prepareOne(projectId, test, sourceRoot);
+                            }).toList()));
         }
     }
 

@@ -298,7 +298,7 @@ class GenerationFingerprintServiceTest {
     }
 
     @Test void unresolvedMockitoWrapperStillTracksItsTypedProductionCall() throws Exception {
-        String source = "package example; import static org.mockito.fixture.Missing.verify; class SubjectTest { Subject subject = new Subject(); void testTarget() { verify(subject).other(); } }";
+        String source = "package example; import static org.mockito.Mockito.verify; class SubjectTest { Subject subject = new Subject(); void testTarget() { verify(subject).other(); } }";
         var response = Map.of("unit_tests", List.of(Map.of("source_code", source)));
         var before = service.outputFingerprint(response, root);
         assertThat(before.reusable()).isTrue();
@@ -312,7 +312,7 @@ class GenerationFingerprintServiceTest {
         "doAnswer(invocation -> invocation.getArgument(0)).when(subject).target(1);"
     })
     void mockitoAnswerLambdaTracksProductionCallsWithoutRequiringMockitoOnParserClasspath(String setup) throws Exception {
-        String source = "package example; import static org.mockito.fixture.Missing.when; import static org.mockito.fixture.Missing.doAnswer; "
+        String source = "package example; import static org.mockito.Mockito.when; import static org.mockito.Mockito.doAnswer; "
                 + "class SubjectTest { Subject subject = new Subject(); void testTarget() { " + setup + " } }";
         var response = Map.of("unit_tests", List.of(Map.of("source_code", source)));
         var before = service.outputFingerprint(response, root);

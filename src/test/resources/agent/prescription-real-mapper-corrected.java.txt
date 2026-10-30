@@ -1,0 +1,77 @@
+package com.example.HMS.service;
+
+import com.example.HMS.dto.PrescriptionDto;
+import com.example.HMS.dto.PrescriptionMapper;
+import com.example.HMS.entity.MedicalRecord;
+import com.example.HMS.entity.Prescription;
+import com.example.HMS.repository.MedicalRecordRepository;
+import com.example.HMS.repository.PrescriptionRepository;
+import java.util.Arrays;
+import java.util.List;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.Spy;
+import org.mockito.junit.jupiter.MockitoExtension;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+@ExtendWith(MockitoExtension.class)
+class PrescriptionServiceTest {
+
+    @Mock
+    private PrescriptionRepository prescriptionRepository;
+
+    @Mock
+    private MedicalRecordRepository medicalRecordRepository;
+
+    @Spy
+    private PrescriptionMapper prescriptionMapper = new PrescriptionMapper();
+
+    @InjectMocks
+    private PrescriptionService prescriptionService;
+
+    // GreyTest trace: fetchAllPrescription | STMT-1, STMT-2 | BR-127 -> TP-099 -> TC-160
+    @Test
+    void fetchAllPrescription_MapsEveryEntityInRepositoryOrder() {
+        // Arrange
+        MedicalRecord medicalRecord = new MedicalRecord();
+        medicalRecord.setRecordId(52L);
+
+        Prescription first = new Prescription();
+        first.setPrescriptionId(73L);
+        first.setMedicine("Amoxicillin");
+        first.setDosage("500 mg");
+        first.setInstructions("Uống sau bữa ăn");
+        first.setMedicalRecord(medicalRecord);
+
+        Prescription second = new Prescription();
+        second.setPrescriptionId(74L);
+        second.setMedicine("Ibuprofen");
+        second.setDosage("200 mg");
+        second.setInstructions("Uống khi cần");
+        second.setMedicalRecord(null);
+
+        when(prescriptionRepository.findAll()).thenReturn(Arrays.asList(first, second));
+
+        // Act
+        List<PrescriptionDto> result = prescriptionService.fetchAllPrescription();
+
+        // Assert
+        assertEquals(2, result.size());
+        assertEquals(73L, result.get(0).getPrescriptionId());
+        assertEquals("Amoxicillin", result.get(0).getMedicine());
+        assertEquals("500 mg", result.get(0).getDosage());
+        assertEquals("Uống sau bữa ăn", result.get(0).getInstructions());
+        assertEquals(52L, result.get(0).getMedicalRecordId());
+        assertEquals(74L, result.get(1).getPrescriptionId());
+        assertEquals("Ibuprofen", result.get(1).getMedicine());
+        assertEquals("200 mg", result.get(1).getDosage());
+        assertEquals("Uống khi cần", result.get(1).getInstructions());
+        assertNull(result.get(1).getMedicalRecordId());
+        verify(prescriptionRepository).findAll();
+    }
+}

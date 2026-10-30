@@ -109,9 +109,10 @@ public class LlmBatchExecutor {
 
         Locale locale = LocaleContextHolder.getLocale();
         Object completionLock = new Object();
-        java.util.concurrent.BlockingQueue<BatchTask<I>> queue = new java.util.concurrent.LinkedBlockingQueue<>();
+        List<java.util.concurrent.BlockingQueue<BatchTask<I>>> queues = new ArrayList<>(workerCount);
+        for (int w = 0; w < workerCount; w++) queues.add(new java.util.concurrent.LinkedBlockingQueue<>());
         for (int i = 0; i < inputs.size(); i++) {
-            queue.offer(new BatchTask<>(i, i + 1, inputs.get(i)));
+            queues.get(i % workerCount).offer(new BatchTask<>(i, i + 1, inputs.get(i)));
         }
 
         List<O> outputs = java.util.Collections.synchronizedList(new ArrayList<>(java.util.Collections.nCopies(inputs.size(), null)));
@@ -120,8 +121,10 @@ public class LlmBatchExecutor {
 
         List<CompletableFuture<Void>> workers = new ArrayList<>(workerCount);
         for (int w = 0; w < workerCount; w++) {
+            final int workerIndex = w;
             CompletableFuture<Void> workerFuture = CompletableFuture.supplyAsync(GenerationJobContext.wrap(() -> {
                 LocaleContextHolder.setLocale(locale);
+                var queue = queues.get(workerIndex);
                 try {
                     while (remainingTasks.get() > 0) {
                         if (fatalError.get() != null || (shouldStop != null && shouldStop.getAsBoolean())) {
@@ -135,6 +138,7 @@ public class LlmBatchExecutor {
                             break;
                         }
                         if (task == null) {
+                            if (fatalError.get() != null || (shouldStop != null && shouldStop.getAsBoolean())) break;
                             continue;
                         }
 
@@ -143,11 +147,13 @@ public class LlmBatchExecutor {
                             output = GenerationJobContext.withLlmCallBudget(task.remainingBudget, () -> worker.apply(task.input));
                         } catch (BatchExecutionException exception) {
                             recordFailure(fatalError, exception);
+                            for (var q : queues) q.clear();
                             remainingTasks.decrementAndGet();
                             continue;
                         } catch (LlmResponseException exception) {
                             if (!exception.isRetryable() || task.attempt >= retryAttempts) {
                                 recordFailure(fatalError, new BatchExecutionException(task.batchNumber, exception));
+                                for (var q : queues) q.clear();
                                 remainingTasks.decrementAndGet();
                             } else {
                                 task.attempt++;
@@ -161,6 +167,7 @@ public class LlmBatchExecutor {
                             continue;
                         } catch (RuntimeException exception) {
                             recordFailure(fatalError, new BatchExecutionException(task.batchNumber, exception));
+                            for (var q : queues) q.clear();
                             remainingTasks.decrementAndGet();
                             continue;
                         }
@@ -173,6 +180,7 @@ public class LlmBatchExecutor {
                             remainingTasks.decrementAndGet();
                         } catch (RuntimeException callbackException) {
                             recordFailure(fatalError, new BatchExecutionException(task.batchNumber, callbackException));
+                            for (var q : queues) q.clear();
                             remainingTasks.decrementAndGet();
                         }
                     }
@@ -199,11 +207,21 @@ public class LlmBatchExecutor {
         return outputs.stream().filter(java.util.Objects::nonNull).toList();
     }
 
-    /** Giữ lỗi riêng của mọi batch để giao diện không gán lỗi đầu tiên cho các batch khác. */
+    /** Giữ lỗi riêng của mọi batch theo thứ tự batch nhỏ nhất để giao diện thông báo xác định. */
     private static void recordFailure(java.util.concurrent.atomic.AtomicReference<RuntimeException> failures,
             RuntimeException failure) {
-        RuntimeException first = failures.compareAndExchange(null, failure);
-        if (first != null && first != failure) first.addSuppressed(failure);
+        failures.accumulateAndGet(failure, (current, next) -> {
+            if (current == null) return next;
+            if (current == next) return current;
+            if (current instanceof BatchExecutionException cb && next instanceof BatchExecutionException nb) {
+                if (nb.batchNumber() < cb.batchNumber()) {
+                    nb.addSuppressed(cb);
+                    return nb;
+                }
+            }
+            current.addSuppressed(next);
+            return current;
+        });
     }
 
     private int concurrencyForActor() {

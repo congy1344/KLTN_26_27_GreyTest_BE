@@ -10,11 +10,13 @@ final class UpstreamSourceEvidenceValidator {
 
     static Optional<String> businessRules(BusinessRuleGenerationContextDto context, BusinessRuleResponseDto response) {
         var evidence = new SourceExceptionMessageEvidence(context.classes());
+        Set<String> problems = new LinkedHashSet<>();
         for (var rule : response.rules()) {
             var problem = evidence.validate(context.classes(), rule.methodId(), rule.description(), null, true);
-            if (problem.isPresent()) return problem;
+            problem.ifPresent(problems::add);
         }
-        return Optional.empty();
+        // Gửi đủ lỗi của batch trong một lượt sửa, tránh hết retry vì mỗi lần chỉ thấy lỗi đầu tiên.
+        return problems.isEmpty() ? Optional.empty() : Optional.of(String.join("\n", problems));
     }
 
     static Optional<String> cases(TestCaseContextDto context, TestCaseResponseDto response) {
@@ -24,6 +26,7 @@ final class UpstreamSourceEvidenceValidator {
     private static Optional<String> cases(TestCaseContextDto context, TestCaseResponseDto response, boolean requireProof) {
         var index = new SourceEvidenceIndex(context.classes());
         var messages = new SourceExceptionMessageEvidence(context.classes());
+        Set<String> problems = new LinkedHashSet<>();
         for (var item : response.cases()) {
             var plan = context.approvedTestPlans().stream().filter(p -> Objects.equals(p.id(), item.planId())).findFirst().orElse(null);
             if (plan == null) continue;
@@ -34,15 +37,15 @@ final class UpstreamSourceEvidenceValidator {
             for (var source : context.classes()) for (var method : source.methods()) if (ids.contains(method.id())) {
                 Map<String, Object> input = input(item);
                 var problem = messages.validate(context.classes(), method.id(), item.expectedResult(), input, requireProof);
-                if (problem.isPresent()) return problem;
+                problem.ifPresent(p -> problems.add("plan_id=" + item.planId() + ": " + p));
                 // Interaction đã được BR/TP yêu cầu rõ ràng phải được giữ để kiểm chứng source, không tự sửa oracle.
                 String approved = rules.stream().map(BusinessRuleContextDto::description).reduce("", (a, b) -> a + " " + b)
                         + " " + plan.title() + " " + plan.description();
                 problem = new SourceCollectionCallEvidence(index, item, approved).validate(method);
-                if (problem.isPresent()) return problem;
+                problem.ifPresent(problems::add);
             }
         }
-        return Optional.empty();
+        return problems.isEmpty() ? Optional.empty() : Optional.of(String.join("\n", problems));
     }
 
     static Optional<String> prerequisites(Object context) {

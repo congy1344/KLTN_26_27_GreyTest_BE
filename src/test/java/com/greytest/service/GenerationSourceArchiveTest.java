@@ -25,6 +25,61 @@ class GenerationSourceArchiveTest {
     private static String javacCommand;
     private static final String SOURCE = "class Sample { String label = \"kiểm thử\"; int value = 1; }\n";
 
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void rootlessExportRejectsMixedSourceRootsEvenWhenHashesMatch(boolean changed) {
+        String path = "backend/appointment-service/src/main/java/Sample.java";
+        String old = metadata("hospital-management-demo-main/" + path, SOURCE);
+        String current = metadata(path, changed ? SOURCE.replace("value = 1", "value = 2") : SOURCE);
+        var test = new UnitTestFileDto("src/test/java/SampleTest.java", "SampleTest", "", 1, List.of(),
+                old + current + "class SampleTest {}\n");
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> new UnitTestFileService().createCoverageArchive(List.of(test)))
+                .isInstanceOf(com.greytest.exception.StorageException.class).hasMessageContaining("Mixed generation source roots");
+    }
+
+    @Test
+    void alignedExportRejectsChangedHistoricalHashInsteadOfDroppingOldMetadata() throws Exception {
+        Path root = Files.createDirectories(workspace.resolve("source"));
+        String path = "backend/appointment-service/src/main/java/Sample.java";
+        Files.createDirectories(root.resolve(path).getParent());
+        Files.writeString(root.resolve(path), SOURCE.replace("value = 1", "value = 2"));
+        String old = metadata("hospital-management-demo-main/" + path, SOURCE);
+        String current = metadata(path, SOURCE.replace("value = 1", "value = 2"));
+        var test = new UnitTestFileDto("src/test/java/SampleTest.java", "SampleTest", "", 1, List.of(),
+                old + current + "class SampleTest {}\n");
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> new UnitTestFileService().createCoverageArchive(List.of(test), root))
+                .isInstanceOf(com.greytest.exception.StorageException.class).hasMessageContaining("Source changed");
+    }
+
+    @Test
+    void mixedWrapperExportKeepsTenUniqueFilesIncludingSiblingModule() throws Exception {
+        Path root = Files.createDirectories(workspace.resolve("source"));
+        StringBuilder old = new StringBuilder(); StringBuilder current = new StringBuilder();
+        for (int i = 0; i < 10; i++) {
+            String path = "backend/" + (i == 9 ? "common-lib" : "appointment-service") + "/src/main/java/Source" + i + ".java";
+            String source = "class Source" + i + " {}\n";
+            Files.createDirectories(root.resolve(path).getParent()); Files.writeString(root.resolve(path), source);
+            old.append(metadata("hospital-management-demo-main/" + path, source));
+            current.append(metadata(path, source));
+        }
+        var test = new UnitTestFileDto("src/test/java/SampleTest.java", "SampleTest", "", 1, List.of(),
+                old.toString() + current + "class SampleTest {}\n");
+        Path module = root.resolve("backend/appointment-service");
+        extractArchive(module, new UnitTestFileService().createCoverageArchive(List.of(test), root));
+        String manifest = Files.readString(module.resolve("greytest-source-version.txt"));
+        assertThat(manifest.lines()).hasSize(10);
+        assertThat(manifest).isEqualTo(GenerationSourceFingerprint.manifest(current.toString()));
+        assertThat(Files.readString(module.resolve(test.filePath()))).startsWith(current.toString());
+        Result result = verify(module);
+        assertThat(result.exit).withFailMessage(result.output).isZero();
+        assertThat(result.output).contains("Source version verified for 10 generation files");
+    }
+
+    private static String metadata(String path, String source) {
+        return GenerationSourceFingerprint.PREFIX + GenerationSourceFingerprint.hash(source) + " "
+                + java.util.Base64.getEncoder().encodeToString(path.getBytes(StandardCharsets.UTF_8)) + "\n";
+    }
+
     @BeforeAll
     static void compileExportedJava8Verifier() throws Exception {
         String suffix = System.getProperty("os.name").toLowerCase().contains("win") ? ".exe" : "";

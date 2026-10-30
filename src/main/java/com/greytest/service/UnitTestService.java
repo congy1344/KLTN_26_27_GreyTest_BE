@@ -67,15 +67,30 @@ public class UnitTestService {
         if(approved.isEmpty()) throw new LlmResponseException("Không có Test Case đã approve để sinh Unit Test.");
         ai.validateUnitTestPrerequisites(projectId, approved.stream().map(TestCase::getId).collect(java.util.stream.Collectors.toSet()));
         List<List<TestCase>> allBatches = caseBatches(approved);
+        Set<Long> validatedIds = new java.util.HashSet<>();
 
         List<TestCase> target;
         List<List<TestCase>> batchesToRun;
         List<Integer> batchIndexes;
         if(resume){
-            target = approved.stream().filter(c -> units.findByTestCaseId(c.getId()) == null).toList();
+            for (var testCase : approved) {
+                var existing = units.findByTestCaseId(testCase.getId());
+                if (existing == null) continue;
+                try {
+                    ai.validateExistingUnitTest(projectId, existing, null);
+                    validatedIds.add(testCase.getId());
+                } catch (LlmResponseException invalid) {
+                    generationProgress.log(projectId, GenerationProgressStage.UNIT_TEST,
+                            "UT của " + testCase.getCaseCode() + " không còn hợp lệ; cần phục hồi: " + invalid.getMessage());
+                }
+            }
+            target = approved.stream().filter(c -> !validatedIds.contains(c.getId())).toList();
             if(target.isEmpty()){
                 transactions.executeWithoutResult(status -> {
                     Project currentProject = lockedProject(projectId);
+                    var currentApproved = scope == null ? approvedCases(projectId) : approvedCases(projectId, scope);
+                    if (!currentApproved.stream().allMatch(c -> validatedIds.contains(c.getId())))
+                        throw new InvalidProjectStatusException("Test Case đã thay đổi trong lúc kiểm tra UT; hãy tiếp tục sinh.");
                     currentProject.setStatus(ProjectStatus.TEST_GENERATED);
                     projects.save(currentProject);
                 });
@@ -83,6 +98,11 @@ public class UnitTestService {
                         "Tất cả " + approved.size() + " Test Case đã có Unit Test đầy đủ.");
                 return list(projectId, scope != null ? scope.servicePath() : null);
             }
+            if (project.getStatus() == ProjectStatus.TEST_GENERATED) transactions.executeWithoutResult(status -> {
+                var currentProject = lockedProject(projectId);
+                currentProject.setStatus(ProjectStatus.CASE_APPROVED);
+                projects.save(currentProject);
+            });
             Set<Long> targetIds = target.stream().map(TestCase::getId).collect(java.util.stream.Collectors.toSet());
             batchIndexes = java.util.stream.IntStream.range(0, allBatches.size())
                     .filter(index -> allBatches.get(index).stream().anyMatch(testCase -> targetIds.contains(testCase.getId())))
@@ -96,7 +116,7 @@ public class UnitTestService {
             Set<Integer> completedBatchIndices = new LinkedHashSet<>();
             for (int i = 0; i < allBatches.size(); i++) {
                 List<TestCase> batch = allBatches.get(i);
-                boolean allInDb = batch.stream().allMatch(tc -> units.findByTestCaseId(tc.getId()) != null);
+                boolean allInDb = batch.stream().allMatch(tc -> validatedIds.contains(tc.getId()));
                 if (allInDb) {
                     completedBatchIndices.add(i);
                 }
@@ -106,7 +126,7 @@ public class UnitTestService {
             String batchDetailList = batchIndexes.stream()
                     .map(idx -> "batch " + (idx + 1) + "/" + allBatches.size())
                     .collect(java.util.stream.Collectors.joining(", "));
-            String message = "Tiếp tục sinh Unit Test cho " + batchesToRun.size() + " batch còn thiếu (" + batchDetailList + ").";
+            String message = "Tiếp tục sinh Unit Test cho " + batchesToRun.size() + " batch thiếu hoặc cần phục hồi (" + batchDetailList + ").";
 
             // Giữ snapshot cũ cả khi chưa có batch nào hoàn tất trọn vẹn; batch hiện tại có thể mới lưu một phần.
             generationProgress.resume(projectId, GenerationProgressStage.UNIT_TEST, stepLabels, completedBatchIndices, message);
@@ -126,6 +146,7 @@ public class UnitTestService {
         try {
             Map<Long,BlockedUnitTestDto> blockedCases = new java.util.concurrent.ConcurrentHashMap<>();
             var generated=generateBatches(projectId,batchesToRun,batchIndexes,allBatches.size(),blockedCases);
+            generated.forEach(unit -> validatedIds.add(unit.caseId()));
             if (generationProgress.isPaused(projectId, GenerationProgressStage.UNIT_TEST)) {
                 generationProgress.log(projectId, GenerationProgressStage.UNIT_TEST,
                         "Tác vụ đã tạm dừng. Các Unit Test đã sinh được lưu an toàn vào CSDL. Nhấn 'Tiếp tục sinh' khi bạn sẵn sàng.");
@@ -142,7 +163,7 @@ public class UnitTestService {
                         throw new InvalidProjectStatusException("Test Case đã thay đổi trong lúc sinh Unit Test. Hãy thử lại.");
                     }
                 }
-                boolean allCovered = approvedCurrent.stream().allMatch(c -> units.findByTestCaseId(c.getId()) != null);
+                boolean allCovered = approvedCurrent.stream().allMatch(c -> validatedIds.contains(c.getId()) && units.findByTestCaseId(c.getId()) != null);
                 if (allCovered) {
                     p.setStatus(ProjectStatus.TEST_GENERATED);
                     projects.save(p);
@@ -477,7 +498,7 @@ public class UnitTestService {
             TestCase tc = cases.findById(x.caseId()).orElse(null);
             if (tc != null) {
                 tc.setStatus(ReviewStatus.APPROVED);
-                tc.setIsModified(false);
+                // Sinh UT không sửa TC; giữ dấu vết oracle đã được người dùng chỉnh/duyệt.
                 cases.save(tc);
             }
         }

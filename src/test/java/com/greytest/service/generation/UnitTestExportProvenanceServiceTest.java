@@ -26,6 +26,17 @@ class UnitTestExportProvenanceServiceTest {
     private final GenerationFingerprintService fingerprints = mock(GenerationFingerprintService.class);
     private final UnitTestExportProvenanceService service = new UnitTestExportProvenanceService(jdbc, agent, fingerprints, new ObjectMapper());
 
+    @Test void alignedSourceHashCannotExportAStoredInvalidFixture(@TempDir Path root) throws Exception {
+        Files.writeString(root.resolve("Service.java"), "class Service {} ");
+        UnitTest unit = unit(metadata(GenerationSourceFingerprint.hash(Files.readString(root.resolve("Service.java")))) + "class ServiceTest { void testValue() {} }");
+        String original = unit.getSourceCode();
+        org.mockito.Mockito.doThrow(new com.greytest.service.agent.LlmResponseException("Missing collection stub"))
+                .when(agent).validateExistingUnitTest(1L, unit, root);
+        assertThatThrownBy(() -> service.prepare(1L, List.of(unit), root)).hasMessageContaining("Missing collection stub");
+        assertThat(unit.getSourceCode()).isEqualTo(original);
+        verifyNoInteractions(jdbc, fingerprints);
+    }
+
     @Test
     void alignedMetadataReturnsOriginalEntityWithoutQueryAndRestoresCallerScope(@TempDir Path root) throws Exception {
         Path source = root.resolve("Service.java"); Files.writeString(source, "class Service { int value() { return 1; } }");
@@ -36,7 +47,8 @@ class UnitTestExportProvenanceServiceTest {
             assertThat(GenerationJobContext.actorUserId()).isEqualTo(42L);
             assertThat(GenerationJobContext.sourceUpdateId()).isEqualTo(99L);
         }
-        verifyNoInteractions(jdbc, agent, fingerprints);
+        org.mockito.Mockito.verify(agent).validateExistingUnitTest(1L, unit, root);
+        verifyNoInteractions(jdbc, fingerprints);
     }
 
     @Test
@@ -47,7 +59,8 @@ class UnitTestExportProvenanceServiceTest {
         assertThatThrownBy(() -> service.prepare(1L, List.of(unit), root)).isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("no valid applied checkpoint");
         assertThat(unit.getSourceCode()).isEqualTo(original);
-        verifyNoInteractions(agent, fingerprints);
+        org.mockito.Mockito.verify(agent).validateExistingUnitTest(1L, unit, root);
+        verifyNoInteractions(fingerprints);
     }
 
     private UnitTest unit(String source) {

@@ -272,6 +272,96 @@ class IncrementalCheckpointCoordinatorTest {
         verify(fixture.store).mark(any(),eq("UNIT_TEST"),eq("3"),eq("BLOCKED"),eq("same"),anyString(),contains("unknown"),anyString());
     }
 
+    @Test void retainedCaseRevalidatesSavedDraftRatherThanOverwritingCheckpointWithActiveOutput() throws Exception {
+        var fixture = new Fixture();
+        var active = new com.greytest.entity.UnitTest(); active.setId(9L); active.setTestCaseId(3L);
+        active.setSourceCode("class ActiveTest {}");
+        var draft = new GeneratedUnitTestDto(3L, "DraftTest", "testDraft", "demo", "NEW_TEST", "class SavedDraftTest {}");
+        var item = new SourceUpdateItem(); item.setId(4L); item.setSourceUpdateId(2L); item.setTargetId(9L); item.setUserRevision(0L);
+        item.setTargetType(com.greytest.entity.enums.SourceUpdateTargetType.UNIT_TEST);
+        item.setAction(com.greytest.entity.enums.SourceUpdateAction.UPDATE);
+        item.setAfterData(fixture.mapper.writeValueAsString(draft));
+        when(fixture.agent.parseSnapshotOutput(eq(GenerationProgressStage.UNIT_TEST), anyString())).thenReturn(new UnitTestResponseDto(List.of(draft)));
+        when(fixture.items.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(2L)).thenReturn(List.of(item));
+        fixture.run(() -> { fixture.coordinator.recordRetainedUnitTest(1L, 2L, 3L, active, Path.of("candidate")); return null; });
+        verify(fixture.store).complete(any(), eq("UNIT_TEST"), eq("3"), anyString(), anyString(), contains("SavedDraftTest"), anyString());
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"invalid", "unresolved"})
+    void invalidRetainedDraftCannotSilentlyDisappearFromStageValidation(String mode) throws Exception {
+        var fixture = new Fixture();
+        var active = new com.greytest.entity.UnitTest(); active.setId(9L); active.setTestCaseId(3L); active.setSourceCode("class ActiveTest {}");
+        var output = new UnitTestResponseDto(List.of(new GeneratedUnitTestDto(3L, "DraftTest", "testDraft", "demo", "NEW_TEST", "class DraftTest {}")));
+        var item = new SourceUpdateItem(); item.setId(4L); item.setSourceUpdateId(2L); item.setTargetId(9L); item.setUserRevision(0L);
+        item.setTargetType(com.greytest.entity.enums.SourceUpdateTargetType.UNIT_TEST); item.setAction(com.greytest.entity.enums.SourceUpdateAction.UPDATE);
+        item.setAfterData(fixture.mapper.writeValueAsString(output.unitTests().get(0)));
+        when(fixture.items.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(2L)).thenReturn(List.of(item));
+        when(fixture.agent.parseSnapshotOutput(eq(GenerationProgressStage.UNIT_TEST), anyString())).thenReturn(output);
+        if (mode.equals("invalid")) doThrow(new com.greytest.service.agent.LlmResponseException("invalid draft"))
+                .when(fixture.agent).validateSnapshotOutput(any(), anyLong(), any(), any(), any());
+        else when(fixture.fingerprints.outputFingerprint(any(), any(), any())).thenReturn(new GenerationFingerprintService.Fingerprint("bad", "{}", false));
+        assertThatThrownBy(() -> fixture.run(() -> { fixture.coordinator.recordRetainedUnitTest(1L, 2L, 3L, active, Path.of("candidate")); return null; }))
+                .isInstanceOf(com.greytest.service.agent.TestFeasibilityBlockedException.class);
+        verify(fixture.store, never()).complete(any(), eq("UNIT_TEST"), anyString(), anyString(), anyString(), anyString(), anyString());
+    }
+
+    @Test void applyRevalidatesDraftWhenOnlyAProvenApplicationRepackChangedRuntimeHash() throws Exception {
+        var fixture = runtimeApplyFixture("");
+        try (var runtime = mockStatic(ParserDependencyClasspath.class)) {
+            runtime.when(() -> ParserDependencyClasspath.compatibleRuntimeIdentity("old-runtime", "new-runtime")).thenReturn(true);
+            fixture.coordinator.assertReadyForApply(2L);
+            runtime.verify(() -> ParserDependencyClasspath.compatibleRuntimeIdentity("old-runtime", "new-runtime"), times(1));
+            verify(fixture.agent).validateSnapshotOutput(eq(GenerationProgressStage.BUSINESS_RULE), eq(1L), any(), any(), any());
+            verify(fixture.agent, never()).generateSnapshotBusinessRules(anyLong(), anySet(), any());
+            verify(fixture.store, never()).complete(any(), anyString(), anyString(), anyString(), anyString(), anyString(), anyString());
+        }
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"source", "configuration", "output", "libraries", "semantic"})
+    void runtimeRepackDoesNotBypassRealInputOutputOrValidationChanges(String change) throws Exception {
+        var fixture = runtimeApplyFixture(change);
+        try (var runtime = mockStatic(ParserDependencyClasspath.class)) {
+            runtime.when(() -> ParserDependencyClasspath.compatibleRuntimeIdentity("old-runtime", "new-runtime")).thenReturn(!change.equals("libraries"));
+            assertThatThrownBy(() -> fixture.coordinator.assertReadyForApply(2L)).isInstanceOf(IllegalArgumentException.class);
+            verify(fixture.agent, never()).generateSnapshotBusinessRules(anyLong(), anySet(), any());
+        }
+    }
+
+    private Fixture runtimeApplyFixture(String change) throws Exception {
+        var fixture = new Fixture();
+        var updates = mock(com.greytest.repository.SourceUpdateRepository.class);
+        var revisions = mock(com.greytest.repository.SourceRevisionRepository.class);
+        org.springframework.test.util.ReflectionTestUtils.setField(fixture.coordinator, "updates", updates);
+        org.springframework.test.util.ReflectionTestUtils.setField(fixture.coordinator, "revisions", revisions);
+        var update = new com.greytest.entity.SourceUpdate(); update.setId(2L); update.setProjectId(1L); update.setCandidateRevisionId(9L);
+        update.setImpactSummary("{\"changedMethods\":[],\"affectedServiceMethods\":[],\"affectedBusinessRuleIds\":[],\"affectedTestPlanIds\":[],\"affectedTestCaseIds\":[],\"affectedUnitTestIds\":[]}");
+        var revision = new com.greytest.entity.SourceRevision(); revision.setStoragePath("candidate");
+        when(updates.findById(2L)).thenReturn(Optional.of(update)); when(revisions.findById(9L)).thenReturn(Optional.of(revision));
+        for (var stage : GenerationProgressStage.values())
+            when(fixture.store.find(2L, stage.name(), "__stage__")).thenReturn(Optional.of(new GenerationCheckpointStore.Checkpoint(
+                    stage.name(), "__stage__", "receipt", "{}", stage == GenerationProgressStage.BUSINESS_RULE ? "{\"targets\":[3]}" : "{\"targets\":[]}", "digest", "SUCCEEDED")));
+        var old = fixture.mapper.createObjectNode(); old.putObject("sourceDependencies").put("analysis-classpath-v1", "old-runtime").put("Subject#run()", "body");
+        old.putObject("configuration").put("model", "same"); old.putArray("problems"); old.put("reusable", true);
+        var current = old.deepCopy(); ((com.fasterxml.jackson.databind.node.ObjectNode) current.path("sourceDependencies")).put("analysis-classpath-v1", "new-runtime");
+        if (change.equals("source")) ((com.fasterxml.jackson.databind.node.ObjectNode) current.path("sourceDependencies")).put("Subject#run()", "changed");
+        if (change.equals("configuration")) ((com.fasterxml.jackson.databind.node.ObjectNode) current.path("configuration")).put("model", "changed");
+        when(fixture.fingerprints.fingerprint(anyString(), any(), any())).thenReturn(new GenerationFingerprintService.Fingerprint("new-input", current.toString(), true));
+        var output = new BusinessRuleResponseDto(List.of(new GeneratedBusinessRuleDto(3L, "Rule", "BUSINESS_LOGIC", "STMT-1")));
+        var envelope = fixture.mapper.createObjectNode().put("outputFingerprint", "old-output");
+        envelope.set("outputProvenance", old); envelope.set("response", fixture.mapper.valueToTree(output));
+        when(fixture.store.find(2L, "BUSINESS_RULE", "3")).thenReturn(Optional.of(new GenerationCheckpointStore.Checkpoint(
+                "BUSINESS_RULE", "3", "old-input", old.toString(), envelope.toString(), "digest", "SUCCEEDED")));
+        when(fixture.agent.parseSnapshotOutput(eq(GenerationProgressStage.BUSINESS_RULE), anyString())).thenReturn(output);
+        var out = old.deepCopy(); ((com.fasterxml.jackson.databind.node.ObjectNode) out.path("sourceDependencies")).put("analysis-classpath-v1", "new-runtime");
+        if (change.equals("output")) ((com.fasterxml.jackson.databind.node.ObjectNode) out.path("sourceDependencies")).put("Subject#run()", "changed-output");
+        when(fixture.fingerprints.outputFingerprint(any(), any(), any())).thenReturn(new GenerationFingerprintService.Fingerprint("new-output", out.toString(), true));
+        if (change.equals("semantic")) doThrow(new com.greytest.service.agent.LlmResponseException("invalid draft"))
+                .when(fixture.agent).validateSnapshotOutput(any(), anyLong(), any(), any(), any());
+        return fixture;
+    }
+
     private static class Fixture {
         final ObjectMapper mapper=new ObjectMapper();
         final GenerationCheckpointStore store=mock(GenerationCheckpointStore.class);

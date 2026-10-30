@@ -97,6 +97,66 @@ class LombokSourceDependencyTest {
         assertThat(fingerprint("Patient p = new Patient(); p.getName();").reusable()).isFalse();
     }
 
+    @Test void nestedLombokClassDiscoveredDomainsApiResolvesCleanly() throws Exception {
+        write("AppConstant", "package example;\n" +
+                "import lombok.AccessLevel;\n" +
+                "import lombok.NoArgsConstructor;\n" +
+                "@NoArgsConstructor(access = AccessLevel.PRIVATE)\n" +
+                "public abstract class AppConstant {\n" +
+                "    @NoArgsConstructor(access = AccessLevel.PRIVATE)\n" +
+                "    public abstract static class DiscoveredDomainsApi {\n" +
+                "        public static final String USER_SERVICE_HOST = \"http://USER-SERVICE/user-service\";\n" +
+                "    }\n" +
+                "}");
+        var fp = fingerprint("String host = AppConstant.DiscoveredDomainsApi.USER_SERVICE_HOST;");
+        assertThat(fp.provenance()).doesNotContain("unresolved Lombok configuration");
+        assertThat(fp.reusable()).isTrue();
+    }
+
+    @Test void doctorAvailableDaysHashSetInitializerResolvesCleanly() throws Exception {
+        write("Doctor", "package example;\n" +
+                "import java.util.HashSet;\n" +
+                "import java.util.Set;\n" +
+                "import lombok.Data;\n" +
+                "import lombok.NoArgsConstructor;\n" +
+                "@Data\n" +
+                "@NoArgsConstructor\n" +
+                "public class Doctor {\n" +
+                "    private Long id;\n" +
+                "    private Set<String> availableDays = new HashSet<>();\n" +
+                "}");
+        var fp = fingerprint("Doctor d = new Doctor(); d.getAvailableDays().add(\"Monday\");");
+        assertThat(fp.provenance()).doesNotContain("unresolved initializer dependency");
+        assertThat(fp.reusable()).isTrue();
+    }
+
+    @Test void classWithoutLombokResolvesCleanly() throws Exception {
+        write("PlainEntity", "package example;\n" +
+                "public class PlainEntity {\n" +
+                "    private String name;\n" +
+                "    public PlainEntity(String name) { this.name = name; }\n" +
+                "    public String getName() { return name; }\n" +
+                "}");
+        var fp = fingerprint("PlainEntity entity = new PlainEntity(\"test\"); entity.getName();");
+        assertThat(fp.provenance()).doesNotContain("unresolved");
+        assertThat(fp.reusable()).isTrue();
+    }
+
+    @Test void parallelBatchFingerprintingIsThreadSafe() throws Exception {
+        write("Patient", "package example; @lombok.Data public class Patient { private String name; }");
+        java.util.concurrent.ExecutorService executor = java.util.concurrent.Executors.newFixedThreadPool(4);
+        java.util.List<java.util.concurrent.Future<GenerationFingerprintService.Fingerprint>> futures = new java.util.ArrayList<>();
+        for (int i = 0; i < 10; i++) {
+            futures.add(executor.submit(() -> fingerprint("Patient p = new Patient(); p.setName(\"Alice\"); p.getName();")));
+        }
+        for (var future : futures) {
+            var fp = future.get(5, java.util.concurrent.TimeUnit.SECONDS);
+            assertThat(fp.reusable()).isTrue();
+            assertThat(fp.provenance()).doesNotContain("unresolved");
+        }
+        executor.shutdown();
+    }
+
 
     private GenerationFingerprintService.Fingerprint fingerprint(String statements) {
         return service.outputFingerprint(Map.of("source_code", "package example; class GeneratedTest { void test() { " + statements + " } }"), root);

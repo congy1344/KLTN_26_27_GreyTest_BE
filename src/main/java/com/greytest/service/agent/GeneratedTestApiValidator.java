@@ -29,6 +29,12 @@ import com.greytest.dto.agent.GenerationContextDtos.UnitTestContextDto;
 final class GeneratedTestApiValidator {
     private static final Set<String> JAVA_LANG_TYPES = Set.of(
             "Object", "String", "Boolean", "Byte", "Character", "Double", "Float", "Integer", "Long", "Short");
+    private static final Set<String> FINAL_JDK_TYPES = Set.of(
+            "java.lang.String", "java.lang.Boolean", "java.lang.Byte", "java.lang.Character",
+            "java.lang.Double", "java.lang.Float", "java.lang.Integer", "java.lang.Long", "java.lang.Short",
+            "java.math.BigDecimal", "java.math.BigInteger",
+            "java.time.LocalDate", "java.time.LocalTime", "java.time.LocalDateTime", "java.time.Instant",
+            "java.util.UUID", "java.util.Optional");
     private final Map<String, ClassOrInterfaceDeclaration> declarations = new HashMap<>();
     private final Map<String, String> sourcePaths = new HashMap<>();
     private final List<com.greytest.dto.agent.GenerationContextDtos.ResourceEvidenceDto> resources;
@@ -62,6 +68,8 @@ final class GeneratedTestApiValidator {
         validator.validateMissingProjectImports(test, problems);
         validator.validateUninitializedSpies(test, problems);
         test.findAll(ObjectCreationExpr.class).forEach(creation -> validator.validateConstructor(creation, test, problems));
+        test.findAll(com.github.javaparser.ast.expr.BinaryExpr.class)
+                .forEach(binary -> validator.validateBinaryComparison(binary, test, problems));
         test.findAll(MethodCallExpr.class).forEach(call -> {
             validator.validateCall(call, test, problems);
             validator.validateNullAssertion(call, test, problems);
@@ -100,21 +108,92 @@ final class GeneratedTestApiValidator {
     }
 
     private void validateReferenceIdentity(MethodCallExpr call, CompilationUnit test, List<String> problems) {
-        if (!call.getNameAsString().equals("assertSame") || call.getArguments().size() < 2 || call.getArguments().size() > 3) return;
+        if (!Set.of("assertSame", "assertNotSame").contains(call.getNameAsString())
+                || call.getArguments().size() < 2 || call.getArguments().size() > 3) return;
         String junit = junitAssertionsOwner(call, test);
         if (junit == null) return;
         int first = junit.equals("org.junit.Assert") ? call.getArguments().size() - 2 : 0;
-        var left = declaredValueType(call.getArgument(first), test);
-        var right = declaredValueType(call.getArgument(first + 1), test);
+        Expression leftExpr = unwrap(call.getArgument(first));
+        Expression rightExpr = unwrap(call.getArgument(first + 1));
+        if (call.getNameAsString().equals("assertSame") && isTautologicalSameExpression(leftExpr, rightExpr, call)) {
+            problems.add("Tautological identity assertion '" + call + "': both arguments evaluate to the same test variable or captor read. "
+                    + "Remove the tautological assertSame or verify the approved repository/service interaction instead.");
+            return;
+        }
+        var left = declaredValueType(leftExpr, test);
+        var right = declaredValueType(rightExpr, test);
         if (left == null || right == null) return;
+        // Hai class cụ thể độc lập hoặc entity với kiểu vô hướng final không thể là cùng một instance.
+        if (incomparableTypes(left, right)) {
+            problems.add("Impossible reference identity: " + left.type() + " and " + right.type()
+                    + " are unrelated concrete types. Preserve approved mapped DTO fields; do not assert entity-to-DTO or entity-to-scalar identity.");
+        }
+    }
+
+    /** Chặn phép so sánh == / != giữa hai kiểu không tương thích gây lỗi biên dịch javac (incomparable types). */
+    private void validateBinaryComparison(com.github.javaparser.ast.expr.BinaryExpr binary, CompilationUnit test, List<String> problems) {
+        if (binary.getOperator() != com.github.javaparser.ast.expr.BinaryExpr.Operator.EQUALS
+                && binary.getOperator() != com.github.javaparser.ast.expr.BinaryExpr.Operator.NOT_EQUALS) return;
+        Expression leftExpr = unwrap(binary.getLeft());
+        Expression rightExpr = unwrap(binary.getRight());
+        if (leftExpr.isNullLiteralExpr() || rightExpr.isNullLiteralExpr()) {
+            Expression nonNull = leftExpr.isNullLiteralExpr() ? rightExpr : leftExpr;
+            SourceValueType resolved = declaredValueType(nonNull, test);
+            if (resolved != null && resolved.type().isPrimitiveType()) {
+                problems.add("Source value contract: " + nonNull + " has primitive type " + resolved.type()
+                        + " and cannot be compared with null.");
+            }
+            return;
+        }
+        var left = declaredValueType(leftExpr, test);
+        var right = declaredValueType(rightExpr, test);
+        if (left == null || right == null) return;
+        if (incomparableTypes(left, right)) {
+            problems.add("Incompatible type comparison '" + binary + "': " + left.type() + " and " + right.type()
+                    + " are incomparable types and will not compile. Compare compatible fields (such as saved.getId() and result.getId() with assertEquals) instead of comparing an entity/DTO reference with an unrelated type.");
+        }
+    }
+
+    private boolean incomparableTypes(SourceValueType left, SourceValueType right) {
         var a = declaration(left.type(), left.unit());
         var b = declaration(right.type(), right.unit());
-        // Hai class cụ thể chỉ kế thừa Object không thể là cùng một instance.
-        if (a != null && b != null && a != b && !a.isInterface() && !b.isInterface()
-                && a.getExtendedTypes().isEmpty() && b.getExtendedTypes().isEmpty()) {
-            problems.add("Impossible reference identity: " + a.getNameAsString() + " and " + b.getNameAsString()
-                    + " are unrelated concrete source classes. Preserve approved mapped DTO fields; do not assert entity-to-DTO identity.");
-        }
+        boolean concreteA = a != null && !a.isInterface() && a.getExtendedTypes().isEmpty();
+        boolean concreteB = b != null && !b.isInterface() && b.getExtendedTypes().isEmpty();
+        if (concreteA && concreteB) return a != b;
+        String qLeft = left.type().isClassOrInterfaceType() ? qualifiedType(left.type().asClassOrInterfaceType(), left.unit()) : null;
+        String qRight = right.type().isClassOrInterfaceType() ? qualifiedType(right.type().asClassOrInterfaceType(), right.unit()) : null;
+        boolean finalLeft = qLeft != null && FINAL_JDK_TYPES.contains(qLeft);
+        boolean finalRight = qRight != null && FINAL_JDK_TYPES.contains(qRight);
+        if (finalLeft && finalRight) return !qLeft.equals(qRight);
+        if (concreteA && (right.type().isPrimitiveType() || finalRight)) return true;
+        if (concreteB && (left.type().isPrimitiveType() || finalLeft)) return true;
+        return false;
+    }
+
+    private static boolean isTautologicalSameExpression(Expression left, Expression right, Node contextNode) {
+        if ((left.isNameExpr() || left.isFieldAccessExpr()
+                || left.isMethodCallExpr() && left.asMethodCallExpr().getNameAsString().equals("getValue"))
+                && left.equals(right)) return true;
+        return sameInitializerRead(left, right, contextNode) || sameInitializerRead(right, left, contextNode);
+    }
+
+    private static boolean sameInitializerRead(Expression candidateName, Expression other, Node contextNode) {
+        if (!candidateName.isNameExpr()) return false;
+        String name = candidateName.asNameExpr().getNameAsString();
+        var method = contextNode.findAncestor(MethodDeclaration.class).orElse(null);
+        if (method == null) return false;
+        var locals = method.findAll(VariableDeclarator.class).stream()
+                .filter(v -> v.getNameAsString().equals(name)).toList();
+        if (locals.size() != 1 || locals.get(0).getInitializer().isEmpty()) return false;
+        boolean reassigned = method.findAll(com.github.javaparser.ast.expr.AssignExpr.class).stream()
+                .anyMatch(a -> a.getTarget().isNameExpr() && a.getTarget().asNameExpr().getNameAsString().equals(name));
+        return !reassigned && unwrap(locals.get(0).getInitializer().get()).equals(other);
+    }
+
+    private static Expression unwrap(Expression expression) {
+        Expression current = expression;
+        while (current.isEnclosedExpr()) current = current.asEnclosedExpr().getInner();
+        return current;
     }
 
     private void validateMissingProjectImports(CompilationUnit test, List<String> problems) {

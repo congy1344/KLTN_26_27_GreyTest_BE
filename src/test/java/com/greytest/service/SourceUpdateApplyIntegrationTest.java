@@ -33,6 +33,42 @@ class SourceUpdateApplyIntegrationTest {
     @Autowired private EndpointRepository endpoints;
     @Autowired private TestCaseRepository testCases;
     @Autowired private UnitTestService unitTestService;
+    @Autowired private UnitTestRepository unitTests;
+
+    @Test
+    void applying13GeneratedDraftsMakesAll38UnitTestsVisibleAndPreserves25OldTests(@TempDir Path snapshot) throws Exception {
+        SourceUpdate update = draft(snapshot);
+        BusinessRule rule = rule(update.getProjectId(), "BR-001");
+        TestPlan plan = new TestPlan(); plan.setProjectId(update.getProjectId()); plan.setBusinessRuleId(rule.getId());
+        plan.setPlanCode("TP-001"); plan.setTitle("Plan"); plan.setDescription("Approved plan");
+        plan.setTestType(TestType.HAPPY_PATH); plan.setStatus(ReviewStatus.APPROVED); plan = plans.saveAndFlush(plan);
+        var oldSources = new java.util.LinkedHashMap<Long, String>();
+        var allCaseIds = new java.util.ArrayList<Long>();
+        var json = new com.fasterxml.jackson.databind.ObjectMapper();
+        for (int i = 1; i <= 38; i++) {
+            TestCase testCase = approvedCase(plan.getId(), String.format("TC-%03d", i)); allCaseIds.add(testCase.getId());
+            String source = "package demo; class Case" + i + "Test { @org.junit.jupiter.api.Test void testCase() {} }";
+            if (i <= 25) {
+                UnitTest unit = new UnitTest(); unit.setTestCaseId(testCase.getId()); unit.setTestClassName("Case" + i + "Test");
+                unit.setTestMethodName("testCase"); unit.setPackageName("demo"); unit.setGenerationType("NEW_TEST");
+                unit.setSourceCode(source); unit.setFilePath("src/test/java/demo/Case" + i + "Test.java");
+                unit = unitTests.saveAndFlush(unit); oldSources.put(unit.getId(), source);
+            } else {
+                var output = new com.greytest.dto.agent.GenerationResponseDtos.GeneratedUnitTestDto(testCase.getId(),
+                        "Case" + i + "Test", "testCase", "demo", "NEW_TEST", source);
+                item(update, SourceUpdateTargetType.UNIT_TEST, null, "case:" + testCase.getId(), json.writeValueAsString(output));
+            }
+        }
+        assertThat(unitTestService.list(update.getProjectId())).hasSize(25);
+        assertThat(unitTests.findByTestCaseIdIn(allCaseIds)).hasSize(25);
+
+        service.applyUpdate(update.getProjectId(), update.getId(), admin());
+
+        assertThat(unitTests.findByTestCaseIdIn(allCaseIds)).hasSize(38);
+        assertThat(unitTestService.list(update.getProjectId())).hasSize(38);
+        oldSources.forEach((id, source) -> assertThat(unitTests.findById(id).orElseThrow().getSourceCode()).isEqualTo(source));
+        assertThat(updates.findById(update.getId()).orElseThrow().getStatus()).isEqualTo(SourceUpdateStatus.APPLIED);
+    }
 
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})

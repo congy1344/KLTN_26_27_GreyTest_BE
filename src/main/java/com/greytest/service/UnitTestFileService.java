@@ -286,6 +286,7 @@ public class UnitTestFileService {
         }
         testFiles.forEach(this::validateArchiveFile);
         String sourceMetadata = sourceMetadata(testFiles.stream().map(UnitTestFileDto::sourceCode).toList());
+        assertUnambiguousSourcePaths(sourceMetadata);
         var output = new ByteArrayOutputStream();
         String testSelector = testFiles.stream()
                 .map(test -> test.packageName() == null || test.packageName().isBlank()
@@ -323,6 +324,22 @@ public class UnitTestFileService {
             throw new StorageException("Không tạo được ZIP unit test", exception);
         }
         return output.toByteArray();
+    }
+
+    private void assertUnambiguousSourcePaths(String metadata) {
+        List<String> paths = metadata.lines().filter(line -> line.startsWith(GenerationSourceFingerprint.PREFIX))
+                .map(line -> line.substring(GenerationSourceFingerprint.PREFIX.length()).split(" ")[1])
+                .map(encoded -> new String(java.util.Base64.getDecoder().decode(encoded), StandardCharsets.UTF_8)).toList();
+        // Không tự bỏ fingerprint cũ: thiếu source root thì không thể chứng minh hai đường dẫn là cùng file.
+        for (int left = 0; left < paths.size(); left++) {
+            for (int right = left + 1; right < paths.size(); right++) {
+                String first = paths.get(left); String second = paths.get(right);
+                if (first.endsWith("/" + second) || second.endsWith("/" + first)) {
+                    throw new StorageException("Mixed generation source roots; export with the active source root "
+                            + "to verify historical hashes before creating the ZIP", null);
+                }
+            }
+        }
     }
 
     /** Đồng bộ đường dẫn trong header và manifest với source đang hoạt động trước khi xuất ZIP. */

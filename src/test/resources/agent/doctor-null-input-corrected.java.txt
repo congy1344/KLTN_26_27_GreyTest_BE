@@ -1,0 +1,33 @@
+package com.example.HMS.service;
+
+import com.example.HMS.dto.DoctorMapper;
+import com.example.HMS.repository.AppointmentRepository;
+import com.example.HMS.repository.DepartmentRepository;
+import com.example.HMS.repository.DoctorRepository;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentMatchers;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+
+@ExtendWith(MockitoExtension.class)
+class DoctorServiceTest {
+    @Mock private DoctorRepository doctorRepository;
+    @Mock private AppointmentRepository appointmentRepository;
+    @Mock private DepartmentRepository departmentRepository;
+    @Mock private DoctorMapper doctorMapper;
+
+    @Test
+    void fetchDoctorByAppointment_NullId_ThrowsIllegalArgumentException() {
+        DoctorService doctorService = new DoctorService(doctorRepository, appointmentRepository, departmentRepository, doctorMapper);
+        Long appointmentId = null;
+        IllegalArgumentException exception = assertThrows(IllegalArgumentException.class,
+                () -> doctorService.fetchDoctorByAppointment(appointmentId));
+        assertEquals("appointmentId cannot be empty", exception.getMessage());
+        verify(appointmentRepository, never()).findById(ArgumentMatchers.<Long>any());
+    }
+}

@@ -109,4 +109,25 @@ class AIAgentServiceRetryTest {
         assertThat(AIAgentService.retryDelayMillis(1, transientError, 250L))
                 .isEqualTo(60_000L);
     }
+
+    @Test
+    void nonLlmOutputErrorsAreNotRetried() {
+        var ex = new LlmResponseException("source analysis unresolved", LlmResponseException.ErrorClassification.SOURCE_ANALYSIS_UNRESOLVED);
+        assertThat(ex.isRetryable()).isFalse();
+
+        var cacheEx = new LlmResponseException("cache provenance incomplete", LlmResponseException.ErrorClassification.CACHE_PROVENANCE_INCOMPLETE);
+        assertThat(cacheEx.isRetryable()).isFalse();
+
+        var depEx = new LlmResponseException("dependency resolution failed", LlmResponseException.ErrorClassification.DEPENDENCY_RESOLUTION_FAILED);
+        assertThat(depEx.isRetryable()).isFalse();
+
+        var llmEx = new LlmResponseException("invalid test output", LlmResponseException.ErrorClassification.LLM_OUTPUT_INVALID);
+        assertThat(llmEx.isRetryable()).isTrue();
+    }
+
+    @Test
+    void provenanceInfrastructureErrorsAreNotClassifiedAsLlmOutputErrors() {
+        assertThat(AIAgentService.extractLlmOutputProblems("{\"problems\":[\"unresolved output dependencies: IllegalArgumentException\"]}")).isEmpty();
+        assertThat(AIAgentService.extractLlmOutputProblems("{\"problems\":[\"unresolved output call: getNonExistent\"]}")).hasSize(1);
+    }
 }

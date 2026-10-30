@@ -12,15 +12,21 @@ import com.greytest.dto.agent.GenerationResponseDtos.*;
 
 /** Đối chiếu literal exception với biểu thức/constructor thật, không sửa chuỗi để khớp. */
 final class SourceExceptionMessageEvidence {
-    private static final Pattern MESSAGE = Pattern.compile("(?iuU)(?:thông\\s+(?:điệp|báo)|message)[^\"“`\\n]{0,80}[\"“`]([^\"”`]+)[\"”`]");
+    private static final Pattern MESSAGE = Pattern.compile("(?iuU)(?:thông\\s+(?:điệp|báo)|message|"
+            + ExceptionMessageFormatClaim.HEADER + ")[^\"“`\\n]{0,160}[\"“`]([^\"”`]+)[\"”`]");
     private static final Pattern CONSTRUCTOR = Pattern.compile(
             "`?\\b(?:new\\s+)?((?:[\\w$]+\\.)*[\\w$]*(?:Exception|Error))\\s*\\((?:\"(?:\\\\.|[^\"\\\\])*\"|[^()\"\\r\\n])*\\)`?");
+    private static final Set<String> INTEGRAL_TYPES = Set.of("byte", "short", "int", "long", "java.lang.Byte",
+            "java.lang.Short", "java.lang.Integer", "java.lang.Long", "java.math.BigInteger");
     private static final Set<String> STANDARD = Set.of("java.lang.Exception", "java.lang.RuntimeException", "java.lang.Throwable",
             "java.lang.IllegalArgumentException", "java.lang.IllegalStateException", "java.lang.NullPointerException",
             "java.lang.UnsupportedOperationException", "java.lang.ArithmeticException", "java.lang.Error");
-    record Text(List<String> segments, String display, boolean string, int fixed) {
-        static Text literal(String value, boolean string) { return new Text(List.of(value), value, string, value.length()); }
-        static Text hole(String name, boolean string) { return new Text(Collections.singletonList(null), "<" + name + ">", string, 0); }
+    record FormatTemplate(String value, List<String> arguments, List<String> decimalArguments) { }
+    record Text(List<String> segments, String display, boolean string, int fixed, FormatTemplate format, String sourceArgument) {
+        Text(List<String> segments, String display, boolean string, int fixed, FormatTemplate format) { this(segments, display, string, fixed, format, null); }
+        Text(List<String> segments, String display, boolean string, int fixed) { this(segments, display, string, fixed, null); }
+        static Text literal(String value, boolean string) { return new Text(List.of(value), value, string, value.length(), null, string ? new StringLiteralExpr().setString(value).toString() : value); }
+        static Text hole(String name, boolean string) { return new Text(Collections.singletonList(null), "<" + name + ">", string, 0, null, name); }
         Text plus(Text other) {
             var combined = new ArrayList<>(segments);
             for (String segment : other.segments) {
@@ -68,28 +74,37 @@ final class SourceExceptionMessageEvidence {
             String name = parameter.getNameAsString();
             boolean string = "java.lang.String".equals(index.resolve(parameter.getType(), owner.unit()));
             Object value = input == null ? null : input.get(name);
-            arguments.put(name, !written.contains(name) && input != null && input.containsKey(name) && !(value instanceof Map<?, ?>) && !(value instanceof List<?>)
-                    ? Text.literal(String.valueOf(value), string) : Text.hole(name, string));
+            Text text = !written.contains(name) && input != null && input.containsKey(name) && !(value instanceof Map<?, ?>) && !(value instanceof List<?>)
+                    ? Text.literal(String.valueOf(value), string) : Text.hole(name, string);
+            arguments.put(name, new Text(text.segments(), text.display(), text.string(), text.fixed(), text.format(), name));
         }
         var matcher = MESSAGE.matcher(description);
         int previousEnd = 0;
         while (matcher.find()) {
             String claimed = matcher.group(1);
             String claimKind = matcher.group().substring(0, matcher.start(1) - matcher.start());
-            boolean substringClaim = Pattern.compile("(?iuU)\\b(?:contains?|includes?|chứa)\\b").matcher(claimKind).find();
+            boolean substringClaim = Pattern.compile("(?iuU)\\b(?:contains?|includes?|chứa|bao\\s+gồm)\\b").matcher(claimKind).find();
             boolean excludedFragment = substringClaim && Pattern.compile("(?iuU)(?:\\b(?:not|never)\\s+(?:contains?|includes?)\\b"
-                    + "|\\bkhông\\s+(?:được\\s+)?chứa\\b|\\b(?:contains?|includes?)\\s+no\\s*$)").matcher(claimKind).find();
-            boolean fragmentClaim = substringClaim || description.substring(matcher.end()).stripLeading().startsWith("+")
-                    || Pattern.compile("(?iuU)(?:ghép\\s+từ|nối\\s+từ|concatenat|literal\\s+fragment)").matcher(claimKind).find();
+                    + "|\\bkhông\\s+(?:được\\s+)?(?:chứa|bao\\s+gồm)\\b|\\b(?:contains?|includes?)\\s+no\\s*$)").matcher(claimKind).find();
+            String afterClaim = description.substring(matcher.end()).stripLeading();
+            boolean fragmentClaim = substringClaim || afterClaim.startsWith("+")
+                    || Pattern.compile("(?iuU)^(?:,\\s*)?(?:(?:nối|ghép|cộng)(?:\\s+chuỗi)?\\s+(?:với|cùng|và)|(?:với|cùng|và)\\s+(?:giá\\s+trị|tham\\s+số|biến|ID|id|mã)\\b)").matcher(afterClaim).find()
+                    || Pattern.compile("(?iuU)(?:(?<!\\bkết\\s)(?:(?:ghép|nối)\\s+chuỗi|(?:được|bằng(?:\\s+cách)?)\\s+(?:ghép|nối)|(?:ghép|nối)\\s+(?:từ|bởi|với|cùng|các\\s+phần))\\b|gồm\\s+(?:các\\s+phần|phần|chuỗi)|\\b(?:tiền\\s+tố|hậu\\s+tố|prefix|suffix|bắt\\s+đầu\\s+(?:bằng|với)|kết\\s+thúc\\s+(?:bằng|với)|starts?\\s+with|ends?\\s+with)\\b|concatenat|literal\\s+fragment)").matcher(claimKind).find();
             String prefix = description.substring(previousEnd, matcher.start());
+            String beforeLiteral = description.substring(previousEnd, matcher.start(1) - 1);
             previousEnd = matcher.end();
             var named = Pattern.compile("\\b([A-Za-z_$][A-Za-z0-9_$]*(?:Exception|Error))\\b").matcher(prefix);
             String associated = null;
             while (named.find()) associated = named.group(1);
             if (associated == null) continue;
             Map<String, List<Text>> evidence = new LinkedHashMap<>();
+            List<FormatTemplate> formats = new ArrayList<>();
             Set<String> unknown = new HashSet<>();
             for (var creation : method.findAll(ObjectCreationExpr.class)) {
+                // Không lấy exception trong method/class lồng nhau làm bằng chứng của method hiện tại.
+                if (creation.findAncestor(CallableDeclaration.class).orElse(null) != method
+                        || creation.findAncestor(TypeDeclaration.class).isPresent()
+                        || creation.findAncestor(ObjectCreationExpr.class).filter(c -> c.getAnonymousClassBody().isPresent()).isPresent()) continue;
                 // Chỉ xét exception nằm trong throw hoặc supplier của orElseThrow.
                 boolean thrown = creation.getParentNode().filter(ThrowStmt.class::isInstance)
                         .map(ThrowStmt.class::cast).filter(t -> t.getExpression() == creation).isPresent()
@@ -100,8 +115,29 @@ final class SourceExceptionMessageEvidence {
                 String qualified = index.resolve(creation.getType(), owner.unit());
                 var values = creation.getArguments().stream().map(e -> fragment(e, owner.unit(), arguments, 0)).toList();
                 Text text = constructor(qualified, values, 0);
+                if (text != null && text.format() != null) formats.add(text.format());
                 if (text == null || text.fixed() == 0) unknown.add(simple);
                 else evidence.computeIfAbsent(simple, ignored -> new ArrayList<>()).add(text);
+            }
+            var formatClaim = ExceptionMessageFormatClaim.parse(beforeLiteral, claimed, description.substring(matcher.end()));
+            if (!substringClaim && formatClaim.template()) {
+                Set<String> parameters = method.getParameters().stream().map(Parameter::getNameAsString)
+                        .collect(java.util.stream.Collectors.toSet());
+                boolean proven = formatClaim.valid() && formats.stream().anyMatch(format -> format.value().equals(claimed)
+                        && format.arguments().equals(formatClaim.arguments()) && format.arguments().stream().allMatch(arg -> arg != null && (arg.startsWith("\"") || parameters.contains(rootParameter(arg))))
+                        && format.arguments().stream().filter(arg -> arg != null && !arg.startsWith("\"")).map(SourceExceptionMessageEvidence::rootParameter).noneMatch(written::contains)
+                        && format.decimalArguments().stream().allMatch(name -> isIntegralArgument(name, method, owner)
+                                || method.getParameters().stream()
+                                .anyMatch(parameter -> parameter.getNameAsString().equals(name) && !parameter.isVarArgs()
+                                        && INTEGRAL_TYPES.contains(Objects.toString(index.resolve(parameter.getType(), owner.unit()), "")))));
+                if (proven) continue;
+                if (requireProof || !formats.isEmpty() || !evidence.isEmpty()) return Optional.of("method_id=" + methodId
+                        + ": cannot verify source exception format template and unchanged arguments for " + associated
+                        + ". Source formatter evidence (template, arguments bound at the calling method): " + formats
+                        + ". Quote only the exact source format template and list its arguments in source order "
+                        + "(e.g., from template \"<template>\" using <arguments> / từ mẫu \"<template>\" với các tham số <arguments>); "
+                        + "require the complete formatted message at test runtime.");
+                continue;
             }
             boolean supported = evidence.values().stream().flatMap(List::stream)
                     .anyMatch(text -> excludedFragment ? text.segments().stream().allMatch(Objects::nonNull) && !text.containsLiteral(claimed)
@@ -121,7 +157,8 @@ final class SourceExceptionMessageEvidence {
                     + ": cannot verify the exact source exception message for " + associated
                     + ". Keep the proven exception type and describe dynamic/unknown message data instead of inventing a quoted literal. "
                     + "For a locale-sensitive String.format expression, require the complete message computed with that same source formatter "
-                    + "and unchanged inputs at test runtime, without quoting a rendered message or its format template. Do not reduce an approved message requirement to exception type alone.");
+                    + "and unchanged inputs at test runtime. Do not quote a guessed rendered message; identify a quoted format template "
+                    + "explicitly and list its unchanged source arguments in order. Do not reduce an approved message requirement to exception type alone.");
         }
         return Optional.empty();
     }
@@ -228,7 +265,7 @@ final class SourceExceptionMessageEvidence {
             var parameter = constructor.getParameter(i);
             var value = args.get(i);
             env.put(parameter.getNameAsString(), new Text(value.segments(), value.display(),
-                    "java.lang.String".equals(index.resolve(parameter.getType(), source.unit())), value.fixed()));
+                    "java.lang.String".equals(index.resolve(parameter.getType(), source.unit())), value.fixed(), value.format(), value.sourceArgument()));
         }
         var delegated = invocation.getArguments().stream().map(e -> fragment(e, source.unit(), env, depth + 1)).toList();
         String parent = invocation.isThis() ? qualified : declaration.getExtendedTypes().size() == 1
@@ -256,10 +293,12 @@ final class SourceExceptionMessageEvidence {
                     || call.getArguments().isEmpty() || !call.getArgument(0).isStringLiteralExpr()) return Text.hole(expression.toString(), false);
             String format = call.getArgument(0).asStringLiteralExpr().asString();
             Text result = Text.literal("", true);
+            boolean localeSensitive = false;
+            List<String> decimalArguments = new ArrayList<>();
             int argument = 1;
             for (int cursor = 0; cursor < format.length();) {
                 int marker = format.indexOf('%', cursor);
-                if (marker < 0) return argument == call.getArguments().size() ? result.plus(Text.literal(format.substring(cursor), true)) : null;
+                if (marker < 0) { result = result.plus(Text.literal(format.substring(cursor), true)); break; }
                 result = result.plus(Text.literal(format.substring(cursor, marker), true));
                 if (marker + 1 >= format.length()) return null;
                 char token = format.charAt(marker + 1);
@@ -268,12 +307,60 @@ final class SourceExceptionMessageEvidence {
                     var value = fragment(call.getArgument(argument++), unit, env, depth + 1);
                     if (value == null) return null;
                     result = result.plus(value);
+                } else if (token == 'd' && argument < call.getArguments().size()) {
+                    var value = fragment(call.getArgument(argument++), unit, env, depth + 1);
+                    if (value == null || value.sourceArgument() == null) return null;
+                    decimalArguments.add(value.sourceArgument());
+                    localeSensitive = true;
                 } else return null;
                 cursor = marker + 2;
-                if (cursor == format.length()) return argument == call.getArguments().size() ? result : null;
             }
+            if (argument != call.getArguments().size()) return null;
+            // Giữ đối số tại method gọi qua constructor để không nhầm tên tham số trùng nhau.
+            var boundArguments = call.getArguments().subList(1, call.getArguments().size()).stream()
+                    .map(e -> fragment(e, unit, env, depth + 1))
+                    .map(value -> value == null ? "" : Objects.toString(value.sourceArgument(), "")).toList();
+            var template = new FormatTemplate(format, boundArguments, List.copyOf(decimalArguments));
+            // %d phụ thuộc locale: giữ bằng chứng mẫu/tham số, không đoán chuỗi message đã format.
+            return localeSensitive ? new Text(Collections.singletonList(null), call.toString(), true, 0, template)
+                    : new Text(result.segments(), result.display(), true, result.fixed(), template);
         }
         // Biểu thức còn lại là giá trị runtime, không đoán kết quả helper/getter.
         return expression.isMethodCallExpr() || expression.isFieldAccessExpr() ? Text.hole(expression.toString(), false) : null;
+    }
+
+    private static String rootParameter(String argument) {
+        int dot = argument.indexOf('.');
+        return dot >= 0 ? argument.substring(0, dot) : argument;
+    }
+
+    private boolean isIntegralArgument(String argument, MethodDeclaration method, SourceEvidenceIndex.SourceType owner) {
+        String root = rootParameter(argument);
+        var parameter = method.getParameters().stream().filter(p -> p.getNameAsString().equals(root) && !p.isVarArgs()).findFirst().orElse(null);
+        if (parameter == null) return false;
+        String currentType = index.resolve(parameter.getType(), owner.unit());
+        if (!argument.contains(".")) return INTEGRAL_TYPES.contains(Objects.toString(currentType, ""));
+        String[] parts = argument.split("\\.");
+        for (int i = 1; i < parts.length; i++) {
+            var type = currentType == null ? null : index.type(currentType);
+            if (type == null) return false;
+            String part = parts[i];
+            if (part.endsWith("()")) {
+                String methodName = part.substring(0, part.length() - 2);
+                var methods = type.node().getMethodsByName(methodName).stream().filter(m -> m.getParameters().isEmpty()).toList();
+                if (methods.size() == 1) currentType = index.resolve(methods.get(0).getType(), type.unit());
+                else if (methods.isEmpty() && index.getterGenerated(type)) {
+                    String prop = type.node().isRecordDeclaration() ? methodName
+                            : methodName.startsWith("get") && methodName.length() > 3
+                                    ? Character.toLowerCase(methodName.charAt(3)) + methodName.substring(4) : null;
+                    var propType = prop == null ? null : index.propertyType(type, prop);
+                    currentType = propType == null ? null : index.resolve(propType, type.unit());
+                } else return false;
+            } else {
+                var propType = index.propertyType(type, part);
+                currentType = propType == null ? null : index.resolve(propType, type.unit());
+            }
+        }
+        return INTEGRAL_TYPES.contains(Objects.toString(currentType, ""));
     }
 }

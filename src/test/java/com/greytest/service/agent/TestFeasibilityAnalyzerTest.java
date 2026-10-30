@@ -13,6 +13,14 @@ import com.greytest.dto.agent.GenerationContextDtos.*;
 import com.greytest.service.agent.TestFeasibilityAnalyzer.Status;
 
 class TestFeasibilityAnalyzerTest {
+    @Test void privateHelperRequiresAnExplicitPublicPathFixtureStrategyAtEveryStage() {
+        var selected = classes("class Service { public String read() { return enrich(\"input\"); } private String enrich(String value) { return value; } }",
+                "enrich", List.of(new MethodParamDto("value", "String")));
+        var result = TestFeasibilityAnalyzer.analyzeScenario(selected, 7L, "Expect enriched data");
+        assertThat(result.status()).isEqualTo(Status.UNKNOWN);
+        assertThat(result.findings()).extracting(TestFeasibilityAnalyzer.Finding::code).contains("PRIVATE_HELPER_ENTRY_POINT");
+        assertThat(result.strategies()).anySatisfy(text -> assertThat(text).contains("public", "collection", "fixture"));
+    }
     @Test
     void blocksOnlyExplicitRandomBranchScenarioWithSourceEvidence() {
         var classes = classes("class Service { void run() { if (Math.random() > 0.8) throw new IllegalStateException(); } }", "run", List.of());

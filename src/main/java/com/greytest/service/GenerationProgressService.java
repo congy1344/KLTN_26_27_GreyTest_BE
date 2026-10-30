@@ -40,6 +40,16 @@ public class GenerationProgressService {
         this.clock = clock;
     }
 
+    public synchronized void reset(Long projectId) {
+        if (projectId == null) return;
+        states.keySet().removeIf(key -> projectId.equals(key.projectId()));
+    }
+
+    public synchronized void reset(Long projectId, GenerationProgressStage stage) {
+        if (projectId == null || stage == null) return;
+        states.remove(new ProgressKey(projectId, stage));
+    }
+
     public synchronized void start(Long projectId, GenerationProgressStage stage, List<String> stepLabels, String message) {
         cleanupExpired();
         ProgressKey requestedKey = new ProgressKey(projectId, stage);

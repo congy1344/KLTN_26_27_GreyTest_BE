@@ -1,0 +1,488 @@
+{
+  "classes": [
+    {
+      "id": 10087,
+      "packageName": "com.example.HMS.exception",
+      "className": "AppointmentNotFoundException",
+      "qualifiedName": "com.example.HMS.exception.AppointmentNotFoundException",
+      "classType": "OTHER",
+      "filePath": "Hospital-Management-System/HMS/src/main/java/com/example/HMS/exception/AppointmentNotFoundException.java",
+      "sourceCode": "package com.example.HMS.exception;\r\n\r\npublic class AppointmentNotFoundException extends RuntimeException {\r\n\r\n    public AppointmentNotFoundException(String message) {\r\n        super(message);\r\n    }\r\n}\r\n",
+      "annotations": [],
+      "methods": []
+    },
+    {
+      "id": 10113,
+      "packageName": "com.example.HMS.service",
+      "className": "AppointmentService",
+      "qualifiedName": "com.example.HMS.service.AppointmentService",
+      "classType": "SERVICE",
+      "filePath": "Hospital-Management-System/HMS/src/main/java/com/example/HMS/service/AppointmentService.java",
+      "sourceCode": "package com.example.HMS.service;\r\n\r\nimport com.example.HMS.anotations.Auditable;\r\nimport com.example.HMS.dto.AppointmentDto;\r\nimport com.example.HMS.dto.AppointmentMapper;\r\nimport com.example.HMS.entity.Appointment;\r\nimport com.example.HMS.entity.Doctor;\r\nimport com.example.HMS.entity.Patient;\r\nimport com.example.HMS.enums.AppointmentStatus;\r\nimport com.example.HMS.exception.AppointmentNotFoundException;\r\nimport com.example.HMS.exception.DoctorNotFoundException;\r\nimport com.example.HMS.exception.PatientNotFoundException;\r\nimport com.example.HMS.repository.AppointmentRepository;\r\nimport com.example.HMS.repository.DoctorRepository;\r\nimport com.example.HMS.repository.PatientRepository;\r\nimport lombok.RequiredArgsConstructor;\r\nimport org.hibernate.Hibernate;\r\nimport org.springframework.cache.annotation.CacheEvict;\r\nimport org.springframework.cache.annotation.CachePut;\r\nimport org.springframework.cache.annotation.Cacheable;\r\nimport org.springframework.cache.annotation.Caching;\r\nimport org.springframework.data.domain.Page;\r\nimport org.springframework.data.domain.PageRequest;\r\nimport org.springframework.data.domain.Pageable;\r\nimport org.springframework.stereotype.Service;\r\nimport java.time.LocalDate;\r\nimport java.util.List;\r\nimport java.util.Optional;\r\n\r\n@Service\r\n@RequiredArgsConstructor\r\npublic class AppointmentService {\r\n\r\n    private final AppointmentRepository appointmentRepository;\r\n\r\n    private final DoctorRepository doctorRepository;\r\n\r\n    private final PatientRepository patientRepository;\r\n\r\n    private final AppointmentMapper appointmentMapper;\r\n\r\n    // create appointment\r\n    @Auditable(action = \"CREATE_APPOINTMENT\")\r\n    public AppointmentDto createAppointment(AppointmentDto dto) {\r\n        if (dto == null) {\r\n            throw new IllegalArgumentException(\"Appointment data cannot be null\");\r\n        }\r\n        Appointment appointmentEntity = appointmentMapper.toEntity(dto);\r\n        Doctor doctor = doctorRepository.findById(dto.getDoctorId()).orElseThrow(() -> new DoctorNotFoundException(\"Doctor not found with id: \" + dto.getDoctorId()));\r\n        Patient patient = patientRepository.findById(dto.getPatientId()).orElseThrow(() -> new PatientNotFoundException(\"Patient not found with id: \" + dto.getPatientId()));\r\n        appointmentEntity.setDoctor(doctor);\r\n        appointmentEntity.setPatient(patient);\r\n        Appointment appointment = appointmentRepository.save(appointmentEntity);\r\n        return appointmentMapper.toDto(appointment);\r\n    }\r\n\r\n    // get all appointments\r\n    public Page<AppointmentDto> getAllAppointment(int page, int size) {\r\n        Pageable pageable = PageRequest.of(page, size);\r\n        Page<Appointment> appointments = appointmentRepository.findAll(pageable);\r\n        return appointments.map(appointmentMapper::toDto);\r\n    }\r\n\r\n    // get appointment by id\r\n    @Cacheable(value = \"appointments\", key = \"#appointmentId\")\r\n    public AppointmentDto getAppointmentById(Long appointmentId) {\r\n        Optional<Appointment> optionalAppointment = appointmentRepository.findById(appointmentId);\r\n        if (optionalAppointment.isEmpty()) {\r\n            throw new AppointmentNotFoundException(String.format(\"Failed to find the appointment with id %d\", appointmentId));\r\n        }\r\n        Appointment appointment = optionalAppointment.get();\r\n        // Force load lazy associations\r\n        Hibernate.initialize(appointment.getDoctor());\r\n        Hibernate.initialize(appointment.getPatient());\r\n        return appointmentMapper.toDto(appointment);\r\n    }\r\n\r\n    // update appointment\r\n    @Caching(put = { @CachePut(value = \"appointments\", key = \"#appointmentId\") }, evict = { @CacheEvict(value = \"appointmentsByDoctor\", allEntries = true), @CacheEvict(value = \"appointmentsByPatient\", allEntries = true) })\r\n    @Auditable(action = \"UPDATE_APPOINTMENT\")\r\n    public AppointmentDto updateAppointmentById(Long appointmentId, AppointmentDto dto) {\r\n        Optional<Appointment> optionalAppointment = appointmentRepository.findById(appointmentId);\r\n        if (optionalAppointment.isEmpty()) {\r\n            throw new AppointmentNotFoundException(String.format(\"Failed to find the appointment with id %d\", appointmentId));\r\n        }\r\n        Appointment appointment = optionalAppointment.get();\r\n        if (dto.getDoctorId() != null) {\r\n            Doctor doctor = doctorRepository.findById(dto.getDoctorId()).orElseThrow(() -> new DoctorNotFoundException(\"Doctor not found with id: \" + dto.getDoctorId()));\r\n            appointment.setDoctor(doctor);\r\n        }\r\n        if (dto.getPatientId() != null) {\r\n            Patient patient = patientRepository.findById(dto.getPatientId()).orElseThrow(() -> new PatientNotFoundException(\"Patient not found with id: \" + dto.getPatientId()));\r\n            appointment.setPatient(patient);\r\n        }\r\n        if (dto.getTime() != null) {\r\n            appointment.setTime(dto.getTime());\r\n        }\r\n        if (dto.getDate() != null) {\r\n            appointment.setDate(dto.getDate());\r\n        }\r\n        if (dto.getStatus() != null) {\r\n            appointment.setStatus(dto.getStatus());\r\n        }\r\n        if (dto.getEmail() != null) {\r\n            appointment.setPatientEmail(dto.getEmail());\r\n        }\r\n        Appointment savedAppointment = appointmentRepository.save(appointment);\r\n        return appointmentMapper.toDto(savedAppointment);\r\n    }\r\n\r\n    // Reschedule appointment\r\n    @Auditable(action = \"RESCHEDULE_APPOINTMENT\")\r\n    public AppointmentDto rescheduleAppointment(Long appointmentId, AppointmentDto dto) {\r\n        Optional<Appointment> optionalAppointment = appointmentRepository.findById(appointmentId);\r\n        if (optionalAppointment.isEmpty()) {\r\n            throw new AppointmentNotFoundException(String.format(\"Failed to find the appointment with id %d\", appointmentId));\r\n        }\r\n        Appointment appointment = optionalAppointment.get();\r\n        if (dto.getTime() != null) {\r\n            appointment.setTime(dto.getTime());\r\n        }\r\n        if (dto.getDate() != null) {\r\n            appointment.setDate(dto.getDate());\r\n        }\r\n        if (dto.getStatus() != null) {\r\n            appointment.setStatus(AppointmentStatus.APPOINTMENT_RESCHEDULED);\r\n        }\r\n        Appointment savedAppointment = appointmentRepository.save(appointment);\r\n        return appointmentMapper.toDto(savedAppointment);\r\n    }\r\n\r\n    // cancel appointment\r\n    @Caching(evict = { @CacheEvict(value = \"appointments\", key = \"#appointmentId\"), @CacheEvict(value = \"appointmentsByDoctor\", allEntries = true), @CacheEvict(value = \"appointmentsByPatient\", allEntries = true), @CacheEvict(value = \"allAppointments\", allEntries = true) })\r\n    @Auditable(action = \"CANCEL_APPOINTMENT\")\r\n    public Appointment cancelAppointment(Long appointmentId) {\r\n        Optional<Appointment> optionalAppointment = appointmentRepository.findById(appointmentId);\r\n        if (optionalAppointment.isEmpty()) {\r\n            throw new AppointmentNotFoundException(String.format(\"Failed to find the appointment with id %d\", appointmentId));\r\n        }\r\n        Appointment appointment = optionalAppointment.get();\r\n        appointmentRepository.delete(appointment);\r\n        return appointment;\r\n    }\r\n\r\n    // get appointments by date\r\n    public List<AppointmentDto> getAppointmentsByDate(LocalDate date) {\r\n        List<Appointment> appointment = appointmentRepository.findByDate(date);\r\n        return appointment.stream().map(appointmentMapper::toDto).toList();\r\n    }\r\n\r\n    // get appointments by doctor\r\n    @Cacheable(value = \"appointmentsByDoctor\", key = \"#doctorId\")\r\n    public List<AppointmentDto> getAppointmentByDoctor(Long doctorId) {\r\n        if (doctorId == null || doctorId <= 0) {\r\n            throw new IllegalArgumentException(\"Doctor ID must be valid and positive\");\r\n        }\r\n        List<Appointment> appointments = appointmentRepository.findByDoctorDoctorIdOrderByDateDesc(doctorId);\r\n        return appointments.stream().map(appointmentMapper::toDto).toList();\r\n    }\r\n\r\n    // get appointments by patient\r\n    @Cacheable(value = \"appointmentsByPatient\", key = \"#patientId\")\r\n    public List<AppointmentDto> getAppointmentByPatient(Long patientId) {\r\n        if (patientId == null || patientId <= 0) {\r\n            throw new IllegalArgumentException(\"Patient ID must be valid and positive\");\r\n        }\r\n        List<Appointment> appointment = appointmentRepository.findByPatientPatientId(patientId);\r\n        return appointment.stream().map(appointmentMapper::toDto).toList();\r\n    }\r\n\r\n    // get appointments by status\r\n    public List<AppointmentDto> getAppointmentByStatus(AppointmentStatus status) {\r\n        if (status == null) {\r\n            throw new IllegalArgumentException(\"Appointment Status can't be null\");\r\n        }\r\n        List<Appointment> appointment = appointmentRepository.findByStatus(status);\r\n        return appointment.stream().map(appointmentMapper::toDto).toList();\r\n    }\r\n}\r\n",
+      "annotations": [
+        {
+          "id": 13455,
+          "targetType": "CLASS",
+          "category": "COMPONENT",
+          "annotationName": "Service",
+          "attributes": "@Service"
+        }
+      ],
+      "methods": [
+        {
+          "id": 21161,
+          "classQualifiedName": "com.example.HMS.service.AppointmentService",
+          "methodName": "getAppointmentById",
+          "returnType": "AppointmentDto",
+          "parameters": [
+            {
+              "name": "appointmentId",
+              "type": "Long"
+            }
+          ],
+          "throwsList": [],
+          "visibility": "PUBLIC",
+          "sourceCode": "@Cacheable(value = \"appointments\", key = \"#appointmentId\")\r\n    public AppointmentDto getAppointmentById(Long appointmentId)\r\n    {\r\n        Optional<Appointment> optionalAppointment = appointmentRepository.findById(appointmentId);\r\n\r\n        if (optionalAppointment.isEmpty()){\r\n            throw new AppointmentNotFoundException(String.format(\"Failed to find the appointment with id %d\" , appointmentId));\r\n        }\r\n\r\n        Appointment appointment = optionalAppointment.get();\r\n\r\n                                       \r\n        Hibernate.initialize(appointment.getDoctor());\r\n        Hibernate.initialize(appointment.getPatient());\r\n\r\n        return appointmentMapper.toDto(appointment);\r\n    }",
+          "lineStart": 73,
+          "lineEnd": 89,
+          "annotations": [],
+          "endpoints": [],
+          "branches": [
+            {
+              "branchId": "STMT-1",
+              "kind": "STATEMENT",
+              "outcome": "EXECUTABLE",
+              "condition": "executable statement",
+              "lineStart": 76,
+              "lineEnd": 76
+            },
+            {
+              "branchId": "IF-1-TRUE",
+              "kind": "IF",
+              "outcome": "TRUE",
+              "condition": "optionalAppointment.isEmpty()",
+              "lineStart": 79,
+              "lineEnd": 79
+            },
+            {
+              "branchId": "IF-1-FALSE",
+              "kind": "IF",
+              "outcome": "FALSE",
+              "condition": "optionalAppointment.isEmpty()",
+              "lineStart": 78,
+              "lineEnd": 78
+            },
+            {
+              "branchId": "STMT-2",
+              "kind": "STATEMENT",
+              "outcome": "EXECUTABLE",
+              "condition": "executable statement",
+              "lineStart": 82,
+              "lineEnd": 82
+            },
+            {
+              "branchId": "STMT-3",
+              "kind": "STATEMENT",
+              "outcome": "EXECUTABLE",
+              "condition": "executable statement",
+              "lineStart": 85,
+              "lineEnd": 85
+            },
+            {
+              "branchId": "STMT-4",
+              "kind": "STATEMENT",
+              "outcome": "EXECUTABLE",
+              "condition": "executable statement",
+              "lineStart": 86,
+              "lineEnd": 86
+            },
+            {
+              "branchId": "STMT-5",
+              "kind": "STATEMENT",
+              "outcome": "EXECUTABLE",
+              "condition": "executable statement",
+              "lineStart": 88,
+              "lineEnd": 88
+            }
+          ]
+        },
+        {
+          "id": 21162,
+          "classQualifiedName": "com.example.HMS.service.AppointmentService",
+          "methodName": "updateAppointmentById",
+          "returnType": "AppointmentDto",
+          "parameters": [
+            {
+              "name": "appointmentId",
+              "type": "Long"
+            },
+            {
+              "name": "dto",
+              "type": "AppointmentDto"
+            }
+          ],
+          "throwsList": [],
+          "visibility": "PUBLIC",
+          "sourceCode": "@Caching(\r\n            put = {\r\n                    @CachePut(value = \"appointments\", key = \"#appointmentId\")\r\n            },\r\n            evict = {\r\n                    @CacheEvict(value = \"appointmentsByDoctor\", allEntries = true),\r\n                    @CacheEvict(value = \"appointmentsByPatient\", allEntries = true)\r\n            }\r\n    )\r\n    @Auditable(action = \"UPDATE_APPOINTMENT\")\r\n    public AppointmentDto updateAppointmentById(Long appointmentId,AppointmentDto dto )\r\n    {\r\n        Optional<Appointment> optionalAppointment = appointmentRepository.findById(appointmentId);\r\n\r\n        if (optionalAppointment.isEmpty()){\r\n            throw new AppointmentNotFoundException(String.format(\"Failed to find the appointment with id %d\" , appointmentId));\r\n        }\r\n\r\n        Appointment appointment = optionalAppointment.get();\r\n\r\n        if (dto.getDoctorId() != null) {\r\n            Doctor doctor = doctorRepository.findById(dto.getDoctorId())\r\n                    .orElseThrow(() -> new DoctorNotFoundException(\r\n                            \"Doctor not found with id: \" + dto.getDoctorId()));\r\n            appointment.setDoctor(doctor);\r\n        }\r\n\r\n        if (dto.getPatientId() != null) {\r\n            Patient patient = patientRepository.findById(dto.getPatientId())\r\n                    .orElseThrow(() -> new PatientNotFoundException(\r\n                            \"Patient not found with id: \" + dto.getPatientId()));\r\n            appointment.setPatient(patient);\r\n        }\r\n\r\n        if (dto.getTime() != null) { appointment.setTime(dto.getTime()); }\r\n\r\n        if (dto.getDate() != null) { appointment.setDate(dto.getDate()); }\r\n\r\n        if (dto.getStatus() != null) { appointment.setStatus(dto.getStatus()); }\r\n\r\n        if (dto.getEmail() != null) { appointment.setPatientEmail(dto.getEmail()); }\r\n\r\n        Appointment savedAppointment = appointmentRepository.save(appointment);\r\n\r\n        return appointmentMapper.toDto(savedAppointment);\r\n    }",
+          "lineStart": 92,
+          "lineEnd": 137,
+          "annotations": [],
+          "endpoints": [],
+          "branches": [
+            {
+              "branchId": "STMT-1",
+              "kind": "STATEMENT",
+              "outcome": "EXECUTABLE",
+              "condition": "executable statement",
+              "lineStart": 104,
+              "lineEnd": 104
+            },
+            {
+              "branchId": "IF-1-TRUE",
+              "kind": "IF",
+              "outcome": "TRUE",
+              "condition": "optionalAppointment.isEmpty()",
+              "lineStart": 107,
+              "lineEnd": 107
+            },
+            {
+              "branchId": "IF-1-FALSE",
+              "kind": "IF",
+              "outcome": "FALSE",
+              "condition": "optionalAppointment.isEmpty()",
+              "lineStart": 106,
+              "lineEnd": 106
+            },
+            {
+              "branchId": "STMT-2",
+              "kind": "STATEMENT",
+              "outcome": "EXECUTABLE",
+              "condition": "executable statement",
+              "lineStart": 110,
+              "lineEnd": 110
+            },
+            {
+              "branchId": "IF-2-TRUE",
+              "kind": "IF",
+              "outcome": "TRUE",
+              "condition": "dto.getDoctorId() != null",
+              "lineStart": 113,
+              "lineEnd": 116
+            },
+            {
+              "branchId": "IF-2-FALSE",
+              "kind": "IF",
+              "outcome": "FALSE",
+              "condition": "dto.getDoctorId() != null",
+              "lineStart": 112,
+              "lineEnd": 112
+            },
+            {
+              "branchId": "IF-3-TRUE",
+              "kind": "IF",
+              "outcome": "TRUE",
+              "condition": "dto.getPatientId() != null",
+              "lineStart": 120,
+              "lineEnd": 123
+            },
+            {
+              "branchId": "IF-3-FALSE",
+              "kind": "IF",
+              "outcome": "FALSE",
+              "condition": "dto.getPatientId() != null",
+              "lineStart": 119,
+              "lineEnd": 119
+            },
+            {
+              "branchId": "IF-4-TRUE",
+              "kind": "IF",
+              "outcome": "TRUE",
+              "condition": "dto.getTime() != null",
+              "lineStart": 126,
+              "lineEnd": 126
+            },
+            {
+              "branchId": "IF-4-FALSE",
+              "kind": "IF",
+              "outcome": "FALSE",
+              "condition": "dto.getTime() != null",
+              "lineStart": 126,
+              "lineEnd": 126
+            },
+            {
+              "branchId": "IF-5-TRUE",
+              "kind": "IF",
+              "outcome": "TRUE",
+              "condition": "dto.getDate() != null",
+              "lineStart": 128,
+              "lineEnd": 128
+            },
+            {
+              "branchId": "IF-5-FALSE",
+              "kind": "IF",
+              "outcome": "FALSE",
+              "condition": "dto.getDate() != null",
+              "lineStart": 128,
+              "lineEnd": 128
+            },
+            {
+              "branchId": "IF-6-TRUE",
+              "kind": "IF",
+              "outcome": "TRUE",
+              "condition": "dto.getStatus() != null",
+              "lineStart": 130,
+              "lineEnd": 130
+            },
+            {
+              "branchId": "IF-6-FALSE",
+              "kind": "IF",
+              "outcome": "FALSE",
+              "condition": "dto.getStatus() != null",
+              "lineStart": 130,
+              "lineEnd": 130
+            },
+            {
+              "branchId": "IF-7-TRUE",
+              "kind": "IF",
+              "outcome": "TRUE",
+              "condition": "dto.getEmail() != null",
+              "lineStart": 132,
+              "lineEnd": 132
+            },
+            {
+              "branchId": "IF-7-FALSE",
+              "kind": "IF",
+              "outcome": "FALSE",
+              "condition": "dto.getEmail() != null",
+              "lineStart": 132,
+              "lineEnd": 132
+            },
+            {
+              "branchId": "STMT-3",
+              "kind": "STATEMENT",
+              "outcome": "EXECUTABLE",
+              "condition": "executable statement",
+              "lineStart": 134,
+              "lineEnd": 134
+            },
+            {
+              "branchId": "STMT-4",
+              "kind": "STATEMENT",
+              "outcome": "EXECUTABLE",
+              "condition": "executable statement",
+              "lineStart": 136,
+              "lineEnd": 136
+            }
+          ]
+        },
+        {
+          "id": 21163,
+          "classQualifiedName": "com.example.HMS.service.AppointmentService",
+          "methodName": "rescheduleAppointment",
+          "returnType": "AppointmentDto",
+          "parameters": [
+            {
+              "name": "appointmentId",
+              "type": "Long"
+            },
+            {
+              "name": "dto",
+              "type": "AppointmentDto"
+            }
+          ],
+          "throwsList": [],
+          "visibility": "PUBLIC",
+          "sourceCode": "@Auditable(action = \"RESCHEDULE_APPOINTMENT\")\r\n    public AppointmentDto rescheduleAppointment(Long appointmentId, AppointmentDto dto)\r\n    {\r\n        Optional<Appointment> optionalAppointment = appointmentRepository.findById(appointmentId);\r\n\r\n        if (optionalAppointment.isEmpty()){\r\n            throw new AppointmentNotFoundException(String.format(\"Failed to find the appointment with id %d\" , appointmentId));\r\n        }\r\n\r\n        Appointment appointment = optionalAppointment.get();\r\n\r\n        if (dto.getTime() != null){ appointment.setTime(dto.getTime()); }\r\n\r\n        if (dto.getDate() != null){ appointment.setDate(dto.getDate()); }\r\n\r\n        if (dto.getStatus() != null){ appointment.setStatus(AppointmentStatus.APPOINTMENT_RESCHEDULED); }\r\n\r\n        Appointment savedAppointment =  appointmentRepository.save(appointment);\r\n\r\n        return appointmentMapper.toDto(savedAppointment);\r\n    }",
+          "lineStart": 140,
+          "lineEnd": 160,
+          "annotations": [],
+          "endpoints": [],
+          "branches": [
+            {
+              "branchId": "STMT-1",
+              "kind": "STATEMENT",
+              "outcome": "EXECUTABLE",
+              "condition": "executable statement",
+              "lineStart": 143,
+              "lineEnd": 143
+            },
+            {
+              "branchId": "IF-1-TRUE",
+              "kind": "IF",
+              "outcome": "TRUE",
+              "condition": "optionalAppointment.isEmpty()",
+              "lineStart": 146,
+              "lineEnd": 146
+            },
+            {
+              "branchId": "IF-1-FALSE",
+              "kind": "IF",
+              "outcome": "FALSE",
+              "condition": "optionalAppointment.isEmpty()",
+              "lineStart": 145,
+              "lineEnd": 145
+            },
+            {
+              "branchId": "STMT-2",
+              "kind": "STATEMENT",
+              "outcome": "EXECUTABLE",
+              "condition": "executable statement",
+              "lineStart": 149,
+              "lineEnd": 149
+            },
+            {
+              "branchId": "IF-2-TRUE",
+              "kind": "IF",
+              "outcome": "TRUE",
+              "condition": "dto.getTime() != null",
+              "lineStart": 151,
+              "lineEnd": 151
+            },
+            {
+              "branchId": "IF-2-FALSE",
+              "kind": "IF",
+              "outcome": "FALSE",
+              "condition": "dto.getTime() != null",
+              "lineStart": 151,
+              "lineEnd": 151
+            },
+            {
+              "branchId": "IF-3-TRUE",
+              "kind": "IF",
+              "outcome": "TRUE",
+              "condition": "dto.getDate() != null",
+              "lineStart": 153,
+              "lineEnd": 153
+            },
+            {
+              "branchId": "IF-3-FALSE",
+              "kind": "IF",
+              "outcome": "FALSE",
+              "condition": "dto.getDate() != null",
+              "lineStart": 153,
+              "lineEnd": 153
+            },
+            {
+              "branchId": "IF-4-TRUE",
+              "kind": "IF",
+              "outcome": "TRUE",
+              "condition": "dto.getStatus() != null",
+              "lineStart": 155,
+              "lineEnd": 155
+            },
+            {
+              "branchId": "IF-4-FALSE",
+              "kind": "IF",
+              "outcome": "FALSE",
+              "condition": "dto.getStatus() != null",
+              "lineStart": 155,
+              "lineEnd": 155
+            },
+            {
+              "branchId": "STMT-3",
+              "kind": "STATEMENT",
+              "outcome": "EXECUTABLE",
+              "condition": "executable statement",
+              "lineStart": 157,
+              "lineEnd": 157
+            },
+            {
+              "branchId": "STMT-4",
+              "kind": "STATEMENT",
+              "outcome": "EXECUTABLE",
+              "condition": "executable statement",
+              "lineStart": 159,
+              "lineEnd": 159
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "cases": [
+    {
+      "sourceLog": "20261030-054918-178-56-test-case-response-1.log",
+      "methodId": 21161,
+      "expectedResult": "Ném AppointmentNotFoundException. Thông điệp phải bằng toàn bộ kết quả String.format tại thời điểm chạy với mẫu \"Failed to find the appointment with id %d\" và tham số appointmentId giữ nguyên là 1001, bao gồm dấu câu.",
+      "input": {
+        "appointmentId": 1001
+      }
+    },
+    {
+      "sourceLog": "20261030-054928-873-57-test-case-response-2.log",
+      "methodId": 21161,
+      "expectedResult": "Ném AppointmentNotFoundException. Mẫu thông điệp nguồn: \"Failed to find the appointment with id %d\"; tham số theo thứ tự nguồn: appointmentId. Thông điệp phải bằng toàn bộ kết quả được tính tại thời điểm chạy bằng String.format với mẫu và tham số không đổi, bao gồm mọi dấu câu.",
+      "input": {
+        "appointmentId": 1001
+      }
+    },
+    {
+      "sourceLog": "20261030-054929-672-58-test-case-response-1.log",
+      "methodId": 21162,
+      "expectedResult": "Ném AppointmentNotFoundException. Thông điệp phải bằng toàn bộ kết quả được tính tại thời điểm chạy bằng String.format(\"Failed to find the appointment with id %d\", appointmentId), với appointmentId không đổi là 1001 và đầy đủ dấu câu. SOURCE_MISMATCH: source dùng định dạng %d với Long; assertion phải so sánh thông điệp đầy đủ được tạo bởi cùng formatter tại thời điểm chạy, không dùng thông điệp phỏng đoán.",
+      "input": {
+        "appointmentId": 1001,
+        "dto": {
+          "appointmentId": null,
+          "doctorId": null,
+          "patientId": null,
+          "time": null,
+          "date": null,
+          "status": null,
+          "email": null
+        }
+      }
+    },
+    {
+      "sourceLog": "20261030-054932-424-60-test-case-response-1.log",
+      "methodId": 21163,
+      "expectedResult": "Ném AppointmentNotFoundException. Toàn bộ thông điệp phải bằng kết quả String.format(\"Failed to find the appointment with id %d\", appointmentId) tại thời điểm chạy, với tham số nguồn appointmentId giữ nguyên là 1001; thông điệp chứa mã lịch hẹn này. SOURCE_MISMATCH: quy tắc được duyệt yêu cầu thông điệp được tạo bằng String.format từ mã lịch hẹn, phù hợp với source.",
+      "input": {
+        "appointmentId": 1001,
+        "dto": {
+          "appointmentId": null,
+          "doctorId": null,
+          "patientId": null,
+          "time": null,
+          "date": null,
+          "status": null,
+          "email": null
+        }
+      }
+    },
+    {
+      "sourceLog": "20261030-054949-413-61-test-case-response-2.log",
+      "methodId": 21162,
+      "expectedResult": "Ném AppointmentNotFoundException. Template thông điệp chính xác từ source là \"Failed to find the appointment with id %d\"; tham số theo thứ tự source là appointmentId, giữ nguyên giá trị 1001. Yêu cầu thông điệp đầy đủ bằng kết quả String.format(template, appointmentId) tại thời điểm chạy, bao gồm toàn bộ dấu câu.",
+      "input": {
+        "appointmentId": 1001,
+        "dto": {
+          "appointmentId": null,
+          "doctorId": null,
+          "patientId": null,
+          "time": null,
+          "date": null,
+          "status": null,
+          "email": null
+        }
+      }
+    },
+    {
+      "sourceLog": "20261030-054954-604-62-test-case-response-2.log",
+      "methodId": 21163,
+      "expectedResult": "Ném AppointmentNotFoundException. Template định dạng nguồn: \"Failed to find the appointment with id %d\"; các tham số nguồn theo thứ tự: appointmentId. Toàn bộ thông điệp phải bằng kết quả của String.format(template, appointmentId) tại thời điểm chạy, với appointmentId giữ nguyên là 1001.",
+      "input": {
+        "appointmentId": 1001,
+        "dto": {
+          "appointmentId": null,
+          "doctorId": null,
+          "patientId": null,
+          "time": null,
+          "date": null,
+          "status": null,
+          "email": null
+        }
+      }
+    }
+  ]
+}

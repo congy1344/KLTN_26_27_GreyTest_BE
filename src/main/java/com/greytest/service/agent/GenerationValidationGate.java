@@ -52,8 +52,9 @@ public final class GenerationValidationGate {
                     item -> item, (left, right) -> left));
             Set<Long> allCovered = new HashSet<>();
             for (var plan : result.plans()) {
-                Set<Long> covered = new HashSet<>(plan.coveredRuleIds());
-                covered.add(plan.ruleId());
+                List<Long> rawCovered = plan.coveredRuleIds() == null ? List.of() : plan.coveredRuleIds();
+                Set<Long> covered = new HashSet<>(rawCovered.stream().filter(Objects::nonNull).toList());
+                if (plan.ruleId() != null) covered.add(plan.ruleId());
                 allCovered.addAll(covered);
                 for (Long ruleId : covered) {
                     var rule = rules.get(ruleId);
@@ -64,6 +65,14 @@ public final class GenerationValidationGate {
                         return Optional.of("method_id=" + plan.methodId() + " has an unknown or unrelated rule_id=" + ruleId
                                 + ". Allowed approved rule IDs by method_id: " + allowed + ".");
                     }
+                }
+                // Đồng bộ điều kiện của TestPlanService: covered_rule_ids phải chứa anchor rule_id và không trùng lặp.
+                if (rawCovered.isEmpty() || rawCovered.stream().anyMatch(Objects::isNull)
+                        || plan.ruleId() == null || !rawCovered.contains(plan.ruleId())
+                        || new HashSet<>(rawCovered).size() != rawCovered.size()) {
+                    return Optional.of("method_id=" + plan.methodId() + ": covered_rule_ids " + rawCovered
+                            + " must be non-empty, contain anchor rule_id=" + plan.ruleId()
+                            + ", and have no duplicate rule IDs.");
                 }
             }
             var missing = rules.keySet().stream().filter(id -> !allCovered.contains(id)).sorted().toList();

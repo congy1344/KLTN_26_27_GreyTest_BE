@@ -36,6 +36,7 @@ final class GeneratedRepositoryFixtureValidator {
             List<Stub> stubs = checker.stubs(method);
             checker.validateSaveReturns(approved, method, stubs, problems);
             checker.validateMappingState(approved, target, method, stubs, problems);
+            checker.validateUnapprovedEnrichedFieldNullAssertions(approved, target, method, stubs, problems);
         }
         return problems;
     }
@@ -408,5 +409,168 @@ final class GeneratedRepositoryFixtureValidator {
 
     private static String upper(String property) {
         return Character.toUpperCase(property.charAt(0)) + property.substring(1);
+    }
+
+    /** Chặn assertion null tự suy diễn trên trường DTO đã được helper/SUT làm giàu khi TC không yêu cầu null. */
+    private void validateUnapprovedEnrichedFieldNullAssertions(
+            TestCaseContextItemDto approved, MethodContextDto target, MethodDeclaration method, List<Stub> stubs, List<String> problems) {
+        if (target == null || target.sourceCode() == null || target.classQualifiedName() == null) return;
+        boolean hasFailureOrNullStub = method.findAll(MethodCallExpr.class).stream()
+                .anyMatch(c -> Set.of("doThrow", "thenThrow").contains(c.getNameAsString())
+                        || c.getNameAsString().equals("thenReturn") && c.getArguments().size() == 1
+                                && c.getArgument(0).isNullLiteralExpr());
+        if (hasFailureOrNullStub) return;
+        var parsedTarget = new JavaParser().parseMethodDeclaration(target.sourceCode()).getResult();
+        var owner = source.declaration(target.classQualifiedName());
+        if (parsedTarget.isEmpty() || owner == null) return;
+
+        for (var variable : method.findAll(VariableDeclarator.class)) {
+            if (variable.getInitializer().filter(Expression::isMethodCallExpr).isEmpty()) continue;
+            var act = variable.getInitializer().get().asMethodCallExpr();
+            if (!act.getNameAsString().equals(target.methodName()) || deferred(act, method) || act.getScope().isEmpty()
+                    || source.declaration(source.expressionType(act.getScope().get(), test), test) != owner) continue;
+            var returnedType = source.declaration(variable.getType(), test);
+            if (returnedType == null) continue;
+            Set<String> enriched = unconditionallyPopulatedProperties(parsedTarget.get(), owner, returnedType, stubs);
+            if (enriched.isEmpty()) continue;
+            String resultName = variable.getNameAsString();
+            for (var call : method.findAll(MethodCallExpr.class)) {
+                String junit = source.junitAssertionsOwner(call, test);
+                if (junit == null) continue;
+                Expression nullTarget = nullAssertedExpression(call, junit);
+                if (nullTarget == null || !nullTarget.isMethodCallExpr()) continue;
+                var getter = nullTarget.asMethodCallExpr();
+                if (!getter.getNameAsString().matches("get[A-Z].*") || !getter.getArguments().isEmpty()
+                        || getter.getScope().filter(Expression::isNameExpr)
+                                .filter(s -> s.asNameExpr().getNameAsString().equals(resultName)).isEmpty()) continue;
+                String prop = property(getter.getNameAsString());
+                if (enriched.contains(prop) && !isPropertyNullApproved(approved, prop)) {
+                    problems.add("Unapproved null assertion on '" + nullTarget + "': Test Case " + approved.id()
+                            + " does not expect '" + prop + "' to be null, and " + target.methodName()
+                            + " populates set" + upper(prop) + "(...) from the stubbed collaborators. "
+                            + "Remove the unapproved null assertion or assert the enriched value from the approved mock fixtures.");
+                }
+            }
+        }
+    }
+
+    private Set<String> unconditionallyPopulatedProperties(
+            MethodDeclaration targetMethod, ClassOrInterfaceDeclaration owner, ClassOrInterfaceDeclaration returnedType, List<Stub> stubs) {
+        List<MethodDeclaration> candidates = new ArrayList<>();
+        candidates.add(targetMethod);
+        for (int depth = 0; depth < 2; depth++) {
+            for (var current : new ArrayList<>(candidates)) {
+                if (!tryBlockCollaboratorsStubbed(current, owner, stubs)) continue;
+                for (var ret : current.findAll(ReturnStmt.class)) {
+                    if (ret.findAncestor(CatchClause.class).isPresent()
+                            || ret.getExpression().filter(Expression::isMethodCallExpr).isEmpty()) continue;
+                    var helperCall = ret.getExpression().get().asMethodCallExpr();
+                    if (helperCall.getScope().isPresent() && !helperCall.getScope().get().isThisExpr()) continue;
+                    owner.getMethodsByName(helperCall.getNameAsString()).stream()
+                            .filter(m -> m.getParameters().size() == helperCall.getArguments().size())
+                            .filter(m -> !candidates.contains(m))
+                            .forEach(candidates::add);
+                }
+            }
+        }
+        Set<String> populated = new HashSet<>();
+        var ownerUnit = owner.findCompilationUnit().orElseThrow();
+        for (var candidate : candidates) {
+            if (!tryBlockCollaboratorsStubbed(candidate, owner, stubs)) continue;
+            Set<String> dtoVars = new HashSet<>();
+            for (var v : candidate.findAll(VariableDeclarator.class)) {
+                if (source.declaration(v.getType(), ownerUnit) == returnedType) dtoVars.add(v.getNameAsString());
+            }
+            if (dtoVars.isEmpty()) continue;
+            for (var call : candidate.findAll(MethodCallExpr.class)) {
+                if (!call.getNameAsString().matches("set[A-Z].*") || call.getArguments().size() != 1
+                        || call.findAncestor(IfStmt.class).isPresent() || call.findAncestor(LambdaExpr.class).isPresent()
+                        || call.getArgument(0).isNullLiteralExpr()
+                        || call.getScope().filter(Expression::isNameExpr)
+                                .filter(s -> dtoVars.contains(s.asNameExpr().getNameAsString())).isEmpty()) continue;
+                String prop = property(call.getNameAsString());
+                if (directGetter(returnedType, prop) && directSetter(returnedType, prop)) populated.add(prop);
+            }
+        }
+        return populated;
+    }
+
+    private static boolean tryBlockCollaboratorsStubbed(
+            MethodDeclaration method, ClassOrInterfaceDeclaration owner, List<Stub> stubs) {
+        var tries = method.findAll(TryStmt.class);
+        if (tries.isEmpty()) return true;
+        Set<String> fieldNames = new HashSet<>();
+        owner.getFields().stream().filter(f -> !f.isStatic())
+                .flatMap(f -> f.getVariables().stream()).forEach(v -> fieldNames.add(v.getNameAsString()));
+        for (var tryStmt : tries) {
+            for (var call : tryStmt.getTryBlock().findAll(MethodCallExpr.class)) {
+                if (call.getScope().filter(Expression::isNameExpr).isEmpty()) continue;
+                String receiver = call.getScope().get().asNameExpr().getNameAsString();
+                if (!fieldNames.contains(receiver)) continue;
+                boolean stubbed = stubs.stream().anyMatch(s -> s.invocation().getScope().map(Object::toString)
+                        .filter(receiver::equals).isPresent()
+                        && s.invocation().getNameAsString().equals(call.getNameAsString())
+                        && !s.returned().isNullLiteralExpr());
+                if (!stubbed) return false;
+            }
+        }
+        return true;
+    }
+
+    private static Expression nullAssertedExpression(MethodCallExpr call, String junit) {
+        String name = call.getNameAsString();
+        int size = call.getArguments().size();
+        if (name.equals("assertNull") && (size == 1 || size == 2)) {
+            return unwrapExpr(call.getArgument(junit.equals("org.junit.Assert") ? size - 1 : 0));
+        }
+        if (name.equals("assertEquals") && (size == 2 || size == 3)) {
+            int first = junit.equals("org.junit.Assert") ? size - 2 : 0;
+            Expression left = unwrapExpr(call.getArgument(first));
+            Expression right = unwrapExpr(call.getArgument(first + 1));
+            if (left.isNullLiteralExpr()) return right;
+            if (right.isNullLiteralExpr()) return left;
+        }
+        if ((name.equals("assertTrue") || name.equals("assertFalse")) && (size == 1 || size == 2)) {
+            Expression cond = unwrapExpr(call.getArgument(junit.equals("org.junit.Assert") ? size - 1 : 0));
+            if (!cond.isBinaryExpr()) return null;
+            var binary = cond.asBinaryExpr();
+            var expectedOp = name.equals("assertTrue") ? BinaryExpr.Operator.EQUALS : BinaryExpr.Operator.NOT_EQUALS;
+            if (binary.getOperator() != expectedOp) return null;
+            Expression left = unwrapExpr(binary.getLeft());
+            Expression right = unwrapExpr(binary.getRight());
+            if (left.isNullLiteralExpr()) return right;
+            if (right.isNullLiteralExpr()) return left;
+        }
+        return null;
+    }
+
+    private static Expression unwrapExpr(Expression expression) {
+        Expression current = expression;
+        while (current != null && current.isEnclosedExpr()) current = current.asEnclosedExpr().getInner();
+        return current;
+    }
+
+    private static boolean isPropertyNullApproved(TestCaseContextItemDto approved, String prop) {
+        if (hasNullValueForKey(approved.testData(), prop)) return true;
+        String text = (Objects.toString(approved.description(), "") + " "
+                + Objects.toString(approved.expectedResult(), "")).toLowerCase(Locale.ROOT);
+        String spaced = prop.replaceAll("(?<=[a-z0-9])(?=[A-Z])", " ").toLowerCase(Locale.ROOT);
+        return (text.contains(prop.toLowerCase(Locale.ROOT)) || text.contains(spaced))
+                && text.matches("(?s).*(\\bnull\\b|rỗng|trống|không có|chưa có).*");
+    }
+
+    private static boolean hasNullValueForKey(Object data, String prop) {
+        if (data instanceof Map<?, ?> map) {
+            for (var entry : map.entrySet()) {
+                if (entry.getKey() instanceof String key && key.equalsIgnoreCase(prop)
+                        && (entry.getValue() == null || "null".equalsIgnoreCase(Objects.toString(entry.getValue(), "")))) {
+                    return true;
+                }
+                if (hasNullValueForKey(entry.getValue(), prop)) return true;
+            }
+        } else if (data instanceof Collection<?> list) {
+            for (var item : list) if (hasNullValueForKey(item, prop)) return true;
+        }
+        return false;
     }
 }

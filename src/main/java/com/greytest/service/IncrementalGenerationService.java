@@ -28,6 +28,7 @@ import com.greytest.dto.agent.GenerationResponseDtos.TestCaseResponseDto;
 import com.greytest.dto.agent.GenerationResponseDtos.GeneratedTestCaseDto;
 import com.greytest.dto.agent.GenerationResponseDtos.TestPlanResponseDto;
 import com.greytest.dto.agent.GenerationResponseDtos.UnitTestResponseDto;
+import com.greytest.dto.agent.GenerationResponseDtos.GeneratedUnitTestDto;
 import com.greytest.dto.agent.GenerationResponseDtos.BlockedUnitTestDto;
 import com.greytest.dto.diff.ImpactSummaryDto;
 import com.greytest.dto.diff.MethodDiffItem;
@@ -97,6 +98,8 @@ public class IncrementalGenerationService {
     private final LlmBatchExecutor batchExecutor;
     @Autowired(required = false)
     private com.greytest.service.generation.IncrementalCheckpointCoordinator checkpoints;
+    @Autowired(required = false)
+    private com.greytest.service.generation.GenerationFingerprintService fingerprints;
     @Autowired(required = false)
     private GenerationProgressService progressService;
 
@@ -207,6 +210,7 @@ public class IncrementalGenerationService {
     /** Một lượt Sinh Tất Cả dùng chung analysis và giữ lease xuyên suốt bốn stage. */
     public SourceUpdateDto generateAll(Long projectId,Long updateId,AuthUser user) {
         if(checkpoints!=null) authorizeGeneration(projectId,updateId,user);
+        if (progressService != null) progressService.reset(projectId);
         java.util.function.Supplier<SourceUpdateDto> run=()->{
             SourceUpdateDto result=null;
             for(var stage:GenerationProgressStage.values()) result=generateStage(projectId,updateId,stage,user);
@@ -308,7 +312,8 @@ public class IncrementalGenerationService {
         if (batches.isEmpty()) {
             log.info("Không có target method nào cần sinh lại BR cho project {}", projectId);
             if (progressService != null) {
-                progressService.log(projectId, GenerationProgressStage.BUSINESS_RULE, "Không có method nào cần cập nhật Business Rule.");
+                progressService.complete(projectId, GenerationProgressStage.BUSINESS_RULE,
+                        "Không có method nào cần cập nhật Business Rule (giữ nguyên).");
             }
             return;
         }
@@ -429,7 +434,8 @@ public class IncrementalGenerationService {
         if (ruleIds.isEmpty()) {
             log.info("Không có Business Rule nào cần sinh Test Plan tăng dần cho project {}", projectId);
             if (progressService != null) {
-                progressService.log(projectId, GenerationProgressStage.TEST_PLAN, "Không có Business Rule nào cần cập nhật Test Plan.");
+                progressService.complete(projectId, GenerationProgressStage.TEST_PLAN,
+                        "Không có Business Rule nào cần cập nhật Test Plan (giữ nguyên).");
             }
             return;
         }
@@ -533,7 +539,8 @@ public class IncrementalGenerationService {
                 .map(SourceUpdateItem::getTargetId).filter(Objects::nonNull).forEach(planIds::add);
         if (planIds.isEmpty()) {
             if (progressService != null) {
-                progressService.log(projectId, GenerationProgressStage.TEST_CASE, "Không có Test Plan nào cần cập nhật Test Case.");
+                progressService.complete(projectId, GenerationProgressStage.TEST_CASE,
+                        "Không có Test Plan nào cần cập nhật Test Case (giữ nguyên).");
             }
             return;
         }
@@ -687,8 +694,8 @@ public class IncrementalGenerationService {
                 .filter(i->i.getReviewStatus()!=SourceUpdateReviewStatus.REJECTED)
                 .map(SourceUpdateItem::getTargetId).filter(Objects::nonNull).collect(Collectors.toSet());
         Set<Long> caseIds = new HashSet<>(impact.affectedTestCaseIds());
-        // Hash UT bao phủ cả file: method không đổi vẫn cần xác minh/sinh lại khi file nguồn đổi.
-        caseIds.addAll(staleSourceCaseIds(projectId, sourceUpdateService.getCandidateSourcePath(update)));
+        // Chỉ sinh lại các Test Case thực sự bị ảnh hưởng hoặc dependency thay đổi, không sinh lại mọi UT chỉ vì hash toàn file đổi.
+        caseIds.addAll(staleSourceCaseIds(projectId, update, impact, sourceUpdateService.getCandidateSourcePath(update)));
         Set<Long> removedUnitIds = existingItems.stream()
                 .filter(i -> i.getTargetType() == SourceUpdateTargetType.UNIT_TEST && i.getAction() == SourceUpdateAction.REMOVE)
                 .filter(i -> i.getReviewStatus() != SourceUpdateReviewStatus.REJECTED)
@@ -702,7 +709,8 @@ public class IncrementalGenerationService {
                 .map(UnitTest::getTestCaseId).ifPresent(caseIds::remove);
         if (caseIds.isEmpty()) {
             if (progressService != null) {
-                progressService.log(projectId, GenerationProgressStage.UNIT_TEST, "Không có Test Case nào cần cập nhật Unit Test.");
+                progressService.complete(projectId, GenerationProgressStage.UNIT_TEST,
+                        "Không có Test Case nào cần cập nhật Unit Test (giữ nguyên).");
             }
             return;
         }
@@ -758,7 +766,7 @@ public class IncrementalGenerationService {
         if (responses.isEmpty()) log.info("AI không trả về Unit Test cho project {}", projectId);
     }
 
-    private Set<Long> staleSourceCaseIds(Long projectId, java.nio.file.Path candidate) {
+    private Set<Long> staleSourceCaseIds(Long projectId, SourceUpdate update, ImpactSummaryDto impact, java.nio.file.Path candidate) {
         if (candidate == null || testPlanRepository == null || testCaseRepository == null || unitTestRepository == null)
             return Set.of();
         Set<Long> approvedPlans = testPlanRepository.findByProjectId(projectId).stream()
@@ -768,17 +776,89 @@ public class IncrementalGenerationService {
                 .map(TestCase::getId).toList();
         if (approvedCases.isEmpty()) return Set.of();
         Set<Long> stale = new HashSet<>();
+        Set<Long> changedMethodIds = new HashSet<>();
+        if (impact != null && impact.changedMethods() != null) {
+            for (var changed : impact.changedMethods()) {
+                if (changed.diffType() == MethodDiffType.MODIFIED || changed.diffType() == MethodDiffType.DELETED) {
+                    Long mId = resolveChangedMethodId(projectId, changed);
+                    if (mId != null) changedMethodIds.add(mId);
+                }
+            }
+        }
         for (UnitTest test : unitTestRepository.findByTestCaseIdIn(approvedCases)) {
             if (test.getSourceCode() == null) continue;
             String metadata = com.greytest.service.agent.GenerationSourceFingerprint.aggregate(List.of(test.getSourceCode()));
             if (!metadata.contains(com.greytest.service.agent.GenerationSourceFingerprint.PREFIX)) continue;
             try {
                 com.greytest.service.agent.GenerationSourceFingerprint.alignToSourceRoot(List.of(test.getSourceCode()), candidate);
+                continue;
             } catch (IllegalArgumentException changed) {
-                stale.add(test.getTestCaseId());
+                // File hash changed; xác minh chi tiết thay vì bắt buộc sinh lại toàn bộ file.
             }
+            if (impact != null && impact.affectedTestCaseIds() != null && impact.affectedTestCaseIds().contains(test.getTestCaseId())) {
+                stale.add(test.getTestCaseId());
+                continue;
+            }
+            Long caseMethodId = methodIdForCase(test.getTestCaseId());
+            if (caseMethodId != null && changedMethodIds.contains(caseMethodId)) {
+                stale.add(test.getTestCaseId());
+                continue;
+            }
+            if (fingerprints != null && aiAgentService != null && test.getSourceCode() != null) {
+                try {
+                    Object context = aiAgentService.snapshotContext(GenerationProgressStage.UNIT_TEST, projectId, Set.of(test.getTestCaseId()), candidate);
+                    var output = new UnitTestResponseDto(List.of(new GeneratedUnitTestDto(test.getTestCaseId(),
+                            test.getTestClassName(), test.getTestMethodName(), test.getPackageName(),
+                            test.getGenerationType(), test.getSourceCode())));
+                    aiAgentService.validateSnapshotOutput(GenerationProgressStage.UNIT_TEST, projectId, context, output, candidate);
+                    var outFp = fingerprints.outputFingerprint(output, candidate, context);
+                    if (!outFp.reusable()) {
+                        log.warn("outFp not reusable for case {}: {}", test.getTestCaseId(), outFp.provenance());
+                        stale.add(test.getTestCaseId());
+                        continue;
+                    }
+                    if (checkpoints != null && update != null) {
+                        checkpoints.recordRetainedUnitTest(projectId, update.getId(), test.getTestCaseId(), test, candidate);
+                    }
+                    continue; // UT cũ vẫn hoàn toàn tương thích với candidate; không sinh lại
+                } catch (Exception incompatible) {
+                    log.warn("Compatibility check failed for case {}: {}", test.getTestCaseId(), incompatible.getMessage(), incompatible);
+                    stale.add(test.getTestCaseId());
+                    continue;
+                }
+            }
+            stale.add(test.getTestCaseId());
         }
         return stale;
+    }
+
+    private Long methodIdForCase(Long caseId) {
+        if (caseId == null || testCaseRepository == null || testPlanRepository == null || businessRuleRepository == null)
+            return null;
+        return testCaseRepository.findById(caseId)
+                .map(TestCase::getTestPlanId)
+                .flatMap(planId -> testPlanRepository.findById(planId))
+                .map(TestPlan::getBusinessRuleId)
+                .flatMap(ruleId -> businessRuleRepository.findById(ruleId))
+                .map(BusinessRule::getMethodId)
+                .orElse(null);
+    }
+
+    private Long resolveChangedMethodId(Long projectId, MethodDiffItem changed) {
+        if (javaClassRepository == null || javaMethodRepository == null) return null;
+        for (JavaClass jc : javaClassRepository.findByProjectId(projectId)) {
+            if (Objects.equals(jc.getQualifiedName(), changed.qualifiedClassName())) {
+                for (JavaMethod m : javaMethodRepository.findByClassId(jc.getId())) {
+                    String parameterTypes = m.getParameters() == null ? ""
+                            : m.getParameters().stream().map(MethodParam::type).collect(Collectors.joining(","));
+                    if (Objects.equals(m.getMethodName(), changed.methodName())
+                            && Objects.equals(m.getMethodName() + "(" + parameterTypes + ")", changed.signature())) {
+                        return m.getId();
+                    }
+                }
+            }
+        }
+        return null;
     }
 
     private TestFeasibilityBlockedException blockedSnapshotFailure(

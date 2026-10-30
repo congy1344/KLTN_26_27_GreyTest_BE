@@ -33,7 +33,7 @@ final class GeneratedOutputDependencyResolver {
     }
 
     Map<String, String> resolve(List<String> sources) {
-        index.classpathEvidence(dependencies);
+        index.outputClasspathEvidence(dependencies);
         for (String source : sources) {
             var parsed = GenerationJobContext.memoize("output-dependency-ast-v1:" + GenerationFingerprintService.hash(source), () -> {
                 GenerationJobContext.increment("outputDependencyAstParses");
@@ -42,21 +42,49 @@ final class GeneratedOutputDependencyResolver {
             if (!parsed.isSuccessful()) { problems.add("unresolved output source syntax"); continue; }
             CompilationUnit unit = parsed.getResult().orElseThrow().clone();
             unit.setData(com.github.javaparser.ast.Node.SYMBOL_RESOLVER_KEY, new JavaSymbolSolver(index.outputSolver(module)));
+            Set<String> mockNames = mockVariableNames(unit);
+            Set<String> mockTypes = mockTypeNames(unit);
             for (ClassOrInterfaceType type : unit.findAll(ClassOrInterfaceType.class)) {
                 TypeDeclaration<?> sourceType = sourceType(type.getNameWithScope(), unit);
-                if (sourceType != null) index.outputContract(sourceType, dependencies, visited, problems);
+                if (sourceType != null) {
+                    if (mockTypes.contains(sourceType.getNameAsString()) && !isSutType(sourceType, unit)) {
+                        index.outputMockContract(sourceType, dependencies, visited, problems);
+                    } else {
+                        index.outputContract(sourceType, dependencies, visited, problems);
+                    }
+                }
             }
-            for (MethodCallExpr call : unit.findAll(MethodCallExpr.class)) resolveCall(call, unit);
+            var calls = new java.util.ArrayList<>(unit.findAll(MethodCallExpr.class));
+            java.util.Collections.reverse(calls);
+            for (MethodCallExpr call : calls) resolveCall(call, unit, mockNames, mockTypes);
             if (!unit.findAll(MethodReferenceExpr.class).isEmpty()) problems.add("unresolved output method reference");
         }
         return dependencies;
     }
 
-    private void resolveCall(MethodCallExpr call, CompilationUnit unit) {
+    private void resolveCall(MethodCallExpr call, CompilationUnit unit, Set<String> mockNames, Set<String> mockTypes) {
         if (knownSpringFixture(call, unit)) return;
         try {
+            bindMockitoMatchers(call, unit);
+            bindPolyFactoryArguments(call);
             var resolved = call.resolve();
             String declaringType = resolved.declaringType().getQualifiedName();
+            if (declaringType.startsWith("org.mockito.")) {
+                var usage = com.github.javaparser.symbolsolver.javaparsermodel.JavaParserFacade.get(index.outputSolver(module)).solveMethodAsUsage(call);
+                for (int i = 0; i < call.getArguments().size(); i++) {
+                    var argument = call.getArgument(i);
+                    if (argument.isLambdaExpr()) continue;
+                    int parameter = Math.min(i, usage.getNoParams() - 1);
+                    var expected = usage.getParamType(parameter);
+                    var actual = argument.calculateResolvedType();
+                    if (resolved.hasVariadicParameter() && parameter == usage.getNoParams() - 1 && expected.isArray()
+                            && !(i == parameter && actual.isArray() && expected.isAssignableBy(actual)))
+                        expected = expected.asArrayType().getComponentType();
+                    if (!expected.isAssignableBy(actual))
+                        throw new IllegalArgumentException("Mockito argument incompatible with " + usage.getQualifiedSignature());
+                }
+                dependencies.put("resolved-mockito:" + usage.getQualifiedSignature(), usage.returnType().describe());
+            }
             if (declaringType.startsWith("java.lang.reflect.") || declaringType.startsWith("java.lang.invoke.")
                     || declaringType.equals("org.springframework.test.util.ReflectionTestUtils") && call.getNameAsString().startsWith("invoke")
                     || declaringType.equals("java.lang.Class") && Set.of("getDeclaredMethod", "getMethod", "newInstance").contains(call.getNameAsString())) {
@@ -69,18 +97,183 @@ final class GeneratedOutputDependencyResolver {
                 else if (receiver.isFieldAccessExpr()) receiver.asFieldAccessExpr().resolve();
                 else if (receiver.isTypeExpr()) throw new IllegalArgumentException("Instance method called through a type");
             }
-            if (owner != null) index.outputMethod(owner, resolved.getName(), resolved.getSignature(),
-                    call.getArguments().size(), call, dependencies, visited, problems);
-            return;
+            if (owner != null) {
+                boolean mock = isMockReceiver(call, unit, mockNames, mockTypes);
+                if (mock) {
+                    index.outputMockMethod(owner, resolved.getName(), resolved.getSignature(),
+                            call.getArguments().size(), dependencies, visited, problems);
+                } else {
+                    index.outputMethod(owner, resolved.getName(), resolved.getSignature(),
+                            call.getArguments().size(), call, dependencies, visited, problems);
+                }
+                return;
+            }
         } catch (RuntimeException exception) {
+            if (mockitoApi(call, unit)) {
+                problems.add("unresolved Mockito signature: " + call.getNameAsString() + " (" + exception.getClass().getSimpleName()
+                        + ": " + java.util.Objects.toString(exception.getMessage(), "") + ")");
+                return;
+            }
             TypeDeclaration<?> owner = call.getScope().map(scope -> receiverType(scope, unit)).orElse(null);
             if (owner != null) {
-                index.outputMethod(owner, call.getNameAsString(), null, call.getArguments().size(), call, dependencies, visited, problems);
+                boolean mock = isMockReceiver(call, unit, mockNames, mockTypes);
+                if (mock) {
+                    index.outputMockMethod(owner, call.getNameAsString(), null, call.getArguments().size(), dependencies, visited, problems);
+                } else {
+                    index.outputMethod(owner, call.getNameAsString(), null, call.getArguments().size(), call, dependencies, visited, problems);
+                }
                 return;
             }
             if (knownMockitoInvocation(call, unit) || knownExternal(call, unit) || ownTestHelper(call, unit)) return;
             problems.add("unresolved output call: " + call.getNameAsString());
         }
+    }
+
+    /** Gán target type cho matcher generic khi chữ ký production duy nhất đã được chứng minh. */
+    private void bindMockitoMatchers(MethodCallExpr call, CompilationUnit unit) {
+        if (call.getScope().isEmpty()) return;
+        TypeDeclaration<?> owner = receiverType(call.getScope().orElseThrow(), unit);
+        if (owner == null) return;
+        var methods = owner.getMethodsByName(call.getNameAsString()).stream()
+                .filter(m -> m.getParameters().size() == call.getArguments().size()).toList();
+        if (methods.size() != 1) return;
+        for (int i = 0; i < call.getArguments().size(); i++) {
+            var argument = call.getArgument(i);
+            if (!argument.isMethodCallExpr()) continue;
+            var matcher = argument.asMethodCallExpr();
+            if (!matcher.getArguments().isEmpty() || matcher.getTypeArguments().isPresent()) continue;
+            var declared = matcher.resolve();
+            if (!declared.declaringType().getQualifiedName().equals("org.mockito.ArgumentMatchers")
+                    || !declared.getReturnType().isTypeVariable()) continue;
+            var type = methods.get(0).getParameter(i).getType().resolve();
+            var receiver = call.getScope().orElseThrow().calculateResolvedType();
+            if (receiver.isReferenceType()) type = receiver.asReferenceType().typeParametersMap().replaceAll(type);
+            if (!type.isReferenceType() || hasFreeTypeVariable(type)) continue;
+            matcher.setTypeArguments(new com.github.javaparser.ast.NodeList<>(com.github.javaparser.StaticJavaParser.parseType(type.describe())));
+        }
+    }
+
+    private boolean hasFreeTypeVariable(com.github.javaparser.resolution.types.ResolvedType type) {
+        if (type.isTypeVariable()) return true;
+        if (type.isArray()) return hasFreeTypeVariable(type.asArrayType().getComponentType());
+        if (type.isWildcard()) return type.asWildcard().isBounded() && hasFreeTypeVariable(type.asWildcard().getBoundedType());
+        return type.isReferenceType() && type.asReferenceType().typeParametersValues().stream().anyMatch(this::hasFreeTypeVariable);
+    }
+
+    /** Tránh lỗi JavaParser suy ra Optional<Optional<T>> khi factory generic nằm trong thenReturn. */
+    private void bindPolyFactoryArguments(MethodCallExpr call) {
+        if (!call.getNameAsString().equals("thenReturn") || call.getScope().isEmpty()) return;
+        var receiver = call.getScope().orElseThrow().calculateResolvedType();
+        if (!receiver.isReferenceType() || !receiver.asReferenceType().getQualifiedName().equals("org.mockito.stubbing.OngoingStubbing")) return;
+        var values = receiver.asReferenceType().typeParametersValues();
+        if (values.size() != 1 || !values.get(0).isReferenceType()) return;
+        var expected = values.get(0).asReferenceType();
+        for (Expression argument : call.getArguments()) {
+            if (!argument.isMethodCallExpr()) continue;
+            var factory = argument.asMethodCallExpr();
+            if (!factory.getArguments().isEmpty() || factory.getTypeArguments().isPresent()) continue;
+            var method = factory.resolve();
+            if (!method.isStatic() || !method.getReturnType().isReferenceType() || method.getTypeParameters().isEmpty()) continue;
+            var returned = method.getReturnType().asReferenceType();
+            if (!returned.getQualifiedName().equals(expected.getQualifiedName())) continue;
+            var parameters = returned.typeParametersValues();
+            if (parameters.size() != expected.typeParametersValues().size()) continue;
+            var witnesses = new com.github.javaparser.ast.NodeList<com.github.javaparser.ast.type.Type>();
+            for (var parameter : method.getTypeParameters()) {
+                int position = -1;
+                for (int i = 0; i < parameters.size(); i++)
+                    if (parameters.get(i).isTypeVariable() && parameters.get(i).asTypeVariable().asTypeParameter().equals(parameter)) position = i;
+                if (position < 0 || !expected.typeParametersValues().get(position).isReferenceType()) { witnesses.clear(); break; }
+                var witness = expected.typeParametersValues().get(position);
+                if (parameter.getBounds().stream().anyMatch(bound -> !bound.isExtends() || !bound.getType().isAssignableBy(witness))) {
+                    witnesses.clear(); break;
+                }
+                witnesses.add(com.github.javaparser.StaticJavaParser.parseType(expected.typeParametersValues().get(position).describe()));
+            }
+            // Chỉ thêm type witness trên AST riêng của validator; không sửa byte output đã lưu.
+            if (witnesses.size() == method.getTypeParameters().size()) factory.setTypeArguments(witnesses);
+        }
+    }
+
+    private Set<String> mockVariableNames(CompilationUnit unit) {
+        Set<String> names = new HashSet<>();
+        for (var field : unit.findAll(com.github.javaparser.ast.body.FieldDeclaration.class)) {
+            boolean isMock = field.getAnnotations().stream().anyMatch(a -> {
+                String name = a.getNameAsString();
+                return name.endsWith("Mock") || name.endsWith("MockBean");
+            });
+            if (isMock) {
+                field.getVariables().forEach(v -> names.add(v.getNameAsString()));
+            }
+        }
+        for (MethodCallExpr call : unit.findAll(MethodCallExpr.class)) {
+            if ("mock".equals(call.getNameAsString()) && !call.getArguments().isEmpty()) {
+                call.getParentNode().ifPresent(parent -> {
+                    if (parent instanceof com.github.javaparser.ast.body.VariableDeclarator v) names.add(v.getNameAsString());
+                    else if (parent instanceof com.github.javaparser.ast.expr.AssignExpr a && a.getTarget().isNameExpr()) names.add(a.getTarget().asNameExpr().getNameAsString());
+                });
+            }
+        }
+        return names;
+    }
+
+    private Set<String> mockTypeNames(CompilationUnit unit) {
+        Set<String> types = new HashSet<>();
+        for (var field : unit.findAll(com.github.javaparser.ast.body.FieldDeclaration.class)) {
+            boolean isMock = field.getAnnotations().stream().anyMatch(a -> {
+                String name = a.getNameAsString();
+                return name.endsWith("Mock") || name.endsWith("MockBean");
+            });
+            if (isMock) {
+                types.add(field.getElementType().asString());
+            }
+        }
+        for (MethodCallExpr call : unit.findAll(MethodCallExpr.class)) {
+            if ("mock".equals(call.getNameAsString()) && !call.getArguments().isEmpty()) {
+                var arg = call.getArgument(0);
+                if (arg instanceof com.github.javaparser.ast.expr.ClassExpr classExpr) {
+                    types.add(classExpr.getType().asString());
+                }
+            }
+        }
+        return types;
+    }
+
+    private boolean isSutType(TypeDeclaration<?> type, CompilationUnit unit) {
+        String simpleName = type.getNameAsString();
+        for (var field : unit.findAll(com.github.javaparser.ast.body.FieldDeclaration.class)) {
+            if (field.getElementType().asString().equals(simpleName)) {
+                if (field.getAnnotations().stream().anyMatch(a -> a.getNameAsString().endsWith("InjectMocks"))) {
+                    return true;
+                }
+            }
+        }
+        for (var creation : unit.findAll(com.github.javaparser.ast.expr.ObjectCreationExpr.class)) {
+            if (creation.getType().getNameAsString().equals(simpleName)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean isMockReceiver(MethodCallExpr call, CompilationUnit unit, Set<String> mockNames, Set<String> mockTypes) {
+        if (call.getScope().isEmpty()) return false;
+        Expression scope = call.getScope().orElseThrow();
+        if (scope.isMethodCallExpr()) {
+            MethodCallExpr wrapper = scope.asMethodCallExpr();
+            if (Set.of("verify", "when").contains(wrapper.getNameAsString()) && mockitoApi(wrapper, unit)
+                    && !wrapper.getArguments().isEmpty() && wrapper.getArgument(0).isNameExpr()
+                    && mockNames.contains(wrapper.getArgument(0).asNameExpr().getNameAsString())) {
+                return true;
+            }
+        }
+        if (scope.isNameExpr()) {
+            String name = scope.asNameExpr().getNameAsString();
+            return mockNames.contains(name);
+        }
+        if (scope.isFieldAccessExpr() && scope.asFieldAccessExpr().getScope().isThisExpr())
+            return mockNames.contains(scope.asFieldAccessExpr().getNameAsString());
+        return false;
     }
 
     /** Chỉ nhận InvocationOnMock từ lambda Answer của Mockito, không bỏ qua API production trong lambda. */
@@ -121,7 +314,9 @@ final class GeneratedOutputDependencyResolver {
     private TypeDeclaration<?> receiverType(Expression scope, CompilationUnit unit) {
         if (scope.isMethodCallExpr()) {
             MethodCallExpr wrapper = scope.asMethodCallExpr();
-            if (Set.of("verify", "spy", "when").contains(wrapper.getNameAsString())
+            boolean stubberWhen = wrapper.getNameAsString().equals("when")
+                    && wrapper.getScope().filter(Expression::isMethodCallExpr).isPresent();
+            if ((Set.of("verify", "spy").contains(wrapper.getNameAsString()) || stubberWhen)
                     && !wrapper.getArguments().isEmpty() && knownExternal(wrapper, unit)) {
                 TypeDeclaration<?> wrapped = receiverType(wrapper.getArgument(0), unit);
                 if (wrapped != null) return wrapped;
@@ -132,6 +327,25 @@ final class GeneratedOutputDependencyResolver {
             if (type.isReferenceType()) return productionType(type.asReferenceType().getQualifiedName());
         } catch (RuntimeException exception) { /* Static type qualifiers are not value expressions. */ }
         return sourceType(scope.toString(), unit);
+    }
+
+    private boolean mockitoApi(MethodCallExpr call, CompilationUnit unit) {
+        if (call.getScope().filter(Expression::isMethodCallExpr).isPresent())
+            return mockitoApi(call.getScope().orElseThrow().asMethodCallExpr(), unit);
+        if (call.getScope().isPresent()) {
+            Expression receiver = call.getScope().orElseThrow();
+            try {
+                var type = receiver.calculateResolvedType();
+                if (type.isReferenceType() && type.asReferenceType().getQualifiedName().startsWith("org.mockito.")) return true;
+            } catch (RuntimeException unresolved) { /* Kiểm tra qualifier được import bên dưới. */ }
+            String scope = receiver.toString();
+            return scope.startsWith("org.mockito.") || unit.getImports().stream()
+                    .anyMatch(i -> !i.isStatic() && i.getNameAsString().startsWith("org.mockito.")
+                            && i.getName().getIdentifier().equals(scope));
+        }
+        return unit.getImports().stream().anyMatch(i -> i.isStatic()
+                && i.getNameAsString().startsWith("org.mockito.")
+                && (i.isAsterisk() || i.getName().getIdentifier().equals(call.getNameAsString())));
     }
 
     private TypeDeclaration<?> sourceType(String name, CompilationUnit unit) {

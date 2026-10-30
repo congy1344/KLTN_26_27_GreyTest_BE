@@ -40,11 +40,47 @@ final class ParserDependencyClasspath {
                 } catch (IOException invalid) { throw new IllegalArgumentException("Cannot index analysis dependency JAR", invalid); }
             }
             // Với manifest đã xác minh, không dùng thư viện backend chưa được ghi fingerprint.
-            solver.add(new ReflectionTypeSolver(configured()));
+            solver.add(new ReflectionTypeSolver(configured()) {
+                @Override protected boolean filterName(String name) {
+                    return !name.startsWith("com.greytest.") && super.filterName(name);
+                }
+            });
             return solver;
         }
     }
     private ParserDependencyClasspath() { }
+    /** Chỉ nhận fingerprint cũ khi JAR lưu làm bằng chứng có cùng thư viện với runtime hiện tại. */
+    static boolean compatibleRuntimeIdentity(String previous, String current) {
+        String jdk = System.getProperty("java.runtime.version") + ":" + System.getProperty("java.vendor");
+        if (!defaultSnapshot(jdk).digest().equals(current)) return false;
+        String proof = System.getProperty("greytest.analysis.previous-runtime-jar",
+                System.getenv().getOrDefault("GREYTEST_ANALYSIS_PREVIOUS_RUNTIME_JAR", "")).trim();
+        if (proof.isEmpty()) return false;
+        String[] entries = System.getProperty("java.class.path", "").split(java.io.File.pathSeparator);
+        if (entries.length != 1 || entries[0].isBlank()) return false;
+        try {
+            return compatibleArchivedRuntime(previous, current, Path.of(entries[0]), Path.of(proof), jdk);
+        } catch (RuntimeException invalid) { return false; }
+    }
+
+    static boolean compatibleArchivedRuntime(String previous, String current, Path runtime, Path archived, String jdk) {
+        try {
+            runtime = runtime.toAbsolutePath().normalize();
+            archived = archived.toAbsolutePath().normalize();
+            if (!Files.isRegularFile(runtime) || !Files.isRegularFile(archived)) return false;
+            try (var currentJar = new java.util.jar.JarFile(runtime.toFile());
+                 var oldJar = new java.util.jar.JarFile(archived.toFile())) {
+                if (currentJar.getJarEntry("BOOT-INF/classes/") == null || oldJar.getJarEntry("BOOT-INF/classes/") == null) return false;
+            }
+            String identity = RuntimeIdentity.capture(List.of(runtime));
+            if (!GenerationFingerprintService.hash("default-runtime:" + jdk + ":" + identity).equals(current)
+                    || !identity.equals(RuntimeIdentity.capture(List.of(archived)))) return false;
+            var digest = MessageDigest.getInstance("SHA-256");
+            digest.update(runtime.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            RuntimeIdentity.update(digest, archived);
+            return GenerationFingerprintService.hash("default-runtime:" + jdk + ":" + HexFormat.of().formatHex(digest.digest())).equals(previous);
+        } catch (IOException | java.security.NoSuchAlgorithmException | RuntimeException invalid) { return false; }
+    }
 
     static Snapshot load(Path root, Set<String> sourceModules) {
         String property = System.getProperty("greytest.analysis.classpath-file", "").trim();
@@ -150,9 +186,68 @@ final class ParserDependencyClasspath {
     }
 
     /** Classpath của tiến trình được chốt lúc khởi động, kể cả byte thư viện backend dùng để resolve. */
-    private static final class RuntimeIdentity {
+    static final class RuntimeIdentity {
         static final String VALUE = capture();
-        private static String capture() {
+        static String capture() {
+            List<Path> paths = new ArrayList<>();
+            for (String entry : System.getProperty("java.class.path", "").split(java.io.File.pathSeparator)) {
+                if (!entry.isBlank()) paths.add(Path.of(entry).toAbsolutePath().normalize());
+            }
+            return capture(paths);
+        }
+
+        static String capture(List<Path> paths) {
+            try {
+                MessageDigest digest = MessageDigest.getInstance("SHA-256");
+                for (Path path : paths) {
+                    path = path.toAbsolutePath().normalize();
+                    if (Files.isRegularFile(path)) {
+                        if (path.toString().endsWith(".jar") || path.toString().endsWith(".zip")) {
+                            updateJar(digest, path);
+                        } else {
+                            digest.update(path.getFileName().toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                            update(digest, path);
+                        }
+                    } else if (Files.isDirectory(path)) {
+                        Path classpathRoot = path;
+                        try (var files = Files.walk(path)) {
+                            for (Path file : files.filter(Files::isRegularFile).filter(p -> p.toString().endsWith(".class"))
+                                    .filter(p -> !classpathRoot.relativize(p).toString().replace('\\', '/').startsWith("com/greytest/")).sorted().toList()) {
+                                digest.update(path.relativize(file).toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                                update(digest, file);
+                            }
+                        }
+                    }
+                }
+                return HexFormat.of().formatHex(digest.digest());
+            } catch (IOException | java.security.NoSuchAlgorithmException invalid) {
+                throw new IllegalStateException("Cannot fingerprint parser runtime", invalid);
+            }
+        }
+
+        private static void updateJar(MessageDigest digest, Path jarPath) throws IOException {
+            try (var jar = new java.util.jar.JarFile(jarPath.toFile())) {
+                var entries = jar.entries();
+                List<java.util.jar.JarEntry> sorted = new ArrayList<>();
+                while (entries.hasMoreElements()) {
+                    var entry = entries.nextElement();
+                    if (entry.getName().startsWith("BOOT-INF/classes/com/greytest/")) continue;
+                    sorted.add(entry);
+                }
+                sorted.sort(java.util.Comparator.comparing(java.util.zip.ZipEntry::getName));
+                for (var entry : sorted) {
+                    digest.update(entry.getName().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                    try (var is = jar.getInputStream(entry)) {
+                        byte[] buffer = new byte[65536];
+                        for (int n; (n = is.read(buffer)) >= 0;) digest.update(buffer, 0, n);
+                    }
+                }
+            } catch (Exception e) {
+                update(digest, jarPath);
+            }
+        }
+
+        private static String legacyCapture() {
             try {
                 MessageDigest digest = MessageDigest.getInstance("SHA-256");
                 for (String entry : System.getProperty("java.class.path", "").split(java.io.File.pathSeparator)) {

@@ -109,6 +109,14 @@ public final class TestFeasibilityAnalyzer {
         for (var local : method.findAll(VariableDeclarator.class)) types.put(local.getNameAsString(), local.getTypeAsString());
         boolean uncertain = false;
         boolean blocked = false;
+        if (method.isPrivate()) {
+            findings.add(finding(owner, target, method, "PRIVATE_HELPER_ENTRY_POINT",
+                    "Method private phải được kiểm thử qua entry point hiện có, chưa phải một Act trực tiếp."));
+            strategies.add("Chọn public entry point có trong source và lập fixture cho toàn bộ đường gọi tới helper: "
+                    + "repository collection/Optional phải chứa entity đã duyệt, client phải trả DTO cần dùng trước Act. "
+                    + "Khai báo DTO riêng không cấu hình mock; không dựa vào collection rỗng hoặc null mặc định, không đổi expected result.");
+            uncertain = true;
+        }
         for (MethodCallExpr call : method.findAll(MethodCallExpr.class)) {
             if (call.findAncestor(MethodDeclaration.class).orElse(null) != method) continue;
             String scope = call.getScope().map(Object::toString).orElse("");

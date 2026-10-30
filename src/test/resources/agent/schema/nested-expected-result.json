@@ -1,0 +1,219 @@
+{
+  "cases": [
+    {
+      "plan_id": 3002,
+      "test_type": "HAPPY_PATH",
+      "description": "Cập nhật medical record hiện có bằng các trường khác null và giữ nguyên các trường có giá trị null trong DTO.",
+      "preconditions": "MedicalRecordRepository và MedicalRecordMapper là các dependency được inject qua constructor. Repository trả về record có recordId 41, diagnosis \"Chẩn đoán cũ\", treatment \"Điều trị cũ\" và visitDate 2025-01-10. Mapper chuyển record đã lưu thành DTO phản ánh các trường của record đó.",
+      "test_data": {
+        "input": {
+          "recordId": 41,
+          "dto": {
+            "diagnosis": "Chẩn đoán mới",
+            "treatment": null,
+            "visitDate": "2025-02-15"
+          }
+        },
+        "mocks": {
+          "medicalRepository.findById(41)": "Optional chứa record có recordId 41, diagnosis \"Chẩn đoán cũ\", treatment \"Điều trị cũ\" và visitDate 2025-01-10",
+          "medicalRepository.save": "Trả về chính record được truyền vào sau khi lưu",
+          "medicalRecordMapper.toDto": "Trả về DTO có recordId 41, diagnosis \"Chẩn đoán mới\", treatment \"Điều trị cũ\" và visitDate 2025-02-15"
+        }
+      },
+      "expected_result": "Service cập nhật diagnosis thành \"Chẩn đoán mới\" và visitDate thành 2025-02-15, giữ nguyên treatment là \"Điều trị cũ\", lưu record đã cập nhật bằng medicalRepository.save và trả về DTO phản ánh các giá trị đã lưu. SOURCE_MISMATCH: source gọi medicalRecordMapper.toDto(savedRecord), nhưng mapper là dependency được inject; kết quả DTO phải được xác định bằng kết quả mapper cho record đã lưu.",
+      "priority": "HIGH",
+      "trace_source": "BR-109 [IF-2], BR-110 [IF-3], BR-111 [IF-4], BR-112 [STMT-2], BR-113 [STMT-3] -> TP-097 -> IF-1-FALSE, IF-2-TRUE, IF-3-FALSE, IF-4-TRUE, STMT-2, STMT-3"
+    },
+    {
+      "plan_id": 3002,
+      "test_type": "EXCEPTION",
+      "description": "Từ chối cập nhật khi recordId là null.",
+      "preconditions": "MedicalRecordService được tạo với các dependency constructor-injected. Do recordId không hợp lệ, không cần thiết lập kết quả cho repository hoặc mapper.",
+      "test_data": {
+        "input": {
+          "recordId": null,
+          "dto": {
+            "diagnosis": "Chẩn đoán mới",
+            "treatment": "Điều trị mới",
+            "visitDate": "2025-02-15"
+          }
+        },
+        "mocks": {}
+      },
+      "expected_result": "Service ném IllegalArgumentException với thông điệp chính xác \"Medical Record ID must be valid and positive\" trước khi tìm record, lưu hoặc chuyển đổi DTO.",
+      "priority": "HIGH",
+      "trace_source": "BR-109 [IF-2], BR-110 [IF-3], BR-111 [IF-4], BR-112 [STMT-2], BR-113 [STMT-3] -> TP-097 -> IF-1-TRUE"
+    },
+    {
+      "plan_id": 3002,
+      "test_type": "BOUNDARY",
+      "description": "Từ chối recordId bằng 0 và recordId âm; chấp nhận giá trị dương nhỏ nhất để đi tiếp đến bước tìm record.",
+      "preconditions": "MedicalRecordRepository và MedicalRecordMapper được inject qua constructor. Với recordId dương 1, repository trả về record hiện có; mapper trả DTO tương ứng với record được lưu.",
+      "test_data": {
+        "input": {
+          "recordIds": [
+            0,
+            -1,
+            1
+          ],
+          "dto": {
+            "diagnosis": null,
+            "treatment": null,
+            "visitDate": null
+          },
+          "mocks": {
+            "medicalRepository.findById(1)": "Optional chứa record có recordId 1, diagnosis \"Chẩn đoán hiện có\", treatment \"Điều trị hiện có\" và visitDate 2025-01-10",
+            "medicalRepository.save": "Trả về chính record được truyền vào sau khi lưu",
+            "medicalRecordMapper.toDto": "Trả về DTO phản ánh record có recordId 1 và các trường hiện có"
+          }
+        },
+        "expected_result": "Với recordId 0 và -1, service ném IllegalArgumentException với thông điệp chính xác \"Medical Record ID must be valid and positive\". Với recordId 1, service chấp nhận ID, giữ nguyên cả ba trường vì DTO chứa null, lưu record và trả DTO phản ánh record đã lưu.",
+        "priority": "HIGH",
+        "trace_source": "BR-109 [IF-2], BR-110 [IF-3], BR-111 [IF-4], BR-112 [STMT-2], BR-113 [STMT-3] -> TP-097 -> IF-1-TRUE (0, -1), IF-1-FALSE (1), IF-2-FALSE, IF-3-FALSE, IF-4-FALSE, STMT-2, STMT-3"
+      },
+      "priority": "HIGH",
+      "trace_source": "BR-109 [IF-2], BR-110 [IF-3], BR-111 [IF-4], BR-112 [STMT-2], BR-113 [STMT-3] -> TP-097 -> IF-1-TRUE (0, -1), IF-1-FALSE (1), IF-2-FALSE, IF-3-FALSE, IF-4-FALSE, STMT-2, STMT-3"
+    },
+    {
+      "plan_id": 3003,
+      "test_type": "HAPPY_PATH",
+      "description": "Tạo prescription khi DTO có medicalRecordId và xác nhận liên kết hai chiều trước khi lưu.",
+      "preconditions": "PrescriptionMapper, MedicalRecordRepository và PrescriptionRepository được inject qua constructor. MedicalRecordRepository trả về record có recordId 52. PrescriptionMapper.toEntity chuyển các trường medicine, dosage và instructions của DTO thành entity Prescription; PrescriptionRepository.save trả về entity đã lưu với prescriptionId 73 và giữ các trường đã gửi cùng liên kết medical record. PrescriptionMapper.toDto chuyển entity đã lưu thành DTO.",
+      "test_data": {
+        "input": {
+          "dto": {
+            "prescriptionId": null,
+            "medicine": "Thuốc A",
+            "dosage": "10 mg",
+            "instructions": "Uống sau bữa ăn",
+            "medicalRecordId": 52
+          }
+        },
+        "mocks": {
+          "medicalRecordRepository.findById(52)": "Optional chứa MedicalRecord có recordId 52",
+          "prescriptionRepository.save": "Trả về prescription được truyền vào, giữ medicine \"Thuốc A\", dosage \"10 mg\", instructions \"Uống sau bữa ăn\", liên kết với MedicalRecord recordId 52 và có prescriptionId 73",
+          "prescriptionMapper.toDto": "Trả về DTO có prescriptionId 73, medicine \"Thuốc A\", dosage \"10 mg\", instructions \"Uống sau bữa ăn\" và medicalRecordId 52"
+        }
+      },
+      "expected_result": "Service tìm MedicalRecord có ID 52, gắn record đó vào Prescription và gắn Prescription vào MedicalRecord trước khi lưu. Sau khi lưu thành công, service trả DTO phản ánh prescription đã lưu, gồm prescriptionId 73 và medicalRecordId 52.",
+      "priority": "HIGH",
+      "trace_source": "BR-126 [IF-1] -> TP-098 -> STMT-1, STMT-2, IF-1-TRUE, STMT-3, STMT-4"
+    },
+    {
+      "plan_id": 3003,
+      "test_type": "EXCEPTION",
+      "description": "Ném MedicalRecordNotFoundException khi medicalRecordId có giá trị nhưng không tìm thấy record.",
+      "preconditions": "PrescriptionMapper, MedicalRecordRepository và PrescriptionRepository được inject qua constructor. MedicalRecordRepository trả Optional rỗng cho ID 52. Không thiết lập kết quả save hoặc chuyển đổi DTO vì luồng dừng khi không tìm thấy record.",
+      "test_data": {
+        "input": {
+          "dto": {
+            "prescriptionId": null,
+            "medicine": "Thuốc A",
+            "dosage": "10 mg",
+            "instructions": "Uống sau bữa ăn",
+            "medicalRecordId": 52
+          }
+        },
+        "mocks": {
+          "medicalRecordRepository.findById(52)": "Optional rỗng"
+        }
+      },
+      "expected_result": "Service ném MedicalRecordNotFoundException với thông điệp chính xác \"Failed to find the medical record with id 52\". PrescriptionRepository.save không được thực hiện vì ngoại lệ phát sinh trước bước lưu.",
+      "priority": "HIGH",
+      "trace_source": "BR-126 [IF-1] -> TP-098 -> STMT-1, STMT-2, IF-1-TRUE"
+    },
+    {
+      "plan_id": 3003,
+      "test_type": "HAPPY_PATH",
+      "description": "Tạo prescription khi DTO không có medicalRecordId.",
+      "preconditions": "PrescriptionMapper, MedicalRecordRepository và PrescriptionRepository được inject qua constructor. PrescriptionMapper.toEntity tạo entity từ các trường prescription trong DTO. PrescriptionRepository.save trả về entity đã lưu với prescriptionId 73 và giữ các trường đã gửi; PrescriptionMapper.toDto trả DTO tương ứng. Không cần thiết lập kết quả tìm MedicalRecord vì ID là null.",
+      "test_data": {
+        "input": {
+          "dto": {
+            "prescriptionId": null,
+            "medicine": "Thuốc B",
+            "dosage": "5 mg",
+            "instructions": "Uống buổi sáng",
+            "medicalRecordId": null
+          }
+        },
+        "mocks": {
+          "prescriptionRepository.save": "Trả về prescription được truyền vào, giữ medicine \"Thuốc B\", dosage \"5 mg\", instructions \"Uống buổi sáng\" và có prescriptionId 73",
+          "prescriptionMapper.toDto": "Trả về DTO có prescriptionId 73, medicine \"Thuốc B\", dosage \"5 mg\", instructions \"Uống buổi sáng\" và medicalRecordId null"
+        }
+      },
+      "expected_result": "Service không tìm hoặc gắn MedicalRecord khi medicalRecordId là null, vẫn lưu Prescription và trả DTO phản ánh prescription đã lưu.",
+      "priority": "MEDIUM",
+      "trace_source": "BR-126 [IF-1] -> TP-098 -> STMT-1, STMT-2, IF-1-FALSE, STMT-3, STMT-4"
+    },
+    {
+      "plan_id": 3004,
+      "test_type": "HAPPY_PATH",
+      "description": "Lấy toàn bộ prescription và chuyển từng entity thành DTO tương ứng.",
+      "preconditions": "PrescriptionRepository và PrescriptionMapper được inject qua constructor. Repository trả về hai Prescription có lần lượt prescriptionId 11 và 12. Mapper chuyển từng entity thành DTO, giữ đúng ID và các trường medicine, dosage, instructions tương ứng.",
+      "test_data": {
+        "input": {},
+        "mocks": {
+          "prescriptionRepository.findAll()": "Danh sách gồm Prescription 11 (medicine \"Thuốc A\", dosage \"10 mg\", instructions \"Uống sáng\") và Prescription 12 (medicine \"Thuốc B\", dosage \"5 mg\", instructions \"Uống tối\")",
+          "prescriptionMapper.toDto(Prescription 11)": "DTO có prescriptionId 11, medicine \"Thuốc A\", dosage \"10 mg\", instructions \"Uống sáng\"",
+          "prescriptionMapper.toDto(Prescription 12)": "DTO có prescriptionId 12, medicine \"Thuốc B\", dosage \"5 mg\", instructions \"Uống tối\""
+        }
+      },
+      "expected_result": "Service trả về danh sách PrescriptionDto tương ứng với toàn bộ entity do findAll trả về; mỗi DTO giữ đúng ID và các trường của entity tương ứng.",
+      "priority": "HIGH",
+      "trace_source": "BR-127 [STMT-1] -> TP-099 -> STMT-1, STMT-2"
+    },
+    {
+      "plan_id": 3004,
+      "test_type": "EDGE",
+      "description": "Trả về danh sách rỗng khi repository không có prescription nào.",
+      "preconditions": "PrescriptionRepository và PrescriptionMapper được inject qua constructor. Repository trả về danh sách rỗng.",
+      "test_data": {
+        "input": {},
+        "mocks": {
+          "prescriptionRepository.findAll()": "Danh sách rỗng"
+        }
+      },
+      "expected_result": "Service trả về danh sách PrescriptionDto rỗng.",
+      "priority": "MEDIUM",
+      "trace_source": "BR-127 [STMT-1] -> TP-099 -> STMT-1, STMT-2"
+    },
+    {
+      "plan_id": 3005,
+      "test_type": "EXCEPTION",
+      "description": "Ném ngoại lệ khi prescriptionId là null.",
+      "preconditions": "PrescriptionRepository và PrescriptionMapper được inject qua constructor. Nhánh kiểm tra ID kết thúc method trước khi gọi repository hoặc mapper.",
+      "test_data": {
+        "input": {
+          "prescriptionId": null
+        },
+        "mocks": {}
+      },
+      "expected_result": "Service ném IllegalArgumentException với thông điệp chính xác \"Prescription ID must be valid and positive\".",
+      "priority": "HIGH",
+      "trace_source": "BR-128 [IF-1] -> TP-100 -> IF-1-TRUE"
+    },
+    {
+      "plan_id": 3005,
+      "test_type": "BOUNDARY",
+      "description": "Ném ngoại lệ với prescriptionId bằng 0 và -1; chấp nhận giá trị dương nhỏ nhất để tìm prescription.",
+      "preconditions": "PrescriptionRepository và PrescriptionMapper được inject qua constructor. Với prescriptionId 1, repository trả về Prescription có ID 1 và mapper chuyển entity đó thành DTO.",
+      "test_data": {
+        "input": {
+          "prescriptionIds": [
+            0,
+            -1,
+            1
+          ]
+        },
+        "mocks": {
+          "prescriptionRepository.findById(1)": "Optional chứa Prescription có prescriptionId 1",
+          "prescriptionMapper.toDto(Prescription 1)": "DTO có prescriptionId 1"
+        }
+      },
+      "expected_result": "Với prescriptionId 0 và -1, service ném IllegalArgumentException với thông điệp chính xác \"Prescription ID must be valid and positive\". Với prescriptionId 1, service chấp nhận ID, tìm prescription và trả DTO do mapper chuyển đổi.",
+      "priority": "HIGH",
+      "trace_source": "BR-128 [IF-1] -> TP-100 -> IF-1-TRUE (0, -1), IF-1-FALSE (1), STMT-1, STMT-2"
+    }
+  ]
+}

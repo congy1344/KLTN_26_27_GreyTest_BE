@@ -39,6 +39,45 @@ import com.greytest.service.agent.LlmResponseException;
 class UnitTestServiceTest {
 
     @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"repaired", "blocked", "failed"})
+    void resumeRevalidatesStoredUnitsAndPreservesValidOnesAndEditedOracle(String outcome) {
+        boolean blocked = outcome.equals("blocked"); boolean failed = outcome.equals("failed");
+        Project project = new Project(); project.setId(1L); project.setStatus(ProjectStatus.TEST_GENERATED);
+        TestPlan plan = new TestPlan(); plan.setId(20L); plan.setProjectId(1L); plan.setStatus(ReviewStatus.APPROVED);
+        var first = approvedCase(1L, 20L); var second = approvedCase(2L, 20L); second.setIsModified(true);
+        second.setExpectedResult("Human approved expected value");
+        var good = new UnitTest(); good.setTestCaseId(1L); good.setSourceCode(validSource("ServiceTest", "case1"));
+        var bad = new UnitTest(); bad.setTestCaseId(2L); bad.setSourceCode("old invalid fixture");
+        Map<Long, UnitTest> stored = new java.util.HashMap<>(); stored.put(1L, good); stored.put(2L, bad);
+        when(projects.findById(1L)).thenReturn(Optional.of(project)); when(projects.findByIdForUpdate(1L)).thenReturn(Optional.of(project));
+        when(cases.findAll()).thenReturn(List.of(first, second)); when(plans.findById(20L)).thenReturn(Optional.of(plan));
+        if (!blocked && !failed) when(cases.findById(2L)).thenReturn(Optional.of(second));
+        when(units.findByTestCaseId(org.mockito.ArgumentMatchers.anyLong())).thenAnswer(call -> stored.get(call.<Long>getArgument(0)));
+        org.mockito.Mockito.doAnswer(call -> {
+            if (call.getArgument(1) == bad) throw new LlmResponseException("Missing collection stub");
+            return null;
+        }).when(ai).validateExistingUnitTest(org.mockito.ArgumentMatchers.eq(1L), org.mockito.ArgumentMatchers.any(UnitTest.class), org.mockito.ArgumentMatchers.isNull());
+        var output = blocked ? new UnitTestResponseDto(List.of(), List.of(new com.greytest.dto.agent.GenerationResponseDtos.BlockedUnitTestDto(2L, "TC-2", "not feasible")))
+                : new UnitTestResponseDto(List.of(generated(2L, validSource("ServiceTest", "case2"))));
+        if (failed) when(ai.generateUnitTests(1L, Set.of(2L))).thenThrow(new LlmResponseException("provider failed"));
+        else when(ai.generateUnitTests(1L, Set.of(2L))).thenReturn(output);
+        if (!blocked && !failed) when(units.saveAll(org.mockito.ArgumentMatchers.anyList())).thenAnswer(call -> {
+            List<UnitTest> saved = call.getArgument(0); saved.forEach(unit -> stored.put(unit.getTestCaseId(), unit)); return saved;
+        });
+        if (failed) assertThatThrownBy(() -> service.generate(1L, (String) null, true)).hasMessageContaining("provider failed");
+        else service.generate(1L, (String) null, true);
+        verify(ai).validateExistingUnitTest(1L, good, null);
+        verify(ai).generateUnitTests(1L, Set.of(2L));
+        verify(ai, never()).generateUnitTests(1L, Set.of(1L, 2L));
+        assertThat(stored.get(1L)).isSameAs(good);
+        assertThat(second.getIsModified()).isTrue(); assertThat(second.getExpectedResult()).isEqualTo("Human approved expected value");
+        if (blocked || failed) {
+            assertThat(project.getStatus()).isEqualTo(ProjectStatus.CASE_APPROVED);
+            verify(generationProgress, never()).completeAfterCommit(org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyString());
+        }
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.EnumSource(value = ProjectStatus.class, names = {"CASE_APPROVED", "TEST_GENERATED"})
     void keepsValidTestsAndRecoversOnlyMissingNonBlockedCases(ProjectStatus initialStatus) {
         Project project = new Project();

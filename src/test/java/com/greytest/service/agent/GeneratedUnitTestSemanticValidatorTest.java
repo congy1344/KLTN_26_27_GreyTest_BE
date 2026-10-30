@@ -3042,4 +3042,169 @@ class GeneratedUnitTestSemanticValidatorTest {
         return new UnitTestResponseDto(List.of(new GeneratedUnitTestDto(
                 40L, "ServiceTest", methodName, "demo", "NEW_TEST", source)));
     }
+
+    @Test
+    void rejectsFixtureAssertionWhenFieldNeverArrangedAndNotModifiedBySut() {
+        String sutSource = """
+                public void updateStatus(Long id, String status) {
+                    Appointment app = repository.findById(id).orElseThrow();
+                    app.setStatus(status);
+                    repository.save(app);
+                }
+                """;
+        UnitTestContextDto context = contextWithServiceSource(
+                "demo.Service", "updateStatus", sutSource,
+                "public class Service { " + sutSource + " }");
+
+        // Sử dụng @org.junit.jupiter.api.Test để đồng thời kiểm tra Finding 1 (annotation fully qualified)
+        String testSource = """
+                package demo;
+                import static org.junit.jupiter.api.Assertions.assertEquals;
+                class ServiceTest {
+                    @org.junit.jupiter.api.Test
+                    void testCase() {
+                        Appointment appointment = new Appointment();
+                        appointment.setId(1001L);
+                        appointment.setStatus("PENDING");
+                        assertEquals("Ghi chú ban đầu", appointment.getNotes());
+                    }
+                }
+                """;
+
+        var result = GeneratedUnitTestSemanticValidator.validate(context, response("testCase", testSource));
+        org.assertj.core.api.Assertions.assertThat(result).isPresent();
+        org.assertj.core.api.Assertions.assertThat(result.get())
+                .contains("appointment.getNotes()")
+                .contains("was never called in Arrange");
+    }
+
+    @Test
+    void allowsFixtureAssertionWhenFieldArrangedInTest() {
+        String sutSource = """
+                public void updateStatus(Long id, String status) {
+                    Appointment app = repository.findById(id).orElseThrow();
+                    app.setStatus(status);
+                    repository.save(app);
+                }
+                """;
+        UnitTestContextDto context = contextWithServiceSource(
+                "demo.Service", "updateStatus", sutSource,
+                "public class Service { " + sutSource + " }");
+
+        String testSource = """
+                package demo;
+                import org.junit.jupiter.api.Test;
+                import static org.junit.jupiter.api.Assertions.assertEquals;
+                class ServiceTest {
+                    @Test
+                    void testCase() {
+                        Appointment appointment = new Appointment();
+                        appointment.setId(1001L);
+                        appointment.setStatus("PENDING");
+                        appointment.setNotes("Ghi chú ban đầu");
+                        assertEquals("Ghi chú ban đầu", appointment.getNotes());
+                    }
+                }
+                """;
+
+        var result = GeneratedUnitTestSemanticValidator.validate(context, response("testCase", testSource));
+        org.assertj.core.api.Assertions.assertThat(result).isEmpty();
+    }
+
+    @Test
+    void allowsFixtureAssertionWhenMethodChainingSetsField() {
+        // Finding 2: method chaining app.setId(1L).setNotes(...)
+        String sutSource = """
+                public void updateStatus(Long id, String status) {
+                    Appointment app = repository.findById(id).orElseThrow();
+                    app.setStatus(status);
+                    repository.save(app);
+                }
+                """;
+        UnitTestContextDto context = contextWithServiceSource(
+                "demo.Service", "updateStatus", sutSource,
+                "public class Service { " + sutSource + " }");
+
+        String testSource = """
+                package demo;
+                import org.junit.jupiter.api.Test;
+                import static org.junit.jupiter.api.Assertions.assertEquals;
+                class ServiceTest {
+                    @Test
+                    void testCase() {
+                        Appointment appointment = new Appointment();
+                        appointment.setId(1001L).setNotes("Ghi chú chuỗi");
+                        assertEquals("Ghi chú chuỗi", appointment.getNotes());
+                    }
+                }
+                """;
+
+        var result = GeneratedUnitTestSemanticValidator.validate(context, response("testCase", testSource));
+        org.assertj.core.api.Assertions.assertThat(result).isEmpty();
+    }
+
+    @Test
+    void allowsFixtureAssertionWhenVariableIsReassigned() {
+        // Finding 3: app được reassign từ service call
+        String sutSource = """
+                public Appointment getAppointment(Long id) {
+                    return repository.findById(id).orElseThrow();
+                }
+                """;
+        UnitTestContextDto context = contextWithServiceSource(
+                "demo.Service", "getAppointment", sutSource,
+                "public class Service { " + sutSource + " }");
+
+        String testSource = """
+                package demo;
+                import org.junit.jupiter.api.Test;
+                import static org.junit.jupiter.api.Assertions.assertEquals;
+                class ServiceTest {
+                    Service service;
+                    @Test
+                    void testCase() {
+                        Appointment appointment = new Appointment();
+                        appointment = service.getAppointment(1001L);
+                        assertEquals("Ghi chú từ DB", appointment.getNotes());
+                    }
+                }
+                """;
+
+        var result = GeneratedUnitTestSemanticValidator.validate(context, response("testCase", testSource));
+        org.assertj.core.api.Assertions.assertThat(result).isEmpty();
+    }
+
+    @Test
+    void allowsFixtureAssertionWhenSutModifiesField() {
+        // Finding 5: test method thực sự gọi SUT method
+        String sutSource = """
+                public void updateNotes(Long id, String notes) {
+                    Appointment app = repository.findById(id).orElseThrow();
+                    app.setNotes(notes);
+                    repository.save(app);
+                }
+                """;
+        UnitTestContextDto context = contextWithServiceSource(
+                "demo.Service", "updateNotes", sutSource,
+                "public class Service { " + sutSource + " }");
+
+        String testSource = """
+                package demo;
+                import org.junit.jupiter.api.Test;
+                import static org.junit.jupiter.api.Assertions.assertEquals;
+                class ServiceTest {
+                    Service service;
+                    @Test
+                    void testCase() {
+                        Appointment appointment = new Appointment();
+                        appointment.setId(1001L);
+                        service.updateNotes(1001L, "Ghi chú mới");
+                        assertEquals("Ghi chú mới", appointment.getNotes());
+                    }
+                }
+                """;
+
+        var result = GeneratedUnitTestSemanticValidator.validate(context, response("testCase", testSource));
+        org.assertj.core.api.Assertions.assertThat(result).isEmpty();
+    }
 }

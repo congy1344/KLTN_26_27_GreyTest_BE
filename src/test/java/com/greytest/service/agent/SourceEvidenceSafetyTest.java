@@ -9,6 +9,17 @@ import com.greytest.dto.agent.GenerationResponseDtos.GeneratedTestCaseDto;
 /** Kiểm tra không biến suy luận thiếu bằng chứng thành lỗi giả của BR/TC. */
 class SourceEvidenceSafetyTest {
     @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {
+            "Ném IllegalArgumentException khi template \"welcome\" không tồn tại.",
+            "Ném IllegalArgumentException khi mẫu \"welcome\" không tồn tại.",
+            "IllegalArgumentException khi template \"welcome\" không tồn tại, message \"Unknown template\".",
+            "IllegalArgumentException khi template không tồn tại, message \"Unknown template\"."})
+    void doesNotInterpretDomainTemplatesAsExceptionMessageTemplates(String claim) {
+        var classes = sources("void run() { throw new IllegalArgumentException(\"Unknown template\"); }", "");
+        assertThat(new SourceExceptionMessageEvidence(classes).validate(classes, 1L, claim, Map.of(), true)).isEmpty();
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(strings = {"", "`", "new ", "`new "})
     void distinguishesConstructorArgumentsFromTheRenderedExceptionMessage(String constructorPrefix) {
         var classes = resourceNotFoundSources();

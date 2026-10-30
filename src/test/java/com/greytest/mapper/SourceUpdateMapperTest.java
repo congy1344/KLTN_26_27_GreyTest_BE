@@ -16,6 +16,47 @@ import com.greytest.service.generation.GenerationCheckpointStore.Checkpoint;
 
 class SourceUpdateMapperTest {
     @Test
+    void verifiedRetainedUnitTestCompletesStageWithoutCreatingADraftItem() {
+        var result = retainedSummary("UNIT_TEST", "10", "class Test {}", true, "proof", "retained-verified-digest");
+        assertThat(result.generationSummary().stages().get("UNIT_TEST").completed()).isTrue();
+        assertThat(result.generationSummary().readyForApply()).isTrue();
+    }
+
+    @Test
+    void missingOrMismatchedRetainedProofDoesNotCompleteStage() {
+        assertThat(retainedSummary("UNIT_TEST", "11", "class Test {}", true, "proof", "retained-verified-digest")
+                .generationSummary().readyForApply()).isFalse();
+        assertThat(retainedSummary("UNIT_TEST", "10", " ", true, "proof", "retained-verified-digest")
+                .generationSummary().readyForApply()).isFalse();
+        assertThat(retainedSummary("UNIT_TEST", "10", "class Test {}", false, "proof", "retained-verified-digest")
+                .generationSummary().readyForApply()).isFalse();
+        assertThat(retainedSummary("UNIT_TEST", "10", "class Test {}", true, "", "retained-verified-digest")
+                .generationSummary().readyForApply()).isFalse();
+        assertThat(retainedSummary("UNIT_TEST", "10", "class Test {}", true, "proof", "arbitrary")
+                .generationSummary().readyForApply()).isFalse();
+        assertThat(retainedSummary("BUSINESS_RULE", "10", "class Test {}", true, "proof", "retained-verified-digest")
+                .generationSummary().readyForApply()).isFalse();
+    }
+
+    private com.greytest.dto.SourceUpdateDto retainedSummary(String stage, String caseId, String source, boolean reusable,
+            String fingerprint, String digest) {
+        var store = mock(GenerationCheckpointStore.class);
+        List<Checkpoint> saved = new ArrayList<>();
+        for (String current : List.of("BUSINESS_RULE", "TEST_PLAN", "TEST_CASE", "UNIT_TEST"))
+            saved.add(checkpoint(current, "__stage__", "SUCCEEDED", current.equals(stage) ? "{\"targets\":[\"10\"]}" : "{\"targets\":[]}"));
+        String envelope = new ObjectMapper().createObjectNode().put("outputReusable", reusable).put("outputFingerprint", fingerprint)
+                .set("itemIds", new ObjectMapper().createArrayNode()).toString();
+        var json = new ObjectMapper();
+        try {
+            var value = (com.fasterxml.jackson.databind.node.ObjectNode) json.readTree(envelope);
+            value.set("response", json.valueToTree(java.util.Map.of("unit_tests", List.of(java.util.Map.of("case_id", Long.valueOf(caseId), "source_code", source)))));
+            saved.add(new Checkpoint(stage, "10", "fp", "{}", value.toString(), digest, "SUCCEEDED"));
+        } catch (Exception invalid) { throw new AssertionError(invalid); }
+        when(store.list(1L)).thenReturn(saved);
+        var update = new SourceUpdate(); update.setId(1L);
+        return new SourceUpdateMapper(store, json).toUpdateDto(update, List.of());
+    }
+    @Test
     void oneSuccessfulCaseDoesNotCompleteItsWholeStage() {
         var store = mock(GenerationCheckpointStore.class);
         when(store.list(1L)).thenReturn(List.of(checkpoint("TEST_CASE", "10", "SUCCEEDED", "{}")));

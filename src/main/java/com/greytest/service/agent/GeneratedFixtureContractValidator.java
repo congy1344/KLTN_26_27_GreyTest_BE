@@ -53,23 +53,44 @@ final class GeneratedFixtureContractValidator {
                             && f.getElementType().asClassOrInterfaceType().getNameAsString().endsWith("Mapper"))
                     .map(f -> api.qualifiedType(f.getElementType().asClassOrInterfaceType(), owner.findCompilationUnit().orElseThrow())).distinct().toList();
             boolean soleMapperRole = mapperTypes.size() == 1 && Objects.equals(mapperTypes.get(0), candidates.get(0));
-            for (String sentence : preconditions.split("[.\\n]")) {
-                boolean explicitType = Pattern.compile("(?iuU)(?:\\b" + Pattern.quote(type)
-                        + "\\s+(?:(?:phải\\s+)?(?:dùng|sử\\s+dụng)\\s+)?(?:implementation\\s+)?(?:thật|thực(?!\\s+hiện\\b))\\b|\\breal\\s+" + Pattern.quote(type) + "\\b)")
-                        .matcher(sentence).find();
-                boolean realRole = soleMapperRole && Pattern.compile("(?iuU)\\b(?:mapper\\s+(?:thật|thực(?!\\s+hiện\\b))|real\\s+mapper)\\b").matcher(sentence).find();
-                if (!explicitType && !realRole) continue;
-                // Không diễn giải yêu cầu phủ định hoặc cho phép cả hai cách setup.
-                if (Pattern.compile("(?iuU)\\b(?:không|not|hoặc|or)\\b").matcher(sentence).find()) continue;
-                problems.add("Approved fixture contract: " + type + " must be real. Use a source-supported real @Spy or explicit construction, "
+            if (requiresRealDependency(preconditions, type, soleMapperRole)) {
+                problems.add((caseId == null ? "" : "Test case " + caseId + ": ") + "Approved fixture contract: " + type + " must be real. Use a source-supported real @Spy or explicit construction, "
                         + "not @Mock; preserve approved inputs and assertions.");
-                break;
             }
         }
         String expected = Objects.toString(approved.expectedResult(), "").toLowerCase(Locale.ROOT);
         boolean approximate = expected.contains("approximately") || expected.contains("cho phép sai số") || expected.contains("xấp xỉ");
         if (approximate) validateJwtTimeBounds(test, problems);
         return problems;
+    }
+
+    private static final Pattern NEGATED_BEFORE = Pattern.compile("(?iuU)\\b(?:không|chưa|not|never|no|without)\\b");
+    private static final Pattern NEGATED_AFTER = Pattern.compile("(?iuU)^\\s*(?:là\\s+)?(?:không|chưa|not|never|(?:is|are|was|were)\\s+not)\\b");
+    private static final Pattern OPTIONAL_CHOICE = Pattern.compile("(?iuU)\\b(?:hoặc|hay|or|either)\\b");
+
+    static boolean requiresRealDependency(String preconditions, String type, boolean soleMapperRole) {
+        if (preconditions == null || preconditions.isBlank()) return false;
+        Pattern explicitPattern = Pattern.compile("(?iuU)(?:\\b" + Pattern.quote(type)
+                + "\\s+(?:(?:phải\\s+)?(?:dùng|sử\\s+dụng)\\s+)?(?:implementation\\s+)?(?:thật|thực(?!\\s+hiện\\b))\\b|\\breal\\s+" + Pattern.quote(type) + "\\b)");
+        Pattern rolePattern = Pattern.compile("(?iuU)\\b(?:mapper\\s+(?:thật|thực(?!\\s+hiện\\b))|real\\s+mapper)\\b");
+        for (String clause : preconditions.split("[.;\\n]")) {
+            var explicit = explicitPattern.matcher(clause);
+            var role = rolePattern.matcher(clause);
+            var matched = explicit.find() ? explicit : (soleMapperRole && role.find() ? role : null);
+            if (matched == null) continue;
+            int commaBefore = clause.lastIndexOf(',', matched.start());
+            int subStart = commaBefore >= 0 && !OPTIONAL_CHOICE.matcher(clause.substring(commaBefore + 1, matched.start())).find()
+                    ? commaBefore + 1 : 0;
+            int commaAfter = clause.indexOf(',', matched.end());
+            int subEnd = commaAfter >= 0 && !Pattern.compile("(?iuU)^\\s*,\\s*(?:hoặc|hay|or)\\b").matcher(clause.substring(commaAfter)).find()
+                    ? commaAfter : clause.length();
+            String before = clause.substring(subStart, matched.end());
+            String after = clause.substring(matched.end(), subEnd);
+            if (NEGATED_BEFORE.matcher(before).find() || NEGATED_AFTER.matcher(after).find()
+                    || OPTIONAL_CHOICE.matcher(clause.substring(subStart, subEnd)).find()) continue;
+            return true;
+        }
+        return false;
     }
 
     private static List<MethodCallExpr> targetCalls(MethodDeclaration method, MethodContextDto target,

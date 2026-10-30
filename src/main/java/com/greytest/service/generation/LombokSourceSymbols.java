@@ -42,6 +42,22 @@ final class LombokSourceSymbols {
                 "lombok.Builder", "lombok.EqualsAndHashCode", "lombok.ToString").contains(qualified);
     }
 
+    /** Cho phép cả top-level class và static/nested member class; loại trừ anonymous/local class trong method. */
+    private static boolean isSupportedTypeContext(ClassOrInterfaceDeclaration type) {
+        if (type.findAncestor(MethodDeclaration.class).isPresent()
+                || type.findAncestor(ConstructorDeclaration.class).isPresent()
+                || type.findAncestor(com.github.javaparser.ast.body.InitializerDeclaration.class).isPresent()) {
+            return false;
+        }
+        Node current = type;
+        while (current.getParentNode().isPresent()) {
+            current = current.getParentNode().get();
+            if (current instanceof CompilationUnit) return true;
+            if (!(current instanceof com.github.javaparser.ast.body.TypeDeclaration)) return false;
+        }
+        return false;
+    }
+
     static void expand(Path root, Map<String, CompilationUnit> units) {
         Set<String> declared = units.values().stream().flatMap(unit -> unit.findAll(com.github.javaparser.ast.body.TypeDeclaration.class).stream())
                 .map(type -> String.valueOf(type.getFullyQualifiedName().orElse(""))).collect(java.util.stream.Collectors.toSet());
@@ -51,7 +67,7 @@ final class LombokSourceSymbols {
                 if (type.isInterface()) continue;
                 var lombokAnnotations = type.findAll(AnnotationExpr.class).stream().filter(a -> qualify(a, unit).startsWith("lombok.")).toList();
                 if (lombokAnnotations.isEmpty()) continue;
-                if (type.getParentNode().filter(CompilationUnit.class::isInstance).isEmpty() || hasConfiguration(root.resolve(entry.getKey()).getParent())
+                if (!isSupportedTypeContext(type) || hasConfiguration(root.resolve(entry.getKey()).getParent())
                         || lombokAnnotations.stream().anyMatch(a -> !isSupportedAnnotation(a, unit) || declared.contains(qualify(a, unit)))) {
                     type.setData(UNSUPPORTED, "unresolved Lombok configuration: " + type.getNameAsString()); continue;
                 }
@@ -70,12 +86,12 @@ final class LombokSourceSymbols {
                         if (has(field.getAnnotations(), unit, "lombok.experimental.Accessors")) continue;
                         String suffix = Character.toUpperCase(name.charAt(0)) + name.substring(1);
                         boolean bool = variable.getType().isPrimitiveType() && variable.getType().asString().equals("boolean");
-                        if (bool) continue;
                         if (bool && name.startsWith("is") && name.length() > 2 && Character.isUpperCase(name.charAt(2))) suffix = name.substring(2);
                         String getterName = (bool ? "is" : "get") + suffix;
                         boolean fieldGetter = marker(field.getAnnotations(), unit, "lombok.Getter");
                         boolean fieldSetter = marker(field.getAnnotations(), unit, "lombok.Setter");
-                        if ((fieldGetter || getter && !has(field.getAnnotations(), unit, "lombok.Getter")) && !suppressed(type, getterName, 0)) {
+                        boolean getterSuppressed = suppressed(type, getterName, 0) || (bool && suppressed(type, "get" + suffix, 0));
+                        if ((fieldGetter || getter && !has(field.getAnnotations(), unit, "lombok.Getter")) && !getterSuppressed) {
                             var method = new MethodDeclaration().setName(getterName).setType(variable.getType().clone())
                                     .setModifiers(Modifier.Keyword.PUBLIC).setBody(new BlockStmt().addStatement(
                                             new ReturnStmt(new FieldAccessExpr(new ThisExpr(), name))));

@@ -27,6 +27,7 @@ import com.greytest.dto.agent.GenerationResponseDtos.TestCaseResponseDto;
 import com.greytest.dto.agent.GenerationResponseDtos.TestPlanResponseDto;
 import com.greytest.dto.agent.GenerationResponseDtos.UnitTestResponseDto;
 import com.greytest.dto.agent.GenerationResponseDtos.GeneratedUnitTestDto;
+import com.greytest.dto.agent.GenerationResponseDtos.GeneratedBusinessRuleDto;
 import com.greytest.dto.diff.MethodDiffItem;
 import com.greytest.repository.ProjectRepository;
 import com.greytest.service.GenerationJobContext;
@@ -110,6 +111,16 @@ public class AIAgentService {
         }
         if(output instanceof UnitTestResponseDto r && r.blockedCases()!=null && !r.blockedCases().isEmpty())
             throw new TestFeasibilityBlockedException("Blocked test cases: "+r.blockedCases());
+    }
+
+    /** Kiểm tra lại UT đã lưu theo context/source hiện tại, không gọi LLM hoặc sửa entity. */
+    public void validateExistingUnitTest(Long projectId, com.greytest.entity.UnitTest test, java.nio.file.Path source) {
+        if (test == null || test.getTestCaseId() == null) throw new LlmResponseException("Stored Unit Test has no case identity");
+        var context = contextBuilder.buildUnitTestContext(projectId, Set.of(test.getTestCaseId()));
+        validateSourcePrerequisites(context);
+        var response = new UnitTestResponseDto(List.of(new GeneratedUnitTestDto(test.getTestCaseId(),
+                test.getTestClassName(), test.getTestMethodName(), test.getPackageName(), test.getGenerationType(), test.getSourceCode())));
+        validateSnapshotOutput(com.greytest.dto.GenerationProgressStage.UNIT_TEST, projectId, context, response, source);
     }
 
     public BusinessRuleResponseDto generateSnapshotBusinessRules(Long projectId,Set<Long> ids,java.nio.file.Path source) {
@@ -414,7 +425,7 @@ public class AIAgentService {
                 validateSemanticOutput(promptName, projectId, context, parsed, snapshot);
                 validateIncrementalCompleteness(promptName,projectId,context,parsed,snapshot);
                 var outputFingerprint=durable ? fingerprints.outputFingerprint(parsed,fingerprintSource,context) : null;
-                if(durable && !fingerprints.fingerprint(promptName,context,fingerprintSource).value().equals(fingerprint.value()))
+                if(fingerprint != null && !fingerprints.fingerprint(promptName,context,fingerprintSource).value().equals(fingerprint.value()))
                     throw new LlmResponseException("Source changed while AI was running; retry required");
                 validatingResponse = false;
 
@@ -474,6 +485,16 @@ public class AIAgentService {
                     attemptPrompt = repairPrompt + "\n\n# Unit Test semantic correction\n"
                             + exception.getMessage().substring(UNIT_TEST_SEMANTIC_ERROR.length())
                             + "\nRegenerate the complete unit_tests array. Fix only the reported technical errors; "
+                            + "fix ALL reported errors for ALL case_ids together and preserve already valid tests. "
+                            + "Approved fixture roles take precedence over generic mock wiring guidance. "
+                            + "When an approved case requires a real mapper, supply a source-supported initialized real @Spy "
+                            + "or explicitly construct the real mapper and SUT, not @Mock or stubbed mapping results. "
+                            + "For every SUT constructor, provide non-null mocks/real dependencies in source constructor order, even for unused collaborators. "
+                            + "Do not introduce null constructor arguments while replacing @InjectMocks or fixing a mapper. "
+                            + "Approved null method inputs must remain null; they are different from SUT constructor dependencies. "
+                            + "A generic type witness is legal on an invocation such as ArgumentMatchers.<Long>any(), never in a static import. "
+                            + "Use import static org.mockito.ArgumentMatchers.any; or import org.mockito.ArgumentMatchers and qualify the invocation. "
+                            + "Do not replace a null-inclusive any() with anyLong()/anyInt() when the approved contract includes null. "
                             + "preserve approved test inputs, preconditions, expected results and business assertions. "
                             + "Production source is authoritative only for package, API, signature, type and wiring compatibility. "
                             + "Do not change an assertion or input to make a test pass on current production behavior. Return strict JSON only.";
@@ -481,16 +502,22 @@ public class AIAgentService {
                 } else if (exception.getMessage() != null && exception.getMessage().startsWith(TEST_CASE_SEMANTIC_ERROR)) {
                     GenerationJobContext.log("Test Case có phát biểu hoặc setup chưa khớp bằng chứng source; đang yêu cầu đối chiếu lại.");
                     attemptPrompt = repairPrompt + "\n\n# Test Case semantic correction\n" + exception.getMessage()
-                            + "\nRegenerate the complete cases array for the same plan_id values. Correct unsupported generated claims and mock setup; "
+                            + "\nRegenerate the complete cases array for the same plan_id values. Fix ALL reported plan_id/method_id errors together and preserve already valid cases. "
+                            + "Correct unsupported generated claims and mock setup; "
                             + "derive preconditions and observable expected results from the supplied source. Use real internally created "
                             + "collaborators where possible. Do not hardcode random or salted results or require mocking private internal loggers. "
                             + "Trace collection mutations before dependency calls and verify exact exception strings through their constructors. "
+                            + "When Source formatter evidence FormatTemplate[value=..., arguments=[...]] is reported for an exception, write the claim using that exact template and unchanged arguments in source order "
+                            + "(e.g., `from template \"<value>\" using <arguments>` or `từ mẫu \"<value>\" với các tham số <arguments>`) and require full-message equality at runtime. "
                             + "Do not add an interaction-order requirement absent approved rules/plans. "
                             + "Do not change the approved plans or invent missing APIs. Return strict JSON only.";
                     continue;
                 } else if (exception.getMessage() != null && exception.getMessage().startsWith(VALIDATION_GATE_ERROR)) {
                     attemptPrompt = repairPrompt + "\n\n# Generation validation correction\n" + exception.getMessage()
                             + "\nRegenerate the complete response using only selected source methods and approved rule/plan IDs from context. "
+                            + "Fix ALL reported errors together and preserve already valid items. "
+                            + "When Source formatter evidence FormatTemplate[value=..., arguments=[...]] is reported for an exception, quote that exact template and list its unchanged arguments in source order "
+                            + "(e.g., `from template \"<value>\" using <arguments>` or `từ mẫu \"<value>\" với các tham số <arguments>`) and require the complete formatted message at runtime. "
                             + "Preserve the required business coverage and expected outcomes; never invent IDs or silently drop requirements. Return strict JSON only.";
                     if ("business-rule".equals(promptName) && context instanceof BusinessRuleGenerationContextDto rulesContext) {
                         GenerationJobContext.log("Business Rule còn thiếu nhánh hoặc chưa khớp source; đang yêu cầu AI bổ sung và sửa lại.");
@@ -502,6 +529,21 @@ public class AIAgentService {
                                 + "Do not invent business behavior or change source-proven thresholds, outcomes or exception literals.";
                     }
                     continue;
+                } else if (exception.getMessage() != null && exception.getMessage().startsWith("LLM response không đúng schema:")) {
+                    GenerationJobContext.log("Output AI chưa đúng schema. Đang yêu cầu sửa cấu trúc JSON theo đường dẫn trường lỗi.");
+                    attemptPrompt = repairPrompt + "\n\n# Schema correction\n" + exception.getMessage()
+                            + "\nRegenerate the complete response for the same selected plans/methods using the original JSON schema. "
+                            + "Fix field names, nesting, types and missing required fields at the reported validation path. "
+                            + "Preserve every existing valid item, its IDs, inputs, scenario, expected outcome, priority and traceability. "
+                            + "If a required field was misplaced inside another object, move its existing value to the correct level; "
+                            + "do not replace it with an invented business expectation or silently drop the item. "
+                            + "Use JSON field names from the original schema, not Java DTO property names. Return strict JSON only.";
+                    if (responseType == TestCaseResponseDto.class) {
+                        attemptPrompt += "\nWithin each cases entry, plan_id, test_type, description, preconditions, test_data, "
+                                + "expected_result, priority and trace_source are sibling properties. "
+                                + "The DTO expectedResult property maps to JSON expected_result at the case level, "
+                                + "never inside test_data or test_data.input. Keep inputs and mocks inside test_data.";
+                    }
                 } else if (isMalformedJson(exception)) {
                     String dtoPath = exception.getCause() instanceof com.fasterxml.jackson.databind.JsonMappingException mapping
                             ? " DTO mapping path: " + mapping.getPathReference() : "";
@@ -589,6 +631,74 @@ public class AIAgentService {
                 .ifPresent(problem -> {
                     throw new LlmResponseException(UNIT_TEST_SEMANTIC_ERROR + problem, true);
                 });
+        if (fingerprints != null) {
+            java.nio.file.Path source = snapshot;
+            if (source == null && projectRepository != null && projectId != null) source = projectRepository.findById(projectId)
+                    .map(p -> p.getStoragePath()).filter(p -> p != null && !p.isBlank()).map(java.nio.file.Path::of).orElse(null);
+            var output = fingerprints.outputFingerprint(unitTestResponse, source, unitTestContext);
+            if (!output.reusable()) {
+                List<String> outputErrors = extractLlmOutputProblems(output.provenance());
+                if (!outputErrors.isEmpty()) {
+                    throw new LlmResponseException(UNIT_TEST_SEMANTIC_ERROR
+                            + "Output dependency validation failed: " + String.join("; ", outputErrors),
+                            LlmResponseException.ErrorClassification.LLM_OUTPUT_INVALID);
+                }
+                log.warn("Generated Unit Test has incomplete cache provenance and will not be cached persistently: {}", output.provenance());
+            }
+        }
+    }
+
+    static List<String> extractLlmOutputProblems(String provenanceJson) {
+        if (provenanceJson == null || provenanceJson.isBlank()) return List.of();
+        List<String> result = new ArrayList<>();
+        try {
+            var node = new com.fasterxml.jackson.databind.ObjectMapper().readTree(provenanceJson);
+            if (node.has("problems") && node.get("problems").isArray()) {
+                for (var problemNode : node.get("problems")) {
+                    String text = problemNode.asText();
+                    if (isLlmOutputProblem(text)) {
+                        result.add(text);
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+        return result;
+    }
+
+    static boolean isLlmOutputProblem(String problem) {
+        if (problem == null) return false;
+        return (problem.startsWith("unresolved output ") && !problem.startsWith("unresolved output dependencies:"))
+                || problem.startsWith("unresolved Mockito signature")
+                || problem.startsWith("Mockito argument incompatible")
+                || problem.startsWith("Instance method called through a type")
+                || problem.startsWith("unresolved reflective output API");
+    }
+
+    private static final java.util.regex.Pattern BRANCH_ANCHOR_PATTERN =
+            java.util.regex.Pattern.compile("\\b(?:IF|SWITCH|TERNARY|STMT|CASE|FOR|WHILE|DO)[-_][0-9]+(?:-(?:TRUE|FALSE))?\\b", java.util.regex.Pattern.CASE_INSENSITIVE);
+
+    private List<String> extractBranchIds(GeneratedBusinessRuleDto rule) {
+        if (rule.branchId() == null || rule.branchId().isBlank()) {
+            return extractBranchIdsFromText(rule.description());
+        }
+        List<String> ids = new ArrayList<>();
+        String[] parts = rule.branchId().split("[,;+&/\\s]+");
+        for (String part : parts) {
+            String normalized = SourceBranchReference.normalize(part);
+            if (normalized != null && !normalized.isBlank()) ids.add(normalized);
+        }
+        return ids.isEmpty() ? List.of(rule.branchId().trim()) : ids;
+    }
+
+    private List<String> extractBranchIdsFromText(String text) {
+        if (text == null || text.isBlank()) return List.of();
+        List<String> found = new ArrayList<>();
+        var matcher = BRANCH_ANCHOR_PATTERN.matcher(text);
+        while (matcher.find()) {
+            String id = SourceBranchReference.normalize(matcher.group());
+            if (id != null && !found.contains(id)) found.add(id);
+        }
+        return found;
     }
 
     private List<String> businessRuleDecisionProblems(BusinessRuleGenerationContextDto context, BusinessRuleResponseDto response) {
@@ -597,19 +707,46 @@ public class AIAgentService {
             var rules = response.rules().stream().filter(rule -> Objects.equals(rule.methodId(), method.id())).toList();
             if (rules.isEmpty()) problems.add("Missing business rules for method " + method.id());
             if (method.branches() == null) continue;
-            var returned = rules.stream().map(rule -> SourceBranchReference.normalize(rule.branchId())).filter(Objects::nonNull).toList();
             Set<String> required = requiredDecisionIds(method);
             var anchors = method.branches().stream().map(branch -> SourceBranchReference.normalize(branch.branchId())).collect(Collectors.toSet());
+
+            Set<String> coveredDecisions = new java.util.TreeSet<>();
+            List<String> allReturnedDecisions = new ArrayList<>();
+            List<String> invalidDecisions = new ArrayList<>();
+            int rulesWithAnchors = 0;
+
+            for (var rule : rules) {
+                var branchIds = extractBranchIds(rule);
+                if (!branchIds.isEmpty()) {
+                    rulesWithAnchors++;
+                    for (String id : branchIds) {
+                        if (!anchors.contains(id)) {
+                            invalidDecisions.add(id);
+                        } else {
+                            if (required.contains(id)) {
+                                coveredDecisions.add(id);
+                                allReturnedDecisions.add(id);
+                            }
+                        }
+                    }
+                }
+            }
+
             var missing = new java.util.TreeSet<>(required);
-            missing.removeAll(returned);
-            if (!missing.isEmpty()) problems.add("Missing source decisions for method " + method.id() + ": " + missing
-                    + ". Add one separate rule per missing decision; preserve valid rules.");
-            if (returned.stream().anyMatch(id -> !anchors.contains(id)))
-                problems.add("Invalid source decision for method " + method.id() + ": " + returned);
-            if (!anchors.isEmpty() && returned.size() != rules.size()) problems.add("Missing source anchors for method " + method.id());
-            var decisions = returned.stream().filter(required::contains).toList();
-            if (new java.util.HashSet<>(decisions).size() != decisions.size())
-                problems.add("Duplicate source decisions for method " + method.id() + ": " + decisions + ". Keep exactly one rule per decision.");
+            missing.removeAll(coveredDecisions);
+            if (!missing.isEmpty()) {
+                problems.add("Missing source decisions for method " + method.id() + ": " + missing
+                        + ". Add one separate rule per missing decision; preserve valid rules.");
+            }
+            if (!invalidDecisions.isEmpty()) {
+                problems.add("Invalid source decision for method " + method.id() + ": " + invalidDecisions);
+            }
+            if (!required.isEmpty() && rulesWithAnchors == 0) {
+                problems.add("Missing source anchors for method " + method.id());
+            }
+            if (new java.util.HashSet<>(allReturnedDecisions).size() != allReturnedDecisions.size()) {
+                problems.add("Duplicate source decisions for method " + method.id() + ": " + allReturnedDecisions + ". Keep exactly one rule per decision.");
+            }
         }
         return problems;
     }

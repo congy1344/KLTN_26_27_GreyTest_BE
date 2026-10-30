@@ -143,8 +143,20 @@ public class SourceUpdateMapper {
 
     private boolean hasCurrentOutputs(GenerationCheckpointStore.Checkpoint checkpoint, List<SourceUpdateItem> items) {
         try {
-            var ids = objectMapper.readTree(checkpoint.outputJson()).path("itemIds");
-            if (!ids.isArray() || ids.isEmpty()) return false;
+            var envelope = objectMapper.readTree(checkpoint.outputJson());
+            var ids = envelope.path("itemIds");
+            if (!ids.isArray()) return false;
+            if (ids.isEmpty()) {
+                // UT giữ lại không tạo proposal mới; chỉ nhận receipt đã qua validation và dependency gate.
+                var units = envelope.path("response").path("unit_tests");
+                return "UNIT_TEST".equals(checkpoint.stage())
+                        && "retained-verified-digest".equals(checkpoint.outputDigest())
+                        && envelope.path("outputReusable").asBoolean(false)
+                        && !envelope.path("outputFingerprint").asText("").isBlank()
+                        && units.isArray() && units.size() == 1
+                        && checkpoint.targetKey().equals(units.get(0).path("case_id").asText())
+                        && !units.get(0).path("source_code").asText("").isBlank();
+            }
             for (var id : ids) {
                 if (items.stream().noneMatch(i -> java.util.Objects.equals(i.getId(), id.asLong()) && i.getAfterData() != null)) return false;
             }

@@ -14,6 +14,7 @@ import com.fasterxml.jackson.databind.*;
 import com.greytest.dto.GenerationProgressStage;
 import com.greytest.dto.agent.GenerationResponseDtos.*;
 import com.greytest.entity.SourceUpdateItem;
+import com.greytest.entity.UnitTest;
 import com.greytest.repository.SourceUpdateItemRepository;
 import com.greytest.service.GenerationJobContext;
 import com.greytest.service.GenerationJobService;
@@ -211,8 +212,13 @@ public class IncrementalCheckpointCoordinator {
                 var stage=GenerationProgressStage.valueOf(item.getTargetType().name());
                 var output=item.getAfterData()==null ? mapper.createObjectNode() : mapper.readTree(item.getAfterData());
                 Set<String> targets=new LinkedHashSet<>();
-                String field=switch(stage) { case BUSINESS_RULE->"method_id"; case TEST_PLAN->"rule_id";
-                    case TEST_CASE->"plan_id"; case UNIT_TEST->"case_id"; };
+                String field = switch (stage) {
+                    case BUSINESS_RULE -> "method_id";
+                    case TEST_PLAN -> "rule_id";
+                    case TEST_CASE -> "plan_id";
+                    case UNIT_TEST -> "case_id";
+                    default -> throw new IllegalArgumentException("Unexpected stage: " + stage);
+                };
                 if(output.hasNonNull(field)) targets.add(output.path(field).asText());
                 if(stage==GenerationProgressStage.TEST_PLAN) output.path("covered_rule_ids").forEach(id->targets.add(id.asText()));
                 for(String target:targets) {
@@ -249,6 +255,7 @@ public class IncrementalCheckpointCoordinator {
         try(var scope=GenerationJobContext.openScope(null)) {
             GenerationJobContext.setSourceUpdateId(updateId);
             var current=items.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId);
+            Map<List<String>, Boolean> runtimeProofs = new java.util.HashMap<>();
             for(var stage:GenerationProgressStage.values()) {
                 var marker=store.find(updateId,stage.name(),"__stage__").filter(c->"SUCCEEDED".equals(c.state()))
                     .orElseThrow(()->new IllegalArgumentException("Chưa hoàn tất stage "+stage));
@@ -259,17 +266,78 @@ public class IncrementalCheckpointCoordinator {
                         var checkpoint=store.find(updateId,stage.name(),id.toString()).filter(c->"SUCCEEDED".equals(c.state())).orElseThrow();
                         Object context=targetContext(stage,update.getProjectId(),id,targets,source);
                         var fp=fingerprints.fingerprint(prompt(stage),context,source);
-                        if(!fp.value().equals(checkpoint.fingerprint())) throw new IllegalArgumentException("Input đã thay đổi ở "+stage+" "+id+"; hãy tiếp tục sinh");
-                        Object output=responseFromItems(stage,current.stream().filter(i->belongs(stage,i,id)).toList());
-                        var outputFp=fingerprints.outputFingerprint(output,source,context);
+                        boolean repack = fp.reusable() && sameRuntimeDependencies(checkpoint.provenance(), fp.provenance(), runtimeProofs);
+                        if(!fp.value().equals(checkpoint.fingerprint()) && !repack) throw new IllegalArgumentException("Input đã thay đổi ở "+stage+" "+id+"; hãy tiếp tục sinh");
                         var envelope=mapper.readTree(checkpoint.outputJson());
-                        if(!outputFp.reusable() || !outputFp.value().equals(envelope.path("outputFingerprint").asText()))
+                        var matchingItems=current.stream().filter(i->belongs(stage,i,id)).toList();
+                        Object output=matchingItems.isEmpty() && envelope.hasNonNull("response")
+                            ? agent.parseSnapshotOutput(stage,envelope.path("response").toString())
+                            : responseFromItems(stage,matchingItems);
+                        var outputFp=fingerprints.outputFingerprint(output,source,context);
+                        var outputProvenance = envelope.path("outputProvenance");
+                        String previousOutput = outputProvenance.isTextual() ? outputProvenance.asText() : outputProvenance.toString();
+                        if(!outputFp.reusable() || !(outputFp.value().equals(envelope.path("outputFingerprint").asText())
+                                || repack && sameRuntimeDependencies(previousOutput, outputFp.provenance(), runtimeProofs)))
                             throw new IllegalArgumentException("Dependency của output đã thay đổi ở "+stage+" "+id+"; hãy tiếp tục sinh");
                         agent.validateSnapshotOutput(stage,update.getProjectId(),context,output,source);
                     }
                 } catch(IllegalArgumentException invalid) { throw invalid; }
                 catch(Exception invalid) { throw new IllegalArgumentException("Checkpoint chưa hợp lệ cho "+stage+"; hãy tiếp tục sinh",invalid); }
             }
+        }
+    }
+
+    /** Rebuild backend không thay oracle; vẫn yêu cầu mọi dependency khác giữ nguyên và chạy lại validation. */
+    private boolean sameRuntimeDependencies(String previous, String current, Map<List<String>, Boolean> runtimeProofs) {
+        try {
+            var before = mapper.readTree(previous);
+            var after = mapper.readTree(current);
+            if (!before.isObject() || !after.isObject() || !before.path("problems").isArray()
+                    || !before.path("problems").isEmpty() || !after.path("problems").isArray() || !after.path("problems").isEmpty()) return false;
+            var oldDependencies = before.path("sourceDependencies");
+            var newDependencies = after.path("sourceDependencies");
+            if (!oldDependencies.isObject() || !newDependencies.isObject()) return false;
+            String oldRuntime = oldDependencies.path("analysis-classpath-v1").asText();
+            String newRuntime = newDependencies.path("analysis-classpath-v1").asText();
+            if (oldRuntime.isBlank() || newRuntime.isBlank() || oldRuntime.equals(newRuntime)) return false;
+            ((com.fasterxml.jackson.databind.node.ObjectNode) oldDependencies).remove("analysis-classpath-v1");
+            ((com.fasterxml.jackson.databind.node.ObjectNode) newDependencies).remove("analysis-classpath-v1");
+            return before.equals(after) && runtimeProofs.computeIfAbsent(List.of(oldRuntime, newRuntime),
+                    ignored -> ParserDependencyClasspath.compatibleRuntimeIdentity(oldRuntime, newRuntime));
+        } catch (Exception invalid) { return false; }
+    }
+
+    public void recordRetainedUnitTest(Long projectId, Long updateId, Long caseId, UnitTest test, Path candidate) {
+        Run run = GenerationJobContext.scopedValue(RUN_KEY);
+        if (run == null) return;
+        try {
+            Object context = targetContext(GenerationProgressStage.UNIT_TEST, projectId, caseId, Set.of(caseId), candidate);
+            var fp = fingerprints.fingerprint(prompt(GenerationProgressStage.UNIT_TEST), context, candidate);
+            var drafts = items.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId).stream()
+                    .filter(item -> belongs(GenerationProgressStage.UNIT_TEST, item, caseId)).toList();
+            var output = drafts.isEmpty() ? new UnitTestResponseDto(List.of(new GeneratedUnitTestDto(test.getTestCaseId(),
+                    test.getTestClassName(), test.getTestMethodName(), test.getPackageName(),
+                    test.getGenerationType(), test.getSourceCode()))) : (UnitTestResponseDto) responseFromItems(GenerationProgressStage.UNIT_TEST, drafts);
+            var outputFp = fingerprints.outputFingerprint(output, candidate, context);
+            if (!fp.reusable() || !outputFp.reusable()) throw new LlmResponseException("Retained Unit Test dependencies remain unresolved");
+            agent.validateSnapshotOutput(GenerationProgressStage.UNIT_TEST, projectId, context, output, candidate);
+            run.targets().computeIfAbsent(GenerationProgressStage.UNIT_TEST, ignored -> ConcurrentHashMap.newKeySet()).add(caseId);
+            String envelopeJson = drafts.isEmpty() ? json(Map.of(
+                    "response", output,
+                    "itemIds", List.of(),
+                    "revisions", Map.of(),
+                    "itemDigests", Map.of(),
+                    "outputFingerprint", outputFp.value(),
+                    "outputProvenance", outputFp.provenance(),
+                    "outputReusable", true
+            )) : envelope(output, drafts, candidate, context);
+            transaction.executeWithoutResult(status -> {
+                store.complete(run.lease(), GenerationProgressStage.UNIT_TEST.name(), caseId.toString(),
+                        fp.value(), fp.provenance(), envelopeJson, drafts.isEmpty() ? "retained-verified-digest" : outputDigest(mapper, drafts));
+            });
+        } catch (Exception invalid) {
+            log.warn("Cannot record retained unit test checkpoint for case {}: {}", caseId, invalid.getMessage());
+            throw new com.greytest.service.agent.TestFeasibilityBlockedException("Chưa xác minh được draft/Unit Test giữ lại cho case " + caseId, invalid);
         }
     }
 
@@ -297,14 +365,15 @@ public class IncrementalCheckpointCoordinator {
             var saved=store.find(updateId,stage.name(),id.toString());
             boolean reusable=false;
             if(fp.reusable() && saved.isPresent() && ("SUCCEEDED".equals(saved.get().state()) || "BLOCKED".equals(saved.get().state()))
-                    && fp.value().equals(saved.get().fingerprint())) {
+                    && (fp.value().equals(saved.get().fingerprint()) || canRevalidateBlocked(stage, saved.get(), fp))) {
                 try {
                     JsonNode envelope=mapper.readTree(saved.get().outputJson());
                     List<Long> expected=new ArrayList<>(); envelope.path("itemIds").forEach(n->expected.add(n.asLong()));
                     var current=items.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId).stream()
                         .filter(i->expected.contains(i.getId())).toList();
                     boolean resolved="BLOCKED".equals(saved.get().state()) && envelope.hasNonNull("resolution");
-                    if(resolved) current=items.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId).stream().filter(i->belongs(stage,i,id)).toList();
+                    boolean blocked="BLOCKED".equals(saved.get().state());
+                    if(resolved || (blocked && current.isEmpty())) current=items.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId).stream().filter(i->belongs(stage,i,id)).toList();
                     boolean exact=outputDigest(mapper,current).equals(saved.get().outputDigest());
                     var outputFp=fingerprints.outputFingerprint(envelope.path("response"),source,context);
                     exact=exact && outputFp.reusable() && outputFp.value().equals(envelope.path("outputFingerprint").asText());
@@ -319,10 +388,14 @@ public class IncrementalCheckpointCoordinator {
                     if(!expected.isEmpty() && current.size()==expected.size() && exact) {
                         // Digest đã validate, revision và validator-version không đổi: không ghi lại checkpoint.
                         reusable=true;
-                    } else if((!expected.isEmpty() && current.size()==expected.size() && reviewed) || (resolved && !current.isEmpty())) {
+                    } else if((!expected.isEmpty() && current.size()==expected.size() && reviewed) || (resolved && !current.isEmpty()) || (blocked && !current.isEmpty())) {
                         R output=responseType.cast(responseFromItems(stage,current));
                         agent.validateSnapshotOutput(stage,projectId,context,output,source);
-                        if(!fingerprints.outputFingerprint(output,source,context).reusable()) throw new LlmResponseException("Output dependencies remain unresolved");
+                        var verifiedOutputFp=fingerprints.outputFingerprint(output,source,context);
+                        if(!verifiedOutputFp.reusable()) {
+                            log.warn("Resumed BLOCKED target {} unresolved dependencies: {}", id, verifiedOutputFp.provenance());
+                            throw new LlmResponseException("Output dependencies remain unresolved: " + verifiedOutputFp.provenance());
+                        }
                         var validatedItems=current;
                         transaction.executeWithoutResult(status->store.complete(run.lease(),stage.name(),id.toString(),fp.value(),fp.provenance(),
                             envelope(output,validatedItems,source,context),outputDigest(mapper,validatedItems)));
@@ -388,6 +461,7 @@ public class IncrementalCheckpointCoordinator {
                             envelope(subset,produced,source,contexts.get(id)),outputDigest(mapper,produced));
                     } else {
                         unresolvedOutputs.add(id);
+                        log.warn("Chưa xác minh được dependency của output {} target {}: problems={}", stage, id, outputFp.provenance());
                         store.mark(run.lease(),stage.name(),id.toString(),"BLOCKED",fp.value(),fp.provenance(),
                             envelope(subset,produced,source,contexts.get(id)),"Chưa xác minh được dependency của output: "+outputFp.provenance());
                     }
@@ -419,6 +493,31 @@ public class IncrementalCheckpointCoordinator {
             }
             throw failure;
         } finally { GenerationJobContext.recordDuration(stage.name(),System.nanoTime()-started); }
+    }
+
+    /** Chỉ phục hồi lỗi phân giải khi oracle/config và mọi hash source đã biết còn nguyên. */
+    private boolean canRevalidateBlocked(GenerationProgressStage stage, GenerationCheckpointStore.Checkpoint saved,
+            GenerationFingerprintService.Fingerprint current) {
+        if (stage != GenerationProgressStage.UNIT_TEST || !"BLOCKED".equals(saved.state()) || !current.reusable()) return false;
+        try {
+            var before = mapper.readTree(saved.provenance());
+            var after = mapper.readTree(current.provenance());
+            if (!before.isObject() || !after.isObject() || !before.path("problems").isArray() || before.path("problems").isEmpty()) return false;
+            var oldInputs = ((com.fasterxml.jackson.databind.node.ObjectNode) before).deepCopy();
+            var newInputs = ((com.fasterxml.jackson.databind.node.ObjectNode) after).deepCopy();
+            var derived = List.of("problems", "reusable", "sourceDependencies", "validator");
+            oldInputs.remove(derived); newInputs.remove(derived);
+            if (!oldInputs.equals(newInputs)) return false;
+            var dependencies = before.path("sourceDependencies").fields();
+            boolean hasSource = false;
+            while (dependencies.hasNext()) {
+                var dependency = dependencies.next();
+                if (dependency.getKey().startsWith("resolved-call:") || dependency.getKey().startsWith("resolved-type:")) continue;
+                if (!dependency.getValue().equals(after.path("sourceDependencies").path(dependency.getKey()))) return false;
+                hasSource |= dependency.getKey().contains("#");
+            }
+            return hasSource;
+        } catch (Exception invalid) { return false; }
     }
 
     private boolean conflictApplies(GenerationProgressStage stage,Long id,SourceUpdateItem item) {

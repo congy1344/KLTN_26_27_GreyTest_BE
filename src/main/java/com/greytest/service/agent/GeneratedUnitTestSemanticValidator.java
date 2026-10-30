@@ -101,6 +101,7 @@ public final class GeneratedUnitTestSemanticValidator {
             validateRemovedMockitoApis(test, mockitoVersion, problems);
             validateMockitoRunnerOrExtension(test, framework, problems);
             validateJUnit5AssertionOrder(test, framework, problems);
+            validateFixtureAssertionConsistency(test, productionMethod, problems);
             parseCompilationUnit(test.sourceCode()).ifPresent(source ->
                     problems.addAll(GeneratedMockitoImportValidator.validate(source)));
             validateAssertionImports(test, framework, problems);
@@ -119,6 +120,8 @@ public final class GeneratedUnitTestSemanticValidator {
                     problems.addAll(GeneratedRepositoryFixtureValidator.validate(context, productionMethod, test.caseId(), source)));
             parseCompilationUnit(test.sourceCode()).ifPresent(source ->
                     problems.addAll(GeneratedFixtureContractValidator.validate(context, productionMethod, test.caseId(), source)));
+            parseCompilationUnit(test.sourceCode()).ifPresent(source ->
+                    problems.addAll(GeneratedCollaboratorStubValidator.validate(context, productionMethod, source)));
             if (productionMethod != null) parseCompilationUnit(test.sourceCode()).ifPresent(source ->
                     problems.addAll(GeneratedBooleanAssertionValidator.validate(context,
                             productionMethod.classQualifiedName(), productionMethod.methodName(), source)));
@@ -1364,6 +1367,247 @@ public final class GeneratedUnitTestSemanticValidator {
         };
     }
 
+    /**
+     * Bắt lỗi mâu thuẫn giữa Arrange và Assert trên fixture object:
+     * Nếu fixture được tạo bằng no-arg constructor new Type(), mà một thuộc tính (getter):
+     * 1. Không hề được gán giá trị trong khối test (không gọi setter tương ứng)
+     * 2. Method SUT đang kiểm thử cũng không hề gán giá trị đó trong source code
+     * Nhưng lại assert so sánh getter đó với một non-null literal (hoặc assertNotNull):
+     * Runtime chắc chắn sẽ ném ngoại lệ vì giá trị mặc định là null.
+     */
+    private static void validateFixtureAssertionConsistency(
+            GeneratedUnitTestDto test,
+            MethodContextDto targetMethod,
+            List<String> problems) {
+        if (test == null || test.sourceCode() == null) return;
+        Optional<CompilationUnit> parsed = parseCompilationUnit(test.sourceCode());
+        if (parsed.isEmpty()) return;
+
+        for (MethodDeclaration method : parsed.get().findAll(MethodDeclaration.class)) {
+            // Hỗ trợ cả @Test ngắn gọn lẫn @org.junit.jupiter.api.Test / @org.junit.Test
+            if (method.getAnnotations().stream().noneMatch(a -> "Test".equals(a.getName().getIdentifier()))) continue;
+
+            Map<String, String> defaultConstructedVars = new HashMap<>();
+            for (VariableDeclarator varDecl : method.findAll(VariableDeclarator.class)) {
+                if (varDecl.getInitializer().isPresent() && varDecl.getInitializer().get().isObjectCreationExpr()) {
+                    ObjectCreationExpr creation = varDecl.getInitializer().get().asObjectCreationExpr();
+                    if (creation.getArguments().isEmpty()) {
+                        defaultConstructedVars.put(varDecl.getNameAsString(), creation.getTypeAsString());
+                    }
+                }
+            }
+            if (defaultConstructedVars.isEmpty()) continue;
+
+            // Loại trừ biến bị gán lại sau khi khởi tạo (ví dụ: app = service.get(...))
+            Set<String> reassigned = method.findAll(AssignExpr.class).stream()
+                    .filter(a -> a.getTarget().isNameExpr())
+                    .map(a -> a.getTarget().asNameExpr().getNameAsString())
+                    .collect(java.util.stream.Collectors.toSet());
+            reassigned.forEach(defaultConstructedVars::remove);
+            if (defaultConstructedVars.isEmpty()) continue;
+
+            // Hỗ trợ method chaining / fluent setter (ví dụ: app.setId(1L).setNotes("..."))
+            Map<String, Set<String>> calledMethodsOnVar = new HashMap<>();
+            for (MethodCallExpr call : method.findAll(MethodCallExpr.class)) {
+                Expression root = call.getScope().orElse(null);
+                while (root != null && root.isMethodCallExpr()) {
+                    root = root.asMethodCallExpr().getScope().orElse(null);
+                }
+                if (root != null && root.isNameExpr()) {
+                    String scopeName = root.asNameExpr().getNameAsString();
+                    if (defaultConstructedVars.containsKey(scopeName)) {
+                        calledMethodsOnVar.computeIfAbsent(scopeName, k -> new HashSet<>()).add(call.getNameAsString());
+                    }
+                }
+            }
+
+            // Kiểm tra test method có thực sự gọi method SUT không
+            boolean sutCalled = targetMethod != null && targetMethod.methodName() != null
+                    && method.findAll(MethodCallExpr.class).stream()
+                            .anyMatch(c -> targetMethod.methodName().equals(c.getNameAsString()));
+
+            for (MethodCallExpr call : method.findAll(MethodCallExpr.class)) {
+                String callName = call.getNameAsString();
+                if (callName.equals("assertEquals") || callName.equals("assertSame")) {
+                    int argCount = call.getArguments().size();
+                    if (argCount >= 2) {
+                        int offset = (argCount >= 3 && call.getArgument(0).isStringLiteralExpr()) ? 1 : 0;
+                        if (offset + 1 < argCount) {
+                            Expression argA = call.getArgument(offset);
+                            Expression argB = call.getArgument(offset + 1);
+                            checkGetterAssertion(test, method, defaultConstructedVars, calledMethodsOnVar, targetMethod,
+                                    sutCalled, argA, argB, problems);
+                            checkGetterAssertion(test, method, defaultConstructedVars, calledMethodsOnVar, targetMethod,
+                                    sutCalled, argB, argA, problems);
+                        }
+                    }
+                } else if (callName.equals("assertNotNull")) {
+                    if (!call.getArguments().isEmpty()) {
+                        Expression targetArg = call.getArguments().size() >= 2 && call.getArgument(0).isStringLiteralExpr()
+                                ? call.getArgument(1) : call.getArgument(0);
+                        checkGetterNotNull(test, method, defaultConstructedVars, calledMethodsOnVar, targetMethod,
+                                sutCalled, targetArg, problems);
+                    }
+                } else if (callName.equals("isEqualTo") && call.getScope().isPresent() && call.getArguments().size() == 1) {
+                    Expression scope = call.getScope().get();
+                    if (scope.isMethodCallExpr() && scope.asMethodCallExpr().getNameAsString().equals("assertThat")
+                            && !scope.asMethodCallExpr().getArguments().isEmpty()) {
+                        Expression actual = scope.asMethodCallExpr().getArgument(0);
+                        Expression expected = call.getArgument(0);
+                        checkGetterAssertion(test, method, defaultConstructedVars, calledMethodsOnVar, targetMethod,
+                                sutCalled, expected, actual, problems);
+                    }
+                }
+            }
+        }
+    }
+
+    private static void checkGetterAssertion(
+            GeneratedUnitTestDto test,
+            MethodDeclaration testMethod,
+            Map<String, String> defaultConstructedVars,
+            Map<String, Set<String>> calledMethodsOnVar,
+            MethodContextDto targetMethod,
+            boolean sutCalled,
+            Expression expectedExpr,
+            Expression actualExpr,
+            List<String> problems) {
+        if (!isNonDefaultLiteral(expectedExpr)) return;
+        if (!actualExpr.isMethodCallExpr()) return;
+
+        MethodCallExpr getterCall = actualExpr.asMethodCallExpr();
+        if (getterCall.getScope().isEmpty() || !getterCall.getScope().get().isNameExpr()) return;
+
+        String varName = getterCall.getScope().get().asNameExpr().getNameAsString();
+        if (!defaultConstructedVars.containsKey(varName)) return;
+
+        String getterName = getterCall.getNameAsString();
+        String propertyName = extractPropertyName(getterName);
+        if (propertyName == null || propertyName.isEmpty()) return;
+
+        String setterName = "set" + propertyName;
+        String fluentName = Character.toLowerCase(propertyName.charAt(0)) + propertyName.substring(1);
+        String withName = "with" + propertyName;
+
+        Set<String> called = calledMethodsOnVar.getOrDefault(varName, Set.of());
+        if (called.contains(setterName) || called.contains(fluentName) || called.contains(withName)) {
+            return;
+        }
+
+        if (sutCalled && targetMethod != null && targetMethod.sourceCode() != null) {
+            String sutCode = targetMethod.sourceCode();
+            if (sutCode.contains(setterName) || sutCode.contains(fluentName + " =") || sutCode.contains("." + fluentName + "=")) {
+                return;
+            }
+        }
+
+        String problem = String.format(
+                "Test case %s: In test method '%s', '%s.%s()' is asserted to equal %s, "
+                        + "but '%s' was instantiated with a default constructor and '%s' was never called in Arrange, "
+                        + "nor does '%s' update this field. Initialize '%s' in Arrange or assert null.",
+                test.caseId() != null ? test.caseId() : "unknown",
+                testMethod.getNameAsString(),
+                varName,
+                getterName,
+                expectedExpr.toString(),
+                varName,
+                setterName,
+                targetMethod != null && targetMethod.methodName() != null ? targetMethod.methodName() : "the method under test",
+                setterName);
+
+        if (!problems.contains(problem)) {
+            problems.add(problem);
+        }
+    }
+
+    private static void checkGetterNotNull(
+            GeneratedUnitTestDto test,
+            MethodDeclaration testMethod,
+            Map<String, String> defaultConstructedVars,
+            Map<String, Set<String>> calledMethodsOnVar,
+            MethodContextDto targetMethod,
+            boolean sutCalled,
+            Expression actualExpr,
+            List<String> problems) {
+        if (!actualExpr.isMethodCallExpr()) return;
+
+        MethodCallExpr getterCall = actualExpr.asMethodCallExpr();
+        if (getterCall.getScope().isEmpty() || !getterCall.getScope().get().isNameExpr()) return;
+
+        String varName = getterCall.getScope().get().asNameExpr().getNameAsString();
+        if (!defaultConstructedVars.containsKey(varName)) return;
+
+        String getterName = getterCall.getNameAsString();
+        String propertyName = extractPropertyName(getterName);
+        if (propertyName == null || propertyName.isEmpty()) return;
+
+        String setterName = "set" + propertyName;
+        String fluentName = Character.toLowerCase(propertyName.charAt(0)) + propertyName.substring(1);
+        String withName = "with" + propertyName;
+
+        Set<String> called = calledMethodsOnVar.getOrDefault(varName, Set.of());
+        if (called.contains(setterName) || called.contains(fluentName) || called.contains(withName)) {
+            return;
+        }
+
+        if (sutCalled && targetMethod != null && targetMethod.sourceCode() != null) {
+            String sutCode = targetMethod.sourceCode();
+            if (sutCode.contains(setterName) || sutCode.contains(fluentName + " =") || sutCode.contains("." + fluentName + "=")) {
+                return;
+            }
+        }
+
+        String problem = String.format(
+                "Test case %s: In test method '%s', assertNotNull('%s.%s()') is called, "
+                        + "but '%s' was instantiated with a default constructor and '%s' was never called in Arrange, "
+                        + "nor does '%s' update this field. The field defaults to null.",
+                test.caseId() != null ? test.caseId() : "unknown",
+                testMethod.getNameAsString(),
+                varName,
+                getterName,
+                varName,
+                setterName,
+                targetMethod != null && targetMethod.methodName() != null ? targetMethod.methodName() : "the method under test");
+
+        if (!problems.contains(problem)) {
+            problems.add(problem);
+        }
+    }
+
+    private static boolean isNonDefaultLiteral(Expression expr) {
+        if (expr == null) return false;
+        if (expr.isStringLiteralExpr() || expr.isCharLiteralExpr() || expr.isDoubleLiteralExpr()) return true;
+        if (expr.isIntegerLiteralExpr()) {
+            try {
+                return expr.asIntegerLiteralExpr().asNumber().intValue() != 0;
+            } catch (Exception e) {
+                return true;
+            }
+        }
+        if (expr.isLongLiteralExpr()) {
+            try {
+                return expr.asLongLiteralExpr().asNumber().longValue() != 0L;
+            } catch (Exception e) {
+                return true;
+            }
+        }
+        if (expr.isBooleanLiteralExpr()) {
+            return expr.asBooleanLiteralExpr().getValue();
+        }
+        return false;
+    }
+
+    private static String extractPropertyName(String getterName) {
+        if (getterName == null) return null;
+        if (getterName.startsWith("get") && getterName.length() > 3) {
+            return getterName.substring(3);
+        }
+        if (getterName.startsWith("is") && getterName.length() > 2) {
+            return getterName.substring(2);
+        }
+        return null;
+    }
+
     /** Giữ yêu cầu không gọi collaborator của TC; không suy diễn từ hành vi implementation. */
     private static void validateApprovedNegativeInteractions(UnitTestContextDto context, GeneratedUnitTestDto test,
             CompilationUnit source, List<String> problems) {
@@ -2167,6 +2411,29 @@ public final class GeneratedUnitTestSemanticValidator {
                 .sorted()
                 .toList();
         if (!missing.isEmpty()) {
+            if (context.approvedTestCases() != null) {
+                var approvedCase = context.approvedTestCases().stream()
+                        .filter(c -> java.util.Objects.equals(c.id(), generatedTest.caseId())).findFirst().orElse(null);
+                if (approvedCase != null && approvedCase.preconditions() != null) {
+                    var api = new GeneratedTestApiValidator(context);
+                    var owner = api.declaration(productionMethod.classQualifiedName());
+                    var mapperTypes = owner == null ? List.<String>of() : owner.getFields().stream()
+                            .filter(f -> !f.isStatic() && f.getElementType().isClassOrInterfaceType()
+                                    && f.getElementType().asClassOrInterfaceType().getNameAsString().endsWith("Mapper"))
+                            .map(f -> api.qualifiedType(f.getElementType().asClassOrInterfaceType(), owner.findCompilationUnit().orElseThrow())).distinct().toList();
+                    for (String missingType : missing) {
+                        var candidates = context.classes().stream().filter(c -> missingType.equals(c.className())).map(ClassContextDto::qualifiedName).distinct().toList();
+                        if (candidates.size() == 1) {
+                            boolean soleMapperRole = mapperTypes.size() == 1 && java.util.Objects.equals(mapperTypes.get(0), candidates.get(0));
+                            if (GeneratedFixtureContractValidator.requiresRealDependency(approvedCase.preconditions(), missingType, soleMapperRole)) {
+                                problems.add((generatedTest.caseId() == null ? "" : "Test case " + generatedTest.caseId() + ": ")
+                                        + "Approved fixture contract: " + missingType
+                                        + " must be real. Use a source-supported real @Spy or explicit construction, not @Mock; preserve approved inputs and assertions.");
+                            }
+                        }
+                    }
+                }
+            }
             problems.add("The Service constructor or injected fields require @Mock or @Spy dependencies: "
                     + String.join(", ", missing)
                     + ". Declare each dependency as a class-level @Mock or a source-supported real @Spy, or construct the SUT explicitly, so @InjectMocks does not receive null.");
