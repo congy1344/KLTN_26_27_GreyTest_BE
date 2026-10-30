@@ -161,15 +161,16 @@ class BusinessRuleServiceTest {
                     javaClassRepository, javaMethodRepository, aiAgentService, generationProgressService,
                     transactionManager, scopeResolver, scopedStatuses, executor);
             assertThatThrownBy(() -> service.generate(1L)).isSameAs(original);
-            assertThat(persisted).extracting(BusinessRule::getMethodId).containsExactly(14L, 15L, 16L);
+            assertThat(persisted).extracting(BusinessRule::getMethodId).containsExactly(14L, 15L, 16L, 17L);
             assertThat(service.generate(1L)).extracting(BusinessRuleDto::methodId)
-                    .containsExactlyInAnyOrder(11L, 12L, 13L, 17L);
+                    .containsExactlyInAnyOrder(11L, 12L, 13L);
             assertThat(persisted).hasSize(7).extracting(BusinessRule::getRuleCode).doesNotHaveDuplicates();
             verify(generationProgressService).resume(org.mockito.ArgumentMatchers.eq(1L),
                     org.mockito.ArgumentMatchers.eq(com.greytest.dto.GenerationProgressStage.BUSINESS_RULE),
-                    org.mockito.ArgumentMatchers.anyList(), org.mockito.ArgumentMatchers.eq(Set.of(1)),
+                    org.mockito.ArgumentMatchers.anyList(), org.mockito.ArgumentMatchers.eq(Set.of(1, 2)),
                     org.mockito.ArgumentMatchers.anyString());
             verify(aiAgentService).generateBusinessRules(1L, Set.of(14L, 15L, 16L));
+            verify(aiAgentService).generateBusinessRules(1L, Set.of(17L));
         } finally {
             executor.shutdown();
         }
@@ -366,7 +367,7 @@ class BusinessRuleServiceTest {
                 org.mockito.ArgumentMatchers.anyString());
     }
     @Test
-    void generateStopsQueuedAiCallsAfterInFlightBatchesFail() {
+    void generateAttemptsAllIndependentBatchesAfterInFlightBatchesFail() {
         mockProject();
         mockServiceMethods(java.util.stream.LongStream.rangeClosed(11, 22)
                 .mapToObj(id -> method(id, "m" + id)).toArray(JavaMethod[]::new));
@@ -384,7 +385,11 @@ class BusinessRuleServiceTest {
 
         assertThatThrownBy(() -> parallelService(UserTier.PLUS, 2).generate(1L)).isSameAs(failure);
 
-        assertThat(requests.get()).isEqualTo(2);
+        assertThat(requests.get()).isEqualTo(4);
+        verify(aiAgentService).generateBusinessRules(1L, Set.of(11L, 12L, 13L));
+        verify(aiAgentService).generateBusinessRules(1L, Set.of(14L, 15L, 16L));
+        verify(aiAgentService).generateBusinessRules(1L, Set.of(17L, 18L, 19L));
+        verify(aiAgentService).generateBusinessRules(1L, Set.of(20L, 21L, 22L));
         verify(businessRuleRepository, org.mockito.Mockito.never()).save(any(BusinessRule.class));
         verify(generationProgressService).fail(org.mockito.ArgumentMatchers.eq(1L),
                 org.mockito.ArgumentMatchers.eq(com.greytest.dto.GenerationProgressStage.BUSINESS_RULE),
