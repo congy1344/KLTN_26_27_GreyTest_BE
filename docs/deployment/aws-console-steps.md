@@ -1,6 +1,8 @@
 # GreyTest — Các bước chuẩn bị AWS Console
 
-Ngày 22/10/2026, dành cho tài khoản chưa tạo tài nguyên. Mục tiêu dự kiến: **một EC2 tại Singapore (`ap-southeast-1`), Docker Compose gồm web/Caddy + backend + PostgreSQL**, dùng credit của Free plan. Không tạo RDS, load balancer, NAT Gateway hoặc đăng ký domain trả tiền trong đợt này.
+> Cập nhật 30/10/2026: tài khoản triển khai dùng Sydney. Nếu muốn push main tự cập nhật EC2, sau bước 10 chuyển sang [hướng dẫn CI/CD](aws-auto-deploy.md), thay cho upload bundle thủ công ở bước 11. Không cài cả hai quy trình lên cùng installation.
+
+Ngày 22/10/2026, dành cho tài khoản chưa tạo tài nguyên. Mục tiêu dự kiến: **một EC2 tại Sydney (`ap-southeast-2`), Docker Compose gồm web/Caddy + backend + PostgreSQL**, dùng credit của Free plan. Không tạo RDS, load balancer, NAT Gateway hoặc đăng ký domain trả tiền trong đợt này.
 
 **Trạng thái:** hướng dẫn bám `docker-compose.aws.yml`, `.env.aws.example`, `Dockerfile.aws` và frontend Dockerfile/Caddyfile. Chưa đăng nhập account, xác minh credit, tạo tài nguyên hoặc kiểm chứng deploy trên EC2. Kết quả local được ghi riêng trong release evidence; không suy ra cloud đã chạy từ việc có cấu hình. Xem [runbook lệnh đầy đủ](aws-runbook.md) trước khi chạy phần terminal.
 
@@ -12,9 +14,9 @@ Phần chuẩn bị local đã có [báo cáo kiểm chứng ngày 22/10/2026](l
 2. Tại Console Home, tìm widget **Cost and Usage**. Ghi lại tên plan, credit còn lại và thời gian còn lại. Nếu có **AWS Settings**, mở phần Billing để xem thông tin gói. Account theo giao diện cũ có thể xem **Billing and Cost Management → Credits**.
 3. Credit ban đầu là **100 USD**, có thể nhận thêm tối đa 100 USD khi hoàn thành hoạt động đủ điều kiện. Không ghi số dư 200 USD khi chưa nhìn thấy trên account. Free plan hết khi cạn credit hoặc đủ sáu tháng từ ngày mở account. [AWS Free Tier FAQ](https://aws.amazon.com/free/free-tier-faqs/).
 4. Giữ **Free plan** theo ưu tiên không trả tiền túi. Không chọn Upgrade Paid plan hoặc Activate advanced features để đi tiếp. Free plan hết hạn sẽ mất quyền truy cập tài nguyên; phải xuất backup trước thời hạn. [AWS account plans](https://docs.aws.amazon.com/awsaccountbilling/latest/aboutv2/free-tier-plans.html).
-5. Thử chọn **Asia Pacific (Singapore) / ap-southeast-1** trên thanh region.
+5. Thử chọn **Asia Pacific (Sydney) / ap-southeast-2** trên thanh region.
 
-**Nếu chỉ có Sydney hoặc giao diện yêu cầu advanced features:** dừng trước khi launch. AWS đang triển khai trải nghiệm đăng ký mới, project của địa chỉ Việt Nam có thể được gán **Sydney (`ap-southeast-2`)**. Kiểm tra **AWS Settings → Project → Overview → Additional Info → Region**. Cần thống nhất lại region với người dùng; không tự đổi region hoặc nâng gói. [AWS Regions for projects](https://docs.aws.amazon.com/accounts/latest/reference/project-regions.html).
+**Region của tài khoản đang dùng là Sydney (`ap-southeast-2`):** tiếp tục trong region này, không cần chuyển sang Singapore hoặc nâng plan. Xác minh AWS Settings → Project → Overview → Additional Info → Region trước khi tạo tài nguyên. [AWS Regions for projects](https://docs.aws.amazon.com/accounts/latest/reference/project-regions.html).
 
 IAM, Systems Manager, EC2, EBS và Budgets có trong danh sách dịch vụ Free Tier của trải nghiệm mới. Không cần bật AWS Organizations hoặc IAM Identity Center cho hướng dẫn này. [Dịch vụ được hỗ trợ](https://docs.aws.amazon.com/accounts/latest/reference/supported-services-sign-up-new.html).
 
@@ -25,7 +27,7 @@ IAM, Systems Manager, EC2, EBS và Budgets có trong danh sách dịch vụ Free
 | Plan thật | Free plan / tên hiển thị khác |
 | Credit còn lại | ... USD |
 | Ngày hết hạn | ... |
-| Singapore chọn được | Có / Không |
+| Sydney chọn được | Có / Không |
 | Email nhận cảnh báo | ... |
 
 ## 2. Bật MFA cho tài khoản quản trị
@@ -47,7 +49,7 @@ Nếu account dùng trải nghiệm đăng nhập mới qua Google/GitHub/Builde
 1. Mở **Billing and Cost Management → Budgets → Create budget**.
 2. Chọn **Customize (advanced) → Cost budget**.
 3. Tên: `greytest-monthly-usage`; Period: **Monthly**; Renewal: **Recurring**; Method: **Fixed**.
-4. Amount: **30 USD** làm ngưỡng cảnh báo ban đầu; đây không phải giá đã xác minh cho Singapore.
+4. Amount: **30 USD** làm ngưỡng cảnh báo ban đầu; đây không phải giá đã xác minh cho Sydney.
 5. Để scope toàn account. Chọn **Unblended costs** trong Advanced options.
 6. Nếu có lựa chọn **Credits/Refunds**, loại hai khoản này khỏi budget theo dõi usage, để credit bù trừ không che phần tiêu thụ. API tương ứng `IncludeCredit=false`, `IncludeRefund=false`; mặc định IncludeCredit là true. [AWS CostTypes](https://docs.aws.amazon.com/aws-cost-management/latest/APIReference/API_budgets_CostTypes.html).
 7. Thêm Actual 50%, Actual 80%, Forecasted 100%; điền email của người quản trị. Không thêm hành động tự động.
@@ -55,7 +57,7 @@ Nếu account dùng trải nghiệm đăng nhập mới qua Google/GitHub/Builde
 
 Budget là cảnh báo, không phải khóa chi phí tức thời. Số liệu có độ trễ. Theo dõi riêng số credit/ngày còn lại trong Console Home. [AWS Budgets](https://docs.aws.amazon.com/cost-management/latest/userguide/budgets-managing-costs.html).
 
-Trước launch, kiểm tra estimate cho đúng Singapore: EC2 theo số giờ online + EBS 20 GiB + một public IPv4 + truyền dữ liệu/backup. Không dùng giá US East để khẳng định tổng phí. Không cần thêm dịch vụ có phí chỉ để xem estimate; có thể dùng [AWS Pricing Calculator công khai](https://calculator.aws/) nếu truy cập được mà không nâng gói.
+Trước launch, kiểm tra estimate cho đúng Sydney: EC2 theo số giờ online + EBS 20 GiB + một public IPv4 + truyền dữ liệu/backup. Không dùng giá US East để khẳng định tổng phí. Không cần thêm dịch vụ có phí chỉ để xem estimate; có thể dùng [AWS Pricing Calculator công khai](https://calculator.aws/) nếu truy cập được mà không nâng gói.
 
 ## 4. Tạo role cho EC2 kết nối Session Manager
 
@@ -70,7 +72,7 @@ Trước launch, kiểm tra estimate cho đúng Singapore: EC2 theo số giờ o
 
 ## 5. Kiểm tra mạng và tạo Security Group
 
-1. Chọn region Singapore.
+1. Chọn region Sydney.
 2. Mở **VPC → Your VPCs**, tìm **Default VPC**. Mở Subnets/Route tables để xác minh subnet có route `0.0.0.0/0 → igw-...`.
 3. Default VPC thường có sẵn subnet công khai và internet gateway. Nếu không còn default VPC, dùng **Actions → Create default VPC** nếu được phép; không chọn wizard tạo NAT Gateway. [Default VPC](https://docs.aws.amazon.com/vpc/latest/userguide/default-vpc-components.html).
 4. Mở **EC2 → Network & Security → Security Groups → Create security group**.
@@ -92,7 +94,7 @@ Nếu chưa chuyển file ngay, có thể tạo group chỉ 80/443 rồi thêm S
 
 SSM mở terminal trên trình duyệt, không thay cho thao tác upload file trực tiếp. Đợt đầu dùng SCP tạm thời để tránh thêm registry hoặc bucket.
 
-1. Trong Singapore, mở **EC2 → Network & Security → Key Pairs → Create key pair**.
+1. Trong Sydney, mở **EC2 → Network & Security → Key Pairs → Create key pair**.
 2. Name: `greytest-demo`.
 3. Key pair type: **RSA**; Private key file format: **.pem** cho OpenSSH.
 4. Create key pair; trình duyệt tải file. Lưu ngoài repo, ví dụ `C:\keys\greytest-demo.pem`. Đây là lần AWS cho tải private key.
@@ -144,7 +146,7 @@ Chỉ xóa SSH sau khi SSM đã kiểm chứng kết nối. Nếu cần chẩn �
 ## 9. Giữ một public IP ổn định và trỏ domain
 
 1. EC2 → **Network & Security → Elastic IPs → Allocate Elastic IP address**.
-2. Giữ pool Amazon, Network border group Singapore; Allocate đúng **một** IP.
+2. Giữ pool Amazon, Network border group Sydney; Allocate đúng **một** IP.
 3. Chọn IP → **Actions → Associate Elastic IP address**.
 4. Resource type: Instance → chọn `greytest-demo` → Associate.
 5. Dùng IP này trong DNS/SCP về sau. [Allocate/associate EIP](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/working-with-eips.html).
@@ -264,6 +266,6 @@ AWS credit không chi trả API AI ngoài AWS. Chỉ chạy một kiểm tra pro
 
 - Đã đọc plan `D:\.KLTN\plan\2026-10-22-aws-deployment-readiness-and-plan.md`, AGENTS.md và ponytail SKILL.md.
 - Đã kiểm tra các nguồn primary được dẫn tại từng bước: AWS account plans/FAQ/regions/services, IAM/EC2/SSM/Budgets; Docker image/Compose/install; Caddy HTTPS.
-- Đã phát hiện giới hạn region của signup experience mới; cần đối chiếu account thực trước khi dùng Singapore.
+- Đã phát hiện giới hạn region của signup experience mới; cần đối chiếu account thực trước khi dùng Sydney.
 - Chỉ chuẩn bị tài liệu và cấu hình local. Không đăng nhập AWS, không launch tài nguyên trong bước chuẩn bị này.
 - Kết quả build/smoke local phải ghi trong evidence của bản phát hành. Cloud HTTPS, full workload, backup/restore và khả năng đủ tải EC2 chỉ được đánh dấu đạt sau khi chạy thực tế.
