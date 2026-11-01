@@ -25,6 +25,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -315,8 +316,9 @@ class BusinessRuleServiceTest {
         verify(transactionManager).commit(transactionStatus);
         verify(transactionManager).rollback(transactionStatus);
     }
-    @Test
-    void generateResumesOnlyFailedMiddleBatchAfterLaterInFlightBatchWasSaved() {
+    @ParameterizedTest
+    @ValueSource(ints = {2, 3})
+    void generateResumesOnlyFailedMiddleBatchAfterLaterInFlightBatchWasSaved(int concurrency) {
         mockProject();
         mockProjectSave();
         mockSevenMethods();
@@ -328,26 +330,29 @@ class BusinessRuleServiceTest {
             persisted.add(rule);
             return rule;
         });
-        CountDownLatch allStarted = new CountDownLatch(3);
         CountDownLatch thirdSaved = new CountDownLatch(1);
-        doAnswer(ignored -> { thirdSaved.countDown(); return null; }).when(generationProgressService)
+        // Service báo tiến độ cho mọi batch; stub riêng batch 3 làm Mockito từ chối batch 1 lưu trước.
+        doAnswer(invocation -> {
+            int stepIndex = invocation.getArgument(2);
+            if (stepIndex == 2) thirdSaved.countDown();
+            return null;
+        }).when(generationProgressService)
                 .advanceStep(org.mockito.ArgumentMatchers.eq(1L),
                         org.mockito.ArgumentMatchers.eq(com.greytest.dto.GenerationProgressStage.BUSINESS_RULE),
-                        org.mockito.ArgumentMatchers.eq(2), org.mockito.ArgumentMatchers.anyString());
+                        org.mockito.ArgumentMatchers.anyInt(), org.mockito.ArgumentMatchers.anyString());
         AtomicBoolean firstAttempt = new AtomicBoolean(true);
         var failure = new com.greytest.service.agent.LlmResponseException("AI batch failed");
         when(aiAgentService.generateBusinessRules(org.mockito.ArgumentMatchers.eq(1L), any(Set.class)))
                 .thenAnswer(invocation -> {
                     Set<Long> methodIds = invocation.getArgument(1);
-                    allStarted.countDown();
-                    assertThat(allStarted.await(5, TimeUnit.SECONDS)).isTrue();
                     if (methodIds.contains(14L) && firstAttempt.getAndSet(false)) {
-                        assertThat(thirdSaved.await(5, TimeUnit.SECONDS)).isTrue();
+                        assertThat(thirdSaved.await(5, TimeUnit.SECONDS))
+                                .as("Batch 3 phải được lưu trước khi batch 2 báo lỗi").isTrue();
                         throw failure;
                     }
                     return generatedRules(methodIds);
                 });
-        BusinessRuleService service = parallelService(UserTier.PRO);
+        BusinessRuleService service = parallelService(UserTier.PRO, concurrency);
 
         assertThatThrownBy(() -> service.generate(1L)).isSameAs(failure);
         assertThat(persisted).extracting(BusinessRule::getMethodId).containsExactlyInAnyOrder(11L, 12L, 13L, 17L);
