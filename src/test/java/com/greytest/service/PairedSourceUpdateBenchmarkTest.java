@@ -21,16 +21,20 @@ import jdk.jfr.Recording;
 @EnabledIfSystemProperty(named = "e2e.profile", matches = "true")
 class PairedSourceUpdateBenchmarkTest extends EndToEndCriticalPathProfileTest {
     private static final String JDBC_READ = "greytest.source-update.jdbc-read-optimization-enabled";
+    private String variantFlag = JDBC_READ;
 
     @Override @Test void profileCriticalPath() throws Throwable {
         String task = System.getProperty("benchmark.optimization", "B");
-        assertThat(task).isEqualTo("B");
+        assertThat(task).isIn("B", "CONFIG_DIRECTORY");
+        variantFlag = task.equals("B") ? JDBC_READ : "greytest.source-update.lombok-directory-reuse-enabled";
         boolean instrumented = Boolean.parseBoolean(System.getProperty("benchmark.instrumentation", "true"));
         boolean jfr = Boolean.parseBoolean(System.getProperty("benchmark.jfr", "true"));
         assertThat(instrumented || !jfr).as("Uninstrumented control also requires -Dbenchmark.jfr=false").isTrue();
         int count = Integer.getInteger("e2e.samples", 10);
         assertThat(count).isPositive().isEven();
-        Path output = Path.of("target/phase3-2-" + task.toLowerCase(Locale.ROOT) + (instrumented ? "-profile" : "-control"));
+        Path output = Path.of(task.equals("B") ? "target/phase3-2-b" : "target/phase3-3-config-directory");
+        output = Path.of(output + (instrumented ? "-profile" : "-control"));
+        output = Path.of(System.getProperty("e2e.outputDirectory", output.toString()));
         Files.createDirectories(output);
         int projectsBefore = jdbc.queryForObject("select count(*) from project", Integer.class);
         List<Map<String, Object>> samples = new ArrayList<>();
@@ -44,7 +48,13 @@ class PairedSourceUpdateBenchmarkTest extends EndToEndCriticalPathProfileTest {
                 recording.enable("jdk.FileRead").withThreshold(java.time.Duration.ofMillis(1));
                 recording.start();
             }
-            for (String workload : List.of("ONE_ADDED", "SIX_INDEPENDENT", "DENSE_ONE", "ONE_ADDED_128_UNRELATED", "RESUME")) {
+            List<String> workloads = List.of("ONE_ADDED", "SIX_INDEPENDENT", "DENSE_ONE", "ONE_ADDED_128_UNRELATED", "RESUME");
+            String selected = System.getProperty("benchmark.workload", "");
+            if (!selected.isBlank()) {
+                assertThat(selected).isIn(workloads);
+                workloads = List.of(selected);
+            }
+            for (String workload : workloads) {
                 List<Boolean> orders = new ArrayList<>();
                 for (int i = 0; i < count; i++) orders.add(i % 2 == 0);
                 Collections.shuffle(orders, new Random(32026L + workload.hashCode()));
@@ -104,10 +114,11 @@ class PairedSourceUpdateBenchmarkTest extends EndToEndCriticalPathProfileTest {
     private Map<String, Object> variantMeasure(Fixture fixture, String workload, boolean analyze, boolean failure,
             boolean optimized) {
         try (var scope = GenerationJobContext.openScope(null)) {
-            return GenerationJobContext.withValue(JDBC_READ, optimized, () -> {
+            // Phase 3.3 giữ B1+B2 ở cả hai nhánh; chỉ đổi flag đang được đo.
+            return GenerationJobContext.withValue(JDBC_READ, true, () -> GenerationJobContext.withValue(variantFlag, optimized, () -> {
                         try { return measureProfile(fixture, workload, analyze, failure); }
                         catch (Throwable error) { return rethrow(error); }
-                    });
+                    }));
         }
     }
 

@@ -67,6 +67,7 @@ class EndToEndCriticalPathProfileTest extends IncrementalPipelineBenchmarkTest {
                 }
                 response = json.writeValueAsString(root);
             }
+            GenerationJobContext.count("profile.responseChars", response.length());
             return response;
     }
 

@@ -43,7 +43,7 @@ def summarize(document):
         grouped[row["workload"]].append(row)
     return {"optimization": document["optimization"], "instrumented": document["instrumented"], "jfr": document["jfr"],
             "workloads": {name: paired(rows) for name, rows in sorted(grouped.items())},
-            "limits": ["Synthetic deterministic provider, no API latency; 10 pairs give uncertain tail estimates",
+            "limits": ["Synthetic deterministic provider, no API latency; finite paired samples give uncertain tail estimates",
                        "CPU and allocatedBytes spans are inclusive: never sum nested spans",
                        "JFR includes fixture setup/cleanup; attribute only recorded measured intervals/threads",
                        "Canonical comparison normalizes database IDs, generated BR/TP/TC technical labels, and dense UT Case<case-id> identifiers; source logic and parameter order remain unchanged"]}
