@@ -57,6 +57,55 @@ import com.greytest.service.analysis.AnalysisService;
 import com.greytest.service.analysis.ExistingTestService;
 
 class GenerationContextBuilderTest {
+    @Test void incrementalCasesUseOneBulkReadAndFreshNestedSnapshot() {
+        var cases = stubTwoPlanCases();
+        try (var job = com.greytest.service.GenerationJobContext.openScope(null)) {
+            com.greytest.service.GenerationJobContext.setSourceUpdateId(100L);
+            GenerationContextBuilder.withInputSnapshot(() -> {
+                var first = builder.buildUnitTestContext(1L, Set.of(30L, 31L));
+                assertThat(first.approvedTestCases()).extracting("id").containsExactly(30L, 31L);
+                cases.get(0).setExpectedResult("fresh version before commit");
+                assertThat(builder.buildUnitTestContext(1L, Set.of(30L, 31L)).approvedTestCases().get(0).expectedResult()).isNull();
+                GenerationContextBuilder.withInputSnapshot(() -> {
+                    assertThat(builder.buildUnitTestContext(1L, Set.of(30L, 31L)).approvedTestCases().get(0).expectedResult())
+                            .isEqualTo("fresh version before commit");
+                    return null;
+                });
+                return null;
+            });
+        }
+        org.mockito.Mockito.verify(testCaseRepository, org.mockito.Mockito.times(2)).findByTestPlanIdIn(List.of(20L, 21L));
+        org.mockito.Mockito.verify(testCaseRepository, org.mockito.Mockito.never()).findByTestPlanId(org.mockito.ArgumentMatchers.anyLong());
+    }
+
+    @Test void duplicateCaseCodesKeepLegacyOrderingAndFlagDisablesBulkReads() {
+        var cases = stubTwoPlanCases();
+        cases.get(1).setCaseCode("TC-001");
+        try (var job = com.greytest.service.GenerationJobContext.openScope(null)) {
+            com.greytest.service.GenerationJobContext.setSourceUpdateId(100L);
+            var bulkFallback = GenerationContextBuilder.withInputSnapshot(() -> builder.buildUnitTestContext(1L, Set.of(30L, 31L)));
+            var legacy = com.greytest.service.GenerationJobContext.withValue("greytest.source-update.jdbc-read-optimization-enabled", false,
+                    () -> GenerationContextBuilder.withInputSnapshot(() -> builder.buildUnitTestContext(1L, Set.of(30L, 31L))));
+            assertThat(bulkFallback).isEqualTo(legacy);
+        }
+        org.mockito.Mockito.verify(testCaseRepository).findByTestPlanIdIn(List.of(20L, 21L));
+        org.mockito.Mockito.verify(testCaseRepository, org.mockito.Mockito.times(2)).findByTestPlanId(20L);
+        org.mockito.Mockito.verify(testCaseRepository, org.mockito.Mockito.times(2)).findByTestPlanId(21L);
+    }
+
+    private List<TestCase> stubTwoPlanCases() {
+        mockCommonInputs(); stubApprovedUnitTestCase(11L);
+        var first = testCaseRepository.findByTestPlanId(20L).get(0);
+        var second = new TestCase(); second.setId(31L); second.setTestPlanId(21L); second.setCaseCode("TC-002");
+        second.setStatus(ReviewStatus.APPROVED); second.setPriority(Priority.HIGH);
+        when(testPlanRepository.findByProjectId(1L)).thenReturn(List.of(testPlan(20L, 7L, "TP-001"), testPlan(21L, 7L, "TP-002")));
+        when(testPlanCoveredRuleRepository.findByTestPlanIdIn(List.of(20L, 21L))).thenReturn(List.of(coveredRule(20L, 7L), coveredRule(21L, 7L)));
+        when(testCaseRepository.findByTestPlanId(21L)).thenReturn(List.of(second));
+        when(testCaseRepository.findByTestPlanIdIn(List.of(20L, 21L))).thenReturn(List.of(second, first));
+        org.mockito.Mockito.clearInvocations(testCaseRepository);
+        return List.of(first, second);
+    }
+
     @Test void nestedUpstreamReadsInsideOneSnapshotDoNotMutateComputeIfAbsent() {
         mockCommonInputs(); stubApprovedUnitTestCase(11L);
         var context=GenerationContextBuilder.withInputSnapshot(()->builder.buildUnitTestContext(1L,Set.of(30L)));

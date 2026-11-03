@@ -73,6 +73,9 @@ import com.greytest.service.GenerationJobContext;
 public class GenerationContextBuilder {
     private static final ThreadLocal<Map<Object,Object>> INPUT_SNAPSHOT=new ThreadLocal<>();
     private record InputReadKey(String type,Long projectId,boolean source) { }
+    private static final String JDBC_READ_FLAG = "greytest.source-update.jdbc-read-optimization-enabled";
+    @org.springframework.beans.factory.annotation.Value("${greytest.source-update.jdbc-read-optimization-enabled:true}")
+    private boolean jdbcReadOptimizationEnabled = true;
 
     /** Chụp upstream bất biến trong một batch; scope lồng nhau luôn đọc mới trước commit. */
     public static <T> T withInputSnapshot(java.util.function.Supplier<T> action) {
@@ -1236,8 +1239,7 @@ public class GenerationContextBuilder {
     }
 
     private List<TestCaseContextItemDto> loadApprovedTestCases(Long projectId) {
-        Map<Long, TestCaseContextItemDto> contexts = approvedTestPlans(projectId).stream()
-                .flatMap(plan -> testCaseRepository.findByTestPlanId(plan.id()).stream())
+        Map<Long, TestCaseContextItemDto> contexts = casesForPlans(approvedTestPlans(projectId))
                 .filter(testCase -> testCase.getStatus() == ReviewStatus.APPROVED
                         || GenerationJobContext.sourceUpdateId() != null && testCase.getStatus() == ReviewStatus.PENDING_REVIEW)
                 .map(this::testCaseContext)
@@ -1296,13 +1298,34 @@ public class GenerationContextBuilder {
     }
 
     private List<TestCaseContextItemDto> approvedTestCases(List<TestPlanContextItemDto> plans) {
-        return plans.stream()
-                .flatMap(plan -> testCaseRepository.findByTestPlanId(plan.id()).stream())
+        return casesForPlans(plans)
                 .filter(testCase -> testCase.getStatus() == ReviewStatus.APPROVED
                         || GenerationJobContext.sourceUpdateId() != null && testCase.getStatus() == ReviewStatus.PENDING_REVIEW)
                 .map(this::testCaseContext)
                 .sorted(Comparator.comparing(TestCaseContextItemDto::caseCode))
                 .toList();
+    }
+
+    private boolean optimizedJdbcReads() {
+        return jdbcReadOptimizationEnabled && GenerationJobContext.sourceUpdateId() != null
+                && !Boolean.FALSE.equals(GenerationJobContext.scopedValue(JDBC_READ_FLAG));
+    }
+
+    /** Bulk chỉ đổi số round-trip; case code trùng dùng lại query cũ để giữ ordering/batching. */
+    private Stream<TestCase> casesForPlans(List<TestPlanContextItemDto> plans) {
+        if (!optimizedJdbcReads() || plans.size() < 2) return legacyCasesForPlans(plans);
+        List<Long> planIds = plans.stream().map(TestPlanContextItemDto::id).toList();
+        Set<Long> allowed = Set.copyOf(planIds);
+        var cases = testCaseRepository.findByTestPlanIdIn(planIds).stream()
+                .filter(testCase -> allowed.contains(testCase.getTestPlanId())).toList();
+        Set<String> codes = new java.util.HashSet<>();
+        if (cases.stream().anyMatch(testCase -> !codes.add(testCase.getCaseCode()))) return legacyCasesForPlans(plans);
+        GenerationJobContext.increment("jdbc.caseBulkReads");
+        return cases.stream();
+    }
+
+    private Stream<TestCase> legacyCasesForPlans(List<TestPlanContextItemDto> plans) {
+        return plans.stream().flatMap(plan -> testCaseRepository.findByTestPlanId(plan.id()).stream());
     }
 
     private TestCaseContextItemDto testCaseContext(TestCase testCase) {

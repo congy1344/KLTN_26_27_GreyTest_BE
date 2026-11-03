@@ -57,12 +57,17 @@ def base_workload(name):
     return "RESUME" if name.startswith("RESUME") else name.removesuffix("_WARM")
 
 
-def span_aggregates(spans):
+def span_aggregates(spans, full=False):
     grouped = {}
+    long_names = {"e2e", "batch.worker", "aiagentservice.snapshotcontext", "promptmanager.render",
+                  "generationresponseparser.parse", "provider.local"}
     for span in spans:
-        key = (span["stage"], span["name"], span.get("purpose", "unavailable"))
-        stats = grouped.setdefault(key, {"stage": key[0], "name": key[1], "purpose": key[2],
-                                        "count": 0, "failed": 0, "inclusiveWallNanos": 0,
+        name = span["name"]
+        if not full and not any(name.lower().startswith(prefix) for prefix in long_names) and not name.startswith("jdbc."):
+            continue
+        key = (span["stage"], name, span.get("purpose", "unavailable")) if full else (name,)
+        identity = {"stage": key[0], "name": key[1], "purpose": key[2]} if full else {"name": name}
+        stats = grouped.setdefault(key, {**identity, "count": 0, "failed": 0, "inclusiveWallNanos": 0,
                                         "inclusiveCpuNanos": 0, "inclusiveAllocatedBytes": 0,
                                         "cpuUnavailable": 0, "allocationUnavailable": 0})
         stats["count"] += 1
@@ -76,6 +81,16 @@ def span_aggregates(spans):
             else:
                 stats[target] += value
     return [grouped[key] for key in sorted(grouped)]
+
+
+def jdbc_purpose_counts(spans):
+    grouped = {}
+    for span in spans:
+        if span["name"].startswith("jdbc."):
+            purpose = span.get("purpose", "unavailable")
+            counts = grouped.setdefault(purpose, {})
+            counts[span["name"]] = counts.get(span["name"], 0) + 1
+    return grouped
 
 
 def jfr_aggregates(events):
@@ -107,13 +122,19 @@ def compact_evidence(document):
     assert hashes and all(set(pair) == {"legacy", "optimized"} and pair["legacy"] == pair["optimized"]
                           for pair in hashes.values()), "Canonical paired evidence differs or is incomplete"
     samples = []
+    query_traces = {}
     fields = ("pair", "order", "variant", "workload", "wallMillis", "processCpuMillis", "llmCalls", "changedMethods",
               "metrics", "artifactCounts", "proposalActions", "outputDigest", "provenanceDigest")
     for row in document["samples"]:
         sample = {field: row[field] for field in fields if field in row}
         sample["semanticSha256"] = evidence_by_fixture[(base_workload(row["workload"]), row["pair"], row["variant"])]
         sample["spanAggregates"] = span_aggregates(row.get("spans", []))
-        sample["jdbcByPurpose"] = [stats for stats in sample["spanAggregates"] if stats["name"].startswith("jdbc.")]
+        sample["jdbcByPurpose"] = jdbc_purpose_counts(row.get("spans", []))
+        representative_key = (base_workload(row["workload"]), row["variant"])
+        if "semanticEvidence" in row and representative_key not in query_traces:
+            query_traces[representative_key] = {"workload": representative_key[0], "variant": row["variant"],
+                                               "pair": row["pair"], "measuredPhase": row["workload"],
+                                               "spanAggregates": span_aggregates(row.get("spans", []), full=True)}
         sample["jfrByEvent"] = jfr_aggregates(row.get("jfr", {}))
         samples.append(sample)
     metadata = {key: value for key, value in document.items() if key != "samples"}
@@ -125,7 +146,8 @@ def compact_evidence(document):
             "aggregationLimits": ["Span CPU/allocation/wall values are inclusive and cannot be summed across names or purposes",
                                   "Unavailable CPU/allocation contributes only to unavailable count, never a zero measurement",
                                   "JFR waits are thresholded lower bounds (1ms), execution samples use 10ms period; control has no profiler/JFR data",
-                                  "Full canonical evidence retained once per workload/variant; hashes retain every fixture comparison"],
+                                  "Full canonical evidence and stage/name/purpose traces retained for one cold sample per workload/variant; hashes retain every fixture comparison"],
+            "representativeQueryTrace": [query_traces[key] for key in sorted(query_traces)],
             "representativeSemanticEvidence": [representatives[key] for key in sorted(representatives)], "samples": samples}
 
 
@@ -141,12 +163,19 @@ def self_check():
     aggregate = span_aggregates(spans)[0]
     assert aggregate["inclusiveWallNanos"] == 3 and aggregate["cpuUnavailable"] == 1
     assert aggregate["inclusiveAllocatedBytes"] == 7
+    assert "stage" not in aggregate and "purpose" not in aggregate
+    assert span_aggregates(spans, full=True)[0]["purpose"] == "repository.read"
+    assert jdbc_purpose_counts(spans) == {"repository.read": {"jdbc.executeQuery": 1}}
     sample_rows = [dict(row, workload="ONE_ADDED", semanticEvidence={"business": "42", "ids": ["stable"]}, spans=spans,
                         jfr={"jdk.ThreadPark:stack": {"count": 1, "durationNanos": 2}}) for row in rows]
     compact = compact_evidence({"optimization": "A", "instrumented": True, "jfr": True, "samples": sample_rows,
                                 "qualityRuns": [{"generatedUnitTestsExecuted": 1}]})
     assert compact["correctness"]["canonicalSemanticPairsVerified"] == 10
     assert len(compact["representativeSemanticEvidence"]) == 2
+    assert len(compact["representativeQueryTrace"]) == 2
+    assert compact["samples"][0]["jdbcByPurpose"] == {"repository.read": {"jdbc.executeQuery": 1}}
+    assert "purpose" not in compact["samples"][0]["spanAggregates"][0]
+    assert compact["representativeQueryTrace"][0]["spanAggregates"][0]["purpose"] == "repository.read"
     assert all("spans" not in row and len(row["semanticSha256"]) == 64 for row in compact["samples"])
     assert compact["samples"][0]["jfrByEvent"]["jdk.ThreadPark"]["count"] == 1
     try:

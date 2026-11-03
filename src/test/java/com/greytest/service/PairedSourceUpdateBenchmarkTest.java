@@ -16,17 +16,15 @@ import jdk.jfr.Recording;
 
 /** A/B c?ng fixture logic/provider; setup, semantic gates v? ch?y UT n?m ngo?i interval ?o. */
 @org.springframework.test.context.TestPropertySource(properties = {
-        "greytest.source-update.source-context-cache-enabled=true",
         "greytest.source-update.jdbc-read-optimization-enabled=true"
 })
 @EnabledIfSystemProperty(named = "e2e.profile", matches = "true")
 class PairedSourceUpdateBenchmarkTest extends EndToEndCriticalPathProfileTest {
-    private static final String SOURCE_CACHE = "greytest.source-update.source-context-cache-enabled";
     private static final String JDBC_READ = "greytest.source-update.jdbc-read-optimization-enabled";
 
     @Override @Test void profileCriticalPath() throws Throwable {
-        String task = System.getProperty("benchmark.optimization", "A");
-        assertThat(task).isIn("A", "B");
+        String task = System.getProperty("benchmark.optimization", "B");
+        assertThat(task).isEqualTo("B");
         boolean instrumented = Boolean.parseBoolean(System.getProperty("benchmark.instrumentation", "true"));
         boolean jfr = Boolean.parseBoolean(System.getProperty("benchmark.jfr", "true"));
         assertThat(instrumented || !jfr).as("Uninstrumented control also requires -Dbenchmark.jfr=false").isTrue();
@@ -61,20 +59,15 @@ class PairedSourceUpdateBenchmarkTest extends EndToEndCriticalPathProfileTest {
                             prepare(fixture, workload);
                             dense = workload.equals("DENSE_ONE");
                             if (workload.equals("RESUME")) failNextUnitTest.set(true);
-                            Map<String, Object> cold = variantMeasure(fixture, workload, true, workload.equals("RESUME"), task, optimized);
-                            @SuppressWarnings("unchecked") var coldMetrics = (Map<String, Object>) cold.get("metrics");
-                            long cacheHits = ((Number) coldMetrics.getOrDefault("context.sourceCache.hit", 0L)).longValue();
-                            if (task.equals("B") || optimized)
-                                assertThat(cacheHits).as("Source cache optimized path: %s %s", workload, variant).isPositive();
-                            else assertThat(cacheHits).as("Source cache legacy path: %s", workload).isZero();
-                            Map<String, Object> repeat = variantMeasure(fixture, workload.equals("RESUME") ? "RESUME_RETRY" : workload + "_WARM", false, false, task, optimized);
+                            Map<String, Object> cold = variantMeasure(fixture, workload, true, workload.equals("RESUME"), optimized);
+                            Map<String, Object> repeat = variantMeasure(fixture, workload.equals("RESUME") ? "RESUME_RETRY" : workload + "_WARM", false, false, optimized);
                             if (!workload.equals("RESUME")) {
                                 assertThat(repeat.get("llmCalls")).isEqualTo(0);
                                 assertThat(repeat.get("outputDigest")).isEqualTo(cold.get("outputDigest"));
                                 assertThat(repeat.get("provenanceDigest")).isEqualTo(cold.get("provenanceDigest"));
                             } else {
                                 assertThat(((Number) repeat.get("llmCalls")).intValue()).isPositive();
-                                var settled = variantMeasure(fixture, "RESUME_WARM", false, false, task, optimized);
+                                var settled = variantMeasure(fixture, "RESUME_WARM", false, false, optimized);
                                 assertThat(settled.get("llmCalls")).isEqualTo(0);
                                 assertThat(settled.get("outputDigest")).isEqualTo(repeat.get("outputDigest"));
                                 assertThat(settled.get("provenanceDigest")).isEqualTo(repeat.get("provenanceDigest"));
@@ -109,14 +102,12 @@ class PairedSourceUpdateBenchmarkTest extends EndToEndCriticalPathProfileTest {
     }
 
     private Map<String, Object> variantMeasure(Fixture fixture, String workload, boolean analyze, boolean failure,
-            String task, boolean optimized) {
+            boolean optimized) {
         try (var scope = GenerationJobContext.openScope(null)) {
-            return GenerationJobContext.withValue(SOURCE_CACHE, task.equals("B") || optimized,
-                    () -> GenerationJobContext.withValue(JDBC_READ, task.equals("B") && optimized,
-                    () -> {
+            return GenerationJobContext.withValue(JDBC_READ, optimized, () -> {
                         try { return measureProfile(fixture, workload, analyze, failure); }
                         catch (Throwable error) { return rethrow(error); }
-                    }));
+                    });
         }
     }
 
