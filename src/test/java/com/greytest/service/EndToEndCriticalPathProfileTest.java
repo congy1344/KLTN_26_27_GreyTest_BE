@@ -33,10 +33,15 @@ import jdk.jfr.consumer.RecordingFile;
 @Import(CriticalPathProfiler.Configuration.class)
 @EnabledIfSystemProperty(named = "e2e.profile", matches = "true")
 class EndToEndCriticalPathProfileTest extends IncrementalPipelineBenchmarkTest {
-    private boolean dense;
+    boolean dense;
 
     @Override String respond(String prompt) throws Exception {
-        return CriticalPathProfiler.unchecked("provider.local", () -> {
+        if (Boolean.parseBoolean(System.getProperty("benchmark.instrumentation", "true")))
+            return CriticalPathProfiler.unchecked("provider.local", () -> respondFixture(prompt));
+        return respondFixture(prompt);
+    }
+
+    private String respondFixture(String prompt) throws Exception {
             GenerationJobContext.count("profile.promptChars", prompt.length());
             String response = super.respond(prompt);
             if (dense && prompt.contains("Prompt: business-rule")) {
@@ -63,7 +68,6 @@ class EndToEndCriticalPathProfileTest extends IncrementalPipelineBenchmarkTest {
                 response = json.writeValueAsString(root);
             }
             return response;
-        });
     }
 
     @Test void profileCriticalPath() throws Throwable {
@@ -108,8 +112,15 @@ class EndToEndCriticalPathProfileTest extends IncrementalPipelineBenchmarkTest {
             recording.dump(output.resolve("critical-path.jfr"));
         }
         assertThat(jdbc.queryForObject("select count(*) from project", Integer.class)).isEqualTo(projectsBefore);
+        attachJfr(output.resolve("critical-path.jfr"), samples);
+        json.writerWithDefaultPrettyPrinter().writeValue(output.resolve("samples.json").toFile(), Map.of(
+                "provider", "deterministic local mock; zero network latency", "batchConcurrency", 2,
+                "warmupPerWorkload", 1, "samplesPerWorkload", count, "samples", samples));
+    }
+
+    static void attachJfr(Path recordingPath, List<Map<String, Object>> samples) throws Exception {
         // JFR chứa cả setup/cleanup; chỉ tổng hợp event có thread và interval khớp run đo.
-        try (var events = new RecordingFile(output.resolve("critical-path.jfr"))) {
+        try (var events = new RecordingFile(recordingPath)) {
             while (events.hasMoreEvents()) {
                 var event = events.readEvent();
                 var eventThread = event.getEventType().getName().equals("jdk.ExecutionSample")
@@ -133,12 +144,9 @@ class EndToEndCriticalPathProfileTest extends IncrementalPipelineBenchmarkTest {
                 }
             }
         }
-        Files.writeString(output.resolve("samples.json"), json.writerWithDefaultPrettyPrinter().writeValueAsString(Map.of(
-                "provider", "deterministic local mock; zero network latency", "batchConcurrency", 2,
-                "warmupPerWorkload", 1, "samplesPerWorkload", count, "samples", samples)));
     }
 
-    private void prepare(Fixture fixture, String workload) throws Exception {
+    void prepare(Fixture fixture, String workload) throws Exception {
         Path candidate = fixture.root().resolve("candidate");
         Path file = candidate.resolve("src/main/java/benchmark/BenchmarkService.java");
         if (workload.startsWith("ONE_ADDED")) {
@@ -157,7 +165,7 @@ class EndToEndCriticalPathProfileTest extends IncrementalPipelineBenchmarkTest {
         }
     }
 
-    private Map<String, Object> measureProfile(Fixture fixture, String workload, boolean analyze, boolean expectFailure) throws Throwable {
+    Map<String, Object> measureProfile(Fixture fixture, String workload, boolean analyze, boolean expectFailure) throws Throwable {
         var run = new CriticalPathProfiler.Run(workload, fixture.projectId(), fixture.updateId());
         Map<String, Object> result = new LinkedHashMap<>();
         int before = calls.get();
@@ -166,13 +174,16 @@ class EndToEndCriticalPathProfileTest extends IncrementalPipelineBenchmarkTest {
         result.put("epochStartMillis", System.currentTimeMillis());
         long started = System.nanoTime();
         try (var scope = GenerationJobContext.openScope(null)) {
-            CriticalPathProfiler.bind(run, () -> CriticalPathProfiler.observe("e2e", () -> {
+            CriticalPathProfiler.Call<Void> measured = () -> {
                 if (analyze) result.put("changedMethods", sourceUpdates.analyzeUpdate(fixture.projectId(), fixture.updateId(), null).totalChangedMethods());
                 if (expectFailure) assertThatThrownBy(() -> pipeline.generateAll(fixture.projectId(), fixture.updateId(), null))
                         .hasStackTraceContaining("Injected benchmark failure");
                 else pipeline.generateAll(fixture.projectId(), fixture.updateId(), null);
                 return null;
-            }));
+            };
+            if (Boolean.parseBoolean(System.getProperty("benchmark.instrumentation", "true")))
+                CriticalPathProfiler.bind(run, () -> CriticalPathProfiler.observe("e2e", measured));
+            else measured.get();
             result.put("wallMillis", (System.nanoTime() - started) / 1_000_000.0);
             result.put("processCpuMillis", (os.getProcessCpuTime() - cpu) / 1_000_000.0);
             result.put("epochEndMillis", System.currentTimeMillis());
@@ -185,7 +196,7 @@ class EndToEndCriticalPathProfileTest extends IncrementalPipelineBenchmarkTest {
         result.put("proposalActions", artifacts.stream().collect(java.util.stream.Collectors.groupingBy(item -> item.getTargetType().name() + "." + item.getAction().name(), java.util.stream.Collectors.counting())));
         String content = artifacts.stream().map(item -> item.getTargetType() + ":" + item.getTargetId() + ":" + item.getAfterData()).sorted().collect(java.util.stream.Collectors.joining("\n"));
         result.put("outputDigest", java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(content.getBytes(java.nio.charset.StandardCharsets.UTF_8))));
-        String provenance = jdbc.queryForList("select stage,target_key,fingerprint,provenance::text,output_digest from generation_checkpoint where source_update_id=? and fingerprint is not null order by stage,target_key", fixture.updateId()).toString();
+        String provenance = jdbc.queryForList("select stage,target_key,fingerprint,provenance::text,output_digest,(output_json::jsonb -> 'outputProvenance')::text as output_provenance from generation_checkpoint where source_update_id=? and fingerprint is not null order by stage,target_key", fixture.updateId()).toString();
         result.put("provenanceDigest", java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(provenance.getBytes(java.nio.charset.StandardCharsets.UTF_8))));
         result.put("methodIds", jdbc.queryForList("select jm.id,jm.method_name from java_method jm join java_class jc on jc.id=jm.class_id where jc.project_id=? order by jm.id", fixture.projectId()));
         result.put("targetMethods", jdbc.queryForList("""

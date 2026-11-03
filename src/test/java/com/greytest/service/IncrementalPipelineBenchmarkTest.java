@@ -259,6 +259,37 @@ class IncrementalPipelineBenchmarkTest {
         } finally { cleanupFixture(fixture); }
     }
 
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"pom.xml", "lombok.config", "classpath-setting"})
+    void configurationEditedDuringProviderCallCannotPublishSuccessfulStage(String configuration) throws Exception {
+        Fixture fixture = createFixture();
+        String previousClasspath = System.getProperty("greytest.analysis.classpath-file");
+        try {
+            var changed = new AtomicBoolean();
+            when(provider.complete(anyString(), any(LlmRequestOptions.class))).thenAnswer(invocation -> {
+                String result = respond(invocation.getArgument(0));
+                if (changed.compareAndSet(false, true)) {
+                    if (configuration.equals("classpath-setting")) System.setProperty("greytest.analysis.classpath-file", fixture.root().resolve("changed-classpath.json").toString());
+                    else {
+                        Path file = fixture.root().resolve("candidate").resolve(configuration);
+                        Files.writeString(file, configuration.equals("pom.xml") ? Files.readString(file) + "\n" : "lombok.addLombokGeneratedAnnotation = true\n");
+                    }
+                }
+                return result;
+            });
+            assertThatThrownBy(() -> pipeline.generateAll(fixture.projectId(), fixture.updateId(), null))
+                    .hasStackTraceContaining("SourceSnapshotSession$SnapshotChangedException");
+            assertThat(jdbc.queryForObject("select status from source_update where id=?", String.class, fixture.updateId())).isEqualTo("FAILED");
+            assertThat(jdbc.queryForObject("select count(*) from generation_checkpoint where source_update_id=? and target_key='__stage__' and state='SUCCEEDED'",
+                    Integer.class, fixture.updateId())).isZero();
+            assertThat(calls.get()).isEqualTo(1);
+        } finally {
+            if (previousClasspath == null) System.clearProperty("greytest.analysis.classpath-file");
+            else System.setProperty("greytest.analysis.classpath-file", previousClasspath);
+            cleanupFixture(fixture);
+        }
+    }
+
 
     @Test void benchmarkOneAddedMethodThroughAnalysisAndAllStages() throws Exception {
         List<Map<String, Object>> measurements = new ArrayList<>();

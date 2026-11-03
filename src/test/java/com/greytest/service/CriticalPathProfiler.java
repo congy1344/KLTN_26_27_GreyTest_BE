@@ -25,7 +25,7 @@ import org.springframework.context.annotation.Bean;
 final class CriticalPathProfiler {
     interface Call<T> { T get() throws Throwable; }
     record Span(long id, long parent, String name, long thread, String stage, int batch, String targets,
-                long startNanos, long endNanos, long cpuNanos, boolean failed) { }
+                long startNanos, long endNanos, long cpuNanos, long allocatedBytes, String purpose, boolean failed) { }
     static final class Run {
         final String id = UUID.randomUUID().toString();
         final String workload;
@@ -36,7 +36,7 @@ final class CriticalPathProfiler {
         }
         List<Span> spans() { return List.copyOf(events); }
     }
-    private record Context(Run run, long parent, String stage, int batch, String targets) { }
+    private record Context(Run run, long parent, String stage, int batch, String targets, String name) { }
     private static final ThreadLocal<Context> CURRENT = new ThreadLocal<>();
     private static final AtomicLong IDS = new AtomicLong();
     private static final ThreadMXBean CPU = ManagementFactory.getThreadMXBean();
@@ -45,7 +45,7 @@ final class CriticalPathProfiler {
             ThreadLocal.withInitial(java.util.IdentityHashMap::new);
 
     static <T> T bind(Run run, Call<T> call) throws Throwable {
-        return within(new Context(run, 0, "ANALYZE", 0, "[]"), call);
+        return within(new Context(run, 0, "ANALYZE", 0, "[]", "root"), call);
     }
     private static <T> T within(Context value, Call<T> call) throws Throwable {
         Context previous = CURRENT.get();
@@ -61,21 +61,26 @@ final class CriticalPathProfiler {
     static <T> T observe(String name, Call<T> call) throws Throwable {
         Context context = CURRENT.get();
         if (context == null) return call.get();
-        long id = IDS.incrementAndGet(), started = System.nanoTime(), cpu = cpu();
+        long id = IDS.incrementAndGet(), started = System.nanoTime(), cpu = cpu(), allocated = allocated();
         boolean failed = true;
         try {
-            T result = within(new Context(context.run, id, context.stage, context.batch, context.targets), call);
+            T result = within(new Context(context.run, id, context.stage, context.batch, context.targets, name), call);
             failed = false;
             return result;
         } finally {
-            long endedCpu = cpu();
+            long endedCpu = cpu(), endedAllocated = allocated();
             context.run.events.add(new Span(id, context.parent, name, Thread.currentThread().getId(),
                     context.stage, context.batch, context.targets, started - context.run.started,
-                    System.nanoTime() - context.run.started, cpu < 0 || endedCpu < 0 ? -1 : endedCpu - cpu, failed));
+                    System.nanoTime() - context.run.started, cpu < 0 || endedCpu < 0 ? -1 : endedCpu - cpu,
+                    allocated < 0 || endedAllocated < 0 ? -1 : endedAllocated - allocated, context.name, failed));
         }
     }
     private static long cpu() {
         return CPU.isCurrentThreadCpuTimeSupported() && CPU.isThreadCpuTimeEnabled() ? CPU.getCurrentThreadCpuTime() : -1;
+    }
+    private static long allocated() {
+        return CPU instanceof com.sun.management.ThreadMXBean bean && bean.isThreadAllocatedMemorySupported()
+                && bean.isThreadAllocatedMemoryEnabled() ? bean.getThreadAllocatedBytes(Thread.currentThread().getId()) : -1;
     }
     static Function<Object, Object> batchWorker(List<?> inputs, Function<Object, Object> worker) {
         Context captured = CURRENT.get();
@@ -83,12 +88,12 @@ final class CriticalPathProfiler {
         return input -> {
             if (captured == null) return worker.apply(input);
             int batch = inputs.indexOf(input) + 1;
-            Context context = new Context(captured.run, captured.parent, captured.stage, batch, String.valueOf(input));
+            Context context = new Context(captured.run, captured.parent, captured.stage, batch, String.valueOf(input), captured.name);
             try {
                 return within(context, () -> {
                     long now = System.nanoTime();
                     context.run.events.add(new Span(IDS.incrementAndGet(), context.parent, "batch.readyToStart", Thread.currentThread().getId(),
-                            context.stage, batch, context.targets, ready - context.run.started, now - context.run.started, -1, false));
+                            context.stage, batch, context.targets, ready - context.run.started, now - context.run.started, -1, -1, context.name, false));
                     return observe("batch.worker", () -> worker.apply(input));
                 });
             } catch (RuntimeException | Error e) { throw e; }
@@ -103,7 +108,9 @@ final class CriticalPathProfiler {
 
     @TestConfiguration(proxyBeanMethods = false)
     static class Configuration {
-        @Bean static BeanPostProcessor criticalPathObserver() {
+        @Bean
+        @org.springframework.boot.autoconfigure.condition.ConditionalOnProperty(name = "benchmark.instrumentation", havingValue = "true", matchIfMissing = true)
+        static BeanPostProcessor criticalPathObserver() {
             return new BeanPostProcessor() {
                 @Override public Object postProcessAfterInitialization(Object bean, String name) {
                     if (bean instanceof DataSource) return jdbcProxy(bean, DataSource.class);
@@ -116,7 +123,7 @@ final class CriticalPathProfiler {
                         String method = invocation.getMethod().getName();
                         Object[] args = invocation.getArguments();
                         if (simple.equals("IncrementalCheckpointCoordinator") && method.equals("beginStage"))
-                            CURRENT.set(new Context(context.run, context.parent, String.valueOf(args[1]), 0, "[]"));
+                            CURRENT.set(new Context(context.run, context.parent, String.valueOf(args[1]), 0, "[]", context.name));
                         if (simple.equals("LlmBatchExecutor") && method.equals("map") && args.length == 4) {
                             @SuppressWarnings("unchecked") var worker = (Function<Object, Object>) args[2];
                             args[2] = batchWorker((List<?>) args[0], worker);
@@ -137,7 +144,7 @@ final class CriticalPathProfiler {
                                     Context origin = tx.context;
                                     origin.run.events.add(new Span(IDS.incrementAndGet(), origin.parent, "transaction.hold", Thread.currentThread().getId(),
                                             origin.stage, origin.batch, origin.targets, tx.started - origin.run.started,
-                                            System.nanoTime() - origin.run.started, -1, failed));
+                                            System.nanoTime() - origin.run.started, -1, -1, origin.name, failed));
                                 }
                                 if (TRANSACTIONS.get().isEmpty()) TRANSACTIONS.remove();
                             }

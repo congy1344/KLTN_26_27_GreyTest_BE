@@ -19,6 +19,40 @@ class CriticalPathProfilerTest {
         assertThat(child.startNanos()).isGreaterThanOrEqualTo(parent.startNanos());
         assertThat(child.endNanos()).isLessThanOrEqualTo(parent.endNanos());
         assertThat(parent.cpuNanos()).isGreaterThanOrEqualTo(-1);
+        assertThat(parent.allocatedBytes()).isGreaterThanOrEqualTo(-1);
+        assertThat(child.purpose()).isEqualTo("parent");
+    }
+
+    @Test void controlDisablesObserverAtContextInitialization() {
+        new org.springframework.boot.test.context.runner.ApplicationContextRunner()
+                .withUserConfiguration(CriticalPathProfiler.Configuration.class)
+                .withPropertyValues("benchmark.instrumentation=false")
+                .run(context -> assertThat(context).doesNotHaveBean("criticalPathObserver"));
+    }
+
+    @Test void canonicalComparisonKeepsBusinessValuesAndSource() throws Exception {
+        var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+        var ids = java.util.Map.of("METHOD", java.util.Map.of("17", "Service#value()"), "TEST_CASE", java.util.Map.of("18", "case-ordinal-1"));
+        var input = mapper.readTree("{\"methodId\":17,\"expectedResult\":\"Returns 42\",\"sourceCode\":\"assertEquals(42, service.value());\",\"parameters\":[\"second\",\"first\"]}");
+        var canonical = PairedSourceUpdateBenchmarkTest.canonical(input, "", ids, java.util.Map.of());
+        assertThat(canonical.path("methodId").asText()).isEqualTo("Service#value()");
+        assertThat(canonical.path("expectedResult")).isEqualTo(input.path("expectedResult"));
+        assertThat(canonical.path("sourceCode")).isEqualTo(input.path("sourceCode"));
+        assertThat(canonical.path("parameters")).isEqualTo(input.path("parameters"));
+        assertThat(PairedSourceUpdateBenchmarkTest.normalizeTargetKey("case:18", ids)).isEqualTo("case:case-ordinal-1");
+    }
+
+    @Test void targetKeyPreservesCaseOrdinalWithinPlan() {
+        var ids = java.util.Map.of("TEST_PLAN", java.util.Map.of("17", "plan-identity"),
+                "TEST_CASE", java.util.Map.of("18", "case-identity"));
+        assertThat(PairedSourceUpdateBenchmarkTest.normalizeTargetKey("plan:17:case:0", ids))
+                .isEqualTo("plan:plan-identity:case:0");
+        assertThat(PairedSourceUpdateBenchmarkTest.normalizeTargetKey("plan:17:case:18", ids))
+                .isEqualTo("plan:plan-identity:case:18");
+        assertThat(PairedSourceUpdateBenchmarkTest.normalizeTargetKey("case:18", ids))
+                .isEqualTo("case:case-identity");
+        assertThat(PairedSourceUpdateBenchmarkTest.normalizeTargetKey("benchmark.Service#value()", ids))
+                .isEqualTo("benchmark.Service#value()");
     }
 
     @Test void preservesFailureAndRestoresThreadContext() throws Throwable {
