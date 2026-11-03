@@ -73,6 +73,11 @@ public class SourceDiffService {
      * So sánh 2 thư mục snapshot source code.
      */
     public List<MethodDiffItem> compareSnapshots(Path baseDir, Path candidateDir) {
+        return com.greytest.service.GenerationJobContext.measure("source.diff",
+                () -> compareVerifiedSnapshots(baseDir, candidateDir));
+    }
+
+    private List<MethodDiffItem> compareVerifiedSnapshots(Path baseDir, Path candidateDir) {
         String candidateDigest = persistentSourceAnalysis == null ? null : PersistentSourceAnalysisService.contentDigest(candidateDir);
         SourceScanResult candidateScan = parserHelper.scanProject(candidateDir);
         if (!candidateScan.failedParseFiles().isEmpty()) {

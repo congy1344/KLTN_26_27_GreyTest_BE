@@ -190,7 +190,8 @@ public class GenerationContextBuilder {
     @Transactional(readOnly = true)
     public BusinessRuleGenerationContextDto buildSnapshotBusinessRuleGenerationContext(
             Long projectId, Set<Long> targetMethodIds, java.nio.file.Path snapshot) {
-        return buildBusinessRuleGenerationContext(sourceAnalysis(projectId, snapshot, true), targetMethodIds, snapshot);
+        return GenerationJobContext.measure("context.BUSINESS_RULE", () ->
+                buildBusinessRuleGenerationContext(sourceAnalysis(projectId, snapshot, true), targetMethodIds, snapshot));
     }
 
     private BusinessRuleGenerationContextDto buildBusinessRuleGenerationContext(
@@ -465,7 +466,8 @@ public class GenerationContextBuilder {
 
     @Transactional(readOnly = true)
     public TestPlanContextDto buildSnapshotTestPlanContext(Long projectId, Set<Long> targetRuleIds, java.nio.file.Path snapshot) {
-        return buildTestPlanContext(projectId, targetRuleIds, sourceAnalysis(projectId, snapshot, true), snapshot);
+        return GenerationJobContext.measure("context.TEST_PLAN", () ->
+                buildTestPlanContext(projectId, targetRuleIds, sourceAnalysis(projectId, snapshot, true), snapshot));
     }
 
     private TestPlanContextDto buildTestPlanContext(Long projectId, Set<Long> targetRuleIds,
@@ -499,7 +501,8 @@ public class GenerationContextBuilder {
 
     @Transactional(readOnly = true)
     public TestCaseContextDto buildSnapshotTestCaseContext(Long projectId, Set<Long> targetPlanIds, java.nio.file.Path snapshot) {
-        return buildTestCaseContext(projectId, targetPlanIds, sourceAnalysis(projectId, snapshot, true), snapshot);
+        return GenerationJobContext.measure("context.TEST_CASE", () ->
+                buildTestCaseContext(projectId, targetPlanIds, sourceAnalysis(projectId, snapshot, true), snapshot));
     }
 
     private TestCaseContextDto buildTestCaseContext(Long projectId, Set<Long> targetPlanIds,
@@ -675,8 +678,8 @@ public class GenerationContextBuilder {
     /** Context Unit Test từ snapshot source của bản cập nhật. */
     @Transactional(readOnly = true)
     public UnitTestContextDto buildSnapshotUnitTestContext(Long projectId, Set<Long> targetCaseIds, java.nio.file.Path snapshot) {
-        return buildVerifiedUnitTestContext(projectId, targetCaseIds,
-                sourceAnalysis(projectId, snapshot, true), snapshot);
+        return GenerationJobContext.measure("context.UNIT_TEST", () -> buildVerifiedUnitTestContext(projectId, targetCaseIds,
+                sourceAnalysis(projectId, snapshot, true), snapshot));
     }
 
     private UnitTestContextDto buildVerifiedUnitTestContext(Long projectId, Set<Long> targetCaseIds,

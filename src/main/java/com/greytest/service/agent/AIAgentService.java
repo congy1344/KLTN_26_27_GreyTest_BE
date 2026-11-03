@@ -596,6 +596,14 @@ public class AIAgentService {
 
     private <T> void validateSemanticOutput(String promptName, Long projectId, Object context, T parsed,
             java.nio.file.Path snapshot) {
+        GenerationJobContext.measure("validation.semantic", () -> {
+            validateOutput(promptName, projectId, context, parsed, snapshot);
+            return null;
+        });
+    }
+
+    private <T> void validateOutput(String promptName, Long projectId, Object context, T parsed,
+            java.nio.file.Path snapshot) {
         Optional<String> referenceProblem = GenerationValidationGate.validateReferences(context, parsed);
         if ("business-rule".equals(promptName) && context instanceof BusinessRuleGenerationContextDto rulesContext
                 && parsed instanceof BusinessRuleResponseDto rulesResponse) {

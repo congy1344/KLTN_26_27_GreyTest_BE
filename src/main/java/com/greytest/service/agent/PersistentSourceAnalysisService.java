@@ -86,6 +86,7 @@ public class PersistentSourceAnalysisService {
 
     /** Đọc/hash riêng với parse AST để phát hiện snapshot bị sửa giữa các request hoặc batch. */
     public static String contentDigest(Path root) {
+        GenerationJobContext.increment("source.digestPasses");
         if (root == null || !Files.isDirectory(root)) throw new LlmResponseException("Source snapshot is missing.");
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");

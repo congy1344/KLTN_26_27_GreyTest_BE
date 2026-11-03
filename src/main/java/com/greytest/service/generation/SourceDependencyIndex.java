@@ -125,6 +125,11 @@ final class SourceDependencyIndex {
     }
 
     static SourceDependencyIndex load(Path sourceRoot, Map<String, CompilationUnit> parsedUnits) {
+        GenerationJobContext.increment("dependency.loads");
+        return GenerationJobContext.measure("dependency.load", () -> loadIndex(sourceRoot, parsedUnits));
+    }
+
+    private static SourceDependencyIndex loadIndex(Path sourceRoot, Map<String, CompilationUnit> parsedUnits) {
         try {
             if (sourceRoot == null) throw new IllegalArgumentException("Missing source root");
             Path root = sourceRoot.toRealPath();
@@ -134,6 +139,8 @@ final class SourceDependencyIndex {
     }
 
     private static SourceDependencyIndex loadVerified(Path root, Map<String, CompilationUnit> parsedUnits) {
+        GenerationJobContext.increment("dependency.walks");
+        GenerationJobContext.increment("dependency.hashPasses");
         try {
             Map<String, String> sources = new TreeMap<>();
             Files.walkFileTree(root, new SimpleFileVisitor<>() {
@@ -172,7 +179,8 @@ final class SourceDependencyIndex {
             if (cached != null) { GenerationJobContext.increment("dependencyIndexHits"); return cached.index(); }
         }
         GenerationJobContext.increment("dependencyIndexMisses");
-        SourceDependencyIndex created = new SourceDependencyIndex(key.root(), sources, parsedUnits, classpath);
+        SourceDependencyIndex created = GenerationJobContext.measure("dependency.build",
+                () -> new SourceDependencyIndex(key.root(), sources, parsedUnits, classpath));
         long characters = sources.values().stream().mapToLong(String::length).sum();
         if (characters > MAX_CACHED_SOURCE_CHARACTERS) { created.releaseUncachedFacades(); return created; }
         synchronized (VERIFIED_INDEXES) {

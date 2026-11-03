@@ -257,6 +257,17 @@ public class SourceUpdateService {
      */
     @Transactional
     public SourceUpdateDto analyzeUpdate(Long projectId, Long updateId, String servicePath, AuthUser user) {
+        try (var scope = com.greytest.service.GenerationJobContext.openScope(user == null ? null : user.getId())) {
+            try {
+                return com.greytest.service.GenerationJobContext.measure("source.update.analyze",
+                        () -> analyzeUpdateWithMetrics(projectId, updateId, servicePath, user));
+            } finally {
+                log.info("Source update analysis update={} metrics={}", updateId, com.greytest.service.GenerationJobContext.metrics());
+            }
+        }
+    }
+
+    private SourceUpdateDto analyzeUpdateWithMetrics(Long projectId, Long updateId, String servicePath, AuthUser user) {
         getProjectAndCheckAccess(projectId, user);
         guardMutation(projectId, updateId);
         SourceUpdate update = sourceUpdateRepository.findByIdAndProjectId(updateId, projectId)

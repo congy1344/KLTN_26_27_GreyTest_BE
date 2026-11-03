@@ -73,7 +73,15 @@ public final class GenerationJobContext {
     public static Long sourceUpdateId() { return SOURCE_UPDATE_ID.get(); }
 
     public static void increment(String name) { addMetric(name, 1L); }
+    public static void count(String name, long value) { addMetric(name, value); }
     public static void recordDuration(String name, long nanos) { addMetric(name + "Nanos", nanos); }
+
+    /** Đo cả nhánh lỗi để baseline không che mất chi phí retry/validation. */
+    public static <T> T measure(String name, Supplier<T> task) {
+        long started = System.nanoTime();
+        try { return task.get(); }
+        finally { recordDuration(name, System.nanoTime() - started); }
+    }
 
     private static void addMetric(String name, long value) {
         Map<String, LongAdder> metrics = METRICS.get();
