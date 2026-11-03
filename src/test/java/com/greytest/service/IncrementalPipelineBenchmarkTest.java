@@ -66,9 +66,9 @@ class IncrementalPipelineBenchmarkTest {
     @Autowired SourceUpdateService sourceUpdates;
     @MockBean LlmClient provider;
 
-    private final AtomicInteger calls = new AtomicInteger();
+    final AtomicInteger calls = new AtomicInteger();
     private final AtomicInteger parses = new AtomicInteger();
-    private final AtomicBoolean failNextUnitTest = new AtomicBoolean();
+    final AtomicBoolean failNextUnitTest = new AtomicBoolean();
     private volatile CountDownLatch providerEntered;
     private volatile CountDownLatch providerRelease;
 
@@ -322,7 +322,7 @@ class IncrementalPipelineBenchmarkTest {
                 "limitations", "Deterministic local fixture; sample counts depend on scenario; not a production latency estimate")));
     }
 
-    private void cleanupFixture(Fixture fixture) throws Exception {
+    void cleanupFixture(Fixture fixture) throws Exception {
         jdbc.update("delete from project where id = ? and name = ?", fixture.projectId(), fixture.name());
         try (var paths = Files.walk(fixture.root())) {
             for (Path path : paths.sorted(Comparator.reverseOrder()).toList()) Files.delete(path);
@@ -439,7 +439,7 @@ class IncrementalPipelineBenchmarkTest {
         return result;
     }
 
-    private Fixture createFixture() throws Exception {
+    Fixture createFixture() throws Exception {
         Path root = Files.createTempDirectory(Path.of("target").toAbsolutePath(), "incremental-benchmark-");
         Path base = root.resolve("base");
         Path candidate = root.resolve("candidate");
@@ -490,7 +490,7 @@ class IncrementalPipelineBenchmarkTest {
 
     private Long id(String sql, Object... args) { return jdbc.queryForObject(sql, Long.class, args); }
 
-    private void writeSource(Path root, int value) throws Exception {
+    void writeSource(Path root, int value) throws Exception {
         Path source = root.resolve("src/main/java/benchmark/BenchmarkService.java");
         Files.createDirectories(source.getParent());
         StringBuilder body = new StringBuilder("package benchmark; import org.springframework.stereotype.Service; @Service public class BenchmarkService {\n");
@@ -503,7 +503,7 @@ class IncrementalPipelineBenchmarkTest {
         Files.writeString(root.resolve("pom.xml"), "<project><modelVersion>4.0.0</modelVersion><groupId>benchmark</groupId><artifactId>fixture</artifactId><version>1</version><properties><maven.compiler.release>17</maven.compiler.release></properties><dependencies><dependency><groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter</artifactId><version>5.10.0</version><scope>test</scope></dependency></dependencies></project>");
     }
 
-    private String respond(String prompt) throws Exception {
+    String respond(String prompt) throws Exception {
         calls.incrementAndGet();
         CountDownLatch entered = providerEntered;
         if (entered != null) {
@@ -569,5 +569,5 @@ class IncrementalPipelineBenchmarkTest {
                 + "class BenchmarkServiceTest { @Test void test" + method + "() { BenchmarkService service = new BenchmarkService(); assertEquals(42, service." + method + "()); } }\n";
     }
 
-    private record Fixture(long projectId, long updateId, Path root, String name) { }
+    record Fixture(long projectId, long updateId, Path root, String name) { }
 }
