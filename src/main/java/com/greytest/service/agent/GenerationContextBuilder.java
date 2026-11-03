@@ -54,6 +54,9 @@ import com.greytest.entity.TestCase;
 import com.greytest.entity.TestPlan;
 import com.greytest.entity.TestPlanCoveredRule;
 import com.greytest.entity.enums.ReviewStatus;
+import com.greytest.entity.enums.SourceUpdateAction;
+import com.greytest.entity.enums.SourceUpdateReviewStatus;
+import com.greytest.entity.enums.SourceUpdateTargetType;
 import com.greytest.repository.BusinessRuleRepository;
 import com.greytest.repository.ProjectRepository;
 import com.greytest.repository.TestCaseRepository;
@@ -76,6 +79,13 @@ public class GenerationContextBuilder {
     private static final String JDBC_READ_FLAG = "greytest.source-update.jdbc-read-optimization-enabled";
     @org.springframework.beans.factory.annotation.Value("${greytest.source-update.jdbc-read-optimization-enabled:true}")
     private boolean jdbcReadOptimizationEnabled = true;
+    @org.springframework.beans.factory.annotation.Value("${greytest.source-update.overlay-read-bundle-enabled:true}")
+    private boolean overlayReadBundleEnabled = true;
+    private record DraftReadKey(Long projectId, Long updateId) { }
+    private record DraftOverlayItem(Long id, Long targetId, SourceUpdateTargetType targetType,
+            SourceUpdateAction action, SourceUpdateReviewStatus reviewStatus, String afterData,
+            Long version, Long userRevision) { }
+    private record DraftOverlayBundle(Long updateVersion, List<DraftOverlayItem> items) { }
 
     /** Chụp upstream bất biến trong một batch; scope lồng nhau luôn đọc mới trước commit. */
     public static <T> T withInputSnapshot(java.util.function.Supplier<T> action) {
@@ -1256,44 +1266,62 @@ public class GenerationContextBuilder {
 
     /** Đọc proposal mỗi lần để stage sau nhìn thấy nội dung người dùng vừa sửa trong đúng draft. */
     private <T> void overlay(Long projectId, com.greytest.entity.enums.SourceUpdateTargetType type,
-            Map<Long, T> contexts, java.util.function.BiFunction<T, com.greytest.entity.SourceUpdateItem, T> apply) {
+            Map<Long, T> contexts, java.util.function.BiFunction<T, DraftOverlayItem, T> apply) {
         Long updateId = GenerationJobContext.sourceUpdateId();
         if (updateId == null || sourceUpdates == null || sourceUpdateItems == null) return;
-        sourceUpdates.findByIdAndProjectId(updateId, projectId)
-                .orElseThrow(() -> new IllegalArgumentException("Draft does not belong to selected project"));
-        for (var item : sourceUpdateItems.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId)) {
-            if (item.getTargetType() != type) continue;
-            if (item.getTargetId() == null) throw new IllegalArgumentException("Draft artifact has no logical ID");
-            boolean rejected = item.getReviewStatus() == com.greytest.entity.enums.SourceUpdateReviewStatus.REJECTED
-                    || item.getAction()==com.greytest.entity.enums.SourceUpdateAction.KEEP;
+        for (var item : draftOverlayItems(projectId, updateId)) {
+            if (item.targetType() != type) continue;
+            if (item.targetId() == null) throw new IllegalArgumentException("Draft artifact has no logical ID");
+            boolean rejected = item.reviewStatus() == com.greytest.entity.enums.SourceUpdateReviewStatus.REJECTED
+                    || item.action()==com.greytest.entity.enums.SourceUpdateAction.KEEP;
             if (rejected) {
-                if (item.getAction() == com.greytest.entity.enums.SourceUpdateAction.CREATE) contexts.remove(item.getTargetId());
+                if (item.action() == com.greytest.entity.enums.SourceUpdateAction.CREATE) contexts.remove(item.targetId());
                 continue;
             }
-            T previous = contexts.get(item.getTargetId());
+            T previous = contexts.get(item.targetId());
             if (previous == null) {
                 // Artifact con của một parent đã REMOVE không tham gia context downstream.
                 if (type == com.greytest.entity.enums.SourceUpdateTargetType.TEST_CASE) continue;
                 throw new IllegalArgumentException("Draft artifact is outside the selected project");
             }
-            if (item.getAction() == com.greytest.entity.enums.SourceUpdateAction.REMOVE) {
-                contexts.remove(item.getTargetId());
+            if (item.action() == com.greytest.entity.enums.SourceUpdateAction.REMOVE) {
+                contexts.remove(item.targetId());
             } else {
-                if (item.getAfterData() == null || item.getAfterData().isBlank()) continue;
+                if (item.afterData() == null || item.afterData().isBlank()) continue;
                 T updated = apply.apply(previous, item);
-                if (updated != null) contexts.put(item.getTargetId(), updated);
+                if (updated != null) contexts.put(item.targetId(), updated);
             }
         }
     }
 
-    private <T> T readDraft(com.greytest.entity.SourceUpdateItem item, Class<T> type) {
-        if (item == null || item.getAfterData() == null || item.getAfterData().isBlank()) {
+    /** Bundle chỉ sống trong input epoch của worker; nested precommit scope luôn đọc lại cả ownership/version. */
+    private List<DraftOverlayItem> draftOverlayItems(Long projectId, Long updateId) {
+        if (!optimizedJdbcReads() || !overlayReadBundleEnabled || INPUT_SNAPSHOT.get() == null
+                || Boolean.FALSE.equals(GenerationJobContext.scopedValue("greytest.source-update.overlay-read-bundle-enabled")))
+            return loadDraftOverlayBundle(projectId, updateId).items();
+        return inputSnapshot(new DraftReadKey(projectId, updateId), () -> {
+            GenerationJobContext.increment("jdbc.overlayReadBundles");
+            return loadDraftOverlayBundle(projectId, updateId);
+        }).items();
+    }
+
+    private DraftOverlayBundle loadDraftOverlayBundle(Long projectId, Long updateId) {
+        var update = sourceUpdates.findByIdAndProjectId(updateId, projectId)
+                .orElseThrow(() -> new IllegalArgumentException("Draft does not belong to selected project"));
+        var rows = sourceUpdateItems.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId).stream()
+                .map(item -> new DraftOverlayItem(item.getId(), item.getTargetId(), item.getTargetType(), item.getAction(),
+                        item.getReviewStatus(), item.getAfterData(), item.getVersion(), item.getUserRevision())).toList();
+        return new DraftOverlayBundle(update.getVersion(), rows);
+    }
+
+    private <T> T readDraft(DraftOverlayItem item, Class<T> type) {
+        if (item == null || item.afterData() == null || item.afterData().isBlank()) {
             return null;
         }
         try {
-            return objectMapper.readValue(item.getAfterData(), type);
+            return objectMapper.readValue(item.afterData(), type);
         } catch (Exception exception) {
-            throw new IllegalArgumentException("Invalid draft artifact " + item.getId(), exception);
+            throw new IllegalArgumentException("Invalid draft artifact " + item.id(), exception);
         }
     }
 

@@ -57,6 +57,42 @@ import com.greytest.service.analysis.AnalysisService;
 import com.greytest.service.analysis.ExistingTestService;
 
 class GenerationContextBuilderTest {
+    @Test void overlayBundleCopiesRowsAndNestedPrecommitScopeReadsFresh() {
+        mockCommonInputs(); stubApprovedUnitTestCase(11L);
+        var updates = mock(com.greytest.repository.SourceUpdateRepository.class);
+        var proposals = mock(com.greytest.repository.SourceUpdateItemRepository.class);
+        var update = new com.greytest.entity.SourceUpdate(); update.setId(100L); update.setProjectId(1L);
+        when(updates.findByIdAndProjectId(100L, 1L)).thenReturn(java.util.Optional.of(update));
+        var rule = draft(com.greytest.entity.enums.SourceUpdateTargetType.BUSINESS_RULE, 7L,
+                "{\"method_id\":11,\"description\":\"Rule snapshot\",\"category\":\"VALIDATION\"}");
+        var plan = draft(com.greytest.entity.enums.SourceUpdateTargetType.TEST_PLAN, 20L,
+                "{\"method_id\":11,\"rule_id\":7,\"covered_rule_ids\":[7],\"title\":\"Plan snapshot\",\"description\":\"Plan detail\",\"test_type\":\"HAPPY_PATH\"}");
+        var testCase = draft(com.greytest.entity.enums.SourceUpdateTargetType.TEST_CASE, 30L,
+                "{\"plan_id\":20,\"test_type\":\"HAPPY_PATH\",\"description\":\"Case\",\"preconditions\":\"setup\",\"test_data\":{\"input\":{},\"mocks\":{}},\"expected_result\":\"original revision\",\"priority\":\"HIGH\",\"trace_source\":\"BR-001 -> TP-001\"}");
+        when(proposals.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(100L)).thenReturn(List.of(rule, plan, testCase));
+        builder.configureIncrementalInputs(null, updates, proposals, objectMapper);
+        try (var job = com.greytest.service.GenerationJobContext.openScope(null)) {
+            com.greytest.service.GenerationJobContext.setSourceUpdateId(100L);
+            GenerationContextBuilder.withInputSnapshot(() -> {
+                builder.buildTestPlanContext(1L, Set.of(7L));
+                testCase.setAfterData(testCase.getAfterData().replace("original revision", "edited revision"));
+                testCase.setVersion(1L); testCase.setUserRevision(1L);
+                var preview = builder.buildUnitTestContext(1L, Set.of(30L));
+                assertThat(preview.approvedTestCases().get(0).expectedResult()).isEqualTo("original revision");
+                GenerationContextBuilder.withInputSnapshot(() -> {
+                    assertThat(builder.buildUnitTestContext(1L, Set.of(30L)).approvedTestCases().get(0).expectedResult()).isEqualTo("edited revision");
+                    return null;
+                });
+                when(updates.findByIdAndProjectId(100L, 1L)).thenReturn(java.util.Optional.empty());
+                assertThatThrownBy(() -> GenerationContextBuilder.withInputSnapshot(() -> builder.buildTestPlanContext(1L, Set.of(7L))))
+                        .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("Draft does not belong");
+                return null;
+            });
+        }
+        org.mockito.Mockito.verify(proposals, org.mockito.Mockito.times(2)).findBySourceUpdateIdOrderByTargetTypeAscIdAsc(100L);
+        org.mockito.Mockito.verify(updates, org.mockito.Mockito.times(3)).findByIdAndProjectId(100L, 1L);
+    }
+
     @Test void incrementalCasesUseOneBulkReadAndFreshNestedSnapshot() {
         var cases = stubTwoPlanCases();
         try (var job = com.greytest.service.GenerationJobContext.openScope(null)) {
