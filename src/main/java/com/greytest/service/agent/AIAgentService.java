@@ -388,6 +388,8 @@ public class AIAgentService {
                     GenerationJobContext.increment("cache.hit");
                     GenerationJobContext.log("Đã tái sử dụng kết quả AI đã sinh trước đó (100%).");
                     return attachSourceMetadata(responseType.cast(GenerationValidationGate.addFeasibilityNotes(context, parsed)), responseType, sourceMetadata);
+                } catch (com.greytest.service.generation.SourceSnapshotSession.SnapshotChangedException changed) {
+                    throw changed;
                 } catch (LlmResponseException exception) {
                     if(durable) persistentCache.evict(projectId,promptName,fingerprint.value()); else responseCache.evict(prompt);
                     GenerationJobContext.increment("cache.invalid");
@@ -412,6 +414,7 @@ public class AIAgentService {
         for (int attempt = 1; attempt <= EXHAUSTED_POOL_MAX_ATTEMPTS; attempt++) {
             boolean validatingResponse = false;
             try {
+                com.greytest.service.generation.SourceSnapshotSession.assertUnchanged();
                 GenerationJobContext.reserveLlmCall();
                 GenerationJobContext.increment("llm.calls");
                 long llmStarted=System.nanoTime();

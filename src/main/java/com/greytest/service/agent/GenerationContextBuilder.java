@@ -369,6 +369,7 @@ public class GenerationContextBuilder {
     private List<CollaboratorCallEvidence> collaboratorCalls(String sourceCode) {
         if (sourceCode == null || sourceCode.isBlank()) return List.of();
         try {
+            GenerationJobContext.increment("context.methodParses");
             var parsed = new JavaParser().parseMethodDeclaration(sourceCode);
             MethodDeclaration method = parsed.getResult().orElse(null);
             if (!parsed.isSuccessful() || method == null) return List.of();
@@ -398,6 +399,7 @@ public class GenerationContextBuilder {
     private Map<String, String> fieldTypes(String sourceCode) {
         if (sourceCode == null || sourceCode.isBlank()) return Map.of();
         try {
+            GenerationJobContext.increment("context.classParses");
             var parsed = new JavaParser().parse(sourceCode);
             CompilationUnit unit = parsed.getResult().orElse(null);
             if (!parsed.isSuccessful() || unit == null) return Map.of();
@@ -551,7 +553,8 @@ public class GenerationContextBuilder {
     private AnalysisResultDto sourceAnalysis(Long projectId, java.nio.file.Path root, boolean strict) {
         AnalysisResultDto stored = storedAnalysis(projectId);
         java.nio.file.Path normalized = root.toAbsolutePath().normalize();
-        String digest = inputSnapshot(new SourceDigestKey(normalized),()->PersistentSourceAnalysisService.contentDigest(normalized));
+        String digest = com.greytest.service.generation.SourceSnapshotSession.sourceDigest(normalized,
+                () -> inputSnapshot(new SourceDigestKey(normalized), () -> PersistentSourceAnalysisService.contentDigest(normalized)));
         var parsed = GenerationJobContext.memoize(new ParsedSourceAnalysisKey(projectId, normalized, digest, strict),
                 () -> persistentAnalysis == null ? SnapshotAnalysisLoader.parse(normalized, strict)
                         : persistentAnalysis.load(projectId, normalized, strict, digest));
@@ -780,6 +783,8 @@ public class GenerationContextBuilder {
             if (changed.beforeSource() == null) {
                 if (source == null || changed.afterSource() == null) return null;
                 if (source.contains(changed.afterSource())) continue;
+                GenerationJobContext.increment("context.classParses");
+                GenerationJobContext.increment("context.methodParses");
                 var parsedClass = new JavaParser().parse(source).getResult();
                 var parsedMethod = new JavaParser().parseMethodDeclaration(changed.afterSource()).getResult();
                 if (parsedClass.isEmpty() || parsedMethod.isEmpty()) return null;
@@ -830,6 +835,7 @@ public class GenerationContextBuilder {
         // Duyệt tiếp DTO/repository vừa tìm được để không thiếu kiểu generic, enum và lớp cha của chúng.
         for (int index = 0; index < result.size(); index++) {
             ClassContextDto owner = result.get(index);
+            if (owner.sourceCode() != null) GenerationJobContext.increment("context.classParses");
             CompilationUnit source = owner.sourceCode() == null ? null : new JavaParser(new ParserConfiguration()
                     .setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_21))
                     .parse(owner.sourceCode()).getResult().orElse(null);
@@ -876,6 +882,7 @@ public class GenerationContextBuilder {
         if (ownerSource == null || ownerSource.findAll(com.github.javaparser.ast.body.ClassOrInterfaceDeclaration.class).stream()
                 .noneMatch(type -> type.getFullyQualifiedName().filter(owner.qualifiedName()::equals).isPresent()
                         && (type.isInterface() || type.isAbstract()))) return false;
+        GenerationJobContext.increment("context.classParses");
         var parsed = new JavaParser(new ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_21))
                 .parse(candidate.sourceCode()).getResult();
         if (parsed.isEmpty()) return false;

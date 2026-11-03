@@ -133,8 +133,10 @@ final class SourceDependencyIndex {
         try {
             if (sourceRoot == null) throw new IllegalArgumentException("Missing source root");
             Path root = sourceRoot.toRealPath();
-            return com.greytest.service.agent.GenerationContextBuilder.inputSnapshot(new IndexReadKey(root),
-                    () -> loadVerified(root, parsedUnits));
+            SourceSnapshotSession.assertUnchanged();
+            return SourceSnapshotSession.index(root, () ->
+                    com.greytest.service.agent.GenerationContextBuilder.inputSnapshot(new IndexReadKey(root),
+                            () -> loadVerified(root, parsedUnits)));
         } catch (IOException exception) { throw new IllegalArgumentException("Unreadable snapshot", exception); }
     }
 
@@ -161,7 +163,14 @@ final class SourceDependencyIndex {
                 }
             });
             var classpath = ParserDependencyClasspath.load(root, sources.keySet().stream().map(ServiceScopeResolver::modulePath).collect(java.util.stream.Collectors.toSet()));
+            SourceSnapshotSession.verifyAtEnd(() -> {
+                var verified = ParserDependencyClasspath.load(root, sources.keySet().stream()
+                        .map(ServiceScopeResolver::modulePath).collect(java.util.stream.Collectors.toSet()));
+                if (!classpath.digest().equals(verified.digest())) throw new IllegalStateException("Analysis classpath changed during generation");
+            });
             StringBuilder manifest = new StringBuilder();
+            manifest.append("analyzer:source-dependency-index-v2\n");
+            manifest.append("snapshot:").append(SourceSnapshotSession.contentIdentity(root)).append('\n');
             manifest.append("analysis-classpath:").append(classpath.digest()).append('\n');
             sources.forEach((path, source) -> manifest.append(path.length()).append(':').append(path)
                     .append(':').append(GenerationFingerprintService.hash(source)).append(':')
@@ -1087,7 +1096,7 @@ final class SourceDependencyIndex {
         return Map.copyOf(result);
     }
 
-    Map<String, String> sourceResources(Map<String, String> dependencies, List<String> problems) {
+    synchronized Map<String, String> sourceResources(Map<String, String> dependencies, List<String> problems) {
         var classes = resourceClasses(dependencies);
         var evidence = com.greytest.service.agent.GenerationResourceEvidence.collect(root, classes);
         for (String warning : evidence.warnings()) problems.add("unresolved resource evidence: " + warning);

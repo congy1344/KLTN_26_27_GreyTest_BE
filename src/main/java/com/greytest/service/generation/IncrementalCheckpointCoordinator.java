@@ -82,7 +82,13 @@ public class IncrementalCheckpointCoordinator {
                     catch(RuntimeException lost) { log.warn("Generation lease heartbeat failed update={}",updateId,lost); }
                 },20,20,TimeUnit.SECONDS);
                 long started=System.nanoTime(); String state="SUCCEEDED";
-                try { return GenerationJobContext.withValue(RUN_KEY,new Run(lease),task); }
+                try { return GenerationJobContext.withValue(RUN_KEY,new Run(lease), () -> {
+                    try { return SourceSnapshotSession.withSession(task); }
+                    catch (SourceSnapshotSession.SnapshotChangedException changed) {
+                        changeStatus(updateId, com.greytest.entity.enums.SourceUpdateStatus.FAILED);
+                        throw changed;
+                    }
+                }); }
                 catch (RuntimeException failure) { state="FAILED"; throw failure; }
                 finally {
                     heartbeat.cancel(true); scheduler.shutdownNow();
@@ -107,6 +113,7 @@ public class IncrementalCheckpointCoordinator {
     }
 
     public void completeStage(Long updateId,GenerationProgressStage stage) {
+        SourceSnapshotSession.verifyStage();
         Run run=GenerationJobContext.scopedValue(RUN_KEY);
         var targets=run.targets().getOrDefault(stage,Set.of()).stream().sorted().map(Object::toString).toList();
         if(!run.generated().contains(stage)) GenerationJobContext.increment("stage.skip");
@@ -401,7 +408,8 @@ public class IncrementalCheckpointCoordinator {
                             envelope(output,validatedItems,source,context),outputDigest(mapper,validatedItems)));
                         reusable=true;
                     }
-                } catch(Exception invalid) { GenerationJobContext.increment("checkpoint.invalid"); }
+                } catch(SourceSnapshotSession.SnapshotChangedException changed) { throw changed; }
+                catch(Exception invalid) { GenerationJobContext.increment("checkpoint.invalid"); }
             }
             if(!reusable) pending.add(id);
         }
@@ -445,6 +453,7 @@ public class IncrementalCheckpointCoordinator {
                 }
                 return null;
                 });
+                SourceSnapshotSession.assertUnchanged();
                 persist.accept(eligible,successfulResponse);
                 var savedItems=items.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId);
                 for(Long id:eligible) {

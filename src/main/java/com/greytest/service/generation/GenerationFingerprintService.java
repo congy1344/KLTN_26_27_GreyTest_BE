@@ -75,6 +75,8 @@ public class GenerationFingerprintService {
                 problems.add("unresolved: source context contains warnings");
                 manifest.put("contextWarnings", sorted(input.path("contextWarnings")));
             }
+        } catch (SourceSnapshotSession.SnapshotChangedException changed) {
+            throw changed;
         } catch (RuntimeException exception) {
             // Không cho skip nếu snapshot hoặc dependency không còn đủ bằng chứng an toàn.
             problems.add("unresolved: " + exception.getClass().getSimpleName());
@@ -132,6 +134,8 @@ public class GenerationFingerprintService {
                     } finally { index.outputModule(null); index.releaseUncachedFacades(); }
                 }
             }
+        } catch (SourceSnapshotSession.SnapshotChangedException changed) {
+            throw changed;
         } catch (RuntimeException | java.io.IOException exception) {
             problems.add("unresolved output dependencies: " + exception.getClass().getSimpleName());
         }

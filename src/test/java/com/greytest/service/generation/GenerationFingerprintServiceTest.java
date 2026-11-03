@@ -22,6 +22,48 @@ import com.greytest.service.agent.LlmStageTokenLimits;
 import com.greytest.service.agent.PromptManager;
 
 class GenerationFingerprintServiceTest {
+    @Test void sessionReusePreservesInputAndOutputProofsAndStillDetectsInvalidCalls() {
+        var selected = context(List.of(method(1L, "target", "int")));
+        var input = fingerprint(selected);
+        var valid = Map.of("source_code", "package example; class SubjectTest { void test(){ new Subject().target(1); } }");
+        var invalid = Map.of("source_code", "package example; class SubjectTest { void test(){ new Subject().missing(1); } }");
+        var output = service.outputFingerprint(valid, root, selected);
+        assertThat(input.reusable()).isTrue();
+        assertThat(output.reusable()).isTrue();
+        assertThat(service.outputFingerprint(invalid, root, selected).reusable()).isFalse();
+        SourceSnapshotSession.withSession(() -> {
+            for (int i = 0; i < 8; i++) com.greytest.service.agent.GenerationContextBuilder.withInputSnapshot(() -> {
+                assertThat(fingerprint(selected)).isEqualTo(input);
+                assertThat(service.outputFingerprint(valid, root, selected)).isEqualTo(output);
+                assertThat(service.outputFingerprint(invalid, root, selected).reusable()).isFalse();
+                return null;
+            });
+            return null;
+        });
+    }
+
+    @Test void parallelBatchesCannotMixMutableOutputResolverState() throws Exception {
+        var selected = context(List.of(method(1L, "target", "int")));
+        var expected = fingerprint(selected);
+        var valid = Map.of("source_code", "package example; class SubjectTest { void test(){ new Subject().target(1); } }");
+        var invalid = Map.of("source_code", "package example; class SubjectTest { void test(){ new Subject().missing(1); } }");
+        var workers = java.util.concurrent.Executors.newFixedThreadPool(4);
+        try {
+            SourceSnapshotSession.withSession(() -> {
+                var futures = java.util.stream.IntStream.range(0, 16).mapToObj(number -> workers.submit(
+                        com.greytest.service.GenerationJobContext.wrap(() ->
+                                com.greytest.service.agent.GenerationContextBuilder.withInputSnapshot(() -> {
+                                    assertThat(fingerprint(selected)).isEqualTo(expected);
+                                    assertThat(service.outputFingerprint(number % 2 == 0 ? valid : invalid, root, selected).reusable())
+                                            .isEqualTo(number % 2 == 0);
+                                    return true;
+                                }))::get)).toList();
+                try { for (var future : futures) assertThat(future.get(20, java.util.concurrent.TimeUnit.SECONDS)).isTrue(); }
+                catch (Exception failure) { throw new AssertionError(failure); }
+                return null;
+            });
+        } finally { workers.shutdownNow(); }
+    }
     @Test void unchangedOutputValidationReusesSolverWithoutGrowingFacadeRegistry() {
         var output=Map.of("source_code","package example; class SubjectTest { void test(){ new Subject().target(1); } }");
         try(var scope=GenerationJobContext.openScope(null)) {

@@ -116,12 +116,15 @@ class IncrementalPipelineBenchmarkTest {
             assertThatThrownBy(() -> pipeline.generateAll(fixture.projectId(), fixture.updateId(), null))
                     .hasRootCauseInstanceOf(com.greytest.service.agent.LlmResponseException.class).hasStackTraceContaining("Injected benchmark failure");
             var partial = items.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(fixture.updateId());
-            assertThat(partial).hasSize(18).noneMatch(item -> item.getTargetType().name().equals("UNIT_TEST"));
+            // Batch độc lập vẫn hoàn tất khi batch khác lỗi; chỉ resume các target còn thiếu.
+            long successfulUnits = partial.stream().filter(item -> item.getTargetType().name().equals("UNIT_TEST")).count();
+            assertThat(partial.stream().filter(item -> !item.getTargetType().name().equals("UNIT_TEST"))).hasSize(18);
+            assertThat(successfulUnits).isLessThan(6);
             Map<String, Object> failure = Map.of("workload", "UNIT_PROVIDER_FAILURE", "wallMillis", (System.nanoTime() - started) / 1_000_000.0,
                     "llmCalls", calls.get() - before, "artifacts", partial.size());
             var resumed = measureAll(fixture, "RETRY_RESUME");
             assertThat(resumed.get("llmCalls")).isEqualTo(1);
-            assertRegeneratedAndSkipped(resumed, 6, 18);
+            assertRegeneratedAndSkipped(resumed, 6 - (int) successfulUnits, 18 + (int) successfulUnits);
             saveScenarioEvidence("retry", List.of(failure, resumed));
         } finally { cleanupFixture(fixture); }
     }
@@ -165,7 +168,7 @@ class IncrementalPipelineBenchmarkTest {
                     "llmCalls", 0);
             providerRelease.countDown();
             var completed = first.get(30, TimeUnit.SECONDS);
-            assertThat(completed.get("llmCalls")).isEqualTo(5);
+            assertThat(completed.get("llmCalls")).isEqualTo(7);
             saveScenarioEvidence("concurrent", List.of(completed, rejected));
         } finally {
             providerRelease.countDown(); executor.shutdownNow();
@@ -230,9 +233,65 @@ class IncrementalPipelineBenchmarkTest {
             assertThat(resumed.get("outputDigest")).isEqualTo(original.get("outputDigest"));
             assertRegeneratedAndSkipped(resumed,6,18);
             @SuppressWarnings("unchecked") var metrics=(Map<String,Object>)resumed.get("metrics");
-            assertThat(((Number)metrics.getOrDefault("cache.hit",0)).intValue()).isEqualTo(1);
+            assertThat(((Number)metrics.getOrDefault("cache.hit",0)).intValue()).isEqualTo(2);
             saveScenarioEvidence("persistent-cache",List.of(resumed));
         } finally { cleanupFixture(fixture); }
+    }
+
+    @Test void sourceEditedDuringProviderCallCannotPublishSuccessfulStage() throws Exception {
+        Fixture fixture = createFixture();
+        try {
+            var changed = new AtomicBoolean();
+            when(provider.complete(anyString(), any(LlmRequestOptions.class))).thenAnswer(invocation -> {
+                String result = respond(invocation.getArgument(0));
+                if (changed.compareAndSet(false, true)) {
+                    Path file = fixture.root().resolve("candidate/src/main/java/benchmark/BenchmarkService.java");
+                    Files.writeString(file, Files.readString(file).replace("return 42;", "return 43;"));
+                }
+                return result;
+            });
+            assertThatThrownBy(() -> pipeline.generateAll(fixture.projectId(), fixture.updateId(), null))
+                    .hasStackTraceContaining("SourceSnapshotSession$SnapshotChangedException");
+            assertThat(jdbc.queryForObject("select status from source_update where id=?", String.class, fixture.updateId())).isEqualTo("FAILED");
+            assertThat(jdbc.queryForObject("select count(*) from generation_checkpoint where source_update_id=? and target_key='__stage__' and state='SUCCEEDED'",
+                    Integer.class, fixture.updateId())).isZero();
+            assertThat(calls.get()).isEqualTo(1);
+        } finally { cleanupFixture(fixture); }
+    }
+
+
+    @Test void benchmarkOneAddedMethodThroughAnalysisAndAllStages() throws Exception {
+        List<Map<String, Object>> measurements = new ArrayList<>();
+        for (int sample = -1; sample < 3; sample++) {
+        Fixture fixture = createFixture();
+        try {
+            Path candidate = fixture.root().resolve("candidate");
+            writeSource(candidate, 41);
+            Path file = candidate.resolve("src/main/java/benchmark/BenchmarkService.java");
+            String source = Files.readString(file);
+            Files.writeString(file, source.substring(0, source.lastIndexOf('}'))
+                    + " public int added() { return 42; }\n}\n");
+            try (var javaFiles = Files.list(file.getParent())) {
+                assertThat(javaFiles.filter(path -> path.toString().endsWith(".java")).count())
+                        .isEqualTo(1 + Integer.getInteger("benchmark.supportingClasses", 0));
+            }
+            try (var scope = GenerationJobContext.openScope(null)) {
+                int before = calls.get();
+                long started = System.nanoTime();
+                var analyzed = sourceUpdates.analyzeUpdate(fixture.projectId(), fixture.updateId(), null);
+                assertThat(analyzed.totalChangedMethods()).isEqualTo(1);
+                var generated = pipeline.generateAll(fixture.projectId(), fixture.updateId(), null);
+                assertThat(calls.get() - before).isEqualTo(4);
+                assertThat(generated.items()).hasSize(5);
+                assertThat(generated.items()).allSatisfy(item -> assertThat(item.action().name()).isEqualTo("CREATE"));
+                if (sample >= 0) measurements.add(Map.of("wallMillis", (System.nanoTime() - started) / 1_000_000.0,
+                                "llmCalls", calls.get() - before, "artifacts", generated.items().size(),
+                                "changedMethods", analyzed.totalChangedMethods(), "supportingClasses", Integer.getInteger("benchmark.supportingClasses", 0),
+                                "metrics", GenerationJobContext.metrics()));
+            }
+        } finally { cleanupFixture(fixture); }
+        }
+        saveScenarioEvidence("one-added-method-" + System.getProperty("benchmark.phase", "local"), measurements);
     }
 
     private Map<String, Object> measureAll(Fixture fixture, String workload) throws Exception {
@@ -260,7 +319,7 @@ class IncrementalPipelineBenchmarkTest {
         Files.createDirectories(output.toAbsolutePath().getParent());
         Files.writeString(output, json.writerWithDefaultPrettyPrinter().writeValueAsString(Map.of("scenario", scenario,
                 "provider", "deterministic local TEST provider; no external API", "measurements", samples,
-                "limitations", "Single correctness workload sample; not a production latency estimate or before/after benchmark")));
+                "limitations", "Deterministic local fixture; sample counts depend on scenario; not a production latency estimate")));
     }
 
     private void cleanupFixture(Fixture fixture) throws Exception {
@@ -395,7 +454,8 @@ class IncrementalPipelineBenchmarkTest {
             var analyzed = analysis.analyze(projectId);
             List<Long> ruleIds = new ArrayList<>(), planIds = new ArrayList<>(), caseIds = new ArrayList<>(), unitIds = new ArrayList<>();
             List<Map<String, Object>> changed = new ArrayList<>();
-            for (var method : analyzed.classes().get(0).methods()) {
+            for (var method : analyzed.classes().stream().filter(type -> "benchmark.BenchmarkService".equals(type.qualifiedName()))
+                    .findFirst().orElseThrow().methods()) {
                 String description = "Returns 42 from " + method.methodName() + ".";
                 Long ruleId = id("insert into business_rule(project_id,method_id,rule_code,description,source,status,is_modified) values(?,?,?,?,'AI_GENERATED','APPROVED',false) returning id",
                         projectId, method.id(), "BR-" + method.methodName(), description);
@@ -436,6 +496,10 @@ class IncrementalPipelineBenchmarkTest {
         StringBuilder body = new StringBuilder("package benchmark; import org.springframework.stereotype.Service; @Service public class BenchmarkService {\n");
         for (int i = 0; i < 6; i++) body.append(" public int value").append(i).append("() { return ").append(value).append("; }\n");
         Files.writeString(source, body.append("}\n"));
+        for (int i = 0; i < Integer.getInteger("benchmark.supportingClasses", 0); i++) {
+            Files.writeString(source.resolveSibling("Supporting" + i + ".java"),
+                    "package benchmark; class Supporting" + i + " { private String value; }");
+        }
         Files.writeString(root.resolve("pom.xml"), "<project><modelVersion>4.0.0</modelVersion><groupId>benchmark</groupId><artifactId>fixture</artifactId><version>1</version><properties><maven.compiler.release>17</maven.compiler.release></properties><dependencies><dependency><groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter</artifactId><version>5.10.0</version><scope>test</scope></dependency></dependencies></project>");
     }
 

@@ -46,12 +46,14 @@ class SourceUpdateScanBenchmarkTest {
         var output = Map.of("source_code", "package benchmark; class SubjectTest { void test() { new Subject().added(); } }");
         List<Map<String, Object>> samples = new ArrayList<>();
         for (int sample = -1; sample < 3; sample++) {
+            for (boolean shared : sample % 2 == 0 ? List.of(true, false) : List.of(false, true)) {
             try (var scope = GenerationJobContext.openScope(null)) {
                 long start = System.nanoTime();
                 var diff = new SourceDiffService(new JavaParserHelper()).compareSnapshots(base, candidate);
                 assertThat(diff.stream().filter(item -> !item.diffType().name().equals("UNCHANGED")).toList())
                         .singleElement().satisfies(item -> assertThat(item.signature()).isEqualTo("added()"));
-                List<String> proofs = new ArrayList<>();
+                java.util.function.Supplier<List<String>> workload = () -> {
+                List<String> generatedProofs = new ArrayList<>();
                 for (String stage : List.of("business-rule", "test-plan", "test-case", "unit-test")) {
                     for (int batch = 0; batch < 8; batch++) {
                         com.greytest.service.agent.GenerationContextBuilder.withInputSnapshot(() -> {
@@ -59,14 +61,24 @@ class SourceUpdateScanBenchmarkTest {
                             assertThat(input.reusable()).isTrue();
                             var result = fingerprints.outputFingerprint(output, candidate, context);
                             assertThat(result.reusable()).isTrue();
-                            proofs.add(input.value() + ":" + result.value());
+                            generatedProofs.add(input.value() + ":" + result.value());
                             return null;
                         });
                     }
                 }
+                return generatedProofs;
+                };
+                List<String> proofs = shared ? SourceSnapshotSession.withSession(workload) : workload.get();
                 if (sample >= 0) samples.add(Map.of("wallMillis", (System.nanoTime() - start) / 1_000_000.0,
-                        "metrics", GenerationJobContext.metrics(), "proofs", List.copyOf(proofs)));
+                        "metrics", GenerationJobContext.metrics(), "proofs", List.copyOf(proofs), "sample", sample,
+                        "mode", shared ? "shared" : "verified-load"));
             }
+            }
+        }
+        for (int sample = 0; sample < 3; sample++) {
+            int number = sample;
+            var pair = samples.stream().filter(value -> value.get("sample").equals(number)).toList();
+            assertThat(pair.get(0).get("proofs")).isEqualTo(pair.get(1).get("proofs"));
         }
         Path report = Path.of("target/source-scan-" + System.getProperty("benchmark.phase", "before") + ".json");
         Files.writeString(report, json.writerWithDefaultPrettyPrinter().writeValueAsString(Map.of(

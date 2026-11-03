@@ -252,7 +252,10 @@ final class LombokSourceSymbols {
         return type.findCompilationUnit().map(unit -> marker(type.getAnnotations(), unit, "lombok.Data")).orElse(false);
     }
     static boolean hasConfiguration(Path directory) {
-        for (Path path = directory; path != null; path = path.getParent()) if (Files.exists(path.resolve("lombok.config"))) return true;
+        for (Path path = directory; path != null; path = path.getParent()) {
+            SourceSnapshotSession.watchFile(path.resolve("lombok.config"));
+            if (Files.exists(path.resolve("lombok.config"))) return true;
+        }
         return false;
     }
     private static void generated(Node node) { node.setData(GENERATED, true); }
