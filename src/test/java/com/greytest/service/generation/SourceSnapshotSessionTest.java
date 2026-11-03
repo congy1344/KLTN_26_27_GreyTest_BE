@@ -15,6 +15,55 @@ import com.greytest.service.agent.GenerationContextBuilder;
 class SourceSnapshotSessionTest {
     @TempDir Path root;
 
+    @Test void sourceValuesAreScopedBySnapshotAndQualifiedSelection() throws Exception {
+        Path source = write("src/main/java/example/Subject.java", "package example; class Subject { int value() { return 1; } }");
+        var loads = new java.util.concurrent.atomic.AtomicInteger();
+        try (var job = GenerationJobContext.openScope(null)) {
+            SourceSnapshotSession.withSession(() -> {
+                var first = SourceSnapshotSession.memoizeSource(root, "example.Subject#value()", () -> List.of(loads.incrementAndGet()));
+                assertThat(SourceSnapshotSession.memoizeSource(root, "example.Subject#value()", () -> List.of(loads.incrementAndGet()))).isSameAs(first);
+                assertThat(SourceSnapshotSession.memoizeSource(root, "example.Subject#value(int)", () -> List.of(loads.incrementAndGet()))).isNotEqualTo(first);
+                assertThat(GenerationJobContext.metrics()).containsEntry("dependency.loads", 1L);
+                return null;
+            });
+            Files.writeString(source, "package example; class Subject { int value() { return 2; } }");
+            SourceSnapshotSession.withSession(() -> SourceSnapshotSession.memoizeSource(root, "example.Subject#value()", () -> List.of(loads.incrementAndGet())));
+            assertThat(loads).hasValue(3);
+        }
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"pom.xml", "lombok.config", "src/main/java/example/Subject.java"})
+    void cachedSourceValuesCannotHideChangesAtStageProof(String changedFile) throws Exception {
+        write("src/main/java/example/Subject.java", "package example; class Subject { int value() { return 1; } }");
+        write("pom.xml", "<project/>");
+        write("lombok.config", "lombok.addLombokGeneratedAnnotation = false");
+        assertThatThrownBy(() -> SourceSnapshotSession.withSession(() -> {
+            SourceSnapshotSession.memoizeSource(root, "example.Subject#value()", () -> List.of("contract"));
+            try { Files.writeString(root.resolve(changedFile), "changed during provider call"); }
+            catch (java.io.IOException error) { throw new AssertionError(error); }
+            SourceSnapshotSession.verifyStage();
+            return null;
+        })).isInstanceOf(SourceSnapshotSession.SnapshotChangedException.class);
+    }
+
+    @Test void unmonitoredSourceValuesAlwaysUseLoader() throws Exception {
+        var loads = new java.util.concurrent.atomic.AtomicInteger();
+        assertThat(SourceSnapshotSession.memoizeSource(root, "method()", loads::incrementAndGet)).isEqualTo(1);
+        assertThat(SourceSnapshotSession.memoizeSource(root, "method()", loads::incrementAndGet)).isEqualTo(2);
+        var uri = java.net.URI.create("jar:" + root.resolve("context.zip").toUri());
+        try (var archive = java.nio.file.FileSystems.newFileSystem(uri, java.util.Map.of("create", "true"))) {
+            Path sourceRoot = archive.getPath("/");
+            Files.createDirectories(sourceRoot.resolve("src/main/java/example"));
+            Files.writeString(sourceRoot.resolve("src/main/java/example/Subject.java"), "package example; class Subject {}");
+            SourceSnapshotSession.withSession(() -> {
+                assertThat(SourceSnapshotSession.memoizeSource(sourceRoot, "example.Subject#value()", loads::incrementAndGet)).isEqualTo(3);
+                assertThat(SourceSnapshotSession.memoizeSource(sourceRoot, "example.Subject#value()", loads::incrementAndGet)).isEqualTo(4);
+                return null;
+            });
+        }
+    }
+
     @Test void nestedBatchesAndParallelWorkersReadSourceOnlyOnce() throws Exception {
         write("src/main/java/example/Subject.java", "package example; class Subject { int value() { return 1; } }");
         try (var scope = GenerationJobContext.openScope(null)) {

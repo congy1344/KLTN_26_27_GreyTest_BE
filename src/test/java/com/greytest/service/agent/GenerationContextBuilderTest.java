@@ -57,6 +57,84 @@ import com.greytest.service.analysis.AnalysisService;
 import com.greytest.service.analysis.ExistingTestService;
 
 class GenerationContextBuilderTest {
+    @Test void sourceOnlySliceIsReusedButUpstreamAndPrecommitStayFresh(@TempDir Path snapshot) throws Exception {
+        mockCommonInputs(); stubApprovedUnitTestCase(11L);
+        writeCacheSources(snapshot);
+        try (var job = com.greytest.service.GenerationJobContext.openScope(null)) {
+            com.greytest.service.generation.SourceSnapshotSession.withSession(() -> {
+                var first = GenerationContextBuilder.withInputSnapshot(() -> builder.buildSnapshotTestPlanContext(1L, Set.of(7L), snapshot));
+                long parses = ((Number) com.greytest.service.GenerationJobContext.metrics().get("context.classParses")).longValue();
+                var edited = ruleEntity(7L, 11L, ReviewStatus.APPROVED); edited.setDescription("User revision while provider runs");
+                when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(edited));
+                var fresh = GenerationContextBuilder.withInputSnapshot(() -> builder.buildSnapshotTestPlanContext(1L, Set.of(7L), snapshot));
+                assertThat(fresh.classes()).isSameAs(first.classes());
+                assertThat(fresh.approvedBusinessRules().get(0).description()).isEqualTo(edited.getDescription());
+                assertThat(com.greytest.service.GenerationJobContext.metrics()).containsEntry("context.classParses", parses);
+                assertThatThrownBy(() -> fresh.classes().clear()).isInstanceOf(UnsupportedOperationException.class);
+                var method = fresh.classes().stream().flatMap(c -> c.methods().stream()).findFirst().orElseThrow();
+                assertThatThrownBy(() -> method.parameters().clear()).isInstanceOf(UnsupportedOperationException.class);
+                assertThatThrownBy(() -> method.annotations().clear()).isInstanceOf(UnsupportedOperationException.class);
+                assertThatThrownBy(() -> method.branches().clear()).isInstanceOf(UnsupportedOperationException.class);
+                return null;
+            });
+        }
+    }
+
+    @Test void sourceOnlySliceIsSafeAcrossWorkersAndStillChecksChanges(@TempDir Path snapshot) throws Exception {
+        mockCommonInputs(); stubApprovedUnitTestCase(11L); writeCacheSources(snapshot);
+        try (var job = com.greytest.service.GenerationJobContext.openScope(null)) {
+            com.greytest.service.generation.SourceSnapshotSession.withSession(() -> {
+                var workers = java.util.concurrent.Executors.newFixedThreadPool(3);
+                try {
+                    var tasks = java.util.stream.IntStream.range(0, 8).mapToObj(i -> workers.submit(
+                            com.greytest.service.GenerationJobContext.wrap(() -> GenerationContextBuilder.withInputSnapshot(
+                                    () -> builder.buildSnapshotTestPlanContext(1L, Set.of(7L), snapshot)))::get)).toList();
+                    var first = tasks.get(0).get(15, java.util.concurrent.TimeUnit.SECONDS).classes();
+                    for (var task : tasks) assertThat(task.get(15, java.util.concurrent.TimeUnit.SECONDS).classes()).isSameAs(first);
+                } catch (Exception error) { throw new AssertionError(error); }
+                finally { workers.shutdownNow(); }
+                return null;
+            });
+        }
+    }
+
+    @Test void disablingSourceOnlyCacheKeepsLegacyContextPath(@TempDir Path snapshot) throws Exception {
+        mockCommonInputs(); stubApprovedUnitTestCase(11L); writeCacheSources(snapshot);
+        com.greytest.service.GenerationJobContext.withValue("greytest.source-update.source-context-cache-enabled", false, () ->
+                com.greytest.service.generation.SourceSnapshotSession.withSession(() -> {
+                    var first = builder.buildSnapshotTestPlanContext(1L, Set.of(7L), snapshot);
+                    var repeat = builder.buildSnapshotTestPlanContext(1L, Set.of(7L), snapshot);
+                    assertThat(repeat.classes()).isEqualTo(first.classes()).isNotSameAs(first.classes());
+                    return null;
+                }));
+    }
+
+    @Test void unavailableDependencyProvenanceFallsBackWithoutChangingContextSemantics(@TempDir Path snapshot) throws Exception {
+        mockCommonInputs(); stubApprovedUnitTestCase(11L); writeCacheSources(snapshot);
+        String previous = System.getProperty("greytest.analysis.classpath-file");
+        System.setProperty("greytest.analysis.classpath-file", snapshot.resolve("missing-classpath.json").toString());
+        try {
+            com.greytest.service.generation.SourceSnapshotSession.withSession(() -> {
+                assertThat(builder.buildSnapshotTestPlanContext(1L, Set.of(7L), snapshot).classes()).isNotEmpty();
+                return null;
+            });
+        } finally {
+            if (previous == null) System.clearProperty("greytest.analysis.classpath-file");
+            else System.setProperty("greytest.analysis.classpath-file", previous);
+        }
+    }
+
+    private void writeCacheSources(Path snapshot) throws Exception {
+        writeSnapshotSource(snapshot, "src/main/java/demo/UserService.java", """
+                package demo;
+                @org.springframework.stereotype.Service public class UserService {
+                    public User createUser(String email) { return new User(email); }
+                    public User updateUser() { return new User("updated"); }
+                }
+                """);
+        writeSnapshotSource(snapshot, "src/main/java/demo/User.java", "package demo; public class User { public User(String email) {} }");
+    }
+
     @Test void nestedUpstreamReadsInsideOneSnapshotDoNotMutateComputeIfAbsent() {
         mockCommonInputs(); stubApprovedUnitTestCase(11L);
         var context=GenerationContextBuilder.withInputSnapshot(()->builder.buildUnitTestContext(1L,Set.of(30L)));
@@ -995,9 +1073,21 @@ class GenerationContextBuilderTest {
 
     @Test
     void oversizedDependencySourceIsReportedWithoutSilentlyOmittingTypes() {
-        stubDependencyGraph(5_000);
+        stubDependencyGraph(6_000);
         assertThatThrownBy(() -> builder.buildUnitTestContext(1L, Set.of(30L)))
                 .isInstanceOf(LlmResponseException.class).hasMessageContaining("characters");
+    }
+
+    @Test
+    void configurableMaxSupportingSourceCharsLimitsSupportingClasses() {
+        stubDependencyGraph(100);
+        builder.setMaxSupportingSourceChars(500);
+        try {
+            assertThatThrownBy(() -> builder.buildUnitTestContext(1L, Set.of(30L)))
+                    .isInstanceOf(LlmResponseException.class).hasMessageContaining("characters");
+        } finally {
+            builder.setMaxSupportingSourceChars(GenerationContextBuilder.DEFAULT_MAX_SUPPORTING_SOURCE_CHARS);
+        }
     }
 
     private void stubDependencyGraph(int commentSize) {

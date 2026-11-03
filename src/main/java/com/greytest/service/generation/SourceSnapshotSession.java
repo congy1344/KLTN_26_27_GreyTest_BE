@@ -13,6 +13,13 @@ import com.greytest.service.agent.PersistentSourceAnalysisService;
 public final class SourceSnapshotSession implements AutoCloseable {
     private static final String KEY = SourceSnapshotSession.class.getName();
     private final Map<Path, Object> indexes = new HashMap<>();
+    private final String snapshotId = UUID.randomUUID().toString();
+    private final Map<SourceValueKey, Object> sourceValues = new java.util.concurrent.ConcurrentHashMap<>();
+    private final Map<Path, CachedSourceIdentity> sourceIdentities = new HashMap<>();
+    private record SourceIdentity(String snapshotId, Path root, String fileKey, String contentDigest,
+                                  String configDigest, String analyzerVersion) { }
+    private record SourceValueKey(SourceIdentity source, Object selection) { }
+    private record CachedSourceIdentity(SourceIdentity identity, int watchedInputs) { }
     private final Map<Path, String> digests = new LinkedHashMap<>();
     private final Map<Path, String> externalFiles = new LinkedHashMap<>();
     private final Map<Path, BasicFileAttributes> identities = new LinkedHashMap<>();
@@ -44,6 +51,68 @@ public final class SourceSnapshotSession implements AutoCloseable {
     }
 
     private static SourceSnapshotSession current() { return GenerationJobContext.scopedValue(KEY); }
+
+    public static boolean canReuseSource() {
+        var session = current();
+        if (session == null) return false;
+        synchronized (session) { return session.monitoring; }
+    }
+
+    /** Chỉ cache giá trị source bất biến; upstream và scope precommit không thuộc cache này. */
+    @SuppressWarnings("unchecked")
+    public static <T> T memoizeSource(Path root, Object selection, Supplier<T> loader) {
+        var session = current();
+        if (session == null || root == null || !canReuseSource()) return loader.get();
+        SourceIdentity identity;
+        try { identity = session.sourceIdentity(root); }
+        catch (SnapshotChangedException changed) { throw changed; }
+        catch (RuntimeException unavailable) {
+            // Thiếu provenance chỉ tắt cache; fingerprint/validator vẫn xử lý input unresolved như cũ.
+            GenerationJobContext.increment("context.sourceCache.fallback");
+            return loader.get();
+        }
+        if (identity == null) return loader.get();
+        var key = new SourceValueKey(identity, selection);
+        boolean[] loaded = { false };
+        T result = (T) session.sourceValues.computeIfAbsent(key, ignored -> {
+            loaded[0] = true;
+            GenerationJobContext.increment("context.sourceCache.miss");
+            T value = Objects.requireNonNull(loader.get());
+            assertUnchanged();
+            return value;
+        });
+        if (!loaded[0]) GenerationJobContext.increment("context.sourceCache.hit");
+        assertUnchanged();
+        return result;
+    }
+
+    private SourceIdentity sourceIdentity(Path root) {
+        Path normalized = root.toAbsolutePath().normalize();
+        synchronized (this) {
+            if (!monitoring) return null;
+            check();
+            var cached = sourceIdentities.get(normalized);
+            if (cached != null && cached.watchedInputs() == externalFiles.size()) return cached.identity();
+        }
+        Path canonical;
+        try { canonical = root.toRealPath(); }
+        catch (IOException unreadable) { throw changed("Cannot identify source context snapshot", unreadable); }
+        SourceDependencyIndex index = SourceDependencyIndex.load(canonical);
+        synchronized (this) {
+            if (!monitoring) return null;
+            check();
+            StringBuilder config = new StringBuilder(index.classpathDigest());
+            config.append(':').append(classpathConfiguration.length()).append(':').append(classpathConfiguration);
+            new TreeMap<>(externalFiles).forEach((path, digest) -> config.append(':').append(path.toString().length())
+                    .append(':').append(path).append(':').append(digest.length()).append(':').append(digest));
+            var identity = new SourceIdentity(snapshotId, canonical, String.valueOf(identities.get(canonical).fileKey()),
+                    digests.get(canonical), GenerationFingerprintService.hash(config.toString()),
+                    SourceDependencyIndex.ANALYZER_VERSION + ":source-context-v1");
+            // Chỉ memoize đường dẫn canonical; alias/junction phải resolve lại để phát hiện đổi đích.
+            if (normalized.equals(canonical)) sourceIdentities.put(normalized, new CachedSourceIdentity(identity, externalFiles.size()));
+            return identity;
+        }
+    }
 
     static <T> T index(Path root, Supplier<T> loader) {
         var session = current();
@@ -148,6 +217,8 @@ public final class SourceSnapshotSession implements AutoCloseable {
     private void disableReuse() {
         monitoring = false;
         indexes.clear();
+        sourceValues.clear();
+        sourceIdentities.clear();
         GenerationJobContext.increment("snapshot.fallback");
     }
 

@@ -39,6 +39,7 @@ import com.greytest.service.ServiceScopeResolver;
 
 /** Index AST theo digest snapshot; chỉ giữ trong input bất biến của một generation run. */
 final class SourceDependencyIndex {
+    static final String ANALYZER_VERSION = "source-dependency-index-v2";
     private static final Set<String> SKIP = Set.of(".git", "target", "build", "node_modules", ".gradle", "generated-sources");
     private final Path root;
     private final Map<String, CompilationUnit> units = new TreeMap<>();
@@ -120,6 +121,8 @@ final class SourceDependencyIndex {
         }
     }
 
+    String classpathDigest() { return classpath.digest(); }
+
     static SourceDependencyIndex load(Path sourceRoot) {
         return load(sourceRoot, Map.of());
     }
@@ -169,7 +172,7 @@ final class SourceDependencyIndex {
                 if (!classpath.digest().equals(verified.digest())) throw new IllegalStateException("Analysis classpath changed during generation");
             });
             StringBuilder manifest = new StringBuilder();
-            manifest.append("analyzer:source-dependency-index-v2\n");
+            manifest.append("analyzer:").append(ANALYZER_VERSION).append('\n');
             manifest.append("snapshot:").append(SourceSnapshotSession.contentIdentity(root)).append('\n');
             manifest.append("analysis-classpath:").append(classpath.digest()).append('\n');
             sources.forEach((path, source) -> manifest.append(path.length()).append(':').append(path)

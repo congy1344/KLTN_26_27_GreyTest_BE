@@ -73,6 +73,12 @@ import com.greytest.service.GenerationJobContext;
 public class GenerationContextBuilder {
     private static final ThreadLocal<Map<Object,Object>> INPUT_SNAPSHOT=new ThreadLocal<>();
     private record InputReadKey(String type,Long projectId,boolean source) { }
+    private static final String SOURCE_CACHE_FLAG = "greytest.source-update.source-context-cache-enabled";
+    @org.springframework.beans.factory.annotation.Value("${greytest.source-update.source-context-cache-enabled:true}")
+    private boolean sourceContextCacheEnabled = true;
+    private record SourceMethodKey(String path, Long classId, Long methodId, String qualifiedSignature) { }
+    private record SourceSelectionKey(String part, Long projectId, List<SourceMethodKey> methods,
+                                      boolean includeImplementations) { }
 
     /** Chụp upstream bất biến trong một batch; scope lồng nhau luôn đọc mới trước commit. */
     public static <T> T withInputSnapshot(java.util.function.Supplier<T> action) {
@@ -103,7 +109,9 @@ public class GenerationContextBuilder {
     public static final int MAX_UNIT_TEST_RETRY_CASES = 2;
     private static final int MAX_UNIT_TEST_REFERENCES = 10;
     // Giữ prompt có giới hạn nhưng phải báo thiếu context thay vì âm thầm bỏ dependency.
-    private static final int MAX_SUPPORTING_SOURCE_CHARS = 100_000;
+    public static final int DEFAULT_MAX_SUPPORTING_SOURCE_CHARS = 150_000;
+    @org.springframework.beans.factory.annotation.Value("${greytest.llm.max-supporting-source-chars:150000}")
+    private int maxSupportingSourceChars = DEFAULT_MAX_SUPPORTING_SOURCE_CHARS;
     private static final int MAX_GENERATION_RELATIONS = 40;
     private static final int MAX_GENERATION_DEPENDENCIES = 40;
     // ponytail: chỉ kèm vài callee Service để giữ prompt có giới hạn; tăng khi benchmark chứng minh cần.
@@ -133,6 +141,10 @@ public class GenerationContextBuilder {
         this.sourceUpdates = sourceUpdates;
         this.sourceUpdateItems = sourceUpdateItems;
         this.objectMapper = objectMapper;
+    }
+
+    void setMaxSupportingSourceChars(int maxSupportingSourceChars) {
+        this.maxSupportingSourceChars = maxSupportingSourceChars;
     }
 
     public GenerationContextBuilder(
@@ -215,8 +227,9 @@ public class GenerationContextBuilder {
             throw new IllegalArgumentException(
                     "Business Rule context chỉ được chứa method hợp lệ của đúng một Service.");
         }
-        List<DependencyCallContextDto> dependencyCalls = dependencyCalls(analysis, targetServices, requestedIds);
-        List<ClassContextDto> sourceClasses = sourceContextClasses(analysis, requestedIds, true);
+        List<DependencyCallContextDto> dependencyCalls = sourceFacts(analysis, requestedIds, true, sourceRoot,
+                "dependencyCalls", () -> List.copyOf(dependencyCalls(analysis, targetServices, requestedIds)));
+        List<ClassContextDto> sourceClasses = sourceContextClasses(analysis, requestedIds, true, sourceRoot);
         var resources = BusinessRuleResourceCollector.collect(sourceRoot, sourceClasses);
         Set<Long> targetClassIds = targetServices.stream().map(JavaClassDto::id).collect(java.util.stream.Collectors.toSet());
         return new BusinessRuleGenerationContextDto(
@@ -478,7 +491,7 @@ public class GenerationContextBuilder {
                 .filter(rule -> targetRuleIds == null || targetRuleIds.isEmpty() || targetRuleIds.contains(rule.id()))
                 .toList();
         requireRequestedIds(targetRuleIds, approvedRules.stream().map(BusinessRuleContextDto::id).collect(java.util.stream.Collectors.toSet()), "Business Rule");
-        List<ClassContextDto> sourceClasses = sourceContextClasses(analysis, methodIds(approvedRules));
+        List<ClassContextDto> sourceClasses = sourceContextClasses(analysis, methodIds(approvedRules), false, sourceRoot);
         var resources = BusinessRuleResourceCollector.collect(sourceRoot, sourceClasses);
         return new TestPlanContextDto(
                 project(analysis),
@@ -528,7 +541,7 @@ public class GenerationContextBuilder {
                         .anyMatch(method -> targetMethodIds.contains(method.id())))
                 .map(JavaClassDto::id)
                 .collect(java.util.stream.Collectors.toSet());
-        List<ClassContextDto> sourceClasses = sourceContextClasses(analysis, targetMethodIds);
+        List<ClassContextDto> sourceClasses = sourceContextClasses(analysis, targetMethodIds, false, sourceRoot);
         var resources = BusinessRuleResourceCollector.collect(sourceRoot, sourceClasses);
         return new TestCaseContextDto(
                 project(analysis),
@@ -663,7 +676,7 @@ public class GenerationContextBuilder {
                         .anyMatch(method -> targetMethodIds.contains(method.id())))
                 .map(JavaClassDto::id)
                 .collect(java.util.stream.Collectors.toSet());
-        List<ClassContextDto> sourceClasses = sourceContextClasses(analysis, targetMethodIds);
+        List<ClassContextDto> sourceClasses = sourceContextClasses(analysis, targetMethodIds, false, sourceRoot);
         var resources = BusinessRuleResourceCollector.collect(sourceRoot, sourceClasses);
         return new UnitTestContextDto(
                 project(analysis),
@@ -810,6 +823,44 @@ public class GenerationContextBuilder {
         return method.classQualifiedName() + "#" + method.methodName() + "(" + parameterTypes + ")";
     }
 
+    /** Chỉ dùng signature và mapping source; không đưa BR/TP/TC hoặc entity vào key/value. */
+    private <T> T sourceFacts(AnalysisResultDto analysis, Set<Long> methodIds, boolean includeImplementations,
+            java.nio.file.Path root, String part, java.util.function.Supplier<T> loader) {
+        if (!sourceCacheEnabled(root)) return loader.get();
+        List<SourceMethodKey> methods = analysis.classes().stream().flatMap(type -> type.methods().stream()
+                .filter(method -> methodIds.contains(method.id()))
+                .map(method -> new SourceMethodKey(type.filePath(), type.id(), method.id(), type.qualifiedName() + "#"
+                        + method.methodName() + "(" + method.parameters().stream().map(MethodParamDto::type)
+                        .collect(java.util.stream.Collectors.joining(",")) + ")")))
+                .sorted(Comparator.comparing(SourceMethodKey::qualifiedSignature)
+                        .thenComparing(SourceMethodKey::path, Comparator.nullsLast(String::compareTo))
+                        .thenComparing(SourceMethodKey::methodId)).toList();
+        return com.greytest.service.generation.SourceSnapshotSession.memoizeSource(root,
+                new SourceSelectionKey(part, analysis.projectId(), methods, includeImplementations), loader);
+    }
+
+    private List<ClassContextDto> sourceContextClasses(AnalysisResultDto analysis, Set<Long> methodIds,
+            boolean includeImplementations, java.nio.file.Path root) {
+        if (!sourceCacheEnabled(root)) return sourceContextClasses(analysis, methodIds, includeImplementations);
+        return sourceFacts(analysis, methodIds, includeImplementations, root, "classes", () ->
+                sourceContextClasses(analysis, methodIds, includeImplementations).stream().map(type -> new ClassContextDto(
+                        type.id(), type.packageName(), type.className(), type.qualifiedName(), type.classType(), type.filePath(),
+                        type.sourceCode(), immutable(type.annotations()), type.methods().stream().map(method -> new MethodContextDto(
+                                method.id(), method.classQualifiedName(), method.methodName(), method.returnType(), immutable(method.parameters()),
+                                immutable(method.throwsList()), method.visibility(), method.sourceCode(), method.lineStart(), method.lineEnd(),
+                                immutable(method.annotations()), immutable(method.endpoints()), immutable(method.branches()))).toList(),
+                        type.validationSourceCode())).toList());
+    }
+
+    private boolean sourceCacheEnabled(java.nio.file.Path root) {
+        return sourceContextCacheEnabled && !Boolean.FALSE.equals(GenerationJobContext.scopedValue(SOURCE_CACHE_FLAG))
+                && root != null && com.greytest.service.generation.SourceSnapshotSession.canReuseSource();
+    }
+
+    private static <T> List<T> immutable(List<T> values) {
+        return values == null ? null : java.util.Collections.unmodifiableList(new ArrayList<>(values));
+    }
+
     /** Các bước sinh dùng cùng khai báo kiểu và helper để không truyền kỳ vọng sai xuống Unit Test. */
     private List<ClassContextDto> sourceContextClasses(AnalysisResultDto analysis, Set<Long> targetMethodIds) {
         return sourceContextClasses(analysis, targetMethodIds, false);
@@ -855,9 +906,9 @@ public class GenerationContextBuilder {
                     continue;
                 }
                 supportingSourceChars += candidate.sourceCode().length();
-                if (supportingSourceChars > MAX_SUPPORTING_SOURCE_CHARS) {
+                if (supportingSourceChars > maxSupportingSourceChars) {
                     throw new LlmResponseException("Required supporting production source exceeds "
-                            + MAX_SUPPORTING_SOURCE_CHARS + " characters; cannot omit required types. "
+                            + maxSupportingSourceChars + " characters; cannot omit required types. "
                             + "Generate a smaller group of source methods, rules or cases.");
                 }
                 included.add(candidate.qualifiedName());
