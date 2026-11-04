@@ -7,6 +7,31 @@ import org.junit.jupiter.api.Test;
 
 /** Kiểm tra profiler không đổi kết quả/lỗi và giữ correlation khi chuyển worker. */
 class CriticalPathProfilerTest {
+    @Test void backendCorrelationIsScopedAndClearedAfterFailure() throws Throwable {
+        var run=new CriticalPathProfiler.Run("pid",1,2);
+        assertThatThrownBy(()->CriticalPathProfiler.bind(run,()->CriticalPathProfiler.observe("jdbc.executeQuery",123,()->{
+            assertThat(run.activeJdbc.get(123).operation()).isEqualTo("jdbc.executeQuery");
+            throw new IllegalArgumentException("expected");
+        }))).isInstanceOf(IllegalArgumentException.class);
+        assertThat(run.activeJdbc).isEmpty();
+        assertThat(run.spans()).singleElement().satisfies(span->{
+            assertThat(span.backendPid()).isEqualTo(123); assertThat(span.failed()).isTrue();
+        });
+    }
+
+    @Test void capturesProcessWideGcWithoutRequiringApplicationThread() throws Exception {
+        var file=java.nio.file.Files.createTempFile("tail-gc-",".jfr");
+        var sample=new java.util.HashMap<String,Object>();
+        sample.put("threads",List.of()); sample.put("jfr",new java.util.HashMap<>());
+        try(var recording=new jdk.jfr.Recording()) {
+            recording.enable("jdk.GarbageCollection"); recording.enable("jdk.GCPhasePause"); recording.start();
+            sample.put("epochStartMillis",System.currentTimeMillis());
+            System.gc(); Thread.sleep(25); System.gc(); Thread.sleep(25);
+            sample.put("epochEndMillis",System.currentTimeMillis()); recording.stop(); recording.dump(file);
+            EndToEndCriticalPathProfileTest.attachJfr(file,List.of(sample));
+            assertThat((List<?>)sample.get("gcEvents")).isNotEmpty();
+        } finally {java.nio.file.Files.deleteIfExists(file);}
+    }
     @Test void recordsNestedIntervalsWithoutAddingTheirWallTimes() throws Throwable {
         var run = new CriticalPathProfiler.Run("test", 1, 2);
         CriticalPathProfiler.bind(run, () -> CriticalPathProfiler.observe("parent", () ->

@@ -43,20 +43,26 @@ class PairedSourceUpdateBenchmarkTest extends EndToEndCriticalPathProfileTest {
         int projectsBefore = jdbc.queryForObject("select count(*) from project", Integer.class);
         List<Map<String, Object>> samples = new ArrayList<>();
         List<Map<String, Object>> qualityRuns = new ArrayList<>();
-        try (Recording recording = jfr ? new Recording() : null) {
+        try (TailLatencyObserver observer = TailLatencyObserver.startIfEnabled();
+                Recording recording = jfr ? new Recording() : null) {
             if (recording != null) {
                 recording.enable("jdk.ExecutionSample").withPeriod(java.time.Duration.ofMillis(10));
                 recording.enable("jdk.JavaMonitorEnter").withThreshold(java.time.Duration.ofMillis(1));
                 recording.enable("jdk.ThreadPark").withThreshold(java.time.Duration.ofMillis(1));
                 recording.enable("jdk.SocketRead").withThreshold(java.time.Duration.ofMillis(1));
                 recording.enable("jdk.FileRead").withThreshold(java.time.Duration.ofMillis(1));
+                if (TailLatencyObserver.enabled()) {
+                    recording.enable("jdk.GarbageCollection");
+                    recording.enable("jdk.GCPhasePause");
+                }
                 recording.start();
             }
             List<String> workloads = List.of("ONE_ADDED", "SIX_INDEPENDENT", "DENSE_ONE", "ONE_ADDED_128_UNRELATED", "RESUME");
             String selected = System.getProperty("benchmark.workload", "");
             if (!selected.isBlank()) {
-                assertThat(selected).isIn(workloads);
-                workloads = List.of(selected);
+                var selection = java.util.Arrays.stream(selected.split(",")).map(String::strip).toList();
+                assertThat(selection).isNotEmpty().doesNotHaveDuplicates().isSubsetOf(workloads);
+                workloads = selection;
             }
             for (String workload : workloads) {
                 List<Boolean> orders = new ArrayList<>();
@@ -65,12 +71,15 @@ class PairedSourceUpdateBenchmarkTest extends EndToEndCriticalPathProfileTest {
                 for (int pair = -1; pair < count; pair++) {
                     boolean firstOptimized = pair >= 0 && orders.get(pair);
                     Map<String, JsonNode> correctness = new HashMap<>();
+                    Map<String, String> sourceProofs = new HashMap<>();
                     for (int order = 0; order < 2; order++) {
                         boolean optimized = order == 0 ? firstOptimized : !firstOptimized;
                         String variant = optimized ? "optimized" : "legacy";
                         Fixture fixture = createFixture();
                         try {
                             prepare(fixture, workload);
+                            String sourceProof = fixtureSourceDigest(fixture);
+                            sourceProofs.put(variant, sourceProof);
                             dense = workload.equals("DENSE_ONE");
                             if (workload.equals("RESUME")) failNextUnitTest.set(true);
                             Map<String, Object> cold = variantMeasure(fixture, workload, true, workload.equals("RESUME"), optimized);
@@ -90,6 +99,7 @@ class PairedSourceUpdateBenchmarkTest extends EndToEndCriticalPathProfileTest {
                             JsonNode semantic = semanticEvidence(fixture);
                             correctness.put(variant, semantic);
                             cold.put("semanticEvidence", semantic);
+                            cold.put("sourceFixtureDigest",sourceProof);
                             if (pair == -1) qualityRuns.add(Map.of("workload", workload, "variant", variant,
                                     "generatedUnitTestsExecuted", executeGeneratedTests(fixture)));
                             if (pair >= 0) {
@@ -100,6 +110,8 @@ class PairedSourceUpdateBenchmarkTest extends EndToEndCriticalPathProfileTest {
                     }
                     assertThat(correctness.get("optimized")).as("Semantic A/B equality: %s pair %s", workload, pair)
                             .isEqualTo(correctness.get("legacy"));
+                    assertThat(sourceProofs.get("optimized")).as("Same source bytes in A/B: %s pair %s",workload,pair)
+                            .isEqualTo(sourceProofs.get("legacy"));
                 }
             }
             if (recording != null) { recording.stop(); recording.dump(output.resolve("critical-path.jfr")); attachJfr(output.resolve("critical-path.jfr"), samples); }
@@ -109,6 +121,16 @@ class PairedSourceUpdateBenchmarkTest extends EndToEndCriticalPathProfileTest {
                 "optimization", task, "instrumented", instrumented, "jfr", jfr, "seed", 32026,
                 "provider", "deterministic local mock; zero network latency", "batchConcurrency", 2,
                 "warmupPairsPerWorkload", 1, "samplePairsPerWorkload", count, "qualityRuns", qualityRuns, "samples", samples));
+    }
+
+    private String fixtureSourceDigest(Fixture fixture) throws Exception {
+        var manifest = new java.util.TreeMap<String,String>();
+        var digest = java.security.MessageDigest.getInstance("SHA-256");
+        for(String side:List.of("base","candidate")) try(var paths=Files.walk(fixture.root().resolve(side))) {
+            for(Path path:paths.filter(Files::isRegularFile).sorted().toList()) manifest.put(side+"/"+fixture.root().resolve(side)
+                    .relativize(path).toString().replace('\\','/'),java.util.HexFormat.of().formatHex(digest.digest(Files.readAllBytes(path))));
+        }
+        return java.util.HexFormat.of().formatHex(digest.digest(json.writeValueAsBytes(manifest)));
     }
 
     private void tag(Map<String, Object> sample, int pair, int order, String variant) {

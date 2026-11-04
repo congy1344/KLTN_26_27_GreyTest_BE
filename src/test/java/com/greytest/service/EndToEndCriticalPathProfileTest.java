@@ -124,6 +124,19 @@ class EndToEndCriticalPathProfileTest extends IncrementalPipelineBenchmarkTest {
         try (var events = new RecordingFile(recordingPath)) {
             while (events.hasMoreEvents()) {
                 var event = events.readEvent();
+                String eventName = event.getEventType().getName();
+                if (eventName.equals("jdk.GCPhasePause") || eventName.equals("jdk.GarbageCollection")) {
+                    long startNanos = event.getStartTime().getEpochSecond()*1_000_000_000L + event.getStartTime().getNano();
+                    long endNanos = startNanos + event.getDuration().toNanos();
+                    for (var run : samples) {
+                        long overlap = Math.min(endNanos,(long)run.get("epochEndMillis")*1_000_000L)
+                                - Math.max(startNanos,(long)run.get("epochStartMillis")*1_000_000L);
+                        if (overlap <= 0) continue;
+                        @SuppressWarnings("unchecked") var gc = (List<Map<String,Object>>)run.computeIfAbsent("gcEvents",ignored->new ArrayList<>());
+                        gc.add(Map.of("event",eventName,"epochStartNanos",startNanos,"durationNanos",event.getDuration().toNanos(),"overlapNanos",overlap));
+                    }
+                    continue; // GC là process-wide; không loại event vì không có application event thread.
+                }
                 var eventThread = event.getEventType().getName().equals("jdk.ExecutionSample")
                         ? event.getThread("sampledThread") : event.getThread();
                 if (eventThread == null) continue;
@@ -172,6 +185,7 @@ class EndToEndCriticalPathProfileTest extends IncrementalPipelineBenchmarkTest {
         int before = calls.get();
         var os = (com.sun.management.OperatingSystemMXBean) ManagementFactory.getOperatingSystemMXBean();
         long cpu = os.getProcessCpuTime();
+        long[] gcBefore = gcCounters();
         result.put("epochStartMillis", System.currentTimeMillis());
         long started = System.nanoTime();
         try (var scope = GenerationJobContext.openScope(null)) {
@@ -187,6 +201,9 @@ class EndToEndCriticalPathProfileTest extends IncrementalPipelineBenchmarkTest {
             else measured.get();
             result.put("wallMillis", (System.nanoTime() - started) / 1_000_000.0);
             result.put("processCpuMillis", (os.getProcessCpuTime() - cpu) / 1_000_000.0);
+            long[] gcAfter = gcCounters();
+            result.put("gcCountDelta",gcBefore[0]<0 || gcAfter[0]<0 ? null : gcAfter[0]-gcBefore[0]);
+            result.put("gcMillisDelta",gcBefore[1]<0 || gcAfter[1]<0 ? null : gcAfter[1]-gcBefore[1]);
             result.put("epochEndMillis", System.currentTimeMillis());
             result.put("metrics", GenerationJobContext.metrics());
         }
@@ -226,6 +243,21 @@ class EndToEndCriticalPathProfileTest extends IncrementalPipelineBenchmarkTest {
         result.put("threads", run.spans().stream().map(CriticalPathProfiler.Span::thread).distinct().toList());
         result.put("jfr", new LinkedHashMap<String, Object>());
         result.put("spans", run.spans());
+        if (TailLatencyObserver.enabled()) {
+            result.put("databaseSamples",List.copyOf(run.databaseSamples));
+            result.put("poolSamples",List.copyOf(run.poolSamples));
+            result.put("observerErrors",List.copyOf(run.observerErrors));
+        }
         return result;
+    }
+
+    private static long[] gcCounters() {
+        long count=0,time=0;
+        for(var collector:ManagementFactory.getGarbageCollectorMXBeans()) {
+            long c=collector.getCollectionCount(),t=collector.getCollectionTime();
+            if(c<0 || t<0) return new long[]{-1,-1};
+            count+=c; time+=t;
+        }
+        return new long[]{count,time};
     }
 }

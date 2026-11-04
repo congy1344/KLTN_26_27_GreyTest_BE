@@ -25,12 +25,18 @@ import org.springframework.context.annotation.Bean;
 final class CriticalPathProfiler {
     interface Call<T> { T get() throws Throwable; }
     record Span(long id, long parent, String name, long thread, String stage, int batch, String targets,
-                long startNanos, long endNanos, long cpuNanos, long allocatedBytes, String purpose, boolean failed) { }
+                long startNanos, long endNanos, long cpuNanos, long allocatedBytes, String purpose, boolean failed, int backendPid) { }
+    record ActiveJdbc(long spanId, long thread, String stage, int batch, String targets, String operation, String purpose) { }
     static final class Run {
         final String id = UUID.randomUUID().toString();
         final String workload;
         final long projectId, updateId, started = System.nanoTime();
         final ConcurrentLinkedQueue<Span> events = new ConcurrentLinkedQueue<>();
+        final java.util.concurrent.ConcurrentHashMap<Integer, ActiveJdbc> activeJdbc = new java.util.concurrent.ConcurrentHashMap<>();
+        final ConcurrentLinkedQueue<java.util.Map<String,Object>> databaseSamples = new ConcurrentLinkedQueue<>();
+        final ConcurrentLinkedQueue<java.util.Map<String,Object>> poolSamples = new ConcurrentLinkedQueue<>();
+        final ConcurrentLinkedQueue<java.util.Map<String,Object>> observerErrors = new ConcurrentLinkedQueue<>();
+        boolean active;
         Run(String workload, long projectId, long updateId) {
             this.workload = workload; this.projectId = projectId; this.updateId = updateId;
         }
@@ -45,7 +51,9 @@ final class CriticalPathProfiler {
             ThreadLocal.withInitial(java.util.IdentityHashMap::new);
 
     static <T> T bind(Run run, Call<T> call) throws Throwable {
-        return within(new Context(run, 0, "ANALYZE", 0, "[]", "root"), call);
+        TailLatencyObserver.enter(run);
+        try { return within(new Context(run, 0, "ANALYZE", 0, "[]", "root"), call); }
+        finally { TailLatencyObserver.exit(run); }
     }
     private static <T> T within(Context value, Call<T> call) throws Throwable {
         Context previous = CURRENT.get();
@@ -59,20 +67,29 @@ final class CriticalPathProfiler {
         catch (Throwable e) { throw new IllegalStateException(e); }
     }
     static <T> T observe(String name, Call<T> call) throws Throwable {
+        return observe(name, 0, call);
+    }
+    static <T> T observe(String name, int backendPid, Call<T> call) throws Throwable {
         Context context = CURRENT.get();
         if (context == null) return call.get();
         long id = IDS.incrementAndGet(), started = System.nanoTime(), cpu = cpu(), allocated = allocated();
         boolean failed = true;
+        ActiveJdbc active = backendPid == 0 ? null : new ActiveJdbc(id, Thread.currentThread().getId(), context.stage, context.batch, context.targets, name, context.name);
+        ActiveJdbc previous = active == null ? null : context.run.activeJdbc.put(backendPid, active);
         try {
             T result = within(new Context(context.run, id, context.stage, context.batch, context.targets, name), call);
             failed = false;
             return result;
         } finally {
+            if (active != null) {
+                if (previous == null) context.run.activeJdbc.remove(backendPid, active);
+                else context.run.activeJdbc.put(backendPid, previous);
+            }
             long endedCpu = cpu(), endedAllocated = allocated();
             context.run.events.add(new Span(id, context.parent, name, Thread.currentThread().getId(),
                     context.stage, context.batch, context.targets, started - context.run.started,
                     System.nanoTime() - context.run.started, cpu < 0 || endedCpu < 0 ? -1 : endedCpu - cpu,
-                    allocated < 0 || endedAllocated < 0 ? -1 : endedAllocated - allocated, context.name, failed));
+                    allocated < 0 || endedAllocated < 0 ? -1 : endedAllocated - allocated, context.name, failed, backendPid));
         }
     }
     private static long cpu() {
@@ -93,7 +110,7 @@ final class CriticalPathProfiler {
                 return within(context, () -> {
                     long now = System.nanoTime();
                     context.run.events.add(new Span(IDS.incrementAndGet(), context.parent, "batch.readyToStart", Thread.currentThread().getId(),
-                            context.stage, batch, context.targets, ready - context.run.started, now - context.run.started, -1, -1, context.name, false));
+                            context.stage, batch, context.targets, ready - context.run.started, now - context.run.started, -1, -1, context.name, false, 0));
                     return observe("batch.worker", () -> worker.apply(input));
                 });
             } catch (RuntimeException | Error e) { throw e; }
@@ -113,7 +130,10 @@ final class CriticalPathProfiler {
         static BeanPostProcessor criticalPathObserver() {
             return new BeanPostProcessor() {
                 @Override public Object postProcessAfterInitialization(Object bean, String name) {
-                    if (bean instanceof DataSource) return jdbcProxy(bean, DataSource.class);
+                    if (bean instanceof DataSource dataSource) {
+                        TailLatencyObserver.registerPool(dataSource);
+                        return jdbcProxy(bean, DataSource.class, 0);
+                    }
                     String simple = org.springframework.aop.support.AopUtils.getTargetClass(bean).getSimpleName();
                     if (!SERVICES.contains(simple) && !name.endsWith("Repository")
                             && !(bean instanceof org.springframework.transaction.PlatformTransactionManager)) return bean;
@@ -144,7 +164,7 @@ final class CriticalPathProfiler {
                                     Context origin = tx.context;
                                     origin.run.events.add(new Span(IDS.incrementAndGet(), origin.parent, "transaction.hold", Thread.currentThread().getId(),
                                             origin.stage, origin.batch, origin.targets, tx.started - origin.run.started,
-                                            System.nanoTime() - origin.run.started, -1, -1, origin.name, failed));
+                                            System.nanoTime() - origin.run.started, -1, -1, origin.name, failed, 0));
                                 }
                                 if (TRANSACTIONS.get().isEmpty()) TRANSACTIONS.remove();
                             }
@@ -160,7 +180,7 @@ final class CriticalPathProfiler {
         }
     }
 
-    private static Object jdbcProxy(Object target, Class<?> contract) {
+    private static Object jdbcProxy(Object target, Class<?> contract, int backendPid) {
         return Proxy.newProxyInstance(CriticalPathProfiler.class.getClassLoader(), new Class<?>[] { contract }, (proxy, method, args) -> {
             Call<Object> invoke = () -> {
                 try { return method.invoke(target, args); }
@@ -168,11 +188,18 @@ final class CriticalPathProfiler {
             };
             String name = method.getName();
             Object value = name.startsWith("execute") || name.equals("commit") || name.equals("rollback") || name.equals("getConnection")
-                    ? observe("jdbc." + name, invoke) : invoke.get();
-            if (value instanceof Connection) return jdbcProxy(value, Connection.class);
-            if (value instanceof java.sql.CallableStatement) return jdbcProxy(value, java.sql.CallableStatement.class);
-            if (value instanceof java.sql.PreparedStatement) return jdbcProxy(value, java.sql.PreparedStatement.class);
-            if (value instanceof Statement) return jdbcProxy(value, Statement.class);
+                    ? observe("jdbc." + name, backendPid, invoke) : invoke.get();
+            if (value instanceof Connection connection) {
+                int pid = 0;
+                if (TailLatencyObserver.enabled()) {
+                    try { pid = connection.unwrap(org.postgresql.PGConnection.class).getBackendPID(); }
+                    catch (java.sql.SQLException unavailable) { TailLatencyObserver.pidUnavailable(); }
+                }
+                return jdbcProxy(value, Connection.class, pid);
+            }
+            if (value instanceof java.sql.CallableStatement) return jdbcProxy(value, java.sql.CallableStatement.class, backendPid);
+            if (value instanceof java.sql.PreparedStatement) return jdbcProxy(value, java.sql.PreparedStatement.class, backendPid);
+            if (value instanceof Statement) return jdbcProxy(value, Statement.class, backendPid);
             return value;
         });
     }
