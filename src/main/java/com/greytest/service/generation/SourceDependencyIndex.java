@@ -39,6 +39,7 @@ import com.greytest.service.ServiceScopeResolver;
 
 /** Index AST theo digest snapshot; chỉ giữ trong input bất biến của một generation run. */
 final class SourceDependencyIndex {
+    private static final String LOMBOK_DIRECTORY_REUSE = "greytest.source-update.lombok-directory-reuse-enabled";
     private static final Set<String> SKIP = Set.of(".git", "target", "build", "node_modules", ".gradle", "generated-sources");
     private final Path root;
     private final Map<String, CompilationUnit> units = new TreeMap<>();
@@ -172,9 +173,19 @@ final class SourceDependencyIndex {
             manifest.append("analyzer:source-dependency-index-v2\n");
             manifest.append("snapshot:").append(SourceSnapshotSession.contentIdentity(root)).append('\n');
             manifest.append("analysis-classpath:").append(classpath.digest()).append('\n');
-            sources.forEach((path, source) -> manifest.append(path.length()).append(':').append(path)
-                    .append(':').append(GenerationFingerprintService.hash(source)).append(':')
-                    .append(LombokSourceSymbols.hasConfiguration(root.resolve(path).getParent())).append('\n'));
+            Boolean override = GenerationJobContext.scopedValue(LOMBOK_DIRECTORY_REUSE);
+            boolean reuseDirectories = override != null ? override : Boolean.parseBoolean(System.getProperty(LOMBOK_DIRECTORY_REUSE,
+                    System.getenv().getOrDefault("GREYTEST_SOURCE_UPDATE_LOMBOK_DIRECTORY_REUSE_ENABLED", "true")));
+            Map<Path, Boolean> configurations = new java.util.HashMap<>();
+            sources.forEach((path, source) -> {
+                Path directory = root.resolve(path).getParent();
+                // Chỉ gộp trong lần load có proof; vẫn watch cả config chưa tồn tại và giữ hash cuối stage.
+                boolean configured = reuseDirectories && SourceSnapshotSession.hasMonitoredSnapshot(root)
+                        ? configurations.computeIfAbsent(directory, LombokSourceSymbols::hasConfiguration)
+                        : LombokSourceSymbols.hasConfiguration(directory);
+                manifest.append(path.length()).append(':').append(path).append(':')
+                        .append(GenerationFingerprintService.hash(source)).append(':').append(configured).append('\n');
+            });
             String digest = GenerationFingerprintService.hash(manifest.toString());
             return GenerationJobContext.memoize("source-dependency-index-v1:" + root + ":" + digest,
                     () -> verifiedIndex(new VerifiedIndexKey(root, digest), sources, parsedUnits, classpath));

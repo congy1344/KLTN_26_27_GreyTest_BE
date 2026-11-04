@@ -45,6 +45,13 @@ public final class SourceSnapshotSession implements AutoCloseable {
 
     private static SourceSnapshotSession current() { return GenerationJobContext.scopedValue(KEY); }
 
+    /** Loader đã capture root; mất watcher thì mọi reuse cục bộ phải quay về đọc mới. */
+    static boolean hasMonitoredSnapshot(Path root) {
+        var session = current();
+        if (session == null) return false;
+        synchronized (session) { return session.monitoring && session.digests.containsKey(root); }
+    }
+
     static <T> T index(Path root, Supplier<T> loader) {
         var session = current();
         if (session == null) return loader.get();

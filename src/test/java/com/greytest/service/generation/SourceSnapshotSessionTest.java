@@ -15,6 +15,38 @@ import com.greytest.service.agent.GenerationContextBuilder;
 class SourceSnapshotSessionTest {
     @TempDir Path root;
 
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void configurationDirectoryReuseRequiresAnAttestedSnapshot(boolean enabled) throws Exception {
+        for (int i = 0; i < 5; i++) write("src/main/java/example/Subject" + i + ".java", "package example; class Subject" + i + " {}");
+        try (var scope = GenerationJobContext.openScope(null)) {
+            GenerationJobContext.withValue("greytest.source-update.lombok-directory-reuse-enabled", enabled,
+                    () -> SourceSnapshotSession.withSession(() -> SourceDependencyIndex.load(root)));
+            assertThat(GenerationJobContext.metrics().get("dependency.lombokConfigurationChecks"))
+                    .isEqualTo(enabled ? 1L : 5L);
+        }
+        try (var scope = GenerationJobContext.openScope(null)) {
+            GenerationJobContext.withValue("greytest.source-update.lombok-directory-reuse-enabled", enabled,
+                    () -> SourceDependencyIndex.load(root));
+            assertThat(GenerationJobContext.metrics().get("dependency.lombokConfigurationChecks")).isEqualTo(5L);
+        }
+    }
+
+    @Test void directoryReuseStillDetectsNewAncestorConfiguration() throws Exception {
+        Path candidate = Files.createDirectories(root.resolve("candidate"));
+        for (int i = 0; i < 5; i++) write("candidate/src/main/java/example/Subject" + i + ".java", "package example; class Subject" + i + " {}");
+        try (var scope = GenerationJobContext.openScope(null)) {
+            assertThatThrownBy(() -> GenerationJobContext.withValue("greytest.source-update.lombok-directory-reuse-enabled", true,
+                    () -> SourceSnapshotSession.withSession(() -> {
+                        SourceDependencyIndex.load(candidate);
+                        try { Files.writeString(root.resolve("lombok.config"), "config.stopBubbling = true"); }
+                        catch (Exception error) { throw new AssertionError(error); }
+                        SourceSnapshotSession.verifyStage();
+                        return null;
+                    }))).isInstanceOf(SourceSnapshotSession.SnapshotChangedException.class);
+        }
+    }
+
     @Test void nestedBatchesAndParallelWorkersReadSourceOnlyOnce() throws Exception {
         write("src/main/java/example/Subject.java", "package example; class Subject { int value() { return 1; } }");
         try (var scope = GenerationJobContext.openScope(null)) {
