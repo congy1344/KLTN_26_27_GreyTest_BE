@@ -1,0 +1,198 @@
+{
+  "phase": "3.6",
+  "status": "PREFLIGHT_AWAITING_APPROVAL",
+  "baselineCommit": "257b887",
+  "branch": "perf/source-update-performance",
+  "realProviderRequestsMade": 0,
+  "accountAccessVerified": false,
+  "provider": {
+    "configured": "openai",
+    "model": "gpt-6-luna",
+    "endpoint": "https://api.openai.com/v1/chat/completions",
+    "apiKeyPresent": true,
+    "keyValueRecorded": false,
+    "configurationSource": "application.yml imports local .env; no process overrides observed",
+    "temperature": 0.3,
+    "reasoningEffort": "none",
+    "jsonMode": true,
+    "timeoutSeconds": 60,
+    "fallbackOutputTokenLimit": 16384,
+    "stageOutputTokenLimits": {
+      "BR": 4096,
+      "TP": 6144,
+      "TC": 8192,
+      "UT": 12288
+    },
+    "batchRetryAttemptsConfigured": 2,
+    "batchConcurrencyConfigured": 4,
+    "usageRecordingConfigured": false,
+    "contextFileLoggingConfigured": true,
+    "accountRpm": null,
+    "accountTpm": null,
+    "accountBalance": null
+  },
+  "assertLeaseOptimizationEnabled": false,
+  "proposedPilot": {
+    "approvalGranted": false,
+    "workloads": [
+      "cold-one",
+      "unchanged-resume",
+      "existing-one-update"
+    ],
+    "samplesPerWorkload": 1,
+    "maxHttpAttemptsIncludingFailuresRetriesAndWarmup": 12,
+    "maxRequestBodyBytes": 524288,
+    "maxOutputTokensPerRequest": 16384,
+    "spendingBudgetUsd": 5,
+    "budgetNature": "Proposed reservation budget; not a provider-enforced account billing limit; includes unknown-outcome requests at conservative allowance",
+    "concurrency": 2,
+    "batchRetryAttempts": 2,
+    "timeoutSecondsPerRequest": 60,
+    "automaticAdditionalPaidRuns": false
+  },
+  "publicPricingReference": {
+    "url": "https://developers.openai.com/api/docs/models/gpt-6-luna",
+    "checkedDate": "2026-11-04",
+    "currency": "USD",
+    "perMillionTokens": {
+      "input": 0.1,
+      "cachedInput": 0.01,
+      "cacheWrite": 0.125,
+      "output": 0.5
+    },
+    "longPromptThresholdTokens": 272000,
+    "longPromptInputMultiplier": 2,
+    "longPromptOutputMultiplier": 1.5,
+    "fastMultiplier": 2,
+    "regionalPremiumMultiplier": 1.1,
+    "isMeasuredBill": false
+  },
+  "snapshots": [
+    {
+      "identity": "phase36-base-five-v1",
+      "contentDigest": "f416de0fb409901c3bea2011e2ad1dba93655a0fd7d7aff10146de2f77838c19",
+      "files": {
+        "pom.xml": "<project xmlns=\"http://maven.apache.org/POM/4.0.0\"><modelVersion>4.0.0</modelVersion><parent><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-parent</artifactId><version>3.3.4</version><relativePath/></parent><groupId>benchmark</groupId><artifactId>phase36-source</artifactId><version>1</version><properties><java.version>17</java.version></properties><dependencies><dependency><groupId>org.springframework</groupId><artifactId>spring-context</artifactId></dependency><dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-test</artifactId><scope>test</scope></dependency></dependencies></project>\n",
+        "src/main/java/benchmark/BenchmarkService.java": "package benchmark;\nimport org.springframework.stereotype.Service;\n@Service\npublic class BenchmarkService {\n    public int value0() { return 41; }\n    public int value1() { return 41; }\n    public int value2() { return 41; }\n    public int value3() { return 41; }\n    public int value4() { return 41; }\n}\n"
+      },
+      "fileSha256": {
+        "pom.xml": "c1a2309389445ac2d494f5a5e5a6fe58d393166641f1058bece9e1dd67c5c9c4",
+        "src/main/java/benchmark/BenchmarkService.java": "0c0c5953713a694765da41113ee048ce7c22868b61ff39bc4b9785c9462382ee"
+      },
+      "developerTests": 0
+    },
+    {
+      "identity": "phase36-added-one-v1",
+      "contentDigest": "8a79de0dd6b6e532bb6e32c6e185eef689d80bf0966e27f25b1872a6688d516c",
+      "files": {
+        "pom.xml": "<project xmlns=\"http://maven.apache.org/POM/4.0.0\"><modelVersion>4.0.0</modelVersion><parent><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-parent</artifactId><version>3.3.4</version><relativePath/></parent><groupId>benchmark</groupId><artifactId>phase36-source</artifactId><version>1</version><properties><java.version>17</java.version></properties><dependencies><dependency><groupId>org.springframework</groupId><artifactId>spring-context</artifactId></dependency><dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-test</artifactId><scope>test</scope></dependency></dependencies></project>\n",
+        "src/main/java/benchmark/BenchmarkService.java": "package benchmark;\nimport org.springframework.stereotype.Service;\n@Service\npublic class BenchmarkService {\n    public int value0() { return 41; }\n    public int value1() { return 41; }\n    public int value2() { return 41; }\n    public int value3() { return 41; }\n    public int value4() { return 41; }\n    public int value5() { return 42; }\n}\n"
+      },
+      "fileSha256": {
+        "pom.xml": "c1a2309389445ac2d494f5a5e5a6fe58d393166641f1058bece9e1dd67c5c9c4",
+        "src/main/java/benchmark/BenchmarkService.java": "d08fd3eb97b9fb0feb26d1b167ebce151c9375beda8da35b2ca74d60bf85ed77"
+      },
+      "developerTests": 0
+    },
+    {
+      "identity": "phase36-updated-one-v1",
+      "contentDigest": "21610b9f4b8b622d51ef4878d2552e53dd735605974714802c51400d7e262bbd",
+      "files": {
+        "pom.xml": "<project xmlns=\"http://maven.apache.org/POM/4.0.0\"><modelVersion>4.0.0</modelVersion><parent><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-parent</artifactId><version>3.3.4</version><relativePath/></parent><groupId>benchmark</groupId><artifactId>phase36-source</artifactId><version>1</version><properties><java.version>17</java.version></properties><dependencies><dependency><groupId>org.springframework</groupId><artifactId>spring-context</artifactId></dependency><dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-test</artifactId><scope>test</scope></dependency></dependencies></project>\n",
+        "src/main/java/benchmark/BenchmarkService.java": "package benchmark;\nimport org.springframework.stereotype.Service;\n@Service\npublic class BenchmarkService {\n    public int value0() { return 41; }\n    public int value1() { return 41; }\n    public int value2() { return 41; }\n    public int value3() { return 41; }\n    public int value4() { return 41; }\n    public int value5() { return 43; }\n}\n"
+      },
+      "fileSha256": {
+        "pom.xml": "c1a2309389445ac2d494f5a5e5a6fe58d393166641f1058bece9e1dd67c5c9c4",
+        "src/main/java/benchmark/BenchmarkService.java": "616d9ad96e7de3328ff80301ac965c168c92ac7568a9ce29a61ec165309c37d6"
+      },
+      "developerTests": 0
+    },
+    {
+      "identity": "phase36-updated-six-v1",
+      "contentDigest": "44023f2ce1e74bf52b642a9679bae8cb21ed5b326d36268a68a8cf1fb81c67a4",
+      "files": {
+        "pom.xml": "<project xmlns=\"http://maven.apache.org/POM/4.0.0\"><modelVersion>4.0.0</modelVersion><parent><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-parent</artifactId><version>3.3.4</version><relativePath/></parent><groupId>benchmark</groupId><artifactId>phase36-source</artifactId><version>1</version><properties><java.version>17</java.version></properties><dependencies><dependency><groupId>org.springframework</groupId><artifactId>spring-context</artifactId></dependency><dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-test</artifactId><scope>test</scope></dependency></dependencies></project>\n",
+        "src/main/java/benchmark/BenchmarkService.java": "package benchmark;\nimport org.springframework.stereotype.Service;\n@Service\npublic class BenchmarkService {\n    public int value0() { return 44; }\n    public int value1() { return 44; }\n    public int value2() { return 44; }\n    public int value3() { return 44; }\n    public int value4() { return 44; }\n    public int value5() { return 44; }\n}\n"
+      },
+      "fileSha256": {
+        "pom.xml": "c1a2309389445ac2d494f5a5e5a6fe58d393166641f1058bece9e1dd67c5c9c4",
+        "src/main/java/benchmark/BenchmarkService.java": "457cc66f1236316c5062b331e2191dd4f5a4e42e5b4a66ae9219cce9813223aa"
+      },
+      "developerTests": 0
+    }
+  ],
+  "workloads": [
+    {
+      "id": "cold-one",
+      "base": "phase36-base-five-v1",
+      "candidate": "phase36-added-one-v1",
+      "measuredRuns": 0
+    },
+    {
+      "id": "existing-one-update",
+      "base": "phase36-added-one-v1",
+      "candidate": "phase36-updated-one-v1",
+      "measuredRuns": 0,
+      "prerequisite": "Use only authentic GreyTest-generated artifacts from completed cold-one and normal Apply; no handwritten test seed"
+    },
+    {
+      "id": "six-method-update",
+      "base": "phase36-added-one-v1",
+      "candidate": "phase36-updated-six-v1",
+      "measuredRuns": 0,
+      "prerequisite": "Authentic provider generation for all six baseline methods, charged separately; later approval"
+    },
+    {
+      "id": "unchanged-resume",
+      "candidate": "phase36-added-one-v1",
+      "measuredRuns": 0,
+      "prerequisite": "Replay successful cold-one checkpoint unchanged"
+    },
+    {
+      "id": "failure-resume",
+      "base": "phase36-added-one-v1",
+      "candidate": "phase36-updated-six-v1",
+      "measuredRuns": 0,
+      "prerequisite": "Test-only deterministic failure before selected network request; other workers settle before retry; later approval"
+    }
+  ],
+  "samples": [],
+  "measurements": {
+    "wallMillis": null,
+    "stageMillis": null,
+    "providerMillis": null,
+    "inputTokens": null,
+    "outputTokens": null,
+    "billingCostUsd": null,
+    "calculatedTariffCostUsd": null,
+    "compilePassRate": null,
+    "junitPassRate": null,
+    "p50": null,
+    "p95": null
+  },
+  "readiness": {
+    "immutableSourceManifestPrepared": true,
+    "generationHarnessForRealProviderReady": false,
+    "globalRequestBudgetGuardReady": false,
+    "isolationSentinelGateRun": false,
+    "noApiKeyInArtifacts": true,
+    "runtimeChanged": false
+  },
+  "preflightChecks": {
+    "sourceManifestSelfCheck": "PASS (all four snapshots match files and digests)",
+    "developerTestSourceFilesInSnapshots": 0,
+    "productionFixtureCompile": "PASS, four snapshots, Maven offline, Java release17",
+    "generatedUtCompile": null,
+    "junitExecution": null,
+    "providerAuthentication": null,
+    "runtimeProductionFilesChanged": false,
+    "resolvedFixtureDependencies": {
+      "java": "17.0.18",
+      "springContext": "6.1.13",
+      "junitJupiter": "5.10.3",
+      "junitPlatform": "1.10.3",
+      "mockito": "5.11.0",
+      "verification": "Maven offline dependency:tree, exit0"
+    }
+  }
+}
