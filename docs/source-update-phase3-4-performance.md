@@ -1,5 +1,7 @@
 # Phase 3.4 — LLM critical path: profiling và đề xuất
 
+Implementation tiếp theo và quyết định flag/rollout được ghi ở [báo cáo assertLease](source-update-phase3-4-implementation.md). Báo cáo profiling này giữ nguyên số liệu và trạng thái thiết kế tại baseline lúc đo; không dùng các số đó như benchmark before/after của implementation mới.
+
 Ngày: 2026-11-04, Asia/Bangkok. Baseline: `d1aee0d`, nhánh `perf/source-update-performance`, sau khi gỡ thử nghiệm compatibility. Đã đọc báo cáo [Phase 3.3](source-update-phase3-3-performance.md), [Phase 3.2](source-update-phase3-2-results.md), [critical path](source-update-e2e-critical-path.md), [thiết kế scheduler](source-update-dag-scheduler-design.md), [checkpoint/resume](reports/2026-10-24-incremental-generation-optimization.md) và implementation hiện tại.
 
 **Kết luận trong phạm vi đo:** backend/JDBC chi phối fixture mock. Chọn duy nhất bottleneck **round trips kiểm tra lease/fence**, nằm trong nhóm JDBC lớn nhất có thể quy về cùng một guard trên workload sáu method. Đề xuất gộp hai câu SQL của mỗi `assertLease` thành một statement vẫn khóa row trước khi kiểm tra thời gian DB. **Chưa triển khai runtime hoặc chạy SQL thay thế.** Chưa xác định bottleneck của provider thật và chưa chứng minh giảm thời gian chờ production.
