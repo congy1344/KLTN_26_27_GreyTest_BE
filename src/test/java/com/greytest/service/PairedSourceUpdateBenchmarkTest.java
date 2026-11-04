@@ -240,7 +240,7 @@ class PairedSourceUpdateBenchmarkTest extends EndToEndCriticalPathProfileTest {
         ArrayNode result = JsonNodeFactory.instance.arrayNode(); values.forEach(result::add); return result;
     }
 
-    private int executeGeneratedTests(Fixture fixture) throws Exception {
+    int executeGeneratedTests(Fixture fixture) throws Exception {
         int executed = 0;
         for (var item : items.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(fixture.updateId())) {
             if (!item.getTargetType().name().equals("UNIT_TEST")) continue;
