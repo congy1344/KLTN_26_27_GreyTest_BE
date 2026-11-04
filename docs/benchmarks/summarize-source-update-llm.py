@@ -97,7 +97,7 @@ evidence.update(method='Current build only; profile/control sensitivity, no opti
                 percentile='linear interpolation; six samples are descriptive, not stable production tails',
                 rawSource=str(source), samples=runs, summary=summary)
 output.parent.mkdir(parents=True, exist_ok=True)
-output.write_text(json.dumps(evidence, ensure_ascii=False, indent=2)+'\n', encoding='utf-8')
+output.write_bytes((json.dumps(evidence, ensure_ascii=False, indent=2)+'\n').encode('utf-8'))
 print('Wrote', output, 'windows', len(runs))
 for workload, result in summary.items():
     print(workload, 'wall',result['wallMillis'],'provider',result['providerUnionMillis'],'jdbc',result['jdbcUnionMillis'])
