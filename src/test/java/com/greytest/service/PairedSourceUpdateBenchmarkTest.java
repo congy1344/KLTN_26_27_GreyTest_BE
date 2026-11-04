@@ -25,14 +25,18 @@ class PairedSourceUpdateBenchmarkTest extends EndToEndCriticalPathProfileTest {
 
     @Override @Test void profileCriticalPath() throws Throwable {
         String task = System.getProperty("benchmark.optimization", "B");
-        assertThat(task).isIn("B", "CONFIG_DIRECTORY");
-        variantFlag = task.equals("B") ? JDBC_READ : "greytest.source-update.lombok-directory-reuse-enabled";
+        assertThat(task).isIn("B", "CONFIG_DIRECTORY", "LEASE");
+        variantFlag = switch (task) {
+            case "B" -> JDBC_READ;
+            case "LEASE" -> "greytest.source-update.single-statement-lease-check-enabled";
+            default -> "greytest.source-update.lombok-directory-reuse-enabled";
+        };
         boolean instrumented = Boolean.parseBoolean(System.getProperty("benchmark.instrumentation", "true"));
         boolean jfr = Boolean.parseBoolean(System.getProperty("benchmark.jfr", "true"));
         assertThat(instrumented || !jfr).as("Uninstrumented control also requires -Dbenchmark.jfr=false").isTrue();
         int count = Integer.getInteger("e2e.samples", 10);
         assertThat(count).isPositive().isEven();
-        Path output = Path.of(task.equals("B") ? "target/phase3-2-b" : "target/phase3-3-config-directory");
+        Path output = Path.of(task.equals("B") ? "target/phase3-2-b" : task.equals("LEASE") ? "target/phase3-4-lease" : "target/phase3-3-config-directory");
         output = Path.of(output + (instrumented ? "-profile" : "-control"));
         output = Path.of(System.getProperty("e2e.outputDirectory", output.toString()));
         Files.createDirectories(output);

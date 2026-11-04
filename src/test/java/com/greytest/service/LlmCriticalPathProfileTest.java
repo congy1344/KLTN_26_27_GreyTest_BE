@@ -15,6 +15,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import jdk.jfr.Recording;
 
 /** Đo pipeline hiện tại và payload tại biên mock; không sửa prompt hoặc mô phỏng latency provider thật. */
+@org.junit.jupiter.api.condition.EnabledIfSystemProperty(named = "e2e.profile", matches = "true")
 class LlmCriticalPathProfileTest extends PairedSourceUpdateBenchmarkTest {
     @Override String respond(String prompt) throws Exception {
         if (!Boolean.parseBoolean(System.getProperty("benchmark.instrumentation", "true"))) return super.respond(prompt);
