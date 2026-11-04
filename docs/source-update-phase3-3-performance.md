@@ -1,6 +1,6 @@
 # Phase 3.3 — Fast source-update pipeline
 
-Ngày đo: 2026-11-04, Asia/Bangkok. Nhánh `perf/source-update-performance`; không push/merge hoặc đổi main. Baseline là working tree hiện tại, gồm B1+B2 của Phase 3.2 và các thay đổi compatibility Phase 4.1 đã có trước lượt này; benchmark isolation không được bật. Không so sánh wall time trực tiếp với số lịch sử của Phase 3.1/3.2 vì runtime/config/protocol khác.
+Ngày đo: 2026-11-04, Asia/Bangkok. Nhánh `perf/source-update-performance`; không push/merge hoặc đổi main. Baseline lúc đo là working tree gồm B1+B2 của Phase 3.2 và một số thay đổi compatibility thử nghiệm chưa commit; benchmark isolation không được bật. Các thay đổi thử nghiệm này đã được gỡ sau lượt đo theo yêu cầu người dùng. Evidence bên dưới giữ nguyên lịch sử của build đã đo, không phải phép đo lại trên build sau cleanup. Không so sánh wall time trực tiếp với số lịch sử của Phase 3.1/3.2 vì runtime/config/protocol khác.
 
 Phạm vi: một tối ưu cục bộ trong dependency loader, quyết định giữ/loại bằng paired end-to-end benchmark. Không DAG scheduler, không schema change, không đổi batch grouping/provider/prompt output contract, không khôi phục source-only context cache đã rollback ở Phase 3.2.
 
@@ -149,7 +149,7 @@ Không gộp wall của series profile vào control. **88 measured windows**, c�
 
 Mọi warm fixture ở cả ba series có **100% target checkpoint reuse**, 0 provider calls. Denominator lấy target checkpoint của scope đã settle, **loại bốn `__stage__` marker**; failure window dùng target set cuối cùng nên không gọi đó là rate của riêng số target đã tới trước lỗi. Response cache rate và target checkpoint reuse được giữ riêng.
 
-Full regression với **default true**, DB restored đúng URL, kết thúc **exit 0 / BUILD SUCCESS**: **151 suites, 1903 tests = 1875 pass + 28 skip, 0 failure/error**. Các suite DB protected edits, temporary artifact preservation, export provenance, durable stores, retry/resume và concurrency đã thực thi; không còn 34 DB URL-gated skips của lượt Phase 4.1 dùng cluster khác.
+Full regression trên build lúc benchmark với **default true**, DB restored đúng URL, kết thúc **exit 0 / BUILD SUCCESS**: **151 suites, 1903 tests = 1875 pass + 28 skip, 0 failure/error**. Các suite DB protected edits, temporary artifact preservation, export provenance, durable stores, retry/resume và concurrency đã thực thi. Đây là kết quả lịch sử trước cleanup; số test hiện tại thay đổi do đã gỡ các test compatibility thử nghiệm.
 
 28 skip gồm hai live/replay oracle chưa bật, một golden manifest dành cho checkout khác, một scan microbenchmark opt-in và 12 test kế thừa ở mỗi class profile/paired khi `e2e.profile` không bật. Các profile/paired entrypoint cần cho phép đo này đã chạy riêng và pass; không coi skip là pass. Dùng đúng log invocation mới và Surefire XML tương ứng để cộng số liệu. Lượt tagged mất 422.453 giây cả Maven/test setup; đây không phải pipeline wall time.
 
@@ -195,7 +195,15 @@ mvn -o -B -ntp '-Dtest=PairedSourceUpdateBenchmarkTest#profileCriticalPath' '-De
 python docs/benchmarks/summarize-source-update-paired.py --self-check
 python docs/benchmarks/summarize-source-update-paired.py target/phase3-3-config-directory-control/samples.json --compact-output docs/benchmarks/source-update-phase3-3-control.json
 
-mvn -o -B -ntp '-Dspring.test.context.cache.maxSize=2' '-Dbenchmark.phase=phase3-3-regression' '-Dpetclinic.sourceOnlyPath=../benchmarks/real-projects/petclinic-rest/source-only-input' '-DargLine=-Xms16m -Xmx768m -XX:ReservedCodeCacheSize=64m -XX:+UseSerialGC' test
+mvn -o -B -ntp '-Dspring.test.context.cache.maxSize=2' '-Dbenchmark.phase=phase3-3-cleanup' '-DargLine=-Xms16m -Xmx768m -XX:ReservedCodeCacheSize=64m -XX:+UseSerialGC' test
 ```
 
 Lượt full suite đầu dùng phase mặc định `before` đã bị guard `benchmarkColdAndUnchangedRepeat` từ chối do baseline có sẵn (**1 error**, không failure assertion của pipeline). Hai phương án an toàn là dùng tag `benchmark.phase` riêng hoặc chạy trong output/worktree riêng; đã chọn tag có sẵn, không sửa guard hoặc xóa baseline. Log cũ giữ ở `target/phase3-3-regression-final.log`, lượt chạy lại ở `target/phase3-3-regression-tagged.log`; không báo lượt lỗi là pass.
+
+## 8. Kiểm tra sau khi gỡ thử nghiệm compatibility
+
+Theo yêu cầu người dùng, đã khôi phục các thay đổi compatibility/isolation chưa commit về HEAD, xóa fixture, preflight, báo cáo, checkout benchmark và cluster kiểm thử riêng đã dừng. Giữ nguyên B1+B2, ba commit Phase 3.3, bốn JSON evidence và các cấu hình có sẵn của người dùng. Không thay đổi main hoặc push.
+
+Đã xóa compiled classes cũ trước khi build để không chạy nhầm test đã gỡ. Biên dịch production và test source thành công. Bộ kiểm tra tập trung gồm 13 suites (job context/service, agent/framework/prompt/context/semantic validation, diff, fingerprint, checkpoint, snapshot và batch executor): **370 tests pass, 0 failure/error/skip**, exit 0 / BUILD SUCCESS, 47.406 giây. Log: `target/source-update-cleanup-focused.log`.
+
+Lượt full regression sau cleanup không đạt: PostgreSQL `localhost:5433` không chạy (`Connection refused`), 5 test khởi tạo Spring context báo lỗi DB; đã dừng fork của lượt này, không sửa cấu hình hoặc khởi động database ứng dụng. Log: `target/source-update-cleanup-regression.log`. Có thể chạy full suite khi DB kiểm thử sẵn sàng hoặc dùng môi trường test riêng được cấp; lượt này chỉ kết luận trên 370 test không cần DB. Chưa đo lại paired benchmark sau cleanup, nên không gán số wall time lịch sử cho build sau khi gỡ compatibility.
