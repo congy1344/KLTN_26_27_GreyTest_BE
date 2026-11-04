@@ -123,7 +123,7 @@ class PairedSourceUpdateBenchmarkTest extends EndToEndCriticalPathProfileTest {
                 "warmupPairsPerWorkload", 1, "samplePairsPerWorkload", count, "qualityRuns", qualityRuns, "samples", samples));
     }
 
-    private String fixtureSourceDigest(Fixture fixture) throws Exception {
+    String fixtureSourceDigest(Fixture fixture) throws Exception {
         var manifest = new java.util.TreeMap<String,String>();
         var digest = java.security.MessageDigest.getInstance("SHA-256");
         for(String side:List.of("base","candidate")) try(var paths=Files.walk(fixture.root().resolve(side))) {
@@ -150,7 +150,7 @@ class PairedSourceUpdateBenchmarkTest extends EndToEndCriticalPathProfileTest {
 
     @SuppressWarnings("unchecked") private static <T, E extends Throwable> T rethrow(Throwable error) throws E { throw (E) error; }
 
-    private JsonNode semanticEvidence(Fixture fixture) throws Exception {
+    JsonNode semanticEvidence(Fixture fixture) throws Exception {
         Map<String, Map<String, String>> identities = new HashMap<>();
         for (String type : List.of("METHOD", "BUSINESS_RULE", "TEST_PLAN", "TEST_CASE", "UNIT_TEST")) identities.put(type, new HashMap<>());
         var methods = jdbc.queryForList("select m.id,m.method_name from java_method m join java_class c on c.id=m.class_id where c.project_id=?", fixture.projectId());
