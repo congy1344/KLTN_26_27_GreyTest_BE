@@ -83,10 +83,12 @@ final class ParserDependencyClasspath {
     }
 
     static Snapshot load(Path root, Set<String> sourceModules) {
+        com.greytest.service.GenerationJobContext.increment("classpath.loads");
         String property = System.getProperty("greytest.analysis.classpath-file", "").trim();
         String jdk = System.getProperty("java.runtime.version") + ":" + System.getProperty("java.vendor");
         if (property.isEmpty()) return defaultSnapshot(jdk);
         try {
+            SourceSnapshotSession.watchFile(Path.of(property));
             ObjectMapper mapper = new ObjectMapper().enable(com.fasterxml.jackson.databind.SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS);
             JsonNode configuration = mapper.readTree(Files.readString(Path.of(property)));
             if (!configuration.path("format").asText().equals("greytest-analysis-classpath-v1")) throw new IllegalArgumentException("Invalid analysis classpath format");
@@ -97,12 +99,14 @@ final class ParserDependencyClasspath {
             var external = configuration.path("externalInputs").fields();
             while (external.hasNext()) {
                 var entry = external.next(); Path path = Path.of(entry.getKey());
+                SourceSnapshotSession.watchFile(path);
                 String actual = Files.exists(path) ? hash(Files.readAllBytes(path)) : "absent";
                 if (!actual.equals(entry.getValue().asText())) throw new IllegalArgumentException("Analysis build input changed; resolve the classpath again");
                 externalInputs.put(entry.getKey(), actual);
             }
             if (configuration.hasNonNull("modelRepository")) {
                 Path repository = Path.of(configuration.path("modelRepository").asText()).toRealPath();
+                SourceSnapshotSession.watchTree(repository);
                 Set<Path> expected = new LinkedHashSet<>();
                 for (String name : externalInputs.keySet()) {
                     Path path = Path.of(name).toAbsolutePath().normalize();
@@ -115,6 +119,7 @@ final class ParserDependencyClasspath {
                 }
             }
             Map<String, String> buildHashes = new TreeMap<>();
+            com.greytest.service.GenerationJobContext.increment("classpath.sourceWalks");
             try (var paths = Files.walk(root)) {
                 for (Path path : paths.filter(p -> p.getFileName().toString().equals("pom.xml"))
                         .filter(p -> !excluded(root.relativize(p))).toList()) {
@@ -136,6 +141,7 @@ final class ParserDependencyClasspath {
                 List<Artifact> jars = new ArrayList<>();
                 for (JsonNode entry : declared.path("jars")) {
                     Path path = Path.of(entry.asText()).toRealPath();
+                    SourceSnapshotSession.watchFile(path);
                     if (!Files.isRegularFile(path) || !path.toString().endsWith(".jar")) throw new IllegalArgumentException("Analysis dependencies must be JAR files");
                     Artifact artifact = artifacts.get(path);
                     if (artifact == null) {
@@ -270,6 +276,7 @@ final class ParserDependencyClasspath {
 
     static String sourceHash(Path root, Path directory) throws IOException {
         Map<String, String> files = new TreeMap<>();
+        com.greytest.service.GenerationJobContext.increment("classpath.bindingWalks");
         try (var paths = Files.walk(directory)) {
             for (Path path : paths.filter(Files::isRegularFile).filter(p -> !excluded(directory.relativize(p))).toList()) {
                 checked(root, path); files.put(relative(directory, path), hash(Files.readAllBytes(path)));

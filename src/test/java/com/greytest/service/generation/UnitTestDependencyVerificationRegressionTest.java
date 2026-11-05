@@ -478,6 +478,87 @@ class UnitTestDependencyVerificationRegressionTest {
     }
 
     @Test
+    void mockedInterfaceCollaboratorWithMultipleImplementationsAndUnresolvedParentsPasses() throws Exception {
+        write("petclinic/src/main/java/org/example/repository/PetRepository.java",
+                "package org.example.repository; public interface PetRepository { void delete(String pet); }\n");
+        write("petclinic/src/main/java/org/example/repository/jdbc/JdbcPetRepositoryImpl.java",
+                "package org.example.repository.jdbc; import org.example.repository.PetRepository; public class JdbcPetRepositoryImpl implements PetRepository { public void delete(String pet) {} }\n");
+        write("petclinic/src/main/java/org/example/repository/jpa/JpaPetRepositoryImpl.java",
+                "package org.example.repository.jpa; import org.example.repository.PetRepository; public class JpaPetRepositoryImpl implements PetRepository { public void delete(String pet) {} }\n");
+        write("petclinic/src/main/java/org/example/controller/OwnerRestController.java",
+                "package org.example.controller; public class OwnerRestController implements UnresolvedGeneratedApi {}\n");
+        write("petclinic/src/main/java/org/example/service/ClinicServiceImpl.java",
+                "package org.example.service; import org.example.repository.PetRepository; public class ClinicServiceImpl { private PetRepository petRepository; public void deletePet(String pet) { this.petRepository.delete(pet); } }\n");
+
+        String testSource = """
+                package org.example.service;
+                import org.junit.jupiter.api.Test;
+                import org.junit.jupiter.api.extension.ExtendWith;
+                import org.mockito.InjectMocks;
+                import org.mockito.Mock;
+                import org.mockito.junit.jupiter.MockitoExtension;
+                import static org.mockito.Mockito.verify;
+                import org.example.repository.PetRepository;
+
+                @ExtendWith(MockitoExtension.class)
+                class ClinicServiceImplTest {
+                    @Mock private PetRepository petRepository;
+                    @InjectMocks private ClinicServiceImpl clinicService;
+
+                    @Test
+                    void testDeletePet() {
+                        this.clinicService.deletePet("dog");
+                        verify(this.petRepository).delete("dog");
+                    }
+                }
+                """;
+
+        var fp = service.outputFingerprint(Map.of("unit_tests", List.of(Map.of("source_code", testSource))),
+                root, "petclinic");
+        assertThat(fp.provenance()).doesNotContain("unresolved");
+        assertThat(fp.reusable()).isTrue();
+    }
+
+    @Test
+    void mockedAbstractClassCollaboratorWithMultipleSubclassesPasses() throws Exception {
+        write("petclinic/src/main/java/org/example/service/AbstractNotifier.java",
+                "package org.example.service; public abstract class AbstractNotifier { public abstract void send(String msg); }\n");
+        write("petclinic/src/main/java/org/example/service/EmailNotifier.java",
+                "package org.example.service; public class EmailNotifier extends AbstractNotifier { public void send(String msg) {} }\n");
+        write("petclinic/src/main/java/org/example/service/SmsNotifier.java",
+                "package org.example.service; public class SmsNotifier extends AbstractNotifier { public void send(String msg) {} }\n");
+        write("petclinic/src/main/java/org/example/service/AlertService.java",
+                "package org.example.service; public class AlertService { private AbstractNotifier notifier; public void alert(String msg) { this.notifier.send(msg); } }\n");
+
+        String testSource = """
+                package org.example.service;
+                import org.junit.jupiter.api.Test;
+                import org.junit.jupiter.api.extension.ExtendWith;
+                import org.mockito.InjectMocks;
+                import org.mockito.Mock;
+                import org.mockito.junit.jupiter.MockitoExtension;
+                import static org.mockito.Mockito.verify;
+
+                @ExtendWith(MockitoExtension.class)
+                class AlertServiceTest {
+                    @Mock private AbstractNotifier notifier;
+                    @InjectMocks private AlertService alertService;
+
+                    @Test
+                    void testAlert() {
+                        this.alertService.alert("critical");
+                        verify(this.notifier).send("critical");
+                    }
+                }
+                """;
+
+        var fp = service.outputFingerprint(Map.of("unit_tests", List.of(Map.of("source_code", testSource))),
+                root, "petclinic");
+        assertThat(fp.provenance()).doesNotContain("unresolved");
+        assertThat(fp.reusable()).isTrue();
+    }
+
+    @Test
     void negativeTestNonExistentApiOrMissingDependencyRemainsBlocked() {
         // Calling non-existent method on Product
         String invalidTest = "package com.selimhorri.app.service.impl;\n" +

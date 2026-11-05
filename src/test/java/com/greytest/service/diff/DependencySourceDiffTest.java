@@ -187,6 +187,53 @@ class DependencySourceDiffTest {
         org.assertj.core.api.Assertions.assertThatThrownBy(this::compare).isInstanceOf(IllegalArgumentException.class).hasMessageContaining("dynamic dispatch");
     }
 
+    @Test void unchangedDynamicDispatchDoesNotBlockUnrelatedSourceChanges() throws Exception {
+        both("src/main/java/example/Caller.java", "package example; @org.springframework.stereotype.Service class Caller { private Service service; int target(int input) { return service.save(input); } }");
+        both("src/main/java/example/Service.java", "package example; interface Service { int save(int input); int other(); }");
+        both("src/main/java/example/ServiceImpl.java", "package example; @org.springframework.stereotype.Service class ServiceImpl implements Service { private Repo repo; public int save(int input) { return repo.save(input); } public int other() { return 1; } }");
+        both("src/main/java/example/Repo.java", "package example; interface Repo { int save(int input); }");
+        both("src/main/java/example/FirstRepo.java", "package example; class FirstRepo implements Repo { public int save(int input) { return input; } }");
+        both("src/main/java/example/SecondRepo.java", "package example; class SecondRepo implements Repo { public int save(int input) { return input; } }");
+        candidate("src/main/java/example/ServiceImpl.java", "package example; @org.springframework.stereotype.Service class ServiceImpl implements Service { private Repo repo; public int save(int input) { return repo.save(input); } public int other() { return 2; } }");
+        var diffs = compare();
+        assertThat(method(diffs, "ServiceImpl", "other").diffType()).isEqualTo(MethodDiffType.MODIFIED);
+    }
+
+    @Test void interfaceReferenceIsNotTraversedAsDto() throws Exception {
+        both("src/main/java/example/Caller.java",
+                "package example; @org.springframework.stereotype.Service class Caller { private Repo repo; int target() { return repo.first(); } }");
+        both("src/main/java/example/Repo.java",
+                "package example; interface Repo { int first(); int second(); }");
+        both("src/main/java/example/FirstRepo.java",
+                "package example; @org.springframework.stereotype.Repository class FirstRepo implements Repo { public int first() { return 1; } public int second() { return 2; } }");
+        both("src/main/java/example/SecondRepo.java",
+                "package example; @org.springframework.stereotype.Repository class SecondRepo implements Repo { public int first() { return 1; } public int second() { return 3; } }");
+        // Repo.second() có dynamic dispatch nhập nhằng (2 implementations khác nhau), nhưng Caller chỉ gọi repo.first()
+        candidate("src/main/java/example/SecondRepo.java",
+                "package example; @org.springframework.stereotype.Repository class SecondRepo implements Repo { public int first() { return 1; } public int second() { return 4; } }");
+        var diffs = compare();
+        assertThat(method(diffs, "Caller", "target").diffType()).isEqualTo(MethodDiffType.UNCHANGED);
+    }
+
+    @Test void petclinicSourceUpdateSucceedsWithoutDynamicDispatchError() throws Exception {
+        Path base = Path.of("c:/Users/KhaiTien/Downloads/IUH/IUH/KLTN").toAbsolutePath();
+        if (!Files.isDirectory(base)) return;
+        Path sourceMau = Files.list(base).filter(p -> p.getFileName().toString().contains("source")).findFirst().orElse(null);
+        if (sourceMau == null) return;
+        Path dir210 = sourceMau.resolve("2-10");
+        if (!Files.exists(dir210)) return;
+        Path chuaSua = Files.list(dir210).filter(Files::isDirectory).filter(p -> p.getFileName().toString().startsWith("ch")).findFirst().orElse(null);
+        if (chuaSua == null) return;
+        Path basePetclinic = chuaSua.resolve("spring-petclinic-rest-master/spring-petclinic-rest-master");
+        Path candPetclinic = dir210.resolve("spring-petclinic-rest-master/spring-petclinic-rest-master");
+        if (!Files.exists(basePetclinic) || !Files.exists(candPetclinic)) return;
+
+        List<MethodDiffItem> diffs = service.compareSnapshots(basePetclinic, candPetclinic);
+        assertThat(diffs).isNotEmpty();
+        assertThat(diffs.stream().filter(d -> d.methodName().equals("findPetsByOwnerId"))
+                .allMatch(d -> d.diffType() == MethodDiffType.DELETED)).isTrue();
+    }
+
     private List<MethodDiffItem> compare() { return service.compareSnapshots(temp.resolve("base"), temp.resolve("candidate")); }
     private MethodDiffItem method(List<MethodDiffItem> items, String owner, String method) { return items.stream().filter(item -> item.className().equals(owner) && item.methodName().equals(method)).findFirst().orElseThrow(); }
     private void both(String file, String source) throws Exception { write("base", file, source); candidate(file, source); }

@@ -1,0 +1,1187 @@
+{
+  "baselineCommit": "e5d0fcd",
+  "branch": "perf/source-update-performance",
+  "runtimeJavaChanged": false,
+  "productionGuardDefault": false,
+  "realLlmCalled": false,
+  "dbSettings": [
+    "checkpoint_timeout|300|s",
+    "default_transaction_isolation|read committed|",
+    "fsync|on|",
+    "max_connections|100|",
+    "server_version|15.17|",
+    "synchronous_commit|on|",
+    "track_io_timing|off|",
+    "track_wal_io_timing|off|",
+    "wal_sync_method|fdatasync|",
+    "projects|28",
+    "migrations|27"
+  ],
+  "logs": {
+    "target/tail-observer-check.log": {
+      "sha256": "f9bb88ceeb15819bf3e36b2d928bc3fca261aea10c7483eac70a669de5260bc7",
+      "tests": 10,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "target/tail-six-profile.log": {
+      "sha256": "8ef57073b2fa5c724466b2b9b89e7c0179da709214a08f14428c4a8242f5c477",
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "target/tail-other-profile.log": {
+      "sha256": "c73084b9a7bdf35482f0320fd34f7356d713989b7a807f299454fb70109bd6df",
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "target/tail-control.log": {
+      "sha256": "facaa0d13e6951aa8db712b820ef2cf5861327a0424f1ab8db24134176f90195",
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "target/tail-correctness.log": {
+      "sha256": "a10f1bc68ab16d05f49be783d4ed3f31c09a901ba6436de44613bfe5f9f34e20",
+      "tests": 127,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 1
+    },
+    "target/tail-full-final.log": {
+      "sha256": "84ed479296133f6bdfee118af3b9630d650251b022448a90fdc343ec05723629",
+      "tests": 1917,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 41
+    }
+  },
+  "series": {
+    "control": {
+      "path": "docs/benchmarks/phase3-5-control.json",
+      "sha256": "e723db87525a9a629794aed53f6bbb477388bd36fa91edcb09afa749f4b1125d",
+      "windows": 360,
+      "sourceDigestPairsVerified": 80,
+      "canonicalPairsVerified": 80,
+      "generatedUnitTestsExecuted": 28,
+      "differentPartialWorkPairs": [],
+      "rawSource": {
+        "path": "target/phase3-5-control/samples.json",
+        "sha256": "03e8adf2169466b6c509b9c481ca25bf2bb229d4658c6fc0326a801b881c8e52"
+      }
+    },
+    "six-profile": {
+      "path": "docs/benchmarks/phase3-5-six-profile.json",
+      "sha256": "85d28a30a5c02d935b36bc80f919b9d8e3508ffec3a63260292458cab29cf222",
+      "windows": 80,
+      "sourceDigestPairsVerified": 20,
+      "canonicalPairsVerified": 20,
+      "generatedUnitTestsExecuted": 12,
+      "differentPartialWorkPairs": [],
+      "rawSource": {
+        "path": "target/phase3-5-six-profile/samples.json",
+        "sha256": "0e742e138c9ce90b3f28843bd195d4d739101fe42abac2bd8f61ce638139ac99"
+      }
+    },
+    "other-profile": {
+      "path": "docs/benchmarks/phase3-5-other-profile.json",
+      "sha256": "e35a547b6a882d0380c3f9973625265bad9599d843b447af83c822e30ef2b663",
+      "windows": 84,
+      "sourceDigestPairsVerified": 18,
+      "canonicalPairsVerified": 18,
+      "generatedUnitTestsExecuted": 16,
+      "differentPartialWorkPairs": [
+        {
+          "workload": "RESUME",
+          "pair": 1,
+          "legacyRegenerated": 20,
+          "optimizedRegenerated": 22
+        },
+        {
+          "workload": "RESUME_RETRY",
+          "pair": 1,
+          "legacyRegenerated": 4,
+          "optimizedRegenerated": 2
+        }
+      ],
+      "rawSource": {
+        "path": "target/phase3-5-other-profile/samples.json",
+        "sha256": "7f96119339dc7e43925c978eb4d87242e809f82f24b1989d599dbf600188e6a5"
+      }
+    }
+  },
+  "fullSuites": [
+    {
+      "suite": "com.greytest.Chapter5PipelineIntegrationTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.config.AdminAuthorizationInterceptorTest",
+      "tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.config.AwsDeploymentProfileTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.controller.AdminControllerTest",
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.controller.AnalysisControllerTest",
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.controller.AuthControllerJwtTest",
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.controller.BusinessRuleControllerTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.controller.BusinessRuleGenerationControllerTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.controller.CoverageControllerTest",
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.controller.ExistingTestControllerTest",
+      "tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.controller.GenerationProgressControllerTest",
+      "tests": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.controller.HealthControllerTest",
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.controller.PaymentControllerTest",
+      "tests": 7,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.controller.ProjectControllerTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.controller.SourceUpdateControllerTest",
+      "tests": 8,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.controller.TestPlanControllerTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.controller.UserControllerTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.DataLayerIntegrationTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.exception.GlobalExceptionHandlerTest",
+      "tests": 8,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.mapper.SourceUpdateMapperTest",
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.AdminSafetyConcurrencyIntegrationTest",
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.AdminServiceTest",
+      "tests": 25,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.ActiveSourceUnitTestContextIntegrationTest",
+      "tests": 10,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.AgentGatewayTest",
+      "tests": 52,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.AIAgentRetryProgressTest",
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.AIAgentSchemaRepairTest",
+      "tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.AIAgentServiceJavaVersionTest",
+      "tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.AIAgentServicePersistentCacheTest",
+      "tests": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.AIAgentServiceRetryTest",
+      "tests": 9,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.AiContextLogServiceTest",
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.AppointmentFormatReplayTest",
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.ApprovedBusinessRuleOracleAcceptanceTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 2
+    },
+    {
+      "suite": "com.greytest.service.agent.BusinessRuleRepairRegressionTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.BusinessRuleResourceCollectorTest",
+      "tests": 12,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.CrossProjectGenerationRegressionTest",
+      "tests": 56,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.EnrichmentStubValidationTest",
+      "tests": 17,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.FormattedExceptionMessageEvidenceTest",
+      "tests": 66,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.GeneratedAccessorContractTest",
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.GeneratedBigDecimalAssertionRegressionTest",
+      "tests": 29,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.GeneratedBooleanAssertionValidatorTest",
+      "tests": 10,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.GeneratedFixtureMutationRegressionTest",
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.GeneratedMockitoImportRegressionTest",
+      "tests": 43,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.GeneratedNestedEnumRegressionTest",
+      "tests": 14,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.GeneratedRepositoryFixtureRegressionTest",
+      "tests": 23,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.GeneratedUnitTestSemanticValidatorTest",
+      "tests": 178,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.GeneratedUnusedStubRegressionTest",
+      "tests": 17,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.GenerationContextBuilderTest",
+      "tests": 56,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.GenerationSourceAlignmentTest",
+      "tests": 11,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.GenerationSourceFingerprintTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.GenerationValidationGateTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.GoogleLlmClientTest",
+      "tests": 20,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.LlmHttpTransportTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.LlmProviderContextTest",
+      "tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.LlmResponseCacheTest",
+      "tests": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.LlmStageTokenLimitsTest",
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.LlmTokenUsageTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.LlmUsageFailureRecordingTest",
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.LlmUsageRecorderTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.MultiSourceGenerationRegressionTest",
+      "tests": 19,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.OpenAiLlmClientTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.PersistentSourceAnalysisServiceTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.ProjectJavaVersionDetectorTest",
+      "tests": 26,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.PromptManagerTest",
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.RealMapperRepairTest",
+      "tests": 7,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.RealworldGeneratedContractRegressionTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.SourceEvidenceSafetyTest",
+      "tests": 48,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.SourceMockingGenerationTest",
+      "tests": 12,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.SourceValueContractTest",
+      "tests": 63,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.TestabilityGenerationGatewayTest",
+      "tests": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.TestFeasibilityAnalyzerTest",
+      "tests": 12,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.UnitTestConstructorRepairTest",
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.agent.UpstreamSourceEvidenceRegressionTest",
+      "tests": 89,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.analysis.AnalysisManifestServiceTest",
+      "tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.analysis.AnalysisServiceTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.analysis.JavaParserHelperTest",
+      "tests": 16,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.analysis.MethodBranchAnalyzerTest",
+      "tests": 10,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.analysis.PetClinicGoldenManifestTest",
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 1
+    },
+    {
+      "suite": "com.greytest.service.analysis.ServiceImplementationClassificationTest",
+      "tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.AuthServiceJwtTest",
+      "tests": 29,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.AuthServiceTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.BusinessRuleServiceTest",
+      "tests": 62,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.coverage.JacocoXmlParserTest",
+      "tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.CoverageRefinementServiceTest",
+      "tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.CoverageServiceTest",
+      "tests": 7,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.CoverageToolBootstrapTest",
+      "tests": 16,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.CriticalPathProfilerTest",
+      "tests": 9,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.diff.DependencyImpactAnalysisTest",
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.diff.DependencySourceDiffTest",
+      "tests": 17,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.diff.ImpactAnalysisServiceTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.diff.SourceDiffServiceTest",
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.diff.SourceUpdateScopeRegressionTest",
+      "tests": 7,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.EndToEndCriticalPathProfileTest",
+      "tests": 12,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 12
+    },
+    {
+      "suite": "com.greytest.service.ExportServiceTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.generation.ConstructorReferenceDependencyTest",
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.generation.DurableGenerationStoresIntegrationTest",
+      "tests": 8,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.generation.GeneratedOutputProductionRuntimeTest",
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.generation.GenerationFingerprintServiceTest",
+      "tests": 39,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.generation.GenerationImpactValidatorTest",
+      "tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.generation.IncrementalCheckpointCoordinatorTest",
+      "tests": 23,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.generation.IncrementalUnitTestRegressionTest",
+      "tests": 9,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.generation.LeaseAssertionPostgresIntegrationTest",
+      "tests": 21,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 1
+    },
+    {
+      "suite": "com.greytest.service.generation.LombokSourceDependencyTest",
+      "tests": 16,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.generation.MockitoOutputDependencyTest",
+      "tests": 22,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.generation.ParserDependencyClasspathTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.generation.ParserRuntimeIdentityTest",
+      "tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.generation.SessionImpactRegressionTest",
+      "tests": 7,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.generation.SourceDependencyLinkageTest",
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.generation.SourceSnapshotSessionTest",
+      "tests": 11,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.generation.SourceUpdateScanBenchmarkTest",
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 1
+    },
+    {
+      "suite": "com.greytest.service.generation.UnitTestDependencyVerificationRegressionTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.generation.UnitTestExportProvenanceIntegrationTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.generation.UnitTestExportProvenanceServiceTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.generation.Update263DependencyReplayTest",
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.GenerationJobContextTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.GenerationJobServiceTest",
+      "tests": 13,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.GenerationPerformanceTest",
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.GenerationProgressServiceTest",
+      "tests": 21,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.GenerationSourceArchiveTest",
+      "tests": 22,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.IncrementalBusinessRuleBatchTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.IncrementalGenerationProgressTest",
+      "tests": 8,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.IncrementalGenerationServiceTest",
+      "tests": 37,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.IncrementalPipelineBenchmarkTest",
+      "tests": 13,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.LlmBatchExecutorTest",
+      "tests": 9,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.LlmBatchTierConcurrencyTest",
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.LlmCriticalPathProfileTest",
+      "tests": 12,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 12
+    },
+    {
+      "suite": "com.greytest.service.PairedSourceUpdateBenchmarkTest",
+      "tests": 12,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 12
+    },
+    {
+      "suite": "com.greytest.service.payment.VnpayServiceTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.ProjectServiceTest",
+      "tests": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.ServicePipelineStatusServiceTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.ServiceScopeResolverTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.SourceUpdateAppliedArtifactsTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.SourceUpdateApplyIntegrationTest",
+      "tests": 12,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.SourceUpdateProtectionIntegrationTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.SourceUpdateServiceTest",
+      "tests": 39,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.storage.FileStorageServiceTest",
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.storage.GithubServiceTest",
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.storage.SourceRevisionStorageServiceTest",
+      "tests": 12,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.TailLatencyObserverTest",
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.TemporaryArtifactPreservationIntegrationTest",
+      "tests": 9,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.TestCaseGenerationConcurrencyIntegrationTest",
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.TestCaseServiceTest",
+      "tests": 25,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.TestPlanServiceTest",
+      "tests": 21,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.TraceabilityServiceTest",
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.UnitTestFileServiceTest",
+      "tests": 33,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.UnitTestFixtureExportTest",
+      "tests": 13,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.UnitTestServiceTest",
+      "tests": 26,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.UsageQuotaServiceTest",
+      "tests": 12,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.UsageQuotaTransactionIntegrationTest",
+      "tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.UserActivityServiceTest",
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.service.UserServiceTest",
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "suite": "com.greytest.util.TextSanitizerTest",
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    }
+  ],
+  "generatedUnitTestsExecuted": 56,
+  "measuredWindows": 524,
+  "sourceDigestPairsVerified": 118,
+  "instrumentationCommit": "a6eefdb",
+  "independentReview": {
+    "reviewer": "phase35_independent_review",
+    "actionableFindings": 0,
+    "evidenceRegeneratedExactly": true,
+    "javaBenchmarksRerunByReviewer": false
+  }
+}

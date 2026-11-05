@@ -19,6 +19,13 @@ final class SourceDispatchResolver {
     void visit(TypeDeclaration<?> contract, MethodDeclaration declaration, TypeDeclaration<?> caller,
             Map<String, String> dependencies, Set<String> visited, List<String> problems) {
         if (isObjectMethod(declaration)) return;
+        // Trong chế độ verify output của Unit Test: interface và mock collaborator đã được mock/cô lập, không dispatch xuống implementation cụ thể.
+        if (visited.contains("output-dependency-mode")) {
+            if ((contract.isClassOrInterfaceDeclaration() && contract.asClassOrInterfaceDeclaration().isInterface())
+                    || visited.contains(index.identity(contract) + "#mock-contract")) {
+                return;
+            }
+        }
         List<String> ancestryProblems = new ArrayList<>();
         try {
         List<TypeDeclaration<?>> matches = new ArrayList<>();
@@ -32,7 +39,9 @@ final class SourceDispatchResolver {
             if (assignable(candidate, contract, new HashSet<>(), candidateProblems)) {
                 matches.add(candidate);
             }
-            ancestryProblems.addAll(candidateProblems);
+            if (!candidateProblems.isEmpty()) {
+                ancestryProblems.addAll(candidateProblems);
+            }
         }
         String dispatchKey = index.identity(contract) + "#" + declaration.getSignature();
         if (matches.isEmpty()) {
@@ -57,7 +66,10 @@ final class SourceDispatchResolver {
             }
         }
         if (!anyOverride && declaration.getBody().isPresent()) return;
-        problems.add("unresolved dynamic dispatch: " + dispatchKey);
+        // Dynamic dispatch nhiều implementation trong Unit Test được ghi nhận qua candidate digests, không chặn luồng bằng unresolved problem.
+        if (!visited.contains("output-dependency-mode")) {
+            problems.add("unresolved dynamic dispatch: " + dispatchKey);
+        }
         for (TypeDeclaration<?> implementation : matches) {
             Map<String, String> possible = new TreeMap<>();
             Set<String> possibleVisited = new HashSet<>(visited);
@@ -131,7 +143,13 @@ final class SourceDispatchResolver {
                     return true;
                 }
             } catch (RuntimeException | LinkageError unresolved) {
-                problems.add("unresolved dispatch parent: " + index.identity(candidate) + "#" + reference.getNameWithScope());
+                // Chỉ ghi nhận lỗi unresolved dispatch parent nếu interface/class chưa resolve có tên trùng với target đang kiểm tra.
+                String refName = reference.getNameWithScope();
+                String targetSimple = target.getNameAsString();
+                String targetFull = target.getFullyQualifiedName().orElse(targetSimple);
+                if (refName.equals(targetSimple) || refName.equals(targetFull) || refName.endsWith("." + targetSimple)) {
+                    problems.add("unresolved dispatch parent: " + index.identity(candidate) + "#" + reference.getNameWithScope());
+                }
             }
         }
         return false;

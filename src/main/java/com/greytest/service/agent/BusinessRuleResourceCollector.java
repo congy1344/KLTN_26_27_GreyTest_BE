@@ -166,6 +166,7 @@ final class BusinessRuleResourceCollector {
     }
 
     private void index(Path directory, Set<Path> files) throws IOException {
+        com.greytest.service.GenerationJobContext.increment("resource.walks");
         Files.walkFileTree(directory, new SimpleFileVisitor<>() {
             @Override
             public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
@@ -192,6 +193,7 @@ final class BusinessRuleResourceCollector {
                 warn("Resource omitted (outside source root or too large): " + path);
                 return;
             }
+            com.greytest.service.GenerationJobContext.increment("resource.reads");
             String source = Files.readString(file);
             if (file.getFileName().toString().endsWith(".xml")) {
                 MapperEvidence mapper = readMapper(path, source);

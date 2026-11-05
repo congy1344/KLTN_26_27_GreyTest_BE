@@ -1,0 +1,384 @@
+{
+  "observedLockWaits" : [ {
+    "observedBlockedMillis" : 40.6277,
+    "variant" : "LEGACY",
+    "assertMillis" : 61.7463,
+    "error" : "none",
+    "isolation" : 2,
+    "pair" : 0
+  }, {
+    "observedBlockedMillis" : 25.3759,
+    "variant" : "CANDIDATE",
+    "assertMillis" : 39.6452,
+    "error" : "none",
+    "isolation" : 2,
+    "pair" : 0
+  }, {
+    "observedBlockedMillis" : 26.7757,
+    "variant" : "LEGACY",
+    "assertMillis" : 47.2923,
+    "error" : "none",
+    "isolation" : 2,
+    "pair" : 1
+  }, {
+    "observedBlockedMillis" : 26.2638,
+    "variant" : "CANDIDATE",
+    "assertMillis" : 41.3889,
+    "error" : "none",
+    "isolation" : 2,
+    "pair" : 1
+  }, {
+    "observedBlockedMillis" : 26.116,
+    "variant" : "CANDIDATE",
+    "assertMillis" : 35.5504,
+    "error" : "none",
+    "isolation" : 2,
+    "pair" : 2
+  }, {
+    "observedBlockedMillis" : 25.7494,
+    "variant" : "LEGACY",
+    "assertMillis" : 46.4347,
+    "error" : "none",
+    "isolation" : 2,
+    "pair" : 2
+  }, {
+    "observedBlockedMillis" : 26.5747,
+    "variant" : "LEGACY",
+    "assertMillis" : 53.147,
+    "error" : "none",
+    "isolation" : 2,
+    "pair" : 3
+  }, {
+    "observedBlockedMillis" : 26.1343,
+    "variant" : "CANDIDATE",
+    "assertMillis" : 40.7857,
+    "error" : "none",
+    "isolation" : 2,
+    "pair" : 3
+  }, {
+    "observedBlockedMillis" : 40.3715,
+    "variant" : "LEGACY",
+    "assertMillis" : 58.9581,
+    "error" : "none",
+    "isolation" : 2,
+    "pair" : 4
+  }, {
+    "observedBlockedMillis" : 28.6581,
+    "variant" : "CANDIDATE",
+    "assertMillis" : 42.0354,
+    "error" : "none",
+    "isolation" : 2,
+    "pair" : 4
+  }, {
+    "observedBlockedMillis" : 26.0919,
+    "variant" : "CANDIDATE",
+    "assertMillis" : 40.7354,
+    "error" : "none",
+    "isolation" : 2,
+    "pair" : 5
+  }, {
+    "observedBlockedMillis" : 25.3921,
+    "variant" : "LEGACY",
+    "assertMillis" : 42.8039,
+    "error" : "none",
+    "isolation" : 2,
+    "pair" : 5
+  }, {
+    "observedBlockedMillis" : 26.0082,
+    "variant" : "CANDIDATE",
+    "assertMillis" : 40.4954,
+    "error" : "none",
+    "isolation" : 2,
+    "pair" : 6
+  }, {
+    "observedBlockedMillis" : 26.2439,
+    "variant" : "LEGACY",
+    "assertMillis" : 39.8045,
+    "error" : "none",
+    "isolation" : 2,
+    "pair" : 6
+  }, {
+    "observedBlockedMillis" : 25.9906,
+    "variant" : "CANDIDATE",
+    "assertMillis" : 39.3054,
+    "error" : "none",
+    "isolation" : 2,
+    "pair" : 7
+  }, {
+    "observedBlockedMillis" : 25.2096,
+    "variant" : "LEGACY",
+    "assertMillis" : 40.9459,
+    "error" : "none",
+    "isolation" : 2,
+    "pair" : 7
+  }, {
+    "observedBlockedMillis" : 40.4373,
+    "variant" : "CANDIDATE",
+    "assertMillis" : 57.6308,
+    "error" : "none",
+    "isolation" : 2,
+    "pair" : 8
+  }, {
+    "observedBlockedMillis" : 25.6159,
+    "variant" : "LEGACY",
+    "assertMillis" : 41.6866,
+    "error" : "none",
+    "isolation" : 2,
+    "pair" : 8
+  }, {
+    "observedBlockedMillis" : 100.709,
+    "variant" : "LEGACY",
+    "assertMillis" : 124.4443,
+    "error" : "none",
+    "isolation" : 2,
+    "pair" : 9
+  }, {
+    "observedBlockedMillis" : 40.3743,
+    "variant" : "CANDIDATE",
+    "assertMillis" : 62.3388,
+    "error" : "none",
+    "isolation" : 2,
+    "pair" : 9
+  } ],
+  "assertions" : [ {
+    "variant" : "LEGACY",
+    "pair" : 0,
+    "assertMillis" : 6.6816
+  }, {
+    "variant" : "CANDIDATE",
+    "pair" : 0,
+    "assertMillis" : 4.822
+  }, {
+    "variant" : "LEGACY",
+    "pair" : 1,
+    "assertMillis" : 5.821
+  }, {
+    "variant" : "CANDIDATE",
+    "pair" : 1,
+    "assertMillis" : 3.8233
+  }, {
+    "variant" : "CANDIDATE",
+    "pair" : 2,
+    "assertMillis" : 5.5303
+  }, {
+    "variant" : "LEGACY",
+    "pair" : 2,
+    "assertMillis" : 4.6802
+  }, {
+    "variant" : "LEGACY",
+    "pair" : 3,
+    "assertMillis" : 6.211
+  }, {
+    "variant" : "CANDIDATE",
+    "pair" : 3,
+    "assertMillis" : 4.1462
+  }, {
+    "variant" : "LEGACY",
+    "pair" : 4,
+    "assertMillis" : 5.4332
+  }, {
+    "variant" : "CANDIDATE",
+    "pair" : 4,
+    "assertMillis" : 4.9587
+  }, {
+    "variant" : "CANDIDATE",
+    "pair" : 5,
+    "assertMillis" : 4.6595
+  }, {
+    "variant" : "LEGACY",
+    "pair" : 5,
+    "assertMillis" : 5.4768
+  }, {
+    "variant" : "CANDIDATE",
+    "pair" : 6,
+    "assertMillis" : 5.1031
+  }, {
+    "variant" : "LEGACY",
+    "pair" : 6,
+    "assertMillis" : 6.259
+  }, {
+    "variant" : "CANDIDATE",
+    "pair" : 7,
+    "assertMillis" : 4.161
+  }, {
+    "variant" : "LEGACY",
+    "pair" : 7,
+    "assertMillis" : 5.9314
+  }, {
+    "variant" : "CANDIDATE",
+    "pair" : 8,
+    "assertMillis" : 4.0475
+  }, {
+    "variant" : "LEGACY",
+    "pair" : 8,
+    "assertMillis" : 5.9167
+  }, {
+    "variant" : "LEGACY",
+    "pair" : 9,
+    "assertMillis" : 6.1204
+  }, {
+    "variant" : "CANDIDATE",
+    "pair" : 9,
+    "assertMillis" : 3.9383
+  }, {
+    "variant" : "CANDIDATE",
+    "pair" : 10,
+    "assertMillis" : 4.495
+  }, {
+    "variant" : "LEGACY",
+    "pair" : 10,
+    "assertMillis" : 5.3564
+  }, {
+    "variant" : "CANDIDATE",
+    "pair" : 11,
+    "assertMillis" : 4.0292
+  }, {
+    "variant" : "LEGACY",
+    "pair" : 11,
+    "assertMillis" : 5.5154
+  }, {
+    "variant" : "LEGACY",
+    "pair" : 12,
+    "assertMillis" : 7.3031
+  }, {
+    "variant" : "CANDIDATE",
+    "pair" : 12,
+    "assertMillis" : 4.3201
+  }, {
+    "variant" : "CANDIDATE",
+    "pair" : 13,
+    "assertMillis" : 3.9328
+  }, {
+    "variant" : "LEGACY",
+    "pair" : 13,
+    "assertMillis" : 5.4284
+  }, {
+    "variant" : "LEGACY",
+    "pair" : 14,
+    "assertMillis" : 5.9469
+  }, {
+    "variant" : "CANDIDATE",
+    "pair" : 14,
+    "assertMillis" : 4.1578
+  }, {
+    "variant" : "LEGACY",
+    "pair" : 15,
+    "assertMillis" : 4.7609
+  }, {
+    "variant" : "CANDIDATE",
+    "pair" : 15,
+    "assertMillis" : 3.8517
+  }, {
+    "variant" : "LEGACY",
+    "pair" : 16,
+    "assertMillis" : 7.8687
+  }, {
+    "variant" : "CANDIDATE",
+    "pair" : 16,
+    "assertMillis" : 4.0906
+  }, {
+    "variant" : "CANDIDATE",
+    "pair" : 17,
+    "assertMillis" : 4.2558
+  }, {
+    "variant" : "LEGACY",
+    "pair" : 17,
+    "assertMillis" : 5.4907
+  }, {
+    "variant" : "LEGACY",
+    "pair" : 18,
+    "assertMillis" : 6.2814
+  }, {
+    "variant" : "CANDIDATE",
+    "pair" : 18,
+    "assertMillis" : 4.8497
+  }, {
+    "variant" : "LEGACY",
+    "pair" : 19,
+    "assertMillis" : 6.2193
+  }, {
+    "variant" : "CANDIDATE",
+    "pair" : 19,
+    "assertMillis" : 4.2013
+  }, {
+    "variant" : "CANDIDATE",
+    "pair" : 20,
+    "assertMillis" : 4.0721
+  }, {
+    "variant" : "LEGACY",
+    "pair" : 20,
+    "assertMillis" : 5.516
+  }, {
+    "variant" : "CANDIDATE",
+    "pair" : 21,
+    "assertMillis" : 4.0273
+  }, {
+    "variant" : "LEGACY",
+    "pair" : 21,
+    "assertMillis" : 5.7032
+  }, {
+    "variant" : "CANDIDATE",
+    "pair" : 22,
+    "assertMillis" : 3.636
+  }, {
+    "variant" : "LEGACY",
+    "pair" : 22,
+    "assertMillis" : 5.4365
+  }, {
+    "variant" : "LEGACY",
+    "pair" : 23,
+    "assertMillis" : 5.1825
+  }, {
+    "variant" : "CANDIDATE",
+    "pair" : 23,
+    "assertMillis" : 3.6342
+  }, {
+    "variant" : "CANDIDATE",
+    "pair" : 24,
+    "assertMillis" : 4.4403
+  }, {
+    "variant" : "LEGACY",
+    "pair" : 24,
+    "assertMillis" : 5.5162
+  }, {
+    "variant" : "CANDIDATE",
+    "pair" : 25,
+    "assertMillis" : 4.5203
+  }, {
+    "variant" : "LEGACY",
+    "pair" : 25,
+    "assertMillis" : 5.4037
+  }, {
+    "variant" : "CANDIDATE",
+    "pair" : 26,
+    "assertMillis" : 4.1213
+  }, {
+    "variant" : "LEGACY",
+    "pair" : 26,
+    "assertMillis" : 6.3671
+  }, {
+    "variant" : "LEGACY",
+    "pair" : 27,
+    "assertMillis" : 5.1481
+  }, {
+    "variant" : "CANDIDATE",
+    "pair" : 27,
+    "assertMillis" : 4.8511
+  }, {
+    "variant" : "LEGACY",
+    "pair" : 28,
+    "assertMillis" : 6.0152
+  }, {
+    "variant" : "CANDIDATE",
+    "pair" : 28,
+    "assertMillis" : 4.9717
+  }, {
+    "variant" : "LEGACY",
+    "pair" : 29,
+    "assertMillis" : 5.0368
+  }, {
+    "variant" : "CANDIDATE",
+    "pair" : 29,
+    "assertMillis" : 4.1389
+  } ]
+}

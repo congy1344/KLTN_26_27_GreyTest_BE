@@ -799,9 +799,21 @@ public class IncrementalGenerationService {
                 stale.add(test.getTestCaseId());
                 continue;
             }
-            Long caseMethodId = methodIdForCase(test.getTestCaseId());
-            if (caseMethodId != null && changedMethodIds.contains(caseMethodId)) {
+            Set<Long> caseMethodIds = methodIdsForCase(test.getTestCaseId());
+            if (!caseMethodIds.isEmpty() && caseMethodIds.stream().anyMatch(changedMethodIds::contains)) {
                 stale.add(test.getTestCaseId());
+                continue;
+            }
+            if (!caseMethodIds.isEmpty() && !caseMethodIds.stream().anyMatch(changedMethodIds::contains)) {
+                // Method nghiệp vụ không bị thay đổi và không thuộc phạm vi ảnh hưởng.
+                // Giữ nguyên Unit Test cũ đã duyệt, không đánh dấu stale để tránh sinh lại toàn bộ file khi chỉ thêm method mới.
+                if (checkpoints != null && update != null) {
+                    try {
+                        checkpoints.recordRetainedUnitTest(projectId, update.getId(), test.getTestCaseId(), test, candidate);
+                    } catch (Exception checkpointError) {
+                        log.warn("Không thể ghi retained checkpoint cho case {}: {}", test.getTestCaseId(), checkpointError.getMessage());
+                    }
+                }
                 continue;
             }
             if (fingerprints != null && aiAgentService != null && test.getSourceCode() != null) {
@@ -832,16 +844,28 @@ public class IncrementalGenerationService {
         return stale;
     }
 
-    private Long methodIdForCase(Long caseId) {
+    private Set<Long> methodIdsForCase(Long caseId) {
         if (caseId == null || testCaseRepository == null || testPlanRepository == null || businessRuleRepository == null)
-            return null;
-        return testCaseRepository.findById(caseId)
-                .map(TestCase::getTestPlanId)
-                .flatMap(planId -> testPlanRepository.findById(planId))
-                .map(TestPlan::getBusinessRuleId)
-                .flatMap(ruleId -> businessRuleRepository.findById(ruleId))
-                .map(BusinessRule::getMethodId)
-                .orElse(null);
+            return Set.of();
+        Long planId = testCaseRepository.findById(caseId).map(TestCase::getTestPlanId).orElse(null);
+        if (planId == null) return Set.of();
+        Set<Long> ruleIds = new HashSet<>();
+        testPlanRepository.findById(planId).map(TestPlan::getBusinessRuleId).filter(Objects::nonNull).ifPresent(ruleIds::add);
+        if (testPlanCoveredRuleRepository != null) {
+            testPlanCoveredRuleRepository.findByTestPlanId(planId)
+                    .forEach(cr -> {
+                        if (cr.getBusinessRuleId() != null) ruleIds.add(cr.getBusinessRuleId());
+                    });
+        }
+        Set<Long> methodIds = new HashSet<>();
+        for (Long rId : ruleIds) {
+            businessRuleRepository.findById(rId).map(BusinessRule::getMethodId).filter(Objects::nonNull).ifPresent(methodIds::add);
+        }
+        return methodIds;
+    }
+
+    private Long methodIdForCase(Long caseId) {
+        return methodIdsForCase(caseId).stream().findFirst().orElse(null);
     }
 
     private Long resolveChangedMethodId(Long projectId, MethodDiffItem changed) {

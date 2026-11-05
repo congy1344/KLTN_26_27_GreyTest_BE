@@ -30,6 +30,10 @@ class JavaSourceScanner {
     }
 
     SourceScanResult scanProject(Path projectDir) {
+        return com.greytest.service.GenerationJobContext.measure("source.parse", () -> scanSources(projectDir));
+    }
+
+    private SourceScanResult scanSources(Path projectDir) {
         List<Path> allJavaFiles = findJavaFiles(projectDir);
         List<Path> testFiles = allJavaFiles.stream()
                 .filter(file -> isUnderSourceSet(projectDir, file, "test"))
@@ -61,6 +65,7 @@ class JavaSourceScanner {
     }
 
     private List<Path> findJavaFiles(Path dir) {
+        com.greytest.service.GenerationJobContext.increment("source.walks");
         try (Stream<Path> walk = Files.walk(dir)) {
             return walk.filter(Files::isRegularFile)
                     .filter(path -> path.toString().endsWith(".java"))
@@ -77,6 +82,8 @@ class JavaSourceScanner {
         log.info("Found {} production .java files in {}", javaFiles.size(), rootDir);
 
         for (Path file : javaFiles) {
+            com.greytest.service.GenerationJobContext.increment("source.javaReads");
+            com.greytest.service.GenerationJobContext.increment("source.javaParses");
             try {
                 ParseResult<CompilationUnit> parseResult = JavaParserFactory.parse(file);
                 if (!parseResult.isSuccessful()) throw new ParseProblemException(parseResult.getProblems());

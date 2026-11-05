@@ -16,4 +16,6 @@ target/
 
 # CodeGraph index (local)
 .codegraph/
-scripts/evaluation/__pycache__/
+# Python
+__pycache__/
+*.pyc

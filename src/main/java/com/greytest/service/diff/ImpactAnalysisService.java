@@ -70,6 +70,11 @@ public class ImpactAnalysisService {
     }
 
     public ImpactSummaryDto analyzeImpact(Long projectId, List<MethodDiffItem> diffItems, String servicePath) {
+        return com.greytest.service.GenerationJobContext.measure("source.impact",
+                () -> analyzeScopedImpact(projectId, diffItems, servicePath));
+    }
+
+    private ImpactSummaryDto analyzeScopedImpact(Long projectId, List<MethodDiffItem> diffItems, String servicePath) {
         String normalizedScope = (servicePath != null && !servicePath.isBlank())
                 ? ServiceScopeResolver.normalizeServicePath(servicePath)
                 : null;
@@ -141,6 +146,9 @@ public class ImpactAnalysisService {
                 projectId, changedMethods.size(), affectedServiceMethods.size(),
                 affectedRuleIds.size(), affectedPlanIds.size(), affectedCaseIds.size(), affectedUnitTestIds.size());
 
+        com.greytest.service.GenerationJobContext.count("impact.methods", changedMethods.size());
+        com.greytest.service.GenerationJobContext.count("impact.artifacts", affectedRuleIds.size() + affectedPlanIds.size()
+                + affectedCaseIds.size() + affectedUnitTestIds.size());
         return new ImpactSummaryDto(
                 changedMethods.size(),
                 addedCount,

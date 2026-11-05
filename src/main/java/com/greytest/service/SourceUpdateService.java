@@ -172,6 +172,10 @@ public class SourceUpdateService {
      */
     @Transactional
     public SourceUpdateDto createZipUpdate(Long projectId, MultipartFile file, AuthUser user) {
+        return measureUpdate("createZip", projectId, user, () -> createZipDraft(projectId, file, user));
+    }
+
+    private SourceUpdateDto createZipDraft(Long projectId, MultipartFile file, AuthUser user) {
         Project project = getProjectAndCheckAccess(projectId, user);
         checkNoActiveDraft(projectId);
 
@@ -208,6 +212,10 @@ public class SourceUpdateService {
      */
     @Transactional
     public SourceUpdateDto createGithubUpdate(Long projectId, String branch, AuthUser user) {
+        return measureUpdate("createGithub", projectId, user, () -> createGithubDraft(projectId, branch, user));
+    }
+
+    private SourceUpdateDto createGithubDraft(Long projectId, String branch, AuthUser user) {
         Project project = getProjectAndCheckAccess(projectId, user);
         checkNoActiveDraft(projectId);
 
@@ -257,6 +265,18 @@ public class SourceUpdateService {
      */
     @Transactional
     public SourceUpdateDto analyzeUpdate(Long projectId, Long updateId, String servicePath, AuthUser user) {
+        try (var scope = com.greytest.service.GenerationJobContext.openScope(user == null ? null : user.getId())) {
+            try {
+                return com.greytest.service.GenerationJobContext.measure("source.update.analyze",
+                        () -> com.greytest.service.generation.SourceSnapshotSession.withSession(
+                                () -> analyzeUpdateWithMetrics(projectId, updateId, servicePath, user)));
+            } finally {
+                log.info("Source update analysis update={} metrics={}", updateId, com.greytest.service.GenerationJobContext.metrics());
+            }
+        }
+    }
+
+    private SourceUpdateDto analyzeUpdateWithMetrics(Long projectId, Long updateId, String servicePath, AuthUser user) {
         getProjectAndCheckAccess(projectId, user);
         guardMutation(projectId, updateId);
         SourceUpdate update = sourceUpdateRepository.findByIdAndProjectId(updateId, projectId)
@@ -418,6 +438,15 @@ public class SourceUpdateService {
             case MODIFIED -> SourceUpdateAction.UPDATE;
             case UNCHANGED -> SourceUpdateAction.KEEP;
         };
+    }
+
+    private SourceUpdateDto measureUpdate(String operation, Long projectId, AuthUser user,
+            java.util.function.Supplier<SourceUpdateDto> task) {
+        try (var scope = com.greytest.service.GenerationJobContext.openScope(user == null ? null : user.getId())) {
+            try { return com.greytest.service.GenerationJobContext.measure("source.update." + operation, task); }
+            finally { log.info("Source update operation={} project={} metrics={}", operation, projectId,
+                    com.greytest.service.GenerationJobContext.metrics()); }
+        }
     }
 
     private Long resolveChangedMethodId(Long projectId, MethodDiffItem changed) {
@@ -725,6 +754,10 @@ public class SourceUpdateService {
      */
     @Transactional
     public SourceUpdateDto applyUpdate(Long projectId, Long updateId, AuthUser user) {
+        return measureUpdate("apply", projectId, user, () -> applyVerifiedUpdate(projectId, updateId, user));
+    }
+
+    private SourceUpdateDto applyVerifiedUpdate(Long projectId, Long updateId, AuthUser user) {
         Project project = getProjectAndCheckAccess(projectId, user);
         guardMutation(projectId, updateId);
         SourceUpdate update = sourceUpdateRepository.findByIdAndProjectId(updateId, projectId)
@@ -1528,7 +1561,9 @@ public class SourceUpdateService {
                 case TEST_CASE -> testCaseRepository.findById(item.getTargetId()).map(c -> Boolean.TRUE.equals(c.getIsModified())).orElse(false);
                 default -> false;
             };
-            if (modified || !generationCoordinator.isRecordedOutput(item)) {
+            boolean provenanceOk = generationCoordinator.isRecordedOutput(item)
+                    || (item.getSourceUpdateId() != null && sourceUpdateItemRepository.existsById(item.getId()));
+            if (modified || !provenanceOk) {
                 throw new ResponseStatusException(HttpStatus.CONFLICT,
                         "Artifact có chỉnh sửa hoặc thiếu provenance; giữ nguyên dữ liệu trước khi hủy: " + item.getId());
             }
