@@ -1162,7 +1162,7 @@ class AgentGatewayTest {
         assertThat(agent.generateUnitTests(1L, java.util.Set.of(40L))).isEqualTo(expected);
         var prompts = org.mockito.ArgumentCaptor.forClass(String.class);
         verify(client).complete(prompts.capture(), org.mockito.ArgumentMatchers.any(LlmRequestOptions.class));
-        assertThat(prompts.getValue()).contains("EXCEPTION FLOW VERIFICATION", approvedCase.description(), approvedCase.expectedResult())
+        assertThat(prompts.getValue()).contains("Preserve every approved expected exception", approvedCase.description(), approvedCase.expectedResult())
                 .doesNotContain("# Unit Test semantic correction");
     }
 

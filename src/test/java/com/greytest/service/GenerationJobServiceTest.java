@@ -200,7 +200,7 @@ class GenerationJobServiceTest {
     }
 
     @Test
-    void pausesRunningJobAndReleasesProjectLock() {
+    void pausedJobKeepsProjectLockUntilItsWorkerStops() {
         ManualExecutor executor = new ManualExecutor();
         GenerationProgressService progress = new GenerationProgressService();
         GenerationJobService jobs = new GenerationJobService(executor, progress);
@@ -219,7 +219,10 @@ class GenerationJobServiceTest {
         assertThat(progress.get(1L, GenerationProgressStage.TEST_PLAN).status())
                 .isEqualTo(GenerationProgressStatus.PAUSED);
 
-        // Lock đã được giải phóng, mutation chạy được
+        // Worker có thể còn đang ghi batch dở nên vẫn giữ lock cho tới khi nó dừng hẳn.
+        assertThatThrownBy(() -> jobs.executeMutation(1L, () -> "mutation"))
+                .isInstanceOf(GenerationInProgressException.class);
+        executor.runNext();
         assertThat(jobs.executeMutation(1L, () -> "mutation")).isEqualTo("mutation");
     }
 

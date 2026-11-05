@@ -142,7 +142,8 @@ class IncrementalGenerationProgressTest {
 
         assertThat(completions).singleElement().satisfies(snapshot -> {
             assertThat(snapshot.completedSteps()).isEqualTo(1);
-            assertThat(snapshot.percent()).isEqualTo(100);
+            // Bước đã xong nhưng tác vụ chưa kết thúc nên tiến trình giữ dưới 100%.
+            assertThat(snapshot.percent()).isEqualTo(99);
         });
         assertThat(progress.get(10L, stage).logs()).extracting(log -> log.message())
                 .anySatisfy(message -> assertThat(message).contains("HTTP 504", "2/3"))
