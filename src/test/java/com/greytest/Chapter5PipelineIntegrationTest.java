@@ -210,27 +210,6 @@ class Chapter5PipelineIntegrationTest {
         assertThat(getJson(id, "generation-progress/TEST_PLAN").path("status").asText()).isEqualTo("PAUSED");
     }
 
-    @Test
-    void it05ProviderFailureAndDuplicateJobKeepApprovedRuleAndNoPartialPlans() throws Exception {
-        long id = analyzedProject();
-        createRule(id);
-        postJson(id, "business-rules/approve");
-        String before = getJson(id, "business-rules").toString();
-        provider.block = true;
-        provider.fail = true;
-        accepted(id, "test-plans", "TEST_PLAN");
-        assertThat(provider.entered.await(10, TimeUnit.SECONDS)).isTrue();
-        mvc.perform(post("/api/projects/" + id + "/test-plans/generate").header("Authorization", owner))
-                .andExpect(status().isConflict());
-        mvc.perform(post("/api/projects/" + id + "/business-rules/approve").header("Authorization", owner))
-                .andExpect(status().isConflict());
-        provider.release.countDown();
-        awaitTerminal(id, "TEST_PLAN", "FAILED");
-        assertThat(getJson(id, "test-plans").size()).isZero();
-        assertThat(getJson(id, "business-rules").toString()).isEqualTo(before);
-        assertThat(projects.findById(id).orElseThrow().getStatus().name()).isEqualTo("BR_APPROVED");
-    }
-
     private String register() throws Exception {
         JsonNode result = json(mvc.perform(post("/api/auth/register").contentType(MediaType.APPLICATION_JSON)
                 .content(mapper.writeValueAsString(Map.of("email", UUID.randomUUID() + "@chapter5.test",

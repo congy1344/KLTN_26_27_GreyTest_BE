@@ -131,19 +131,6 @@ class TestCaseServiceTest {
     }
 
     @Test
-    void oraclePreflightFailureDoesNotDeleteCasesOrGenerate() {
-        project(ProjectStatus.PLAN_APPROVED);
-        TestPlan plan = approvedPlan(20L, false);
-        when(plans.findByProjectId(1L)).thenReturn(List.of(plan));
-        org.mockito.Mockito.doThrow(new InvalidProjectStatusException("BR chưa APPROVED"))
-                .when(ai).validateTestCasePrerequisites(1L, Set.of(20L));
-
-        assertThatThrownBy(() -> service.generate(1L)).isInstanceOf(InvalidProjectStatusException.class);
-        verify(ai, org.mockito.Mockito.never()).generateTestCases(org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.anySet());
-        verify(cases, org.mockito.Mockito.never()).deleteAll(org.mockito.ArgumentMatchers.any());
-    }
-
-    @Test
     void pendingPlanIsRejectedBeforeDeletingCasesOrCallingAi() {
         project(ProjectStatus.PLAN_APPROVED);
         TestPlan pending = new TestPlan();

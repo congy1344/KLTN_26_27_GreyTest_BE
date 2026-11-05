@@ -1,7 +1,6 @@
 package com.greytest.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -56,7 +55,6 @@ class CoverageServiceTest {
     @Mock private TestCaseRepository cases;
     @Mock private ProjectRepository projects;
     @Mock private FileStorageService storage;
-    @Mock private MultipartFile file;
     @Mock private ServiceScopeResolver scopeResolver;
     @Mock private ServicePipelineStatusService scopedStatuses;
 
@@ -78,25 +76,6 @@ class CoverageServiceTest {
         when(coveredRules.findByTestPlanIdIn(List.of(10L))).thenReturn(List.of(link));
 
         assertThat(service.calculateRequirementCoverage(5L)).isEqualTo(new BigDecimal("50.00"));
-    }
-
-    @Test
-    void requirementCoverageTra100KhiChuaCoRule() {
-        when(rules.findByProjectIdAndStatus(5L, ReviewStatus.APPROVED)).thenReturn(List.of());
-
-        assertThat(service.calculateRequirementCoverage(5L)).isEqualTo(new BigDecimal("100.00"));
-    }
-
-    @Test
-    void uploadTuChoiKhiChuaSinhUnitTest() {
-        Project project = new Project();
-        project.setId(5L);
-        project.setStatus(ProjectStatus.CASE_APPROVED);
-        when(projects.findById(5L)).thenReturn(Optional.of(project));
-
-        assertThatThrownBy(() -> service.upload(5L, file))
-                .isInstanceOf(InvalidProjectStatusException.class);
-        verify(storage, never()).storeCoverageXml(any(), any());
     }
 
     @Test

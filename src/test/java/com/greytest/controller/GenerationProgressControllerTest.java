@@ -21,6 +21,7 @@ import com.greytest.dto.GenerationProgressDto;
 import com.greytest.dto.GenerationProgressLogDto;
 import com.greytest.dto.GenerationProgressStage;
 import com.greytest.dto.GenerationProgressStatus;
+import com.greytest.dto.GenerationRunMetricsDto;
 import com.greytest.dto.GenerationProgressStepDto;
 import com.greytest.dto.GenerationProgressStepStatus;
 import com.greytest.entity.AuthUser;
@@ -61,7 +62,9 @@ class GenerationProgressControllerTest {
                                         2, "Kiểm tra và lưu Test Plan",
                                         GenerationProgressStepStatus.RUNNING, 0, null)),
                         List.of(new GenerationProgressLogDto(
-                                Instant.parse("2026-08-14T12:00:00Z"), "Đã xử lý batch 1/1."))));
+                                Instant.parse("2026-08-14T12:00:00Z"), "Đã xử lý batch 1/1.")),
+                        new GenerationRunMetricsDto("run-1", Instant.parse("2026-08-14T12:00:00Z"),
+                                null, 12500, 2, 100, 50, 150, 0)));
 
         mockMvc.perform(get("/api/projects/1/generation-progress/TEST_PLAN")
                         .header("Authorization", "Bearer token"))
@@ -70,7 +73,11 @@ class GenerationProgressControllerTest {
                 .andExpect(jsonPath("$.completedSteps").value(1))
                 .andExpect(jsonPath("$.steps[0].status").value("COMPLETED"))
                 .andExpect(jsonPath("$.steps[1].label").value("Kiểm tra và lưu Test Plan"))
-                .andExpect(jsonPath("$.logs[0].message").value("Đã xử lý batch 1/1."));
+                .andExpect(jsonPath("$.logs[0].message").value("Đã xử lý batch 1/1."))
+                .andExpect(jsonPath("$.runMetrics.runId").value("run-1"))
+                .andExpect(jsonPath("$.runMetrics.elapsedMillis").value(12500))
+                .andExpect(jsonPath("$.runMetrics.totalTokens").value(150))
+                .andExpect(jsonPath("$.runMetrics.estimatedCalls").value(0));
 
         verify(projectService).requireAccess(1L, user);
     }

@@ -123,8 +123,9 @@ public class CoverageService {
             }
         } else {
             ProjectStatus status = scopedStatuses.status(projectId, scope);
-            if (status != ProjectStatus.TEST_GENERATED && status != ProjectStatus.COVERAGE_ANALYZED) {
-                throw new InvalidProjectStatusException("Module chỉ upload coverage sau khi đã sinh Unit Test.");
+            if (status != ProjectStatus.TEST_GENERATED && status != ProjectStatus.COVERAGE_ANALYZED
+                    && !scopedStatuses.onlyUnitTestsMissing(projectId, scope, ProjectStatus.TEST_GENERATED)) {
+                throw new InvalidProjectStatusException("Module chỉ upload coverage sau khi đã duyệt BR và sinh đủ Test Plan, Test Case, Unit Test.");
             }
         }
         Path xmlPath = storage.storeCoverageXml(projectId, file);

@@ -35,6 +35,7 @@ import com.greytest.service.agent.LlmResponseException;
 @Service
 public class UnitTestService {
     private static final int MAX_UNIT_TEST_RECOVERY_CALLS = 4;
+    private static final String UNFINISHED_CASE = "Chưa sinh được: ";
     private final UnitTestRepository units; private final TestCaseRepository cases; private final TestPlanRepository plans; private final ProjectRepository projects; private final AIAgentService ai; private final UnitTestFileService files; private final TransactionTemplate transactions; private final GenerationProgressService generationProgress;
     private ServiceScopeResolver scopeResolver; private ServicePipelineStatusService scopedArtifacts; private LlmBatchExecutor batchExecutor;
     @org.springframework.beans.factory.annotation.Autowired(required=false)
@@ -136,7 +137,7 @@ public class UnitTestService {
                                 + formatTestCaseBatchSummary(allBatches.get(compIdx)) + ").");
             }
         } else {
-            deleteOldUnitTests(approved);
+            // Không xóa UT cũ ở đây: persistBatch thay từng case khi đã có kết quả mới hợp lệ.
             target = approved;
             batchesToRun = allBatches;
             batchIndexes = java.util.stream.IntStream.range(0, allBatches.size()).boxed().toList();
@@ -189,7 +190,8 @@ public class UnitTestService {
                     : failedBatch;
             String detailMsg = isQuota
                     ? " Bạn đã sử dụng hết quota LLM trong tháng này. Vui lòng nâng cấp lên gói PRO để tiếp tục sinh."
-                    : " Sinh Unit Test thất bại; các batch đã sinh trước đó đã được lưu an toàn. Bạn có thể nhấn 'Tiếp tục sinh' để chạy tiếp.";
+                    : " Sinh Unit Test thất bại; các batch đã sinh trước đó đã được lưu an toàn. Bạn có thể nhấn 'Tiếp tục sinh' để chạy tiếp."
+                    + (resume ? "" : " Case chưa tới lượt vẫn giữ Unit Test cũ và 'Tiếp tục sinh' chỉ làm lại phần thiếu hoặc không còn hợp lệ; muốn thay toàn bộ hãy chạy Sinh lại.");
             generationProgress.fail(projectId, GenerationProgressStage.UNIT_TEST,
                     (originalBatch > 0 ? "Dừng ở batch " + originalBatch + ". " : "") + detailMsg);
             throw LlmBatchExecutor.originalFailure(exception);
@@ -246,13 +248,21 @@ public class UnitTestService {
             generationProgress.completeAfterCommit(projectId, GenerationProgressStage.UNIT_TEST, "Hoàn tất: " + message);
             return;
         }
-        String blockedSummary = blockedCases.values().stream()
-                .sorted(java.util.Comparator.comparing(BlockedUnitTestDto::caseId))
-                .map(blocked -> (blocked.caseCode() == null ? "ID " + blocked.caseId() : blocked.caseCode() + " (ID " + blocked.caseId() + ")"))
-                .collect(java.util.stream.Collectors.joining(", "));
+        // Case bị chặn do source khác case chưa sinh được do lỗi AI/provider: loại sau chạy lại là có thể đạt.
+        var groups = blockedCases.values().stream().sorted(java.util.Comparator.comparing(BlockedUnitTestDto::caseId))
+                .collect(java.util.stream.Collectors.partitioningBy(blocked -> blocked.details() != null && blocked.details().startsWith(UNFINISHED_CASE)));
+        StringBuilder summary = new StringBuilder("Hoàn tất một phần: ").append(message);
+        if (!groups.get(false).isEmpty()) summary.append(" Còn ").append(groups.get(false).size())
+                .append(" Test Case bị chặn: ").append(caseList(groups.get(false))).append(".");
+        if (!groups.get(true).isEmpty()) summary.append(" Còn ").append(groups.get(true).size())
+                .append(" Test Case chưa sinh được: ").append(caseList(groups.get(true)))
+                .append("; hãy dùng 'Tiếp tục sinh', case đã có Unit Test cũ sẽ giữ bản cũ nếu bản đó còn hợp lệ.");
         generationProgress.partialAfterCommit(projectId, GenerationProgressStage.UNIT_TEST,
-                "Hoàn tất một phần: " + message + " Còn " + blockedCases.size()
-                        + " Test Case bị chặn: " + blockedSummary + ". Xem nhật ký để biết lý do từng case.");
+                summary.append(" Xem nhật ký để biết lý do từng case.").toString());
+    }
+    private static String caseList(List<BlockedUnitTestDto> items){
+        return items.stream().map(blocked -> (blocked.caseCode() == null ? "ID " + blocked.caseId() : blocked.caseCode() + " (ID " + blocked.caseId() + ")"))
+                .collect(java.util.stream.Collectors.joining(", "));
     }
     private List<GeneratedUnitTestDto> generateBatches(Long projectId,List<TestCase> target,Map<Long,BlockedUnitTestDto> blockedCases){
         List<List<TestCase>> batches = caseBatches(target);
@@ -279,15 +289,26 @@ public class UnitTestService {
             generationProgress.setStepStatus(projectId, GenerationProgressStage.UNIT_TEST, batchIdx, com.greytest.dto.GenerationProgressStepStatus.RUNNING);
             generationProgress.log(projectId, GenerationProgressStage.UNIT_TEST,
                     "Đang gọi AI sinh mã Unit Test cho batch " + (batchIdx + 1) + "/" + totalBatches + " (" + summary + ")...");
-            return generateBatchWithRecovery(projectId,ids,batchIdx + 1,totalBatches,
-                    new RecoveryBudget(MAX_UNIT_TEST_RECOVERY_CALLS),false,blockedCases);
+            try {
+                return generateBatchWithRecovery(projectId,ids,batchIdx + 1,totalBatches,
+                        new RecoveryBudget(MAX_UNIT_TEST_RECOVERY_CALLS),false,blockedCases);
+            } catch (RuntimeException exception) {
+                generationProgress.failStep(projectId, GenerationProgressStage.UNIT_TEST, batchIdx, exception.getMessage());
+                throw exception;
+            }
         },
         (completedBatch,valid)-> {
             // Lưu ngay batch này vào CSDL để không mất dữ liệu nếu bị ngắt quãng giữa chừng
-            transactions.execute(status -> {
-                persistBatch(projectId, valid);
-                return null;
-            });
+            try {
+                transactions.execute(status -> {
+                    persistBatch(projectId, valid);
+                    return null;
+                });
+            } catch (RuntimeException exception) {
+                int index = batchIndexes.get(completedBatch - 1);
+                generationProgress.failStep(projectId, GenerationProgressStage.UNIT_TEST, index, exception.getMessage());
+                throw exception;
+            }
             int batchIdx = completedBatch <= batchIndexes.size() ? batchIndexes.get(completedBatch - 1) : -1;
             String summary = completedBatch <= batchCaseLists.size() ? formatTestCaseBatchSummary(batchCaseLists.get(completedBatch - 1)) : "";
             if (batchIdx >= 0) {
@@ -310,18 +331,35 @@ public class UnitTestService {
     private List<GeneratedUnitTestDto> generateBatchWithRecovery(
             Long projectId,Set<Long> requestedIds,int batchNumber,int totalBatches,
             RecoveryBudget recoveryBudget,boolean recoveryCall,Map<Long,BlockedUnitTestDto> blockedCases){
+        return generateBatchWithRecovery(projectId,requestedIds,batchNumber,totalBatches,recoveryBudget,recoveryCall,blockedCases,null);
+    }
+    private List<GeneratedUnitTestDto> generateBatchWithRecovery(
+            Long projectId,Set<Long> requestedIds,int batchNumber,int totalBatches,
+            RecoveryBudget recoveryBudget,boolean recoveryCall,Map<Long,BlockedUnitTestDto> blockedCases,String previousFailure){
         if(recoveryCall&&!recoveryBudget.tryConsume()){
             throw new LlmResponseException("Không thể sinh Unit Test hợp lệ cho Test Case ID " + requestedIds
                     + " vì đã hết giới hạn " + MAX_UNIT_TEST_RECOVERY_CALLS
                     + " lượt phục hồi sau khi tự chia batch.");
         }
-        var response=ai.generateUnitTests(projectId,requestedIds);
+        com.greytest.dto.agent.GenerationResponseDtos.UnitTestResponseDto response;
+        try{
+            response=previousFailure==null ? ai.generateUnitTests(projectId,requestedIds)
+                    : ai.repairUnitTests(projectId,requestedIds,previousFailure);
+        }catch(LlmResponseException.OutputTruncated truncated){
+            if(requestedIds.size()==1) throw truncated;
+            generationProgress.log(projectId,GenerationProgressStage.UNIT_TEST,
+                    "Batch " + batchNumber + "/" + totalBatches + " có output AI bị cắt; đang chia nhỏ " + requestedIds.size() + " case.");
+            Map<Long,GeneratedUnitTestDto> recovered=new LinkedHashMap<>();
+            recoverInGroups(projectId,new ArrayList<>(requestedIds),recovered,batchNumber,totalBatches,recoveryBudget,blockedCases,null);
+            return new ArrayList<>(recovered.values());
+        }
         // Metadata blocked chỉ do backend tạo; không đưa các case này vào lượt phục hồi LLM.
         for(BlockedUnitTestDto blocked : response.blockedCases() == null ? List.<BlockedUnitTestDto>of() : response.blockedCases()){
             if(blocked == null || !requestedIds.contains(blocked.caseId())) continue;
             blockedCases.put(blocked.caseId(),blocked);
             generationProgress.log(projectId,GenerationProgressStage.UNIT_TEST,
                     "Test Case " + blocked.caseCode() + " (ID " + blocked.caseId() + ") bị chặn: " + blocked.details());
+            ai.recordCaseFailure(projectId,blocked.caseId(),new LlmResponseException(blocked.details(),LlmResponseException.ErrorClassification.SOURCE_ANALYSIS_UNRESOLVED));
         }
         Map<Long,List<GeneratedUnitTestDto>> candidates=response.unitTests().stream()
                 .filter(java.util.Objects::nonNull)
@@ -342,7 +380,7 @@ public class UnitTestService {
                 generationProgress.log(projectId,GenerationProgressStage.UNIT_TEST,
                         "Batch " + batchNumber + "/" + totalBatches + " có Unit Test thiếu hoặc hỏng cho Test Case ID "
                                 + unresolved + ". Hệ thống đang thử lại riêng case này.");
-                return generateBatchWithRecovery(projectId,requestedIds,batchNumber,totalBatches,recoveryBudget,true,blockedCases);
+                return generateBatchWithRecovery(projectId,requestedIds,batchNumber,totalBatches,recoveryBudget,true,blockedCases,response.repairNote());
             }
             Long caseId=requestedIds.iterator().next();
             throw new LlmResponseException("Không thể sinh Unit Test hợp lệ cho Test Case ID " + caseId
@@ -351,16 +389,35 @@ public class UnitTestService {
         generationProgress.log(projectId,GenerationProgressStage.UNIT_TEST,
                 "Batch " + batchNumber + "/" + totalBatches + " thiếu hoặc hỏng Unit Test cho Test Case ID "
                         + unresolved + ". Hệ thống đang tự chia nhóm và chỉ thử lại các case này.");
-        int middle=Math.max(1,unresolved.size()/2);
-        List<List<Long>> recoveryGroups=unresolved.size()==1
-                ? List.of(unresolved)
-                : List.of(unresolved.subList(0,middle),unresolved.subList(middle,unresolved.size()));
-        for(List<Long> group:recoveryGroups){
-            Set<Long> groupIds=new LinkedHashSet<>(group);
-            generateBatchWithRecovery(projectId,groupIds,batchNumber,totalBatches,recoveryBudget,true,blockedCases)
-                    .forEach(test->accepted.put(test.caseId(),test));
-        }
+        recoverInGroups(projectId,unresolved,accepted,batchNumber,totalBatches,recoveryBudget,blockedCases,response.repairNote());
         return requestedIds.stream().map(accepted::get).filter(java.util.Objects::nonNull).toList();
+    }
+    /** Chia đôi case còn thiếu; nhóm hỏng không được làm mất test đã đạt, nó được đánh dấu để Tiếp tục sinh xử lý. */
+    private void recoverInGroups(Long projectId,List<Long> ids,Map<Long,GeneratedUnitTestDto> accepted,int batchNumber,int totalBatches,
+            RecoveryBudget recoveryBudget,Map<Long,BlockedUnitTestDto> blockedCases,String previousFailure){
+        int middle=Math.max(1,ids.size()/2);
+        List<List<Long>> groups=ids.size()==1 ? List.of(ids) : List.of(ids.subList(0,middle),ids.subList(middle,ids.size()));
+        Map<List<Long>,LlmResponseException> failed=new LinkedHashMap<>();
+        for(List<Long> group:groups){
+            try{
+                generateBatchWithRecovery(projectId,new LinkedHashSet<>(group),batchNumber,totalBatches,recoveryBudget,true,blockedCases,previousFailure)
+                        .forEach(test->accepted.put(test.caseId(),test));
+            }catch(LlmResponseException failure){
+                // Job bị hủy thì dừng ngay, không ghi nhận như case chưa sinh được.
+                if(Thread.currentThread().isInterrupted()) throw failure;
+                failed.put(group,failure);
+            }
+        }
+        if(failed.isEmpty()) return;
+        // Chưa có test nào đạt thì giữ hành vi cũ: báo lỗi batch để người dùng thấy rõ.
+        if(accepted.isEmpty()) throw failed.values().iterator().next();
+        failed.forEach((group,failure)->group.forEach(id->{
+            String code=cases.findById(id).map(TestCase::getCaseCode).orElse(null);
+            blockedCases.put(id,new BlockedUnitTestDto(id,code,UNFINISHED_CASE + failure.getMessage()));
+            generationProgress.log(projectId,GenerationProgressStage.UNIT_TEST,
+                    "Test Case " + code + " (ID " + id + ") chưa sinh được và sẽ được xử lý khi Tiếp tục sinh: " + failure.getMessage());
+            ai.recordCaseFailure(projectId,id,failure);
+        }));
     }
     private static com.github.javaparser.JavaParser javaParser() {
         return new com.github.javaparser.JavaParser(new com.github.javaparser.ParserConfiguration()
@@ -484,7 +541,10 @@ public class UnitTestService {
     }
     private List<UnitTest> persistBatch(Long projectId, List<GeneratedUnitTestDto> valid) {
         if (valid == null || valid.isEmpty()) return List.of();
+        var replacedCaseIds = valid.stream().map(GeneratedUnitTestDto::caseId).collect(java.util.stream.Collectors.toSet());
+        // UT cũ của chính case đang thay không được coi là trùng tên với UT mới.
         var existingKeys = approvedCases(projectId).stream()
+                .filter(testCase -> !replacedCaseIds.contains(testCase.getId()))
                 .map(testCase -> units.findByTestCaseId(testCase.getId()))
                 .filter(java.util.Objects::nonNull)
                 .map(this::methodKey)
@@ -528,8 +588,6 @@ public class UnitTestService {
     private List<TestCase> approvedCases(Long projectId){return cases.findAll().stream().filter(c->approvedCase(c,projectId)).sorted(java.util.Comparator.comparing(TestCase::getId)).toList();}
     private Project lockedProject(Long id){return projects.findByIdForUpdate(id).orElseThrow(()->new ProjectNotFoundException(id));}
     private List<TestCase> approvedCases(Long projectId,ServiceScopeResolver.ServiceScope scope){return scopedArtifacts.cases(projectId,scope).stream().filter(c->approvedCase(c,projectId)).sorted(java.util.Comparator.comparing(TestCase::getId)).toList();}
-    /** Xóa unit test của vòng trước để sinh lại không bị nhân đôi record. */
-    private void deleteOldUnitTests(List<TestCase> approved){ approved.stream().map(c->units.findByTestCaseId(c.getId())).filter(java.util.Objects::nonNull).forEach(units::delete); units.flush(); }
     private boolean valid(GeneratedUnitTestDto x,Long projectId){if(x==null)return false; TestCase c=cases.findById(x.caseId()).orElse(null); return c!=null&&approvedCase(c,projectId)&&x.sourceCode()!=null&&!x.sourceCode().isBlank()&&validIdentifier(x.testClassName())&&validIdentifier(x.testMethodName())&&validPackage(x.packageName())&&containsExactlyOneRequestedTest(x)&&hasInitializedReferencedFixtures(x);}
     /** Chuẩn hóa source AI trả về cả class nhiều test thành đúng test case đang xử lý. */
     private GeneratedUnitTestDto normalizeCandidate(GeneratedUnitTestDto candidate){
@@ -879,7 +937,7 @@ public class UnitTestService {
         var exportTests=exportProvenance==null?tests:exportProvenance.prepare(projectId,tests,exportSourceRoot(projectId));
         return files.mergeByClass(exportTests).stream()
                 .map(f->new com.greytest.dto.UnitTestFileDto(f.filePath(),f.testClassName(),f.packageName(),f.caseIds().size(),
-                        f.caseIds().stream().map(codeByCaseId::get).filter(java.util.Objects::nonNull).toList(),f.sourceCode()))
+                        f.caseIds().stream().map(codeByCaseId::get).filter(java.util.Objects::nonNull).toList(),com.greytest.service.agent.GenerationSourceFingerprint.withoutMetadata(f.sourceCode())))
                 .toList();
     }
     @Transactional(readOnly=true) public List<com.greytest.dto.UnitTestFileDto> listFiles(Long projectId,String servicePath){
@@ -890,17 +948,55 @@ public class UnitTestService {
         var exportTests=exportProvenance==null?tests:exportProvenance.prepare(projectId,tests,exportSourceRoot(projectId));
         return files.mergeByClass(exportTests).stream()
                 .map(f->new com.greytest.dto.UnitTestFileDto(f.filePath(),f.testClassName(),f.packageName(),f.caseIds().size(),
-                        f.caseIds().stream().map(codeByCaseId::get).filter(java.util.Objects::nonNull).toList(),f.sourceCode()))
+                        f.caseIds().stream().map(codeByCaseId::get).filter(java.util.Objects::nonNull).toList(),com.greytest.service.agent.GenerationSourceFingerprint.withoutMetadata(f.sourceCode())))
                 .toList();
     }
 
+    /** Gói export cùng danh sách case bị bỏ để giao diện báo rõ phần thiếu. */
+    public record ExportArchive(byte[] content,List<String> skippedCaseCodes){}
+
     /** Đóng gói toàn bộ file test đã gộp thành ZIP để user tải về chạy JaCoCo local. */
     @Transactional(readOnly=true) public byte[] zipFiles(Long projectId){
-        return files.createCoverageArchive(listFiles(projectId), exportSourceRoot(projectId));
+        return exportArchive(projectId).content();
     }
 
     @Transactional(readOnly=true) public byte[] zipFiles(Long projectId,String servicePath){
-        return files.createCoverageArchive(listFiles(projectId,servicePath), exportSourceRoot(projectId));
+        return exportArchive(projectId,servicePath).content();
+    }
+
+    @Transactional(readOnly=true) public ExportArchive exportArchive(Long projectId){
+        ensure(projectId);
+        return buildArchive(projectId,cases.findAll().stream().filter(c->approvedCase(c,projectId)).toList());
+    }
+
+    @Transactional(readOnly=true) public ExportArchive exportArchive(Long projectId,String servicePath){
+        ensure(projectId);
+        return buildArchive(projectId,approvedCases(projectId,scopeResolver.resolve(projectId,servicePath)));
+    }
+
+    /** Test đã lưu không còn qua validator thì không xuất ra, vì biết trước sẽ fail; bản trong database vẫn giữ để sinh lại. */
+    private ExportArchive buildArchive(Long projectId,List<TestCase> approved){
+        var codeByCaseId=approved.stream().collect(java.util.stream.Collectors.toMap(TestCase::getId,TestCase::getCaseCode));
+        List<UnitTest> valid=new ArrayList<>();
+        Map<String,String> skipped=new LinkedHashMap<>();
+        for(TestCase testCase:approved){
+            UnitTest test=units.findByTestCaseId(testCase.getId());
+            if(test==null) continue;
+            try{
+                ai.validateExistingUnitTest(projectId,test,null);
+                valid.add(test);
+            }catch(LlmResponseException invalid){
+                skipped.put(testCase.getCaseCode(),invalid.getMessage());
+            }
+        }
+        var exportTests=exportProvenance==null?valid:exportProvenance.prepare(projectId,valid,exportSourceRoot(projectId));
+        var fileList=files.mergeByClass(exportTests).stream()
+                .map(f->new com.greytest.dto.UnitTestFileDto(f.filePath(),f.testClassName(),f.packageName(),f.caseIds().size(),
+                        f.caseIds().stream().map(codeByCaseId::get).filter(java.util.Objects::nonNull).toList(),f.sourceCode()))
+                .toList();
+        byte[] content=files.createCoverageArchive(fileList,exportSourceRoot(projectId),
+                skipped.entrySet().stream().map(item->item.getKey()+": "+item.getValue()).toList());
+        return new ExportArchive(content,List.copyOf(skipped.keySet()));
     }
 
     private java.nio.file.Path exportSourceRoot(Long projectId) {
@@ -909,5 +1005,5 @@ public class UnitTestService {
     }
 
     private Project ensure(Long id){return projects.findById(id).orElseThrow(()->new ProjectNotFoundException(id));}
-    private UnitTestDto dto(UnitTest u){return new UnitTestDto(u.getId(),u.getTestCaseId(),u.getTestClassName(),u.getTestMethodName(),u.getPackageName(),u.getGenerationType(),u.getExistingTestFilePath(),u.getSourceCode(),u.getFilePath(),u.getCreatedAt());}
+    private UnitTestDto dto(UnitTest u){return new UnitTestDto(u.getId(),u.getTestCaseId(),u.getTestClassName(),u.getTestMethodName(),u.getPackageName(),u.getGenerationType(),u.getExistingTestFilePath(),com.greytest.service.agent.GenerationSourceFingerprint.withoutMetadata(u.getSourceCode()),u.getFilePath(),u.getCreatedAt());}
 }

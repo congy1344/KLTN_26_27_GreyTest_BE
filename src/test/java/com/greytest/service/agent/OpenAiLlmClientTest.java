@@ -22,6 +22,53 @@ class OpenAiLlmClientTest {
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Test
+    void cachesOnlyStablePrefixesAndPreservesAllTextAcrossRetry() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
+        var bodies = new java.util.concurrent.CopyOnWriteArrayList<JsonNode>();
+        server.createContext("/", exchange -> {
+            bodies.add(objectMapper.readTree(exchange.getRequestBody()));
+            byte[] response = "{\"choices\":[{\"message\":{\"content\":\"{}\"}}]}".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        server.start();
+        try {
+            var endpoint = URI.create("http://127.0.0.1:" + server.getAddress().getPort());
+            var client = new OpenAiLlmClient(objectMapper, HttpClient.newHttpClient(), "test-key",
+                    "gpt-6-luna", 0.3, 16000, Duration.ofSeconds(5), endpoint);
+            var options = new LlmRequestOptions(4096).withCacheablePrefixes(java.util.List.of("instructions\n", "source \"giữ nguyên\"\n"));
+            String prefix = String.join("", options.cacheablePrefixes());
+            client.complete(prefix + "batch 1", options);
+            client.complete(prefix + "batch 1\n# JSON correction\ninvalid output", options);
+            for (int i = 0; i < 2; i++) {
+                var body = bodies.get(i);
+                assertThat(body.path("prompt_cache_options").path("mode").asText()).isEqualTo("explicit");
+                assertThat(body.path("messages")).hasSize(3);
+                for (int part = 0; part < 2; part++) {
+                    var content = body.at("/messages/" + part + "/content/0");
+                    assertThat(content.path("text").asText()).isEqualTo(options.cacheablePrefixes().get(part));
+                    assertThat(content.path("prompt_cache_breakpoint").path("mode").asText()).isEqualTo("explicit");
+                }
+                assertThat(body.at("/messages/2/content").isTextual()).isTrue();
+                assertThat(body.path("max_completion_tokens").asInt()).isEqualTo(4096);
+            }
+            assertThat(bodies.get(0).path("messages").get(0)).isEqualTo(bodies.get(1).path("messages").get(0));
+            assertThat(bodies.get(1).at("/messages/2/content").asText()).isEqualTo("batch 1\n# JSON correction\ninvalid output");
+            client.complete("prefix no longer matches", options);
+            assertThat(bodies.get(2).has("prompt_cache_options")).isFalse();
+            assertThat(bodies.get(2).at("/messages/0/content").asText()).isEqualTo("prefix no longer matches");
+            var compatibleClient = new OpenAiLlmClient(objectMapper, HttpClient.newHttpClient(), "test-key",
+                    "other-model", 0.3, 16000, Duration.ofSeconds(5), endpoint);
+            compatibleClient.complete(prefix + "batch 2", options);
+            assertThat(bodies.get(3).has("prompt_cache_options")).isFalse();
+            assertThat(bodies.get(3).at("/messages/0/content").asText()).isEqualTo(prefix + "batch 2");
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
     void timesOutWhenHeadersArriveButTheResponseBodyStalls() throws Exception {
         var releaseBody = new java.util.concurrent.CountDownLatch(1);
         var headersSent = new java.util.concurrent.CountDownLatch(1);

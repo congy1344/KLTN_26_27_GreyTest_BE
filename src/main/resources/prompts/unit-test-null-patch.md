@@ -1,0 +1,3 @@
+# Relevant policy: null-patch
+- Keep patch/request DTOs separate from existing entities and expected response DTOs: an approved null input remains null even if the existing entity has an ID or value. Preserve every constructor argument in each test_data.input.cases scenario; never copy existing values into the patch request to simplify setup.
+- For a null patch field, follow the source guard before adding repository verifications: when every approved scenario leaves that field null and source skips its lookup, never invent times(n) for that lookup. Assert all unchanged fields/relations directly on the updated entity after each Act; assertions on a prebuilt mocked response DTO alone do not prove the entity was preserved.

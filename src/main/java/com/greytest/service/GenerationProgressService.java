@@ -62,7 +62,9 @@ public class GenerationProgressService {
                     "Một tác vụ sinh AI đang chạy cho project này. Vui lòng chờ hoàn tất.");
         }
         states.compute(requestedKey, (key, current) -> {
-            return new ProgressState(stage, stepLabels, message, clock.instant());
+            ProgressState state = new ProgressState(stage, stepLabels, message, clock.instant());
+            if (current != null) state.measurement = current.activeMeasurement();
+            return state;
         });
     }
 
@@ -85,6 +87,7 @@ public class GenerationProgressService {
         states.compute(requestedKey, (key, current) -> {
             ProgressState state = new ProgressState(
                     stage, stepLabels, message, clock.instant(), GenerationProgressStatus.RUNNING, false);
+            if (current != null) state.measurement = current.activeMeasurement();
             if (completedStepIndexes != null) {
                 for (int idx : completedStepIndexes) {
                     if (idx >= 0 && idx < state.stepStatuses.size()) {
@@ -119,18 +122,23 @@ public class GenerationProgressService {
         start(projectId, stage, ProgressState.buildStepLabels(stage, totalSteps), message);
     }
 
+    public synchronized boolean hasActiveGeneration(Long projectId) {
+        cleanupExpired();
+        return states.entrySet().stream()
+                .anyMatch(entry -> entry.getKey().projectId().equals(projectId) && entry.getValue().isActive());
+    }
+
     /** Ghi nhận ngay tác vụ đã vào hàng đợi để frontend không phải giữ request HTTP. */
     public synchronized void queue(Long projectId, GenerationProgressStage stage, String message) {
-        cleanupExpired();
-        boolean projectHasActiveGeneration = states.entrySet().stream()
-                .anyMatch(entry -> entry.getKey().projectId().equals(projectId) && entry.getValue().isActive());
-        if (projectHasActiveGeneration) {
+        if (hasActiveGeneration(projectId)) {
             throw new GenerationInProgressException(
                     "Một tác vụ sinh AI đang chạy cho project này. Vui lòng chờ hoàn tất.");
         }
         ProgressKey key = new ProgressKey(projectId, stage);
-        states.put(key,
-                new ProgressState(stage, List.of("Đang chờ worker xử lý"), message, clock.instant(), GenerationProgressStatus.QUEUED));
+        ProgressState state = new ProgressState(stage, List.of("Đang chờ worker xử lý"),
+                message, clock.instant(), GenerationProgressStatus.QUEUED);
+        state.measurement = new GenerationRunMetrics(clock, java.util.Map::of);
+        states.put(key, state);
     }
 
     public void setStepStatus(Long projectId, GenerationProgressStage stage, int stepIndex, GenerationProgressStepStatus status) {
@@ -244,6 +252,12 @@ public class GenerationProgressService {
                 : state.snapshot();
     }
 
+    GenerationRunMetrics beginMeasurement(Long projectId, GenerationProgressStage stage,
+            java.util.function.Supplier<java.util.Map<String, Object>> metrics) {
+        ProgressState state = states.get(new ProgressKey(projectId, stage));
+        return state == null ? new GenerationRunMetrics(clock, metrics) : state.attachMetrics(clock, metrics);
+    }
+
     private void cleanupExpired() {
         Instant threshold = clock.instant().minus(TERMINAL_TTL);
         states.entrySet().removeIf(entry -> entry.getValue().isTerminalBefore(threshold));
@@ -263,6 +277,18 @@ public class GenerationProgressService {
         private int completedSteps;
         private String failureMessage;
         private Instant updatedAt;
+        private GenerationRunMetrics measurement;
+
+        private synchronized GenerationRunMetrics attachMetrics(Clock clock,
+                java.util.function.Supplier<java.util.Map<String, Object>> metrics) {
+            if (measurement == null || measurement.isFinished()) measurement = new GenerationRunMetrics(clock, metrics);
+            else measurement.setMetrics(metrics);
+            return measurement;
+        }
+
+        private synchronized GenerationRunMetrics activeMeasurement() {
+            return measurement != null && !measurement.isFinished() ? measurement : null;
+        }
 
         private ProgressState(GenerationProgressStage stage, List<String> stepLabels, String message, Instant now) {
             this(stage, stepLabels, message, now, GenerationProgressStatus.RUNNING, true);
@@ -355,6 +381,7 @@ public class GenerationProgressService {
         }
 
         private synchronized void complete(String message, Instant now) {
+            if (measurement != null) measurement.finish();
             completedSteps = totalSteps;
             for (int i = 0; i < stepStatuses.size(); i++) {
                 stepStatuses.set(i, GenerationProgressStepStatus.COMPLETED);
@@ -369,6 +396,7 @@ public class GenerationProgressService {
         }
 
         private synchronized void partial(String message, Instant now) {
+            if (measurement != null) measurement.finish();
             status = GenerationProgressStatus.PARTIAL;
             failureMessage = safeMessage(message);
             // Bước chưa đủ kết quả phải dừng ở trạng thái lỗi để UI không giữ spinner vô hạn.
@@ -383,6 +411,7 @@ public class GenerationProgressService {
         }
 
         private synchronized void fail(String message, Instant now) {
+            if (measurement != null) measurement.finish();
             status = GenerationProgressStatus.FAILED;
             failureMessage = message == null || message.isBlank()
                     ? "Tác vụ thất bại."
@@ -416,6 +445,7 @@ public class GenerationProgressService {
 
         private synchronized void pause(String message, Instant now) {
             if (!isActive()) return;
+            if (measurement != null) measurement.finish();
             status = GenerationProgressStatus.PAUSED;
             updatedAt = now;
             addLog(message, now);
@@ -449,9 +479,11 @@ public class GenerationProgressService {
 
         private synchronized GenerationProgressDto snapshot() {
             int percent = totalSteps == 0 ? 0 : completedSteps * 100 / totalSteps;
-            if (status == GenerationProgressStatus.PARTIAL) percent = Math.min(percent, 99);
+            // Chỉ công bố 100% sau khi bước hoàn tất đã chốt thời gian và lưu kết quả.
+            if (status != GenerationProgressStatus.COMPLETED) percent = Math.min(percent, 99);
             return new GenerationProgressDto(
-                    stage, status, percent, completedSteps, totalSteps, stepSnapshots(), List.copyOf(logs));
+                    stage, status, percent, completedSteps, totalSteps, stepSnapshots(), List.copyOf(logs),
+                    measurement == null ? null : measurement.snapshot());
         }
 
         private List<GenerationProgressStepDto> stepSnapshots() {

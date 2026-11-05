@@ -35,6 +35,8 @@ final class SourceEvidenceIndex {
 
     SourceType type(String name) { return name == null || ambiguous.contains(name) ? null : types.get(name); }
 
+    boolean declares(String name) { return types.containsKey(name); }
+
     MethodDeclaration method(MethodContextDto dto) {
         if (dto == null || dto.sourceCode() == null) return null;
         var parsed = parser.parseMethodDeclaration(dto.sourceCode());

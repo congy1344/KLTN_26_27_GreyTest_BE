@@ -73,6 +73,7 @@ public class LlmUsageRecorder {
             String model,
             LlmTokenUsage usage,
             long latencyMillis) {
+        com.greytest.service.GenerationJobContext.recordLlmUsage(usage);
         if (!enabled) return;
 
         String stage = stage(prompt);

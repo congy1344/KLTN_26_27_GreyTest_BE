@@ -36,7 +36,8 @@ public class ProjectServiceScopeService {
                 .map(scope -> new ProjectServiceDto(
                         scope.servicePath(),
                         scopeName(scope, project.getName()),
-                        statuses.status(projectId, scope)))
+                        statuses.status(projectId, scope),
+                        statuses.reachedStatus(projectId, scope)))
                 .toList();
     }
 

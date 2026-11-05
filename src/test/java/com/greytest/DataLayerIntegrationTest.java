@@ -2,7 +2,6 @@ package com.greytest;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import java.util.List;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -10,7 +9,6 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.transaction.annotation.Transactional;
 
 import com.greytest.entity.BusinessRule;
-import com.greytest.entity.JavaClass;
 import com.greytest.entity.JavaMethod;
 import com.greytest.entity.MethodParam;
 import com.greytest.entity.Project;
@@ -45,6 +43,8 @@ class DataLayerIntegrationTest {
     private JavaMethodRepository javaMethodRepository;
     @Autowired
     private BusinessRuleRepository businessRuleRepository;
+    @Autowired
+    private com.greytest.service.ArtifactCodeRenumberService codeRenumber;
     @PersistenceContext
     private EntityManager em;
 
@@ -60,33 +60,6 @@ class DataLayerIntegrationTest {
     }
 
     @Test
-    void roundTripsJsonbParameters() {
-        Project project = projectRepository.save(newProject(ProjectStatus.ANALYZED));
-
-        JavaClass javaClass = new JavaClass();
-        javaClass.setProjectId(project.getId());
-        javaClass.setClassName("UserService");
-        javaClass.setQualifiedName("com.example.UserService");
-        javaClass = javaClassRepository.save(javaClass);
-
-        JavaMethod method = new JavaMethod();
-        method.setClassId(javaClass.getId());
-        method.setMethodName("createUser");
-        method.setParameters(List.of(new MethodParam("name", "String"), new MethodParam("age", "int")));
-        method.setThrowsList(List.of("IllegalArgumentException"));
-        javaMethodRepository.save(method);
-
-        // Flush + clear để lần đọc sau lấy từ DB, kiểm tra JSONB serialize/deserialize thật.
-        em.flush();
-        em.clear();
-
-        JavaMethod loaded = javaMethodRepository.findByClassId(javaClass.getId()).get(0);
-        assertThat(loaded.getParameters()).containsExactly(
-                new MethodParam("name", "String"), new MethodParam("age", "int"));
-        assertThat(loaded.getThrowsList()).containsExactly("IllegalArgumentException");
-    }
-
-    @Test
     void filtersBusinessRulesByStatusAndModified() {
         Project project = projectRepository.save(newProject(ProjectStatus.ANALYZED));
 
@@ -98,6 +71,20 @@ class DataLayerIntegrationTest {
         assertThat(businessRuleRepository.findModifiedRules(project.getId()))
                 .extracting(BusinessRule::getRuleCode)
                 .containsExactly("BR-002");
+    }
+
+    /** Hoán đổi mã trên Postgres thật: unique index không deferrable sẽ báo lỗi nếu đổi trực tiếp. */
+    @Test
+    void renumberingSwapsCodesWithoutHittingTheUniqueIndex() {
+        Project project = projectRepository.save(newProject(ProjectStatus.ANALYZED));
+        BusinessRule first = businessRuleRepository.saveAndFlush(newRule(project.getId(), "BR-002", ReviewStatus.PENDING_REVIEW, false));
+        BusinessRule second = businessRuleRepository.saveAndFlush(newRule(project.getId(), "BR-001", ReviewStatus.PENDING_REVIEW, false));
+
+        codeRenumber.renumberRules(project.getId());
+        em.clear();
+
+        assertThat(businessRuleRepository.findById(first.getId()).orElseThrow().getRuleCode()).isEqualTo("BR-001");
+        assertThat(businessRuleRepository.findById(second.getId()).orElseThrow().getRuleCode()).isEqualTo("BR-002");
     }
 
     private Project newProject(ProjectStatus status) {

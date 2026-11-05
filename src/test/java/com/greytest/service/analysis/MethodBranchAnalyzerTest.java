@@ -30,11 +30,11 @@ class MethodBranchAnalyzerTest {
                 .containsExactly("IF-1-TRUE", "IF-1-FALSE", "IF-2-TRUE", "IF-2-FALSE");
         assertThat(decisionBranches(branches)).extracting(SourceBranchDto::condition)
                 .containsExactly("score >= 80", "score >= 80", "active", "active");
-        assertThat(branches.get(0).lineStart()).isEqualTo(42);
+        assertThat(branches.get(0).lineStart()).isEqualTo(41);
     }
 
     @Test
-    void usesExecutableStatementsInsteadOfConditionOrCommentLines() {
+    void outcomeLinesCoverTheBlockButNotTheCommentAboveIt() {
         var branches = MethodBranchAnalyzer.analyze("""
                 public void create(boolean valid) {
                     // The decision is documented here.
@@ -47,10 +47,10 @@ class MethodBranchAnalyzerTest {
                 }
                 """, 30);
 
-        assertThat(branches.get(0).lineStart()).isEqualTo(33);
-        assertThat(branches.get(0).lineEnd()).isEqualTo(33);
-        assertThat(branches.get(1).lineStart()).isEqualTo(35);
-        assertThat(branches.get(1).lineEnd()).isEqualTo(36);
+        assertThat(branches.get(0).lineStart()).isEqualTo(32);
+        assertThat(branches.get(0).lineEnd()).isEqualTo(34);
+        assertThat(branches.get(1).lineStart()).isEqualTo(34);
+        assertThat(branches.get(1).lineEnd()).isEqualTo(37);
     }
 
     @Test
@@ -207,5 +207,46 @@ class MethodBranchAnalyzerTest {
 
     private List<SourceBranchDto> decisionBranches(List<SourceBranchDto> branches) {
         return branches.stream().filter(branch -> !"STATEMENT".equals(branch.kind())).toList();
+    }
+
+    @Test
+    void sourceLinesCoverTheWholeBlockIncludingTheIfLineAndClosingBrace() {
+        var branches = MethodBranchAnalyzer.analyze("""
+                public long fee(long amount) {
+                    if (amount >= 1000) {
+                        return 0;
+                    }
+                    if (amount >= 500) {
+                        return 1;
+                    } else {
+                        return 2;
+                    }
+                }
+                """, 47);
+
+        var first = branches.stream().filter(branch -> branch.branchId().equals("IF-1-TRUE")).findFirst().orElseThrow();
+        assertThat(first.lineStart()).isEqualTo(48);
+        assertThat(first.lineEnd()).isEqualTo(50);
+        var noElse = branches.stream().filter(branch -> branch.branchId().equals("IF-1-FALSE")).findFirst().orElseThrow();
+        assertThat(noElse.lineStart()).isEqualTo(48);
+        assertThat(noElse.lineEnd()).isEqualTo(50);
+        var withElse = branches.stream().filter(branch -> branch.branchId().equals("IF-2-FALSE")).findFirst().orElseThrow();
+        assertThat(withElse.lineStart()).isEqualTo(53);
+        assertThat(withElse.lineEnd()).isEqualTo(55);
+    }
+
+    @Test
+    void statementAnchorDescribesTheActualCode() {
+        var branches = MethodBranchAnalyzer.analyze("""
+                public void save(Order order) {
+                    // Lưu đơn hàng.
+                    repository.save(order);
+                }
+                """, 10);
+
+        assertThat(branches).singleElement().satisfies(branch -> {
+            assertThat(branch.condition()).isEqualTo("repository.save(order);");
+            assertThat(branch.lineStart()).isEqualTo(12);
+        });
     }
 }

@@ -463,6 +463,51 @@ class UpstreamSourceEvidenceRegressionTest {
     }
 
     @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"Không gọi toView.", "Service thực hiện truy vấn, và không gọi toView.", "Never call toView."})
+    void bindsBareNoCallRequirementToItsUniqueSourceCollaborator(String expected) throws Exception {
+        var f = fixture("library-negative-interaction");
+        ((ObjectNode) f.path("context").path("approvedTestCases").get(0)).put("expectedResult", expected);
+        assertThat(GeneratedUnitTestSemanticValidator.validate(unitContext(f), json.treeToValue(f.get("response"), UnitTestResponseDto.class)))
+                .hasValueSatisfying(p -> assertThat(p).contains("Approved negative interaction"));
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"Never call toView(bookA).", "Never call toView twice.", "If unavailable, never call toView.", "Thông điệp là 'không gọi toView'."})
+    void doesNotWidenConditionalArgumentSpecificOrQuotedBareBans(String expected) throws Exception {
+        var f = fixture("library-negative-interaction");
+        ((ObjectNode) f.path("context").path("approvedTestCases").get(0)).put("expectedResult", expected);
+        assertThat(GeneratedUnitTestSemanticValidator.validate(unitContext(f), json.treeToValue(f.get("response"), UnitTestResponseDto.class)).orElse(""))
+                .doesNotContain("Approved negative interaction");
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {true, false})
+    void doesNotBindBareBanWhenSameTypeCollaboratorsAreAmbiguous(boolean production) throws Exception {
+        var f = fixture("library-negative-interaction");
+        ((ObjectNode) f.path("context").path("approvedTestCases").get(0)).put("expectedResult", "Không gọi toView.");
+        if (production) {
+            for (var item : f.path("context").path("classes")) {
+                var parsed = new com.github.javaparser.JavaParser().parse(item.path("sourceCode").asText()).getResult();
+                if (parsed.isEmpty()) continue;
+                var owner = parsed.get().getTypes().stream().filter(t -> t.getFieldByName("bookMapper").isPresent()).findFirst();
+                if (owner.isEmpty()) continue;
+                var type = owner.get().getFieldByName("bookMapper").orElseThrow().getElementType().clone();
+                owner.get().addField(type, "otherMapper", com.github.javaparser.ast.Modifier.Keyword.PRIVATE);
+                ((ObjectNode)item).put("sourceCode", parsed.get().toString());
+            }
+        } else {
+            var unit = (ObjectNode) f.path("response").path("unit_tests").get(0);
+            var parsed = new com.github.javaparser.JavaParser().parse(unit.path("source_code").asText()).getResult().orElseThrow();
+            var owner = parsed.getType(0);
+            var type = owner.getFieldByName("bookMapper").orElseThrow().getElementType().clone();
+            owner.addField(type, "otherMapper", com.github.javaparser.ast.Modifier.Keyword.PRIVATE).addAnnotation("org.mockito.Mock");
+            unit.put("source_code", parsed.toString());
+        }
+        assertThat(GeneratedUnitTestSemanticValidator.validate(unitContext(f), json.treeToValue(f.get("response"), UnitTestResponseDto.class)).orElse(""))
+                .doesNotContain("Approved negative interaction");
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(strings = {"bookMapper.toView must not be called.", "Never call bookMapper.toView."})
     void recognizesAnExplicitEnglishNoCallRequirement(String expected) throws Exception {
         var f = fixture("library-negative-interaction");

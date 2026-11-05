@@ -104,6 +104,7 @@ final class SourceExceptionMessageEvidence {
                 // Không lấy exception trong method/class lồng nhau làm bằng chứng của method hiện tại.
                 if (creation.findAncestor(CallableDeclaration.class).orElse(null) != method
                         || creation.findAncestor(TypeDeclaration.class).isPresent()
+                        || creation.getAnonymousClassBody().isPresent()
                         || creation.findAncestor(ObjectCreationExpr.class).filter(c -> c.getAnonymousClassBody().isPresent()).isPresent()) continue;
                 // Chỉ xét exception nằm trong throw hoặc supplier của orElseThrow.
                 boolean thrown = creation.getParentNode().filter(ThrowStmt.class::isInstance)
@@ -118,6 +119,15 @@ final class SourceExceptionMessageEvidence {
                 if (text != null && text.format() != null) formats.add(text.format());
                 if (text == null || text.fixed() == 0) unknown.add(simple);
                 else evidence.computeIfAbsent(simple, ignored -> new ArrayList<>()).add(text);
+            }
+            for (var call : method.findAll(MethodCallExpr.class)) {
+                if (call.findAncestor(CallableDeclaration.class).orElse(null) != method
+                        || call.findAncestor(TypeDeclaration.class).isPresent()
+                        || call.findAncestor(LambdaExpr.class).isPresent()) continue;
+                Text text = helperMessage(call, owner, method, arguments, associated, 0);
+                if (text == null || text.fixed() == 0) continue;
+                if (text.format() != null) formats.add(text.format());
+                evidence.computeIfAbsent(associated, ignored -> new ArrayList<>()).add(text);
             }
             var formatClaim = ExceptionMessageFormatClaim.parse(beforeLiteral, claimed, description.substring(matcher.end()));
             if (!substringClaim && formatClaim.template()) {
@@ -248,6 +258,11 @@ final class SourceExceptionMessageEvidence {
     private Text constructor(String qualified, List<Text> args, int depth) {
         if (qualified == null || depth > 5 || args.stream().anyMatch(Objects::isNull)) return null;
         if (STANDARD.contains(qualified)) return args.size() == 1 && args.get(0).string() ? args.get(0) : null;
+        // Chỉ dùng hợp đồng framework đã biết khi project không khai báo đè hoặc làm mơ hồ kiểu đó.
+        if ("org.springframework.security.core.userdetails.UsernameNotFoundException".equals(qualified)
+                && !index.declares(qualified)) {
+            return args.size() == 1 && args.get(0).string() ? args.get(0) : null;
+        }
         var source = index.type(qualified);
         if (source == null || !source.node().isClassOrInterfaceDeclaration()) return null;
         var declaration = source.node().asClassOrInterfaceDeclaration();
@@ -271,6 +286,65 @@ final class SourceExceptionMessageEvidence {
         String parent = invocation.isThis() ? qualified : declaration.getExtendedTypes().size() == 1
                 ? index.resolve(declaration.getExtendedTypes().get(0), source.unit()) : null;
         return constructor(parent, delegated, depth + 1);
+    }
+
+    /** Chỉ lần theo helper một lệnh, có đích gọi và overload xác định từ source. */
+    private Text helperMessage(MethodCallExpr call, SourceEvidenceIndex.SourceType owner,
+            MethodDeclaration caller, Map<String, Text> env, String exception, int depth) {
+        if (depth > 5) return null;
+        var target = owner;
+        boolean classCall = call.getScope().isPresent() && !call.getScope().get().isThisExpr();
+        if (classCall) {
+            Expression scope = call.getScope().get();
+            var root = scope.findFirst(NameExpr.class);
+            if (root.isPresent() && variableType(root.get().getNameAsString(), call, owner, caller) != null) return null;
+            target = index.type(index.resolve(scope.toString(), owner.unit()));
+        }
+        if (target == null) return null;
+        // Chưa suy giải overload kế thừa: không dùng một tập candidate bị thiếu làm bằng chứng.
+        if (!target.node().isClassOrInterfaceDeclaration()) return null;
+        var declaration = target.node().asClassOrInterfaceDeclaration();
+        var targetUnit = target.unit();
+        if (!declaration.getImplementedTypes().isEmpty() || declaration.getExtendedTypes().stream()
+                .anyMatch(t -> !"java.lang.Object".equals(index.resolve(t, targetUnit)))) return null;
+        var values = call.getArguments().stream().map(e -> fragment(e, owner.unit(), env, 0)).toList();
+        if (values.stream().anyMatch(Objects::isNull)) return null;
+        var candidates = target.node().getMethodsByName(call.getNameAsString()).stream()
+                .filter(m -> m.getParameters().size() == values.size()).toList();
+        if (candidates.size() > 1 && values.stream().allMatch(Text::string)) {
+            var unit = target.unit();
+            candidates = candidates.stream().filter(m -> m.getParameters().stream()
+                    .allMatch(p -> "java.lang.String".equals(index.resolve(p.getType(), unit)))).toList();
+        }
+        if (candidates.size() != 1) return null;
+        var helper = candidates.get(0);
+        if (helper.getParameters().stream().anyMatch(Parameter::isVarArgs)) return null;
+        // Chọn overload trước khi xét dispatch; không bỏ overload thực rồi nhận nhầm một overload khác.
+        if (classCall ? !helper.isStatic() : !helper.isStatic() && !helper.isPrivate() && !helper.isFinal()
+                && !target.node().hasModifier(com.github.javaparser.ast.Modifier.Keyword.FINAL)) return null;
+        if (helper.getBody().isEmpty() || helper.getBody().get().getStatements().size() != 1) return null;
+        Map<String, Text> bindings = new HashMap<>();
+        for (int i = 0; i < values.size(); i++) {
+            var value = values.get(i);
+            var parameter = helper.getParameter(i);
+            bindings.put(parameter.getNameAsString(), new Text(value.segments(), value.display(),
+                    "java.lang.String".equals(index.resolve(parameter.getType(), target.unit())),
+                    value.fixed(), value.format(), value.sourceArgument()));
+        }
+        var statement = helper.getBody().get().getStatement(0);
+        if (statement.isThrowStmt() && statement.asThrowStmt().getExpression().isObjectCreationExpr()) {
+            var creation = statement.asThrowStmt().getExpression().asObjectCreationExpr();
+            if (creation.getAnonymousClassBody().isPresent()) return null;
+            if (!creation.getType().getNameAsString().equals(exception)) return null;
+            var helperOwner = target;
+            var args = creation.getArguments().stream().map(e -> fragment(e, helperOwner.unit(), bindings, 0)).toList();
+            return constructor(index.resolve(creation.getType(), target.unit()), args, 0);
+        }
+        if (statement.isExpressionStmt() && statement.asExpressionStmt().getExpression().isMethodCallExpr()) {
+            return helperMessage(statement.asExpressionStmt().getExpression().asMethodCallExpr(), target,
+                    helper, bindings, exception, depth + 1);
+        }
+        return null;
     }
 
     private Text fragment(Expression expression, CompilationUnit unit, Map<String, Text> env, int depth) {

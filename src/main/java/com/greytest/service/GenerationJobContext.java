@@ -6,6 +6,7 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.LongAdder;
 import com.greytest.service.agent.LlmResponseException;
+import com.greytest.service.agent.LlmTokenUsage;
 
 /** Truyền callback log của job theo worker thread mà không làm LLM client phụ thuộc module nghiệp vụ. */
 public final class GenerationJobContext {
@@ -81,8 +82,25 @@ public final class GenerationJobContext {
     }
 
     public static Map<String, Object> metrics() {
-        Map<String, Object> result = new java.util.TreeMap<>();
+        return snapshotMetrics(METRICS.get());
+    }
+
+    /** Giữ đúng bộ đếm của job khi frontend đọc tiến độ từ thread khác. */
+    public static Supplier<Map<String, Object>> metricsSupplier() {
         Map<String, LongAdder> metrics = METRICS.get();
+        return () -> snapshotMetrics(metrics);
+    }
+
+    public static void recordLlmUsage(LlmTokenUsage usage) {
+        increment("llmRecordedCalls");
+        addMetric("llmInputTokens", usage.inputTokens());
+        addMetric("llmOutputTokens", usage.outputTokens());
+        addMetric("llmTotalTokens", usage.totalTokens());
+        if (usage.source() == LlmTokenUsage.UsageSource.ESTIMATED) increment("llmEstimatedCalls");
+    }
+
+    private static Map<String, Object> snapshotMetrics(Map<String, LongAdder> metrics) {
+        Map<String, Object> result = new java.util.TreeMap<>();
         if (metrics != null) metrics.forEach((name, value) -> result.put(name, value.sum()));
         return Map.copyOf(result);
     }
@@ -137,6 +155,12 @@ public final class GenerationJobContext {
             throw new LlmResponseException("Batch AI đã hết ngân sách gọi AI. Các batch đã lưu được giữ lại; hãy tiếp tục phần còn thiếu.");
         }
         LLM_CALLS_REMAINING.set(remaining - 1);
+    }
+
+    /** Lượt hỏng do hạ tầng hoặc output bị cắt không được ăn vào ngân sách sửa output của batch. */
+    public static void refundLlmCall() {
+        Integer remaining = LLM_CALLS_REMAINING.get();
+        if (remaining != null) LLM_CALLS_REMAINING.set(remaining + 1);
     }
 
     public static boolean llmCallBudgetExhausted() {

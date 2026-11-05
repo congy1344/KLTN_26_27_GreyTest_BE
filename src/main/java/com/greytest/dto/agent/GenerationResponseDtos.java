@@ -85,12 +85,17 @@ public final class GenerationResponseDtos {
 
     public record UnitTestResponseDto(
             @JsonProperty("unit_tests") @NotEmpty @Valid List<GeneratedUnitTestDto> unitTests,
-            @com.fasterxml.jackson.annotation.JsonIgnore List<BlockedUnitTestDto> blockedCases) {
+            @com.fasterxml.jackson.annotation.JsonIgnore List<BlockedUnitTestDto> blockedCases,
+            /** Lỗi và output của lượt cuối cho các case còn thiếu; chỉ dùng nội bộ để lượt phục hồi không sửa mù. */
+            @com.fasterxml.jackson.annotation.JsonIgnore String repairNote) {
         public UnitTestResponseDto {
             blockedCases = blockedCases == null ? List.of() : List.copyOf(blockedCases);
         }
         public UnitTestResponseDto(List<GeneratedUnitTestDto> unitTests) {
-            this(unitTests, List.of());
+            this(unitTests, List.of(), null);
+        }
+        public UnitTestResponseDto(List<GeneratedUnitTestDto> unitTests, List<BlockedUnitTestDto> blockedCases) {
+            this(unitTests, blockedCases, null);
         }
     }
 

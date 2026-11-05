@@ -47,6 +47,7 @@ public class UnitTestFileService {
     private static final String UNIX_SCRIPT_NAME = "run-greytest-coverage.sh";
     private static final String GRADLE_INIT_SCRIPT_NAME = "greytest-jacoco.init.gradle";
     private static final String README_NAME = "README-GREYTEST.txt";
+    private static final String SKIPPED_CASES_NAME = "GREYTEST-SKIPPED-CASES.txt";
 
     public record MergedFile(String filePath, String testClassName, String packageName,
             List<Long> caseIds, String sourceCode) {
@@ -62,7 +63,7 @@ public class UnitTestFileService {
         Set<String> usedPaths = new HashSet<>();
         List<MergedFile> files = new ArrayList<>();
         for (var group : byFile.values()) {
-            for (var merged : mergeCompatibleFixtures(group, usedClasses)) {
+            for (var merged : groupFixtureVariants(group.get(0), mergeCompatibleFixtures(group, usedClasses), usedClasses)) {
                 // Windows ghi đè hai file chỉ khác hoa/thường; giữ riêng class cho từng fixture.
                 while (!usedPaths.add(merged.filePath().replace('\\', '/').toLowerCase(java.util.Locale.ROOT))) {
                     merged = renameVariant(merged, group.get(0), usedClasses);
@@ -71,6 +72,94 @@ public class UnitTestFileService {
             }
         }
         return files;
+    }
+
+    /**
+     * AI viết fixture mỗi lượt một kiểu nên một class có thể bị tách thành nhiều nhóm.
+     * Đưa các nhóm vào cùng một file dưới dạng nhiều class độc lập: mỗi class vẫn chạy JVM riêng và giữ nguyên fixture,
+     * nên hành vi test không đổi. Không dùng @Nested vì nó dùng chung JVM và không qua được -Dtest của Surefire cũ.
+     * JUnit 4 cần class public (mỗi file chỉ một) nên giữ file riêng, cả nhóm xung đột import cũng vậy.
+     */
+    private List<MergedFile> groupFixtureVariants(UnitTest first, List<MergedFile> variants, Set<String> usedClasses) {
+        if (variants.size() < 2) return variants;
+        String fileClass = first.getTestClassName();
+        CompilationUnit merged = new CompilationUnit();
+        if (first.getPackageName() != null && !first.getPackageName().isBlank()) merged.setPackageDeclaration(first.getPackageName());
+        List<MergedFile> grouped = new ArrayList<>();
+        List<MergedFile> separate = new ArrayList<>();
+        for (MergedFile variant : variants) {
+            CompilationUnit unit = parse(GenerationSourceFingerprint.withoutMetadata(variant.sourceCode()));
+            CompilationUnit candidate = jupiterTestClass(unit) ? merged.clone() : null;
+            // Class đầu mang tên file để IDE và bước kiểm tra export tìm đúng.
+            // Class sau có tên mới để không trùng file _GreyTest_ của ZIP cũ còn sót trong thư mục giải nén.
+            String name = grouped.isEmpty() ? fileClass : fixtureClassName(first, grouped.size() + 1, usedClasses);
+            if (candidate == null || !addFixtureClass(candidate, unit, variant.testClassName(), name, grouped.isEmpty())) {
+                separate.add(variant);
+                continue;
+            }
+            merged = candidate;
+            grouped.add(variant);
+        }
+        if (grouped.size() < 2) return variants;
+        String source = merged.toString();
+        String metadata = sourceMetadata(grouped.stream().map(MergedFile::sourceCode).toList());
+        if (metadata.contains(GenerationSourceFingerprint.PREFIX)) source = GenerationSourceFingerprint.attach(source, metadata);
+        List<MergedFile> files = new ArrayList<>();
+        files.add(new MergedFile(first.getFilePath(), fileClass, first.getPackageName(),
+                grouped.stream().flatMap(file -> file.caseIds().stream()).toList(), source));
+        files.addAll(separate);
+        return files;
+    }
+
+    /** Một file có thể chứa nhiều class test độc lập; bộ lọc -Dtest phải liệt kê đủ để không bỏ sót class nào. */
+    private java.util.stream.Stream<String> testClassesInFile(UnitTestFileDto file) {
+        String prefix = file.packageName() == null || file.packageName().isBlank() ? "" : file.packageName() + ".";
+        return parse(file.sourceCode()).getTypes().stream()
+                .filter(type -> type.getNameAsString().equals(file.testClassName()) || declaresTest(type))
+                .map(type -> prefix + type.getNameAsString());
+    }
+
+    private boolean declaresTest(TypeDeclaration<?> type) {
+        return type.findAll(MethodDeclaration.class).stream().anyMatch(method -> method.getAnnotations().stream()
+                .anyMatch(annotation -> annotation.getName().getIdentifier().contains("Test")));
+    }
+
+    private String fixtureClassName(UnitTest first, int number, Set<String> usedClasses) {
+        String prefix = first.getPackageName() == null ? "" : first.getPackageName() + ".";
+        String name;
+        do {
+            name = first.getTestClassName() + "_Fixture" + number++ + "Test";
+        } while (!usedClasses.add((prefix + name).toLowerCase(java.util.Locale.ROOT)));
+        return name;
+    }
+
+    private boolean jupiterTestClass(CompilationUnit unit) {
+        String source = unit.toString();
+        return unit.getTypes().size() == 1 && source.contains("org.junit.jupiter.api") && !source.contains("org.junit.Test");
+    }
+
+    private Set<String> typeWildcards(CompilationUnit unit) {
+        return unit.getImports().stream().filter(imp -> imp.isAsterisk() && !imp.isStatic())
+                .map(com.github.javaparser.ast.ImportDeclaration::getNameAsString).collect(Collectors.toSet());
+    }
+
+    private boolean addFixtureClass(CompilationUnit merged, CompilationUnit unit, String className, String newName, boolean mainClass) {
+        renameType(unit, className, newName);
+        TypeDeclaration<?> fixture = typeByName(unit, newName);
+        // Import tường minh mới có thể che tên mà class trước lấy từ wildcard, nên wildcard phải giống nhau.
+        if (!merged.getTypes().isEmpty() && !typeWildcards(merged).equals(typeWildcards(unit))) return false;
+        Map<String, String> conflicts = new LinkedHashMap<>();
+        try {
+            unit.getImports().forEach(imp -> addImport(merged, fixture, unit, fixture, imp, conflicts));
+        } catch (StorageException exception) {
+            return false;
+        }
+        qualifyConflictingTypes(fixture, conflicts);
+        TypeDeclaration<?> copy = fixture.clone();
+        // Mỗi file Java chỉ được có một class public, và nó phải trùng tên file.
+        if (!mainClass) copy.setPublic(false);
+        merged.addType(copy);
+        return true;
     }
 
     private List<MergedFile> mergeCompatibleFixtures(List<UnitTest> tests, Set<String> usedClasses) {
@@ -254,6 +343,16 @@ public class UnitTestFileService {
         int collision = 2;
         while (!usedClasses.add((file.packageName() + "." + name).toLowerCase(java.util.Locale.ROOT))) name = stem + "_" + collision++ + "Test";
         String newName = name;
+        renameType(unit, oldName, newName);
+        String metadata = sourceMetadata(List.of(file.sourceCode()));
+        String source = unit.toString();
+        if (metadata.contains(GenerationSourceFingerprint.PREFIX)) source = GenerationSourceFingerprint.attach(source, metadata);
+        String path = file.filePath().substring(0, file.filePath().length() - oldName.length() - ".java".length())
+                + newName + ".java";
+        return new MergedFile(path, newName, file.packageName(), file.caseIds(), source);
+    }
+
+    private void renameType(CompilationUnit unit, String oldName, String newName) {
         TypeDeclaration<?> type = typeByName(unit, oldName);
         type.setName(newName);
         type.getConstructors().forEach(constructor -> constructor.setName(newName));
@@ -269,18 +368,16 @@ public class UnitTestFileService {
         unit.findAll(com.github.javaparser.ast.expr.SuperExpr.class).stream()
                 .filter(reference -> reference.getTypeName().filter(nameRef -> nameRef.asString().equals(oldName)).isPresent())
                 .forEach(reference -> reference.setTypeName(new com.github.javaparser.ast.expr.Name(newName)));
-        String metadata = sourceMetadata(List.of(file.sourceCode()));
-        String source = unit.toString();
-        if (metadata.contains(GenerationSourceFingerprint.PREFIX)) source = GenerationSourceFingerprint.attach(source, metadata);
-        String path = file.filePath().substring(0, file.filePath().length() - oldName.length() - ".java".length())
-                + newName + ".java";
-        return new MergedFile(path, newName, file.packageName(), file.caseIds(), source);
     }
 
     /**
      * Đóng gói test cùng script để tạo JaCoCo XML mà không thêm cấu hình JaCoCo vào pom.xml.
      */
     public byte[] createCoverageArchive(List<UnitTestFileDto> testFiles) {
+        return createCoverageArchive(testFiles, List.of());
+    }
+
+    private byte[] createCoverageArchive(List<UnitTestFileDto> testFiles, List<String> skippedCases) {
         if (testFiles == null || testFiles.isEmpty()) {
             throw new StorageException("Không có Unit Test để đóng gói", null);
         }
@@ -289,24 +386,19 @@ public class UnitTestFileService {
         assertUnambiguousSourcePaths(sourceMetadata);
         var output = new ByteArrayOutputStream();
         String testSelector = testFiles.stream()
-                .map(test -> test.packageName() == null || test.packageName().isBlank()
-                        ? test.testClassName() : test.packageName() + "." + test.testClassName())
+                .flatMap(this::testClassesInFile)
                 .distinct()
                 .collect(Collectors.joining(","));
         String gradleTestFilters = testFiles.stream()
-                .map(test -> test.packageName() == null || test.packageName().isBlank()
-                        ? test.testClassName() : test.packageName() + "." + test.testClassName())
+                .flatMap(this::testClassesInFile)
                 .distinct()
                 .map(testClass -> "--tests \"" + testClass + "\"")
                 .collect(Collectors.joining(" "));
         try (var zip = new ZipOutputStream(output, StandardCharsets.UTF_8)) {
             for (UnitTestFileDto testFile : testFiles) {
-                String safeSource = ensureMockitoRunner(testFile.sourceCode());
-                if (testFile.sourceCode().contains(GenerationSourceFingerprint.PREFIX)) {
-                    safeSource = GenerationSourceFingerprint.attach(safeSource,
-                            sourceMetadata(List.of(testFile.sourceCode())));
-                }
-                writeArchiveEntry(zip, safeTestPath(testFile.filePath()), safeSource);
+                // Script kiểm tra source đọc greytest-source-version.txt nên file test không cần mang dòng dấu vết.
+                writeArchiveEntry(zip, safeTestPath(testFile.filePath()),
+                        GenerationSourceFingerprint.withoutMetadata(ensureMockitoRunner(testFile.sourceCode())));
             }
             writeArchiveEntry(zip, WINDOWS_SCRIPT_NAME, windowsCoverageScript(testSelector, gradleTestFilters, sourceMetadata));
             writeArchiveEntry(zip, UNIX_SCRIPT_NAME, unixCoverageScript(testSelector, gradleTestFilters, sourceMetadata));
@@ -320,6 +412,10 @@ public class UnitTestFileService {
                 writeArchiveEntry(zip, "GreyTestSourceCheck.java", new String(helper.readAllBytes(), StandardCharsets.UTF_8));
             }
             writeArchiveEntry(zip, README_NAME, coverageReadme());
+            if (!skippedCases.isEmpty()) {
+                writeArchiveEntry(zip, SKIPPED_CASES_NAME, "Các Test Case dưới đây chưa có Unit Test đạt kiểm tra nên không nằm trong gói này.\n"
+                        + "Dùng 'Tiếp tục sinh' trên GreyTest để sinh lại.\n\n" + String.join("\n", skippedCases) + "\n");
+            }
         } catch (IOException exception) {
             throw new StorageException("Không tạo được ZIP unit test", exception);
         }
@@ -344,7 +440,12 @@ public class UnitTestFileService {
 
     /** Đồng bộ đường dẫn trong header và manifest với source đang hoạt động trước khi xuất ZIP. */
     public byte[] createCoverageArchive(List<UnitTestFileDto> testFiles, Path sourceRoot) {
-        if (sourceRoot == null || testFiles == null || testFiles.isEmpty()) return createCoverageArchive(testFiles);
+        return createCoverageArchive(testFiles, sourceRoot, List.of());
+    }
+
+    /** skippedCases: case bị bỏ khỏi gói kèm lý do, ghi vào một file riêng để người chạy biết phần thiếu. */
+    public byte[] createCoverageArchive(List<UnitTestFileDto> testFiles, Path sourceRoot, List<String> skippedCases) {
+        if (sourceRoot == null || testFiles == null || testFiles.isEmpty()) return createCoverageArchive(testFiles, skippedCases);
         try {
             List<String> aligned = GenerationSourceFingerprint.alignToSourceRoot(
                     testFiles.stream().map(UnitTestFileDto::sourceCode).toList(), sourceRoot);
@@ -354,7 +455,7 @@ public class UnitTestFileService {
                 files.add(new UnitTestFileDto(file.filePath(), file.testClassName(), file.packageName(),
                         file.testCount(), file.caseCodes(), aligned.get(index)));
             }
-            return createCoverageArchive(files);
+            return createCoverageArchive(files, skippedCases);
         } catch (IllegalArgumentException exception) {
             throw new StorageException(exception.getMessage(), exception);
         }
@@ -503,10 +604,12 @@ public class UnitTestFileService {
 
                 echo [GreyTest] Running tests and generating JaCoCo XML...
                 call "%%MAVEN_COMMAND%%" clean test-compile ^
+                  -Dmaven.test.skip=false ^
                   -Dfile.encoding=UTF-8 -Dproject.build.sourceEncoding=UTF-8 -Dproject.reporting.outputEncoding=UTF-8 ^
                   %%*
                 if errorlevel 1 (
                   echo [GreyTest] ERROR: Project or generated tests could not be compiled.
+                  echo [GreyTest] Tip: Missing getters/setters in production code usually mean the JDK is newer than the Lombok version of the project.
                   echo [GreyTest] Tip: For Non-resolvable parent POM, use the project wrapper with -N install or see README-GREYTEST.txt.
                   exit /b 1
                 )
@@ -518,15 +621,19 @@ public class UnitTestFileService {
                 )
 
                 call "%%MAVEN_COMMAND%%" ^
-                  -Djacoco.propertyName=greytestJacocoArgLine ^
-                  "-DargLine=@{greytestJacocoArgLine} %%GREYTEST_JVM_ARGS%%" ^
+                  -Djacoco.propertyName=argLine ^
+                  "-DargLine=@{argLine} %%GREYTEST_JVM_ARGS%%" ^
                   "-Dtest=%2$s" ^
+                  -DskipTests=false ^
+                  -Dmaven.test.skip=false ^
+                  -Dmaven.test.failure.ignore=true ^
+                  -DforkCount=1 -DreuseForks=false ^
                   -DfailIfNoTests=true ^
                   org.jacoco:jacoco-maven-plugin:%3$s:prepare-agent ^
                   org.apache.maven.plugins:maven-surefire-plugin:test ^
                   org.jacoco:jacoco-maven-plugin:%4$s:report %%*
                 if errorlevel 1 (
-                  echo [GreyTest] ERROR: Build or tests failed. Review the Maven output above.
+                  echo [GreyTest] ERROR: Build failed before tests could finish. Review the Maven output above.
                 echo [GreyTest] Gợi ý: Nếu gặp lỗi Mockito attach Byte Buddy, kiểm tra GREYTEST_JVM_ARGS hoặc dùng JDK 17+.
                   exit /b 1
                 )
@@ -538,11 +645,16 @@ public class UnitTestFileService {
                 )
 
                 echo [GreyTest] SUCCESS: target\\site\\jacoco\\jacoco.xml
+                findstr /m /r /c:" failures=.[1-9]" /c:" errors=.[1-9]" "target\\surefire-reports\\*.xml" 2>nul
+                if not errorlevel 1 (
+                  echo [GreyTest] Có test FAIL trong các file trên. Đã có coverage. Source có thể đang khác kỳ vọng đã duyệt.
+                  exit /b 3
+                )
                 goto :success
 
                 :gradle
                 set "GRADLE_COMMAND=gradle"
-                if exist "gradlew.bat" set "GRADLE_COMMAND=gradlew.bat"
+                if exist "gradlew.bat" set "GRADLE_COMMAND=.\\gradlew.bat"
                 if not exist "gradlew.bat" (
                   where gradle >nul 2>&1
                   if errorlevel 1 (
@@ -567,6 +679,11 @@ public class UnitTestFileService {
                 )
 
                 echo [GreyTest] SUCCESS: build\\reports\\jacoco\\test\\jacocoTestReport.xml
+                findstr /m /r /c:" failures=.[1-9]" /c:" errors=.[1-9]" "build\\test-results\\test\\*.xml" 2>nul
+                if not errorlevel 1 (
+                  echo [GreyTest] Có test FAIL trong các file trên. Đã có coverage. Source có thể đang khác kỳ vọng đã duyệt.
+                  exit /b 3
+                )
                 goto :success
 
                 :missingBuild
@@ -738,6 +855,10 @@ public class UnitTestFileService {
                     exit 2
                   fi
                   echo "[GreyTest] SUCCESS: build/reports/jacoco/test/jacocoTestReport.xml"
+                  if grep -l -E ' (failures|errors)="[1-9]' build/test-results/test/*.xml 2>/dev/null; then
+                    echo "[GreyTest] Có test FAIL trong các file trên. Đã có coverage. Source có thể đang khác kỳ vọng đã duyệt."
+                    exit 3
+                  fi
                   exit 0
                 fi
 
@@ -753,6 +874,7 @@ public class UnitTestFileService {
 
                 echo "[GreyTest] Running tests and generating JaCoCo XML..."
                 run_maven clean test-compile \
+                  -Dmaven.test.skip=false \
                   -Dfile.encoding=UTF-8 -Dproject.build.sourceEncoding=UTF-8 -Dproject.reporting.outputEncoding=UTF-8 \
                   "$@" || exit 1
 
@@ -762,9 +884,13 @@ public class UnitTestFileService {
                 fi
 
                 run_maven \
-                  -Djacoco.propertyName=greytestJacocoArgLine \
-                  "-DargLine=@{greytestJacocoArgLine} ${GREYTEST_JVM_ARGS:-}" \
+                  -Djacoco.propertyName=argLine \
+                  "-DargLine=@{argLine} ${GREYTEST_JVM_ARGS:-}" \
                   "-Dtest=%2$s" \
+                  -DskipTests=false \
+                  -Dmaven.test.skip=false \
+                  -Dmaven.test.failure.ignore=true \
+                  -DforkCount=1 -DreuseForks=false \
                   -DfailIfNoTests=true \
                   org.jacoco:jacoco-maven-plugin:%3$s:prepare-agent \
                   org.apache.maven.plugins:maven-surefire-plugin:test \
@@ -777,6 +903,10 @@ public class UnitTestFileService {
                 fi
 
                 echo "[GreyTest] SUCCESS: target/site/jacoco/jacoco.xml"
+                if grep -l -E ' (failures|errors)="[1-9]' target/surefire-reports/*.xml 2>/dev/null; then
+                  echo "[GreyTest] Có test FAIL trong các file trên. Đã có coverage. Source có thể đang khác kỳ vọng đã duyệt."
+                  exit 3
+                fi
                 """.formatted(gradleTestFilters.replace("$", "\\$"), testSelector.replace("$", "\\$"),
                         JACOCO_VERSION, JACOCO_VERSION, sourceVersionCheck(false, metadata), unixMavenResolver());
     }
@@ -852,6 +982,8 @@ public class UnitTestFileService {
     private String gradleJacocoInitScript() {
         return """
                 allprojects { project ->
+                    // Mỗi class test một JVM để trạng thái static không rò sang class khác.
+                    project.tasks.withType(org.gradle.api.tasks.testing.Test).configureEach { forkEvery = 1; ignoreFailures = true }
                     project.plugins.withId('java') {
                         project.apply plugin: 'jacoco'
                     }
@@ -880,9 +1012,11 @@ public class UnitTestFileService {
                 3. Windows: chạy run-greytest-coverage.cmd
                    Linux/macOS: chạy sh ./run-greytest-coverage.sh
                 4. Tải file target/site/jacoco/jacoco.xml (Maven) hoặc build/reports/jacoco/test/jacocoTestReport.xml (Gradle) lên GreyTest.
+                   Script kết thúc với mã 3 nghĩa là đã có coverage nhưng có test fail: test đó có thể đang phát hiện source khác kỳ vọng đã duyệt.
 
                 BUILD TOOL VÀ JDK
                 - Cần cài JDK đúng phiên bản project và cấu hình JAVA_HOME hoặc java/javac trong PATH. Wrapper không tự cài JDK.
+                - Nếu production code báo thiếu getter/setter khi compile, JDK đang dùng có thể mới hơn phiên bản Lombok của project: đổi JAVA_HOME sang JDK phù hợp với project.
                 - Maven: ưu tiên wrapper của project/module cha, sau đó Maven chạy được trong PATH hoặc .tools/apache-maven-VERSION/bin.
                 - Nếu chưa có Maven, ZIP có sẵn Apache Maven Wrapper 3.3.4 trong .greytest/maven, tự tải Maven 3.9.14 từ Maven Central.
                 - Giữ nguyên thư mục ẩn .greytest khi giải nén/copy ZIP. Không ghi đè mvnw hoặc .mvn của project.

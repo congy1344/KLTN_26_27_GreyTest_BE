@@ -12,7 +12,14 @@ public final class TextSanitizer {
     private static final Pattern LITERAL_PATTERN = Pattern.compile(
             "```[\\s\\S]*?```|`[^`\\r\\n]*`|\"(?:\\\\.|[^\"\\\\])*\"|(?<![\\p{L}\\p{N}_])'(?:\\\\.|[^'\\\\\\r\\n])*'");
 
+    private static final Pattern TESTABILITY_NOTE = Pattern.compile("(?m)^\\[GreyTest testability:[^\\r\\n]*(?:\\R|$)");
+
     private TextSanitizer() {}
+
+    /** Bỏ ghi chú testability mà dữ liệu cũ đã lưu kèm mô tả: không hiển thị và không gửi cho AI. */
+    public static String withoutTestabilityNote(String text) {
+        return text == null ? null : TESTABILITY_NOTE.matcher(text).replaceAll("").stripTrailing();
+    }
 
     /**
      * Thay thế các từ khóa lập trình tiếng Trung phổ biến thành tiếng Việt tự nhiên,
@@ -23,6 +30,7 @@ public final class TextSanitizer {
             return text;
         }
 
+        text = withoutTestabilityNote(text);
         // Literal là dữ liệu của hợp đồng kiểm thử, chỉ làm sạch phần văn xuôi bên ngoài.
         var literals = LITERAL_PATTERN.matcher(text);
         var result = new StringBuilder();

@@ -165,6 +165,10 @@ public class GoogleLlmClient implements LlmClient {
                     JsonNode root = responseRoot(response.body());
                     String output = "";
                     try {
+                        if ("MAX_TOKENS".equals(root.at("/candidates/0/finishReason").asText())
+                                || "incomplete".equalsIgnoreCase(root.path("status").asText())) {
+                            throw new LlmResponseException.OutputTruncated("Google Gemini đã cắt output vì đạt giới hạn max tokens.");
+                        }
                         output = outputText(response.body());
                         return output;
                     } finally {
@@ -184,10 +188,11 @@ public class GoogleLlmClient implements LlmClient {
                     earliestCooldown = Math.min(earliestCooldown, appliedDeadline);
                     continue;
                 }
-                throw new LlmResponseException("Google Gemini API lỗi HTTP "
-                        + status + ": " + snippet(response.body()), status == 429 || status >= 500);
+                String message = "Google Gemini API lỗi HTTP " + status + ": " + snippet(response.body());
+                if (status >= 500) throw LlmResponseException.provider(message, null, retryAfterMillis(response));
+                throw new LlmResponseException(message, false);
             } catch (IOException exception) {
-                throw new LlmResponseException("Không gọi được Google Gemini API.", exception, true);
+                throw LlmResponseException.provider("Không gọi được Google Gemini API.", exception, 0);
             } catch (InterruptedException exception) {
                 Thread.currentThread().interrupt();
                 throw new LlmResponseException("Bi gian doan khi goi Google Gemini API.", exception);
@@ -195,22 +200,19 @@ public class GoogleLlmClient implements LlmClient {
         }
         if (lastQuotaResponse != null || earliestCooldown != Long.MAX_VALUE) {
             long remainingCooldown = Math.max(earliestCooldown - System.currentTimeMillis(), 0);
-            throw new LlmResponseException(
+            throw LlmResponseException.provider(
                     "Google Gemini API lỗi HTTP 429: "
                             + (lastQuotaResponse == null ? "Tất cả API key đang trong thời gian chờ quota." : snippet(lastQuotaResponse)),
-                    true,
+                    null,
                     remainingCooldown);
         }
         throw new LlmResponseException("Không có Google Gemini API key khả dụng.");
     }
 
     private long retryAfterMillis(HttpResponse<String> response) {
-        String header = response.headers().firstValue("Retry-After").orElse("").trim();
-        try {
-            if (!header.isEmpty()) return Math.round(Double.parseDouble(header) * 1_000);
-        } catch (NumberFormatException ignored) {
-            // Gemini thường trả thời gian chờ trong JSON body.
-        }
+        long header = LlmHttpTransport.retryAfterMillis(response);
+        if (header > 0) return header;
+        // Gemini thường trả thời gian chờ trong JSON body.
         Matcher matcher = RETRY_SECONDS_PATTERN.matcher(response.body() == null ? "" : response.body());
         if (!matcher.find()) return 0;
         try {
@@ -398,9 +400,9 @@ public class GoogleLlmClient implements LlmClient {
             if (!outputText.isBlank()) {
                 return outputText;
             }
-            throw new LlmResponseException("Google Gemini response không có text output: " + snippet(responseBody), true);
+            throw LlmResponseException.provider("Google Gemini response không có text output: " + snippet(responseBody), null, 0);
         } catch (JsonProcessingException exception) {
-            throw new LlmResponseException("Google Gemini response không phải JSON hợp lệ.", exception, true);
+            throw LlmResponseException.provider("Google Gemini response không phải JSON hợp lệ.", exception, 0);
         }
     }
 

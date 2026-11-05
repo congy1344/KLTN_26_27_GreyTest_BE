@@ -5,6 +5,8 @@ public class LlmResponseException extends RuntimeException {
     /** Phân loại lỗi của pipeline để quyết định xử lý đúng tầng, không retry LLM khi lỗi thuộc resolver/cache. */
     public enum ErrorClassification {
         LLM_OUTPUT_INVALID,
+        /** Lỗi hạ tầng (mạng, 429, 5xx): không phải lỗi output nên không tiêu lượt sửa của AI. */
+        PROVIDER_UNAVAILABLE,
         SOURCE_ANALYSIS_UNRESOLVED,
         DEPENDENCY_RESOLUTION_FAILED,
         CACHE_PROVENANCE_INCOMPLETE,
@@ -13,8 +15,19 @@ public class LlmResponseException extends RuntimeException {
         RUNTIME_TEST_FAILURE;
 
         public boolean isLlmRetryable() {
-            return this == LLM_OUTPUT_INVALID;
+            return this == LLM_OUTPUT_INVALID || this == PROVIDER_UNAVAILABLE;
         }
+    }
+
+    /** Provider cắt output vì hết max tokens: gửi lại nguyên khối sẽ cắt tiếp, phải chia nhỏ input. */
+    public static final class OutputTruncated extends LlmResponseException {
+        public OutputTruncated(String message) {
+            super(message, null, false, 0, ErrorClassification.LLM_OUTPUT_INVALID);
+        }
+    }
+
+    public static LlmResponseException provider(String message, Throwable cause, long retryAfterMillis) {
+        return new LlmResponseException(message, cause, true, retryAfterMillis, ErrorClassification.PROVIDER_UNAVAILABLE);
     }
 
     private final boolean retryable;
@@ -54,6 +67,10 @@ public class LlmResponseException extends RuntimeException {
         this.classification = classification != null ? classification : (retryable ? ErrorClassification.LLM_OUTPUT_INVALID : ErrorClassification.VALIDATOR_INTERNAL_ERROR);
         this.retryable = retryable && this.classification.isLlmRetryable();
         this.retryAfterMillis = Math.max(retryAfterMillis, 0);
+    }
+
+    public boolean isProviderFailure() {
+        return classification == ErrorClassification.PROVIDER_UNAVAILABLE;
     }
 
     public boolean isRetryable() {

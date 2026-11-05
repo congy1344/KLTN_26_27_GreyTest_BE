@@ -37,6 +37,10 @@ import com.greytest.service.agent.LlmResponseException;
 /** Quan ly test case sinh tu test plan va review HITL. */
 @Service
 public class TestCaseService {
+    // Các batch chạy song song nên mã được đánh lại theo thứ tự source khi cả bước sinh xong.
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private ArtifactCodeRenumberService codeRenumber;
+
     private final TestCaseRepository cases; private final TestPlanRepository plans; private final ProjectRepository projects; private final AIAgentService ai; private final BusinessRuleRepository rules; private final TransactionTemplate transactions; private final GenerationProgressService generationProgress;
     private ServiceScopeResolver scopeResolver; private LlmBatchExecutor batchExecutor;
     public TestCaseService(TestCaseRepository cases, TestPlanRepository plans, ProjectRepository projects, AIAgentService ai, BusinessRuleRepository rules, PlatformTransactionManager transactionManager, GenerationProgressService generationProgress) { this.cases=cases; this.plans=plans; this.projects=projects; this.ai=ai; this.rules=rules; this.transactions=new TransactionTemplate(transactionManager); this.generationProgress=generationProgress; }
@@ -104,20 +108,6 @@ public class TestCaseService {
         }
 
         ai.validateTestCasePrerequisites(projectId, targetPlans.stream().map(TestPlan::getId).collect(java.util.stream.Collectors.toSet()));
-
-        // Nếu sinh lại từ đầu: xóa case cũ TRƯỚC khi bắt đầu gọi AI,
-        // để mỗi batch mới lưu vào DB ngay mà không bị trùng.
-        if (!resume) {
-            List<TestCase> oldCases = approvedPlans.stream()
-                    .flatMap(plan -> cases.findByTestPlanId(plan.getId()).stream())
-                    .toList();
-            if (!oldCases.isEmpty()) {
-                transactions.executeWithoutResult(status -> {
-                    cases.deleteAll(oldCases);
-                    cases.flush();
-                });
-            }
-        }
 
         List<List<TestPlan>> allBatches = planBatches(approvedPlans);
         Set<Long> targetPlanIds = targetPlans.stream().map(TestPlan::getId).collect(java.util.stream.Collectors.toSet());
@@ -236,6 +226,7 @@ public class TestCaseService {
                 Project p = projects.findById(projectId).orElseThrow(() -> new ProjectNotFoundException(projectId));
                 p.setStatus(ProjectStatus.CASE_PENDING_REVIEW);
                 projects.save(p);
+                if (codeRenumber != null) codeRenumber.renumberCases(projectId);
             });
 
             generationProgress.completeAfterCommit(projectId, GenerationProgressStage.TEST_CASE,
@@ -263,6 +254,11 @@ public class TestCaseService {
     }
 
     private List<GeneratedTestCaseDto> generateValidatedBatch(Long projectId, List<TestPlan> batch) {
+        return LlmBatchExecutor.splitOnTruncation(batch, part -> generatePlanCases(projectId, part)).stream()
+                .flatMap(List::stream).toList();
+    }
+
+    private List<GeneratedTestCaseDto> generatePlanCases(Long projectId, List<TestPlan> batch) {
         Set<Long> batchPlanIds = batch.stream()
                 .map(TestPlan::getId)
                 .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
@@ -550,7 +546,7 @@ public class TestCaseService {
                 .mapToInt(code -> Integer.parseInt(code.substring(3))).max().orElse(0) + 1;
     }
     private SemanticScenarioKey scenarioKey(Long methodId,TestCase c){
-        return new SemanticScenarioKey(methodId,normalize(c.getPreconditions()),c.getTestData(),normalize(c.getExpectedResult()));
+        return new SemanticScenarioKey(methodId,normalize(com.greytest.util.TextSanitizer.withoutTestabilityNote(c.getPreconditions())),c.getTestData(),normalize(c.getExpectedResult()));
     }
     private SemanticScenarioKey scenarioKey(Long methodId,GeneratedTestCaseDto c){
         return new SemanticScenarioKey(methodId,normalize(c.preconditions()),c.testData(),normalize(c.expectedResult()));

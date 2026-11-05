@@ -33,12 +33,162 @@ class ServicePipelineStatusServiceTest {
 
     @Mock private BusinessRuleRepository rules;
     @Mock private TestPlanRepository plans;
+    @Mock private com.greytest.repository.TestPlanCoveredRuleRepository coveredRules;
     @Mock private TestCaseRepository cases;
     @Mock private UnitTestRepository unitTests;
     @Mock private CoverageReportRepository reports;
     @Mock private ProjectRepository projects;
     @Mock private ServiceScopeResolver scopes;
     @InjectMocks private ServicePipelineStatusService statuses;
+
+    @Test
+    void reachedStatusKeepsLaterStepsOpenWhileAnEditedRuleWaitsForApproval() {
+        BusinessRule edited = rule(1L, 11L, ReviewStatus.PENDING_REVIEW);
+        BusinessRule untouched = rule(2L, 11L, ReviewStatus.APPROVED);
+        TestPlan plan = plan(3L, untouched.getId());
+        TestCase kept = testCase(4L);
+        UnitTest unit = new UnitTest();
+        unit.setTestCaseId(kept.getId());
+        when(rules.findByProjectId(7L)).thenReturn(List.of(edited, untouched));
+        when(plans.findByProjectId(7L)).thenReturn(List.of(plan));
+        when(cases.findByTestPlanIdIn(List.of(plan.getId()))).thenReturn(List.of(kept));
+        when(unitTests.findByTestCaseIdIn(List.of(kept.getId()))).thenReturn(List.of(unit));
+        var scope = new ServiceScopeResolver.ServiceScope("svc", Set.of(101L), Set.of(11L));
+
+        assertThat(statuses.status(7L, scope)).isEqualTo(ProjectStatus.BR_PENDING_REVIEW);
+        assertThat(statuses.reachedStatus(7L, scope)).isEqualTo(ProjectStatus.TEST_GENERATED);
+    }
+
+    private final ServiceScopeResolver.ServiceScope gapScope =
+            new ServiceScopeResolver.ServiceScope("svc", Set.of(101L), Set.of(11L));
+
+    private UnitTest unitTest(TestCase testCase, java.time.LocalDateTime createdAt) {
+        UnitTest unit = new UnitTest();
+        unit.setTestCaseId(testCase.getId());
+        unit.setCreatedAt(createdAt);
+        return unit;
+    }
+
+    @Test
+    void anApprovedRuleWithoutAPlanMakesTestPlanTheCurrentStep() {
+        BusinessRule regenerated = rule(1L, 11L, ReviewStatus.APPROVED);
+        BusinessRule kept = rule(2L, 11L, ReviewStatus.APPROVED);
+        TestPlan plan = plan(3L, kept.getId());
+        when(rules.findByProjectId(7L)).thenReturn(List.of(regenerated, kept));
+        when(plans.findByProjectId(7L)).thenReturn(List.of(plan));
+        when(coveredRules.findByTestPlanIdIn(List.of(3L))).thenReturn(List.of());
+        TestCase testCase = testCase(4L);
+        when(cases.findByTestPlanIdIn(List.of(3L))).thenReturn(List.of(testCase));
+        when(unitTests.findByTestCaseIdIn(List.of(4L))).thenReturn(List.of(unitTest(testCase, null)));
+
+        assertThat(statuses.status(7L, gapScope)).isEqualTo(ProjectStatus.BR_APPROVED);
+        assertThat(statuses.reachedStatus(7L, gapScope)).isEqualTo(ProjectStatus.TEST_GENERATED);
+    }
+
+    @Test
+    void aRuleCoveredByAnotherAnchorsPlanIsNotMissing() {
+        BusinessRule covered = rule(1L, 11L, ReviewStatus.APPROVED);
+        BusinessRule anchor = rule(2L, 11L, ReviewStatus.APPROVED);
+        TestPlan plan = plan(3L, anchor.getId());
+        var link = new com.greytest.entity.TestPlanCoveredRule();
+        link.setTestPlanId(3L);
+        link.setBusinessRuleId(1L);
+        when(rules.findByProjectId(7L)).thenReturn(List.of(covered, anchor));
+        when(plans.findByProjectId(7L)).thenReturn(List.of(plan));
+        when(coveredRules.findByTestPlanIdIn(List.of(3L))).thenReturn(List.of(link));
+
+        assertThat(statuses.status(7L, gapScope)).isEqualTo(ProjectStatus.PLAN_APPROVED);
+    }
+
+    @Test
+    void anApprovedPlanWithoutCasesMakesTestCaseTheCurrentStep() {
+        BusinessRule first = rule(1L, 11L, ReviewStatus.APPROVED);
+        BusinessRule second = rule(2L, 11L, ReviewStatus.APPROVED);
+        TestPlan regenerated = plan(3L, first.getId());
+        TestPlan kept = plan(5L, second.getId());
+        TestCase keptCase = testCase(4L);
+        keptCase.setTestPlanId(5L);
+        when(rules.findByProjectId(7L)).thenReturn(List.of(first, second));
+        when(plans.findByProjectId(7L)).thenReturn(List.of(regenerated, kept));
+        when(coveredRules.findByTestPlanIdIn(List.of(3L, 5L))).thenReturn(List.of());
+        when(cases.findByTestPlanIdIn(List.of(3L, 5L))).thenReturn(List.of(keptCase));
+
+        assertThat(statuses.status(7L, gapScope)).isEqualTo(ProjectStatus.PLAN_APPROVED);
+    }
+
+    @Test
+    void onlyCasesNewerThanTheLatestUnitTestMakeUnitTestTheCurrentStep() {
+        var earlier = java.time.LocalDateTime.of(2026, 11, 5, 10, 0);
+        BusinessRule rule = rule(1L, 11L, ReviewStatus.APPROVED);
+        TestPlan plan = plan(3L, rule.getId());
+        TestCase withTest = testCase(4L);
+        withTest.setCreatedAt(earlier);
+        // Case cũ không có test: AI đã thử và chặn, không được khóa bước Coverage mãi.
+        TestCase blocked = testCase(5L);
+        blocked.setCreatedAt(earlier);
+        TestCase regenerated = testCase(6L);
+        regenerated.setCreatedAt(earlier.plusHours(2));
+        when(rules.findByProjectId(7L)).thenReturn(List.of(rule));
+        when(plans.findByProjectId(7L)).thenReturn(List.of(plan));
+        when(coveredRules.findByTestPlanIdIn(List.of(3L))).thenReturn(List.of());
+        when(unitTests.findByTestCaseIdIn(org.mockito.ArgumentMatchers.anyList()))
+                .thenReturn(List.of(unitTest(withTest, earlier.plusHours(1))));
+
+        when(cases.findByTestPlanIdIn(List.of(3L))).thenReturn(List.of(withTest, blocked));
+        assertThat(statuses.status(7L, gapScope)).isEqualTo(ProjectStatus.TEST_GENERATED);
+
+        when(cases.findByTestPlanIdIn(List.of(3L))).thenReturn(List.of(withTest, blocked, regenerated));
+        assertThat(statuses.status(7L, gapScope)).isEqualTo(ProjectStatus.CASE_APPROVED);
+    }
+
+    @Test
+    void newCasesWithoutTestsDoNotLockCoverageButAMissingPlanDoes() {
+        var earlier = java.time.LocalDateTime.of(2026, 11, 5, 10, 0);
+        BusinessRule rule = rule(1L, 11L, ReviewStatus.APPROVED);
+        TestPlan plan = plan(3L, rule.getId());
+        TestCase withTest = testCase(4L);
+        withTest.setCreatedAt(earlier);
+        TestCase regenerated = testCase(6L);
+        regenerated.setCreatedAt(earlier.plusHours(2));
+        when(rules.findByProjectId(7L)).thenReturn(List.of(rule));
+        when(plans.findByProjectId(7L)).thenReturn(List.of(plan));
+        when(cases.findByTestPlanIdIn(List.of(3L))).thenReturn(List.of(withTest, regenerated));
+        when(unitTests.findByTestCaseIdIn(org.mockito.ArgumentMatchers.anyList()))
+                .thenReturn(List.of(unitTest(withTest, earlier.plusHours(1))));
+
+        assertThat(statuses.onlyUnitTestsMissing(7L, gapScope, ProjectStatus.TEST_GENERATED)).isTrue();
+        assertThat(statuses.onlyUnitTestsMissing(7L, gapScope, ProjectStatus.COVERAGE_ANALYZED)).isFalse();
+
+        when(rules.findByProjectId(7L)).thenReturn(List.of(rule, rule(2L, 11L, ReviewStatus.APPROVED)));
+        assertThat(statuses.onlyUnitTestsMissing(7L, gapScope, ProjectStatus.TEST_GENERATED)).isFalse();
+    }
+
+    @Test
+    void reachedStatusOpensTheNextStepOnceItsInputIsApproved() {
+        BusinessRule missing = rule(1L, 11L, ReviewStatus.APPROVED);
+        BusinessRule kept = rule(2L, 11L, ReviewStatus.APPROVED);
+        TestPlan plan = plan(3L, kept.getId());
+        when(rules.findByProjectId(7L)).thenReturn(List.of(missing, kept));
+        when(plans.findByProjectId(7L)).thenReturn(List.of(plan));
+        when(coveredRules.findByTestPlanIdIn(List.of(3L))).thenReturn(List.of());
+
+        when(cases.findByTestPlanIdIn(List.of(3L))).thenReturn(List.of());
+        assertThat(statuses.reachedStatus(7L, gapScope)).isEqualTo(ProjectStatus.PLAN_APPROVED);
+
+        when(cases.findByTestPlanIdIn(List.of(3L))).thenReturn(List.of(testCase(4L)));
+        when(unitTests.findByTestCaseIdIn(List.of(4L))).thenReturn(List.of());
+        assertThat(statuses.reachedStatus(7L, gapScope)).isEqualTo(ProjectStatus.CASE_APPROVED);
+    }
+
+    @Test
+    void reachedStatusStaysAtTheCurrentStepWhenNothingLaterExists() {
+        BusinessRule edited = rule(1L, 11L, ReviewStatus.PENDING_REVIEW);
+        when(rules.findByProjectId(7L)).thenReturn(List.of(edited));
+        when(plans.findByProjectId(7L)).thenReturn(List.of());
+        var scope = new ServiceScopeResolver.ServiceScope("svc", Set.of(101L), Set.of(11L));
+
+        assertThat(statuses.reachedStatus(7L, scope)).isEqualTo(ProjectStatus.BR_PENDING_REVIEW);
+    }
 
     @Test
     void calculatesPipelineStatusIndependentlyForEachService() {
@@ -140,6 +290,7 @@ class ServicePipelineStatusServiceTest {
         TestCase testCase = new TestCase();
         testCase.setId(id);
         testCase.setStatus(ReviewStatus.APPROVED);
+        testCase.setTestPlanId(3L);
         return testCase;
     }
 }

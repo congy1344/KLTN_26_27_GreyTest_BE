@@ -15,6 +15,7 @@ final class SourceMockingSupport {
     private SourceMockingSupport() { }
 
     static Optional<String> validateTestCases(TestCaseContextDto context, TestCaseResponseDto response) {
+        Set<String> problems = new LinkedHashSet<>();
         for (var testCase : response.cases()) {
             var plan = context.approvedTestPlans().stream().filter(item -> item.id().equals(testCase.planId())).findFirst();
             if (plan.isEmpty()) continue;
@@ -25,12 +26,12 @@ final class SourceMockingSupport {
             for (var source : context.classes()) {
                 if (source.methods().stream().noneMatch(method -> methodIds.contains(method.id()))) continue;
                 Set<String> invalid = unsupportedMocks(source, testCase.testData());
-                if (!invalid.isEmpty()) return Optional.of("plan_id=" + testCase.planId() + ": " + source.qualifiedName()
+                if (!invalid.isEmpty()) problems.add("plan_id=" + testCase.planId() + ": " + source.qualifiedName()
                         + " internally initializes final field(s) " + invalid + "; Mockito cannot inject these mocks. "
                         + "Use the real collaborator and source-proven observable results; preserve the plan and business expectation.");
             }
         }
-        return Optional.empty();
+        return problems.isEmpty() ? Optional.empty() : Optional.of(String.join("\n", problems));
     }
 
     static boolean canReconsiderSetup(UnitTestContextDto context, GenerationResponseParser.UnitTestGenerationError error) {

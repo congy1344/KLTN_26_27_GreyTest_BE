@@ -72,12 +72,86 @@ final class GeneratedTestApiValidator {
                 .forEach(binary -> validator.validateBinaryComparison(binary, test, problems));
         test.findAll(MethodCallExpr.class).forEach(call -> {
             validator.validateCall(call, test, problems);
+            validator.validateReflectiveFixtureField(call, test, problems);
+            validator.validateBooleanStubReturn(call, test, problems);
             validator.validateNullAssertion(call, test, problems);
             validator.validateBigDecimalAssertion(call, test, caseId, problems);
             validator.validateUncapturedRead(call, test, problems);
             validator.validateReferenceIdentity(call, test, problems);
         });
         return problems;
+    }
+
+    /** Chỉ kết luận thiếu field khi đã biết đầy đủ lớp cha; không đoán hierarchy ngoài context. */
+    private void validateReflectiveFixtureField(MethodCallExpr call, CompilationUnit test, List<String> problems) {
+        if (!call.getNameAsString().equals("setField") || call.getArguments().size() != 3
+                || !call.getArgument(1).isStringLiteralExpr() || call.getScope().isEmpty()) return;
+        String scope = call.getScope().orElseThrow().toString();
+        if (!scope.equals("org.springframework.test.util.ReflectionTestUtils")
+                && !(scope.equals("ReflectionTestUtils") && test.getImports().stream().anyMatch(i -> !i.isStatic()
+                    && i.getNameAsString().equals("org.springframework.test.util.ReflectionTestUtils"))
+                    && expressionType(call.getScope().orElseThrow(), test) == null
+                    && test.findAll(ClassOrInterfaceDeclaration.class).stream().noneMatch(c -> c.getNameAsString().equals(scope)))) return;
+        Type target = expressionType(call.getArgument(0), test);
+        if (target == null || !target.isClassOrInterfaceType()) return;
+        // Reflection tìm theo lớp runtime, không phải kiểu cha/interface của biến.
+        var variables = test.findAll(VariableDeclarator.class).stream().filter(v -> v.getType() == target).toList();
+        if (variables.size() != 1 || variables.get(0).getInitializer().filter(Expression::isObjectCreationExpr).isEmpty()) return;
+        var variable = variables.get(0);
+        if (test.findAll(com.github.javaparser.ast.expr.AssignExpr.class).stream()
+                .anyMatch(a -> expressionType(a.getTarget(), test) == target)) return;
+        var creation = variable.getInitializer().orElseThrow().asObjectCreationExpr();
+        if (creation.getAnonymousClassBody().isPresent()) return;
+        var owner = declarations.get(qualifiedType(creation.getType(), test));
+        if (owner == null) return;
+        String name = call.getArgument(1).asStringLiteralExpr().asString();
+        var pending = new ArrayList<ClassOrInterfaceDeclaration>(); pending.add(owner);
+        var visited = new java.util.HashSet<String>();
+        for (int index = 0; index < pending.size(); index++) {
+            var type = pending.get(index);
+            if (!visited.add(type.getFullyQualifiedName().orElse(type.getNameAsString()))) continue;
+            if (type.getFieldByName(name).isPresent()) return;
+            for (var parent : type.getExtendedTypes()) {
+                var declared = declarations.get(qualifiedType(parent, type.findCompilationUnit().orElseThrow()));
+                if (declared == null) return;
+                pending.add(declared);
+            }
+        }
+        problems.add("Fixture wiring: field '" + name + "' does not exist in the supplied source hierarchy of "
+                + owner.getNameAsString() + ". Wire a declared injectable field or use the source-defined lookup/helper; do not invent a field from a mock's name.");
+    }
+
+    /** Boolean literal không thể làm giá trị stub cho method source đã xác định trả int/Integer. */
+    private void validateBooleanStubReturn(MethodCallExpr call, CompilationUnit test, List<String> problems) {
+        if (!call.getNameAsString().equals("thenReturn") || call.getArguments().isEmpty()
+                || call.getArguments().stream().noneMatch(Expression::isBooleanLiteralExpr)
+                || call.getScope().filter(Expression::isMethodCallExpr).isEmpty()) return;
+        var when = call.getScope().orElseThrow().asMethodCallExpr();
+        if (!when.getNameAsString().equals("when") || when.getArguments().size() != 1
+                || !when.getArgument(0).isMethodCallExpr()) return;
+        boolean mockito = when.getScope().map(Object::toString).filter(s -> s.equals("org.mockito.Mockito")
+                || s.equals("Mockito") && test.getImports().stream().anyMatch(i -> !i.isStatic()
+                    && i.getNameAsString().equals("org.mockito.Mockito"))).isPresent()
+                || when.getScope().isEmpty() && test.getImports().stream().anyMatch(i -> i.isStatic()
+                    && (i.isAsterisk() && i.getNameAsString().equals("org.mockito.Mockito")
+                    || i.getNameAsString().equals("org.mockito.Mockito.when")))
+                    && test.findAll(MethodDeclaration.class).stream().noneMatch(m -> m.getNameAsString().equals("when"));
+        if (!mockito) return;
+        var invocation = when.getArgument(0).asMethodCallExpr();
+        Type receiver = invocation.getScope().map(s -> expressionType(s, test)).orElse(null);
+        if (receiver == null || !receiver.isClassOrInterfaceType()) return;
+        var owner = declarations.get(qualifiedType(receiver.asClassOrInterfaceType(), test));
+        if (owner == null || !owner.getExtendedTypes().isEmpty() || !owner.getImplementedTypes().isEmpty()) return;
+        var methods = owner.getMethodsByName(invocation.getNameAsString());
+        if (methods.size() != 1 || !methods.get(0).getTypeParameters().isEmpty()
+                || methods.get(0).getParameters().stream().anyMatch(Parameter::isVarArgs)
+                || methods.get(0).getParameters().size() != invocation.getArguments().size()) return;
+        Type result = methods.get(0).getType();
+        boolean integer = result.isPrimitiveType() && result.asString().equals("int")
+                || result.isClassOrInterfaceType() && "java.lang.Integer".equals(
+                        qualifiedType(result.asClassOrInterfaceType(), owner.findCompilationUnit().orElseThrow()));
+        if (integer) problems.add("Stub return type: " + owner.getNameAsString() + "." + invocation.getNameAsString()
+                + " returns " + result + ", so thenReturn(boolean) will not compile. Use the approved affected-row fixture as int/Integer, keeping the service's approved assertion unchanged.");
     }
 
     private void validateUninitializedSpies(CompilationUnit test, List<String> problems) {

@@ -52,6 +52,10 @@ import com.greytest.service.analysis.MethodBranchAnalyzer;
 /** Quản lý Business Rule, điều phối sinh AI theo gói và lưu an toàn từng batch hợp lệ. */
 @Service
 public class BusinessRuleService {
+    // Các batch chạy song song nên mã được đánh lại theo thứ tự source khi cả bước sinh xong.
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private ArtifactCodeRenumberService codeRenumber;
+
 
     // ponytail: tam luu suggestion trong review_note; tach cot rieng khi can lich su review.
     private static final String SUGGESTION_MARKER = "\nAI_SUGGESTION:";
@@ -65,6 +69,10 @@ public class BusinessRuleService {
     private final AIAgentService aiAgentService;
     private final GenerationProgressService generationProgressService;
     private final TransactionTemplate transactions;
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private com.greytest.repository.TestPlanRepository testPlans;
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private com.greytest.repository.TestPlanCoveredRuleRepository coveredRules;
     private ServiceScopeResolver scopeResolver;
     private ServicePipelineStatusService scopedStatuses;
     private LlmBatchExecutor batchExecutor;
@@ -194,6 +202,10 @@ public class BusinessRuleService {
         Project project = ensureProjectExists(rule.getProjectId());
         ensureBusinessRuleEditable(project);
         String description = request.description().trim();
+        // Bấm lưu mà nội dung không đổi thì không tính là người dùng đã sửa.
+        if (request.methodId().equals(rule.getMethodId()) && sameDescription(rule, description)) {
+            return toDto(rule);
+        }
         ensureUniqueDescription(businessRuleRepository.findByProjectId(rule.getProjectId()).stream()
                 .filter(existing -> request.methodId().equals(existing.getMethodId()))
                 .toList(), ruleId, description);
@@ -209,6 +221,7 @@ public class BusinessRuleService {
         rule.setReviewNote(withSourceBranch(
                 sourceBranchId,
                 "Đã sửa thủ công. AI review lại là tùy chọn."));
+        dropPlansCovering(rule);
         project.setStatus(ProjectStatus.BR_PENDING_REVIEW);
         projectRepository.save(project);
         return toDto(businessRuleRepository.save(rule));
@@ -332,7 +345,10 @@ public class BusinessRuleService {
                     generationProgressService.log(projectId, GenerationProgressStage.BUSINESS_RULE,
                             "Đang gọi AI phân tích batch " + batch.number() + "/" + totalBatches
                                     + " (" + summary + ")...");
-                    return generateValidatedBusinessRules(projectId, batch.methodIds());
+                    return new BusinessRuleResponseDto(LlmBatchExecutor.splitOnTruncation(
+                            List.copyOf(batch.methodIds()),
+                            part -> generateValidatedBusinessRules(projectId, new java.util.LinkedHashSet<>(part)).rules())
+                            .stream().flatMap(List::stream).toList());
                 },
                 (completedRunBatch, response) -> {
                     if (failedSaveBatch.get() > 0) return;
@@ -364,6 +380,7 @@ public class BusinessRuleService {
         lastAttemptedBatchNumber = totalBatches + 1;
         generationProgressService.log(projectId, GenerationProgressStage.BUSINESS_RULE,
                 "Đang kiểm tra tính nhất quán và hoàn tất cập nhật trạng thái...");
+        if (codeRenumber != null) codeRenumber.renumberRules(projectId);
         project.setStatus(ProjectStatus.BR_PENDING_REVIEW);
         projectRepository.save(project);
         generationProgressService.completeAfterCommit(projectId, GenerationProgressStage.BUSINESS_RULE,
@@ -508,6 +525,7 @@ public class BusinessRuleService {
         rule.setReviewNote(withSourceBranch(
                 sourceBranchId(rule.getReviewNote()),
                 "Đã áp dụng gợi ý AI."));
+        dropPlansCovering(rule);
         project.setStatus(ProjectStatus.BR_PENDING_REVIEW);
         projectRepository.save(project);
         return toDto(businessRuleRepository.save(rule));
@@ -1165,6 +1183,32 @@ public class BusinessRuleService {
 
     // Cho phép quay lại sửa BR ở mọi pha sau (regenerate); dữ liệu pha sau bị ảnh hưởng
     // sẽ được DB cascade dọn và status rollback về BR_PENDING_REVIEW
+    /** Giao diện gửi lại bản đã làm sạch của mô tả, nên so cả với bản đó. */
+    private boolean sameDescription(BusinessRule rule, String description) {
+        String stored = rule.getDescription();
+        return description.equals(stored.trim())
+                || description.equals(com.greytest.util.TextSanitizer.cleanAiText(stored).trim());
+    }
+
+    /**
+     * Nội dung BR đổi thì Plan phủ BR đó không còn đúng: xóa Plan, DB cascade xóa Case và Unit Test của nó.
+     * Phần còn lại giữ nguyên; "Tiếp tục sinh" ở từng bước chỉ sinh cho phần bị thiếu.
+     */
+    private void dropPlansCovering(BusinessRule rule) {
+        if (testPlans == null) return;
+        Set<Long> coveringPlanIds = coveredRules.findByBusinessRuleId(rule.getId()).stream()
+                .map(com.greytest.entity.TestPlanCoveredRule::getTestPlanId)
+                .collect(Collectors.toSet());
+        List<com.greytest.entity.TestPlan> covering = testPlans.findByProjectId(rule.getProjectId()).stream()
+                .filter(plan -> rule.getId().equals(plan.getBusinessRuleId()) || coveringPlanIds.contains(plan.getId()))
+                .toList();
+        // Tác vụ sinh đang chạy có thể đang ghi Case cho chính các Plan này.
+        if (!covering.isEmpty() && generationProgressService.hasActiveGeneration(rule.getProjectId())) {
+            throw new InvalidProjectStatusException("Đang có tác vụ AI chạy. Hãy đợi xong rồi lưu thay đổi Business Rule.");
+        }
+        testPlans.deleteAll(covering);
+    }
+
     private void ensureBusinessRuleEditable(Project project) {
         ensureBusinessRuleEditable(project.getStatus());
     }

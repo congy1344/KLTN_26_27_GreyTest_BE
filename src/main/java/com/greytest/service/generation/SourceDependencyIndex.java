@@ -48,6 +48,11 @@ final class SourceDependencyIndex {
     private final Map<String, CombinedTypeSolver> solvers = new TreeMap<>();
     private final ParserDependencyClasspath.Snapshot classpath;
     private CombinedTypeSolver cachedOutputSolver;
+    private Set<String> projectPackages;
+    private record Hierarchy(List<TypeDeclaration<?>> types, boolean leavesSource) { }
+    // Một test có thể hỏi lại cùng kiểu nhiều lần; source của index không đổi nên kết quả dùng lại được.
+    private final Map<String, Hierarchy> hierarchies = new java.util.concurrent.ConcurrentHashMap<>();
+    private final Map<String, Boolean> solvedTypes = new java.util.concurrent.ConcurrentHashMap<>();
     private final Map<String, CombinedTypeSolver> frameworkOutputSolvers = new TreeMap<>();
     private record CapturedReceiverUnit(CompilationUnit unit, Set<com.github.javaparser.Range> changedCalls) { }
     private final Map<CompilationUnit, CapturedReceiverUnit> capturedReceiverUnits = new java.util.IdentityHashMap<>();
@@ -847,6 +852,163 @@ final class SourceDependencyIndex {
     }
 
     void outputModule(String module) { analysisModule = module; }
+
+    boolean hasDependencyClasspath() { return classpath.configured(); }
+
+    /** Tên đầy đủ của một tham chiếu trong file: import rõ ràng, cùng package, wildcard, rồi java.lang. */
+    String qualifiedReference(com.github.javaparser.ast.type.ClassOrInterfaceType reference, CompilationUnit unit, String module) {
+        String name = reference.getNameWithScope();
+        int dot = name.indexOf('.');
+        String first = dot < 0 ? name : name.substring(0, dot);
+        if (dot > 0 && Character.isLowerCase(first.charAt(0))) return name;
+        String rest = dot < 0 ? "" : name.substring(dot);
+        if (unit == null) return name;
+        for (var imported : unit.getImports()) {
+            if (!imported.isStatic() && !imported.isAsterisk() && imported.getName().getIdentifier().equals(first)) {
+                return imported.getNameAsString() + rest;
+            }
+        }
+        String local = unit.getPackageDeclaration().map(pkg -> pkg.getNameAsString() + ".").orElse("") + name;
+        if (types.containsKey(local)) return local;
+        for (var imported : unit.getImports()) {
+            String candidate = imported.getNameAsString() + "." + name;
+            if (!imported.isStatic() && imported.isAsterisk() && (types.containsKey(candidate) || solvable(candidate, module))) return candidate;
+        }
+        return solvable("java.lang." + name, module) ? "java.lang." + name : name;
+    }
+
+    /** Kiểu không có trong source, JDK hay thư viện test, và không thuộc namespace của project. */
+    boolean outsideSource(String qualifiedName, String module) {
+        if (outputType(qualifiedName, module, new java.util.ArrayList<>()) != null || inJdk(qualifiedName)) return false;
+        return isTestSource(qualifiedName, module) || projectPackages().stream().noneMatch(root -> qualifiedName.startsWith(root + "."));
+    }
+
+    /** Helper trong src/test/java: có thật ở máy chạy test nhưng index chỉ đọc source production. */
+    boolean isTestSource(String qualifiedName, String module) {
+        Path base = module == null || module.equals(".") ? root : root.resolve(module);
+        return java.nio.file.Files.isRegularFile(base.resolve("src/test/java").resolve(qualifiedName.replace('.', '/') + ".java"));
+    }
+
+    /** Tên chưa xác định có thể đến từ wildcard import của thư viện; wildcard của project hay JDK đã được tra ở trên. */
+    boolean wildcardMayProvide(String name, CompilationUnit unit) {
+        return unit != null && unit.getImports().stream().anyMatch(imported -> !imported.isStatic() && imported.isAsterisk()
+                && !imported.getNameAsString().startsWith("java.")
+                && projectPackages().stream().noneMatch(root -> (imported.getNameAsString() + ".").startsWith(root + ".")));
+    }
+
+    /** Các overload cùng số tham số trong phần source của chuỗi kế thừa. */
+    List<MethodDeclaration> declaredOverloads(TypeDeclaration<?> owner, String method, int arity, String module) {
+        return hierarchy(owner, module).types().stream().flatMap(type -> type.getMethodsByName(method).stream())
+                .filter(declaration -> declaration.getParameters().size() == arity).toList();
+    }
+
+    /** Có method cùng tên và cùng số tham số (hoặc varargs) trong phần source của chuỗi kế thừa. */
+    boolean declaresCall(TypeDeclaration<?> owner, String method, int arity, String module) {
+        return hierarchy(owner, module).types().stream().flatMap(type -> type.getMethodsByName(method).stream())
+                .anyMatch(declaration -> declaration.getParameters().size() == arity
+                        || declaration.getParameters().stream().anyMatch(com.github.javaparser.ast.body.Parameter::isVarArgs));
+    }
+
+    /** Method không khai báo trong source của owner mà owner lại có cha ngoài source: chỉ JAR mới xác nhận được. */
+    boolean inheritedFromOutsideSource(TypeDeclaration<?> owner, String method, String module) {
+        var hierarchy = hierarchy(owner, module);
+        return hierarchy.leavesSource() && hierarchy.types().stream().allMatch(type -> type.getMethodsByName(method).isEmpty());
+    }
+
+    /** Solver không tính được kiểu cha của class này nên mọi phép gán liên quan đều chưa kiểm chứng được. */
+    boolean leavesSource(TypeDeclaration<?> type, String module) {
+        return hierarchy(type, module).leavesSource();
+    }
+
+    /** Chữ ký method dùng kiểu ngoài source thì chỉ JAR mới so khớp được tham số và kiểu trả về. */
+    boolean signatureLeavesSource(TypeDeclaration<?> owner, String method, String module) {
+        var unit = owner.findCompilationUnit().orElse(null);
+        return owner.getMethodsByName(method).stream().anyMatch(declaration -> {
+            var references = new java.util.ArrayList<>(declaration.getType().findAll(com.github.javaparser.ast.type.ClassOrInterfaceType.class));
+            declaration.getParameters().forEach(parameter -> references.addAll(parameter.findAll(com.github.javaparser.ast.type.ClassOrInterfaceType.class)));
+            Set<String> typeParameters = new java.util.HashSet<>();
+            declaration.getTypeParameters().forEach(parameter -> typeParameters.add(parameter.getNameAsString()));
+            if (owner.isClassOrInterfaceDeclaration()) owner.asClassOrInterfaceDeclaration().getTypeParameters().forEach(parameter -> typeParameters.add(parameter.getNameAsString()));
+            return references.stream().anyMatch(reference -> {
+                String name = qualifiedReference(reference, unit, module);
+                if (!name.contains(".")) return !typeParameters.contains(name) && wildcardMayProvide(name, unit);
+                return Character.isLowerCase(name.charAt(0)) && outsideSource(name, module);
+            });
+        });
+    }
+
+    /** Field có trong source, hoặc chưa thể bác bỏ vì owner có cha ngoài source. */
+    boolean mayDeclareField(TypeDeclaration<?> owner, String field, String module) {
+        var hierarchy = hierarchy(owner, module);
+        return hierarchy.leavesSource() || hierarchy.types().stream().anyMatch(type -> type.getFieldByName(field).isPresent());
+    }
+
+    private Hierarchy hierarchy(TypeDeclaration<?> type, String module) {
+        return hierarchies.computeIfAbsent(module + "|" + identity(type), ignored -> {
+            var seen = new java.util.LinkedHashMap<String, TypeDeclaration<?>>();
+            boolean outside = collectHierarchy(type, module, seen);
+            return new Hierarchy(List.copyOf(seen.values()), outside);
+        });
+    }
+
+    /** Trả về true khi chuỗi kế thừa đi ra ngoài source; chỉ JDK mới không tính vì thư viện trong classpath backend có thể khác phiên bản project. */
+    private boolean collectHierarchy(TypeDeclaration<?> type, String module, Map<String, TypeDeclaration<?>> seen) {
+        if (seen.putIfAbsent(identity(type), type) != null || !type.isClassOrInterfaceDeclaration()) return false;
+        var declaration = type.asClassOrInterfaceDeclaration();
+        var parents = new java.util.ArrayList<>(declaration.getExtendedTypes());
+        parents.addAll(declaration.getImplementedTypes());
+        var unit = type.findCompilationUnit().orElse(null);
+        boolean outside = false;
+        for (var parent : parents) {
+            String name = qualifiedReference(parent, unit, module);
+            TypeDeclaration<?> source = outputType(name, module, new java.util.ArrayList<>());
+            if (source != null) outside |= collectHierarchy(source, module, seen);
+            else outside |= !inJdk(name);
+        }
+        return outside;
+    }
+
+    private boolean solvable(String qualifiedName, String module) {
+        return solvedTypes.computeIfAbsent(module + "|" + qualifiedName, ignored -> {
+            try {
+                return outputSolver(module).tryToSolveType(qualifiedName).isSolved();
+            } catch (RuntimeException | LinkageError unresolved) {
+                return false;
+            }
+        });
+    }
+
+    private static boolean inJdk(String qualifiedName) {
+        try {
+            Class.forName(qualifiedName, false, ClassLoader.getPlatformClassLoader());
+            return true;
+        } catch (ClassNotFoundException | LinkageError missing) {
+            return false;
+        }
+    }
+
+    /** Gom theo module và hai đoạn đầu để project nhiều gốc package vẫn phân biệt được với thư viện cùng tổ chức. */
+    private synchronized Set<String> projectPackages() {
+        if (projectPackages != null) return projectPackages;
+        Map<String, String> roots = new TreeMap<>();
+        for (var entry : types.entrySet()) {
+            int dot = entry.getKey().lastIndexOf('.');
+            if (dot < 0) continue;
+            String pkg = entry.getKey().substring(0, dot);
+            String[] parts = pkg.split("\\.");
+            String cluster = parts.length > 1 ? parts[0] + "." + parts[1] : parts[0];
+            for (var type : entry.getValue()) roots.merge(ServiceScopeResolver.modulePath(relative(type)) + "|" + cluster, pkg, SourceDependencyIndex::commonPackage);
+        }
+        projectPackages = Set.copyOf(roots.values());
+        return projectPackages;
+    }
+
+    private static String commonPackage(String left, String right) {
+        String[] first = left.split("\\."), second = right.split("\\.");
+        int shared = 0;
+        while (shared < first.length && shared < second.length && first[shared].equals(second[shared])) shared++;
+        return String.join(".", java.util.Arrays.copyOf(first, shared));
+    }
 
     List<TypeDeclaration<?>> dispatchTypes(TypeDeclaration<?> caller) {
         if (classpath.configured()) {

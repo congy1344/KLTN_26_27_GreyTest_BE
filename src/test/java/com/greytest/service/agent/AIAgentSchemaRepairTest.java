@@ -50,7 +50,8 @@ class AIAgentSchemaRepairTest {
         var contexts = mock(GenerationContextBuilder.class);
         when(contexts.buildTestCaseContext(1L)).thenReturn(context);
         var prompts = mock(PromptManager.class);
-        when(prompts.render(anyString(), anyMap())).thenReturn("APPROVED_CONTEXT_AND_ORIGINAL_SCHEMA");
+        when(prompts.renderPrompt(anyString(), anyMap())).thenReturn(
+                new PromptManager.RenderedPrompt("APPROVED_CONTEXT_AND_ORIGINAL_SCHEMA", List.of()));
         validators = Validation.buildDefaultValidatorFactory();
         var parser = new GenerationResponseParser(json, validators.getValidator());
         agent = new AIAgentService(contexts, prompts, client, parser, mock(AiContextLogService.class));

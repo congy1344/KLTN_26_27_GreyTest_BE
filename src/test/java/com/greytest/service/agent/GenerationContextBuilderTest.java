@@ -1573,6 +1573,29 @@ class GenerationContextBuilderTest {
                 null);
     }
 
+    @Test
+    void testCaseBatchSeesTheUserRuleOfItsMethodWithoutTheAiNoteAboutSource() {
+        when(analysisService.getAnalysisResult(1L)).thenReturn(analysis());
+        BusinessRule aiRule = ruleEntity(7L, 11L, ReviewStatus.APPROVED);
+        aiRule.setSource(RuleSource.AI_GENERATED);
+        BusinessRule userRule = ruleEntity(8L, 11L, ReviewStatus.APPROVED);
+        userRule.setSource(RuleSource.USER_MODIFIED);
+        userRule.setReviewNote("SOURCE_BRANCH:IF-1\nSOURCE_MISMATCH: quantity = 1 được chấp nhận.");
+        BusinessRule otherMethod = ruleEntity(9L, 12L, ReviewStatus.APPROVED);
+        otherMethod.setSource(RuleSource.USER_MODIFIED);
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(aiRule, userRule, otherMethod));
+        when(testPlanRepository.findByProjectId(1L)).thenReturn(List.of(testPlan(20L, 7L, "TP-001")));
+        when(testPlanCoveredRuleRepository.findByTestPlanIdIn(List.of(20L))).thenReturn(List.of(coveredRule(20L, 7L)));
+        when(existingTestService.list(1L)).thenReturn(List.of());
+
+        TestCaseContextDto context = builder.buildTestCaseContext(1L, Set.of(20L));
+
+        assertThat(context.approvedBusinessRules()).extracting("id").containsExactlyInAnyOrder(7L, 8L);
+        var user = context.approvedBusinessRules().stream().filter(rule -> rule.id() == 8L).findFirst().orElseThrow();
+        assertThat(user.reviewNote()).isNull();
+        assertThat(user.sourceBranchId()).isEqualTo("IF-1");
+    }
+
     private BusinessRule ruleEntity(Long id, Long methodId, ReviewStatus status) {
         BusinessRule rule = new BusinessRule();
         rule.setId(id);
