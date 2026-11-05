@@ -64,4 +64,18 @@ public class GenerationProgressController {
         }
         return progressService.get(projectId, stage);
     }
+
+    @PostMapping("/api/projects/{projectId}/generation-progress/{stage}/cancel")
+    public GenerationProgressDto cancel(
+            @PathVariable Long projectId,
+            @PathVariable GenerationProgressStage stage,
+            @RequestHeader("Authorization") String authorization) {
+        projectService.requireAccess(projectId, authService.currentUser(authorization));
+        if (jobService != null) {
+            jobService.cancel(projectId, stage);
+        } else {
+            progressService.cancel(projectId, stage, "Đã hủy tác vụ sinh AI.");
+        }
+        return progressService.get(projectId, stage);
+    }
 }

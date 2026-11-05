@@ -854,10 +854,24 @@ public class GenerationContextBuilder {
                     .parse(owner.sourceCode()).getResult().orElse(null);
             Set<String> references = sourceTypeReferences(source);
             ensureReferencedSourcesParsed(analysis, owner, source, references);
+            boolean ownerCanHaveImplementations = includeImplementations && source != null
+                    && source.findAll(com.github.javaparser.ast.body.ClassOrInterfaceDeclaration.class).stream()
+                            .anyMatch(type -> type.getFullyQualifiedName().filter(owner.qualifiedName()::equals).isPresent()
+                                    && (type.isInterface() || type.isAbstract()));
+            List<JavaClassDto> implementors = ownerCanHaveImplementations ? implementationCandidates.stream()
+                    .filter(type -> implementsSourceType(type, owner, source, candidates))
+                    .filter(type -> {
+                        try {
+                            return preferredDeclaration(type, owner, implementationCandidates);
+                        } catch (LlmResponseException ignored) {
+                            return false;
+                        }
+                    })
+                    .toList() : List.of();
             for (JavaClassDto candidate : candidates) {
                 boolean dependency = isUnitTestDependency(candidate, owner, source, references, candidates);
-                boolean implementation = includeImplementations && implementationCandidates.contains(candidate)
-                        && implementsSourceType(candidate, owner, source, candidates);
+                // Chỉ nhận implementation duy nhất trong module mục tiêu; nếu có nhiều class cùng implement (ví dụ nhiều profile persistence) thì giữ interface làm contract để tránh bùng nổ token/source.
+                boolean implementation = implementors.size() == 1 && implementors.contains(candidate);
                 if (!dependency && !implementation) continue;
                 if (!preferredDeclaration(candidate, owner, dependency ? candidates : implementationCandidates)) continue;
                 if (included.contains(candidate.qualifiedName())) {

@@ -303,6 +303,22 @@ class GenerationProgressServiceTest {
     }
 
     @Test
+    void cancelsGenerationProgressAndMarksFailedAndPaused() {
+        service.start(9L, GenerationProgressStage.TEST_CASE, 3, "Bắt đầu sinh Test Case.");
+        service.advance(9L, GenerationProgressStage.TEST_CASE, "Đã xử lý batch 1/2.");
+
+        assertThat(service.isPaused(9L, GenerationProgressStage.TEST_CASE)).isFalse();
+
+        service.cancel(9L, GenerationProgressStage.TEST_CASE, "Đã hủy tác vụ sinh AI.");
+
+        assertThat(service.isPaused(9L, GenerationProgressStage.TEST_CASE)).isTrue();
+        GenerationProgressDto cancelled = service.get(9L, GenerationProgressStage.TEST_CASE);
+        assertThat(cancelled.status()).isEqualTo(GenerationProgressStatus.FAILED);
+        assertThat(cancelled.logs()).extracting(log -> log.message())
+                .contains("Đã hủy tác vụ sinh AI.");
+    }
+
+    @Test
     void resumesWithNonContiguousCompletedStepsAndPreservesExistingLogs() {
         service.start(9L, GenerationProgressStage.UNIT_TEST, 4, "Lần chạy đầu tiên.");
         service.advance(9L, GenerationProgressStage.UNIT_TEST, "Batch 1 đã xong.");

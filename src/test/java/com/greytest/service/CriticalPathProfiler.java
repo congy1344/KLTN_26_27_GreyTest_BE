@@ -36,6 +36,7 @@ final class CriticalPathProfiler {
         final ConcurrentLinkedQueue<java.util.Map<String,Object>> databaseSamples = new ConcurrentLinkedQueue<>();
         final ConcurrentLinkedQueue<java.util.Map<String,Object>> poolSamples = new ConcurrentLinkedQueue<>();
         final ConcurrentLinkedQueue<java.util.Map<String,Object>> observerErrors = new ConcurrentLinkedQueue<>();
+        final ConcurrentLinkedQueue<java.util.Map<String,Object>> transactionEvents = new ConcurrentLinkedQueue<>();
         boolean active;
         Run(String workload, long projectId, long updateId) {
             this.workload = workload; this.projectId = projectId; this.updateId = updateId;
@@ -46,7 +47,7 @@ final class CriticalPathProfiler {
     private static final ThreadLocal<Context> CURRENT = new ThreadLocal<>();
     private static final AtomicLong IDS = new AtomicLong();
     private static final ThreadMXBean CPU = ManagementFactory.getThreadMXBean();
-    private record Transaction(Context context, long started) { }
+    private record Transaction(Context context, long started, long id) { }
     private static final ThreadLocal<java.util.IdentityHashMap<Object, Transaction>> TRANSACTIONS =
             ThreadLocal.withInitial(java.util.IdentityHashMap::new);
 
@@ -130,6 +131,8 @@ final class CriticalPathProfiler {
         static BeanPostProcessor criticalPathObserver() {
             return new BeanPostProcessor() {
                 @Override public Object postProcessAfterInitialization(Object bean, String name) {
+                    if (Boolean.getBoolean("benchmark.transaction-detail") && bean instanceof jakarta.persistence.EntityManagerFactory factory)
+                        HibernateFlushProfiler.install(factory);
                     if (bean instanceof DataSource dataSource) {
                         TailLatencyObserver.registerPool(dataSource);
                         return jdbcProxy(bean, DataSource.class, 0);
@@ -153,8 +156,17 @@ final class CriticalPathProfiler {
                         boolean failed = true;
                         try {
                             Object result = observe(name + "." + method, invocation::proceed);
-                            if (method.equals("getTransaction") && result instanceof org.springframework.transaction.TransactionStatus status
-                                    && status.isNewTransaction()) TRANSACTIONS.get().put(result, new Transaction(CURRENT.get(), System.nanoTime()));
+                            if (method.equals("getTransaction") && result instanceof org.springframework.transaction.TransactionStatus status) {
+                                long txId=Boolean.getBoolean("benchmark.transaction-detail") ? IDS.incrementAndGet() : 0;
+                                if(txId>0) {
+                                    var definition=args[0] instanceof org.springframework.transaction.TransactionDefinition d ? d : org.springframework.transaction.TransactionDefinition.withDefaults();
+                                    context.run.transactionEvents.add(java.util.Map.of("id",txId,"atNanos",System.nanoTime()-context.run.started,
+                                        "thread",Thread.currentThread().getId(),"stage",CURRENT.get().stage,"batch",CURRENT.get().batch,
+                                        "purpose",CURRENT.get().name,"newTransaction",status.isNewTransaction(),
+                                        "propagation",definition.getPropagationBehavior(),"readOnly",definition.isReadOnly(),"isolation",definition.getIsolationLevel()));
+                                }
+                                if(status.isNewTransaction()) TRANSACTIONS.get().put(result, new Transaction(CURRENT.get(), System.nanoTime(),txId));
+                            }
                             failed = false;
                             return result;
                         } finally {
@@ -162,7 +174,7 @@ final class CriticalPathProfiler {
                                 Transaction tx = TRANSACTIONS.get().remove(args[0]);
                                 if (tx != null) {
                                     Context origin = tx.context;
-                                    origin.run.events.add(new Span(IDS.incrementAndGet(), origin.parent, "transaction.hold", Thread.currentThread().getId(),
+                                    origin.run.events.add(new Span(tx.id>0 ? tx.id : IDS.incrementAndGet(), origin.parent, "transaction.hold", Thread.currentThread().getId(),
                                             origin.stage, origin.batch, origin.targets, tx.started - origin.run.started,
                                             System.nanoTime() - origin.run.started, -1, -1, origin.name, failed, 0));
                                 }

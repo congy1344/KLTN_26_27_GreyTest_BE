@@ -338,9 +338,6 @@ public class AIAgentService {
                 return responseType.cast(new UnitTestResponseDto(eligible.unitTests(), prepared.blockedCases()));
             }
         }
-        var feasibility = TestFeasibilityAnalyzer.analyze(context);
-        feasibility.methods().stream().filter(item -> item.status() != TestFeasibilityAnalyzer.Status.READY)
-                .forEach(item -> GenerationJobContext.log(formatFeasibilityMethodLog(context, item)));
         String sourceMetadata = generationSourceMetadata(promptName, projectId, context, snapshot);
         String prompt = promptManager.render(promptName, Map.of("context_json", context));
         prompt += javaVersionInstruction(promptName, projectId, context, snapshot);
@@ -939,64 +936,5 @@ public class AIAgentService {
             return Math.max((count + 1) / 2, 1);
         }
         return 1;
-    }
-
-    private String formatFeasibilityMethodLog(Object context, TestFeasibilityAnalyzer.MethodAssessment item) {
-        String methodName = null;
-        if (context instanceof UnitTestContextDto c && c.classes() != null) {
-            for (var cl : c.classes()) {
-                if (cl.methods() == null) continue;
-                for (var m : cl.methods()) if (Objects.equals(m.id(), item.methodId())) { methodName = m.methodName(); break; }
-                if (methodName != null) break;
-            }
-        } else if (context instanceof TestCaseContextDto c && c.classes() != null) {
-            for (var cl : c.classes()) {
-                if (cl.methods() == null) continue;
-                for (var m : cl.methods()) if (Objects.equals(m.id(), item.methodId())) { methodName = m.methodName(); break; }
-                if (methodName != null) break;
-            }
-        } else if (context instanceof TestPlanContextDto c && c.classes() != null) {
-            for (var cl : c.classes()) {
-                if (cl.methods() == null) continue;
-                for (var m : cl.methods()) if (Objects.equals(m.id(), item.methodId())) { methodName = m.methodName(); break; }
-                if (methodName != null) break;
-            }
-        } else if (context instanceof BusinessRuleGenerationContextDto c && c.classes() != null) {
-            for (var cl : c.classes()) {
-                if (cl.methods() == null) continue;
-                for (var m : cl.methods()) if (Objects.equals(m.id(), item.methodId())) { methodName = m.methodName(); break; }
-                if (methodName != null) break;
-            }
-        }
-        if (methodName == null && item.findings() != null && !item.findings().isEmpty()) {
-            methodName = item.findings().get(0).methodName();
-        }
-        String target = methodName != null ? methodName : "Method #" + item.methodId();
-
-        String tag = item.status() == TestFeasibilityAnalyzer.Status.BLOCKED
-                ? "[Cảnh báo] "
-                : "[Lưu ý] ";
-
-        String summary = item.findings() != null && !item.findings().isEmpty()
-                ? shortenFindingDetail(item.findings().get(0))
-                : (item.status() == TestFeasibilityAnalyzer.Status.BLOCKED
-                        ? "Chưa đủ điều kiện sinh test tự động."
-                        : "Cần lưu ý cấu trúc mã nguồn khi sinh test.");
-
-        return tag + target + ": " + summary;
-    }
-
-    private String shortenFindingDetail(TestFeasibilityAnalyzer.Finding finding) {
-        if (finding == null || finding.code() == null) return "Cần lưu ý cấu trúc mã nguồn khi sinh test.";
-        return switch (finding.code()) {
-            case "UNCONTROLLED_RANDOM_BRANCH", "UNCONTROLLED_RANDOM" -> "Chứa nhánh ngẫu nhiên không điều khiển được.";
-            case "UNCONTROLLED_NONDETERMINISM", "INJECTABLE_NONDETERMINISM" -> "Nguồn ngẫu nhiên hoặc thời gian tạo nội bộ.";
-            case "UNCONTROLLED_TIME" -> "Dùng thời gian hệ thống (chưa có Clock).";
-            case "UNRESOLVED_HELPER_PATH" -> "Có lời gọi helper nội bộ cần kiểm tra.";
-            case "COLLECTION_MUTATION" -> "Có sửa đổi collection nội bộ.";
-            case "INTERNAL_FINAL_COLLABORATOR" -> "Collaborator final khởi tạo nội bộ.";
-            case "MISSING_VALIDATION_SOURCE", "SOURCE_PARSE_FAILED" -> "Cần kiểm tra lại mã nguồn.";
-            default -> finding.detail() != null ? finding.detail() : "Cần lưu ý khi sinh test.";
-        };
     }
 }

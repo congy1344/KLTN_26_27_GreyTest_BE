@@ -35,9 +35,12 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(LlmBatchExecutor.BatchExecutionException.class)
     public ResponseEntity<ErrorResponse> handleBatchFailure(LlmBatchExecutor.BatchExecutionException e) {
-        var cause = LlmBatchExecutor.originalFailure(e);
+        // Batch có thể lồng nhiều lớp (batch cha bọc batch con); bóc đến lỗi nghiệp vụ gốc.
+        RuntimeException cause = e;
+        while (cause instanceof LlmBatchExecutor.BatchExecutionException) cause = LlmBatchExecutor.originalFailure(cause);
         if (cause instanceof GenerationConflictException conflict) return handleGenerationConflict(conflict);
         if (cause instanceof LlmResponseException provider) return handleLlmResponse(provider);
+        if (cause instanceof UsageQuotaExceededException quota) return handleUsageQuotaExceeded(quota);
         return handleAll(e);
     }
 

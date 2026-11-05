@@ -54,7 +54,7 @@ final class TailLatencyObserver implements AutoCloseable {
         }
     }
 
-    private void sample() {
+    private synchronized void sample() {
         if (runs.isEmpty()) return;
         var before=new HashMap<CriticalPathProfiler.Run,Map<Integer,CriticalPathProfiler.ActiveJdbc>>();
         for(var run:runs.values()) before.put(run,new HashMap<>(run.activeJdbc));
@@ -62,7 +62,8 @@ final class TailLatencyObserver implements AutoCloseable {
         try (var statement=connection.createStatement()) {
             statement.setQueryTimeout(2);
             try(var rows=statement.executeQuery("""
-                    SELECT pid,state,wait_event_type,wait_event,pg_blocking_pids(pid) AS blockers
+                    SELECT pid,state,wait_event_type,wait_event,pg_blocking_pids(pid) AS blockers,
+                        xact_start::text AS xact_start,query_start::text AS query_start,backend_xid::text AS backend_xid
                     FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid()
                     """)) {
                 while(rows.next()) {
@@ -81,6 +82,10 @@ final class TailLatencyObserver implements AutoCloseable {
                         sample.put("startNanos",started-run.started); sample.put("endNanos",System.nanoTime()-run.started);
                         sample.put("state",rows.getString("state")); sample.put("waitType",rows.getString("wait_event_type"));
                         sample.put("waitEvent",rows.getString("wait_event")); sample.put("blockers",blockers);
+                        if(Boolean.getBoolean("benchmark.transaction-detail")) {
+                            sample.put("xactStart",rows.getString("xact_start"));sample.put("queryStart",rows.getString("query_start"));
+                            sample.put("backendXid",rows.getString("backend_xid"));
+                        }
                         // Cùng call phải còn active ở cả hai phía query sampler, tránh gán PID tái sử dụng sang batch khác.
                         synchronized(run) {
                             if(run.active && call.equals(run.activeJdbc.get(pid))) run.databaseSamples.add(sample);
@@ -88,6 +93,7 @@ final class TailLatencyObserver implements AutoCloseable {
                     }
                 }
             }
+            if(Boolean.getBoolean("benchmark.transaction-detail")) captureLocks(before,started);
             var observedPool=pool; var bean=observedPool==null?null:observedPool.getHikariPoolMXBean();
             if(bean!=null) for(var run:before.keySet()) synchronized(run) {
                 if(run.active) run.poolSamples.add(Map.of("atNanos",System.nanoTime()-run.started,
@@ -99,6 +105,54 @@ final class TailLatencyObserver implements AutoCloseable {
                 if(run.active) run.observerErrors.add(Map.of("kind",failure.getClass().getSimpleName(),
                         "sqlState",Objects.toString(failure.getSQLState(),"unknown")));
             }
+        }
+    }
+    /** Cùng JDBC call phải còn active sau cả snapshot activity và pg_locks; không xem hai query là atomic. */
+    private void captureLocks(Map<CriticalPathProfiler.Run,Map<Integer,CriticalPathProfiler.ActiveJdbc>> before,long started) throws SQLException {
+        var locks=new ArrayList<Map<String,Object>>();
+        try(var statement=connection.createStatement()) {
+            statement.setQueryTimeout(2);
+            try(var rows=statement.executeQuery("""
+                SELECT pid,locktype,relation::regclass::text AS relation,transactionid::text AS xid,
+                    virtualxid,mode,granted,fastpath FROM pg_locks
+                WHERE pid IN(SELECT pid FROM pg_stat_activity WHERE datname=current_database())
+                    AND pid<>pg_backend_pid()
+                """)) {
+                while(rows.next()) {
+                    var lock=new LinkedHashMap<String,Object>();lock.put("pid",rows.getInt("pid"));lock.put("type",rows.getString("locktype"));
+                    lock.put("relation",rows.getString("relation"));lock.put("xid",rows.getString("xid"));lock.put("virtualXid",rows.getString("virtualxid"));
+                    lock.put("mode",rows.getString("mode"));lock.put("granted",rows.getBoolean("granted"));lock.put("fastpath",rows.getBoolean("fastpath"));locks.add(lock);
+                }
+            }
+        }
+        long ended=System.nanoTime();
+        for(var entry:before.entrySet()) {
+            var run=entry.getKey();
+            for(var sample:run.databaseSamples) {
+                if(!Objects.equals(sample.get("startNanos"),started-run.started)) continue;
+                int pid=(int)sample.get("backendPid");
+                var call=entry.getValue().get(pid);
+                @SuppressWarnings("unchecked") var blockers=(List<Integer>)sample.get("blockers");
+                if(blockers.isEmpty()) continue;
+                synchronized(run) {
+                    if(run.active && call.equals(run.activeJdbc.get(pid))) {
+                        sample.put("locksEndNanos",ended-run.started);
+                        sample.put("locks",locks.stream().filter(l->(int)l.get("pid")==pid || blockers.contains(l.get("pid"))).toList());
+                    }
+                }
+            }
+        }
+    }
+    /** Counter snapshots ngoài root; server-global và có statistics lag, không phải per-run attribution. */
+    synchronized String statistics() throws SQLException {
+        try(var statement=connection.createStatement()) {
+            statement.setQueryTimeout(2);
+            try(var rows=statement.executeQuery("""
+                SELECT json_build_object('wal',(SELECT row_to_json(w) FROM pg_stat_wal w),
+                    'database',(SELECT row_to_json(d) FROM pg_stat_database d WHERE datname=current_database()),
+                    'bgwriter',(SELECT row_to_json(b) FROM pg_stat_bgwriter b),
+                    'observedAt',clock_timestamp())::text
+                """)) {rows.next();return rows.getString(1);}
         }
     }
     @Override public void close() throws SQLException {

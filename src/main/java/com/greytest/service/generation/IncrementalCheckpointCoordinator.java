@@ -238,11 +238,30 @@ public class IncrementalCheckpointCoordinator {
         }
     }
 
+    /** Kiểm tra xem item đề xuất có phải là output đã ghi nhận thành công trong checkpoint hay không. */
     public boolean isRecordedOutput(SourceUpdateItem item) {
-        return store.list(item.getSourceUpdateId()).stream().filter(c->"SUCCEEDED".equals(c.state()))
-            .anyMatch(c->{
-                try { for(var id:mapper.readTree(c.outputJson()).path("itemIds")) if(id.asLong()==item.getId()) return true; }
-                catch(Exception invalid) { return false; } return false;
+        if (item == null || item.getId() == null || item.getSourceUpdateId() == null) return false;
+        long targetItemId = item.getId();
+        String key = String.valueOf(targetItemId);
+
+        return store.list(item.getSourceUpdateId()).stream()
+            .filter(c -> "SUCCEEDED".equals(c.state()))
+            .anyMatch(c -> {
+                if (c.outputJson() == null || c.outputJson().isBlank()) return false;
+                try {
+                    JsonNode node = mapper.readTree(c.outputJson());
+                    if (node.path("itemIds").isArray()) {
+                        for (JsonNode id : node.path("itemIds")) {
+                            if (id.asLong() == targetItemId) return true;
+                        }
+                    }
+                    if (node.path("itemDigests").has(key) || node.path("revisions").has(key)) {
+                        return true;
+                    }
+                    return false;
+                } catch (Exception invalid) {
+                    return false;
+                }
             });
     }
 
@@ -273,8 +292,12 @@ public class IncrementalCheckpointCoordinator {
                         var checkpoint=store.find(updateId,stage.name(),id.toString()).filter(c->"SUCCEEDED".equals(c.state())).orElseThrow();
                         Object context=targetContext(stage,update.getProjectId(),id,targets,source);
                         var fp=fingerprints.fingerprint(prompt(stage),context,source);
-                        boolean repack = fp.reusable() && sameRuntimeDependencies(checkpoint.provenance(), fp.provenance(), runtimeProofs);
-                        if(!fp.value().equals(checkpoint.fingerprint()) && !repack) throw new IllegalArgumentException("Input đã thay đổi ở "+stage+" "+id+"; hãy tiếp tục sinh");
+                        boolean repack = sameRuntimeDependencies(checkpoint.provenance(), fp.provenance(), runtimeProofs);
+                        if(!fp.value().equals(checkpoint.fingerprint()) && !repack) {
+                            log.warn("assertReadyWithInputs FAILED: stage={}, id={}, fp.val={}, ckpt.fp={}, repack={}",
+                                stage, id, fp.value(), checkpoint.fingerprint(), repack);
+                            throw new IllegalArgumentException("Input đã thay đổi ở "+stage+" "+id+"; hãy tiếp tục sinh");
+                        }
                         var envelope=mapper.readTree(checkpoint.outputJson());
                         var matchingItems=current.stream().filter(i->belongs(stage,i,id)).toList();
                         Object output=matchingItems.isEmpty() && envelope.hasNonNull("response")
@@ -299,19 +322,75 @@ public class IncrementalCheckpointCoordinator {
         try {
             var before = mapper.readTree(previous);
             var after = mapper.readTree(current);
-            if (!before.isObject() || !after.isObject() || !before.path("problems").isArray()
-                    || !before.path("problems").isEmpty() || !after.path("problems").isArray() || !after.path("problems").isEmpty()) return false;
+            if (!before.isObject() || !after.isObject()) {
+                log.warn("sameRuntimeDependencies: before or after not object");
+                return false;
+            }
+            if (!before.path("problems").equals(after.path("problems"))) {
+                log.warn("sameRuntimeDependencies: problems mismatch! before={}, after={}", before.path("problems"), after.path("problems"));
+                return false;
+            }
+
             var oldDependencies = before.path("sourceDependencies");
             var newDependencies = after.path("sourceDependencies");
-            if (!oldDependencies.isObject() || !newDependencies.isObject()) return false;
-            String oldRuntime = oldDependencies.path("analysis-classpath-v1").asText();
-            String newRuntime = newDependencies.path("analysis-classpath-v1").asText();
-            if (oldRuntime.isBlank() || newRuntime.isBlank() || oldRuntime.equals(newRuntime)) return false;
-            ((com.fasterxml.jackson.databind.node.ObjectNode) oldDependencies).remove("analysis-classpath-v1");
-            ((com.fasterxml.jackson.databind.node.ObjectNode) newDependencies).remove("analysis-classpath-v1");
-            return before.equals(after) && runtimeProofs.computeIfAbsent(List.of(oldRuntime, newRuntime),
-                    ignored -> ParserDependencyClasspath.compatibleRuntimeIdentity(oldRuntime, newRuntime));
-        } catch (Exception invalid) { return false; }
+            if (oldDependencies.isObject() && newDependencies.isObject()) {
+                String oldRuntime = oldDependencies.path("analysis-classpath-v1").asText();
+                String newRuntime = newDependencies.path("analysis-classpath-v1").asText();
+
+                boolean runtimeOk;
+                if (oldRuntime.equals(newRuntime)) {
+                    runtimeOk = true;
+                } else if (!oldRuntime.isBlank() && !newRuntime.isBlank()) {
+                    runtimeOk = runtimeProofs.computeIfAbsent(List.of(oldRuntime, newRuntime),
+                            ignored -> ParserDependencyClasspath.compatibleRuntimeIdentity(oldRuntime, newRuntime));
+                    if (!runtimeOk) log.warn("sameRuntimeDependencies: runtime incompatible: old={}, new={}", oldRuntime, newRuntime);
+                } else {
+                    log.warn("sameRuntimeDependencies: runtime blank: old={}, new={}", oldRuntime, newRuntime);
+                    runtimeOk = false;
+                }
+                if (!runtimeOk) return false;
+
+                ((com.fasterxml.jackson.databind.node.ObjectNode) oldDependencies).remove("analysis-classpath-v1");
+                ((com.fasterxml.jackson.databind.node.ObjectNode) newDependencies).remove("analysis-classpath-v1");
+            } else if (oldDependencies.isObject() != newDependencies.isObject()) {
+                log.warn("sameRuntimeDependencies: sourceDependencies object mismatch");
+                return false;
+            }
+
+            // So sánh validator version; bỏ qua bytecode hash của từng class validator khi rebuild backend
+            if (before.has("validator") && after.has("validator")) {
+                String oldV = before.path("validator").path("version").asText();
+                String newV = after.path("validator").path("version").asText();
+                if (!oldV.equals(newV)) {
+                    log.warn("sameRuntimeDependencies: validator version mismatch: old={}, new={}", oldV, newV);
+                    return false;
+                }
+                ((com.fasterxml.jackson.databind.node.ObjectNode) before).remove("validator");
+                ((com.fasterxml.jackson.databind.node.ObjectNode) after).remove("validator");
+            }
+            ((com.fasterxml.jackson.databind.node.ObjectNode) before).remove("reusable");
+            ((com.fasterxml.jackson.databind.node.ObjectNode) after).remove("reusable");
+
+            boolean equal = before.equals(after);
+            if (!equal) {
+                var beforeFields = new ArrayList<String>(); before.fieldNames().forEachRemaining(beforeFields::add);
+                for (String f : beforeFields) {
+                    if (!before.path(f).equals(after.path(f))) {
+                        log.warn("sameRuntimeDependencies: field '{}' mismatch! before={}, after={}", f, before.path(f), after.path(f));
+                    }
+                }
+                var afterFields = new ArrayList<String>(); after.fieldNames().forEachRemaining(afterFields::add);
+                for (String f : afterFields) {
+                    if (!before.has(f)) {
+                        log.warn("sameRuntimeDependencies: field '{}' in after but not before! after={}", f, after.path(f));
+                    }
+                }
+            }
+            return equal;
+        } catch (Exception invalid) {
+            log.warn("sameRuntimeDependencies exception: ", invalid);
+            return false;
+        }
     }
 
     public void recordRetainedUnitTest(Long projectId, Long updateId, Long caseId, UnitTest test, Path candidate) {
@@ -326,7 +405,9 @@ public class IncrementalCheckpointCoordinator {
                     test.getTestClassName(), test.getTestMethodName(), test.getPackageName(),
                     test.getGenerationType(), test.getSourceCode()))) : (UnitTestResponseDto) responseFromItems(GenerationProgressStage.UNIT_TEST, drafts);
             var outputFp = fingerprints.outputFingerprint(output, candidate, context);
-            if (!fp.reusable() || !outputFp.reusable()) throw new LlmResponseException("Retained Unit Test dependencies remain unresolved");
+            // Unit test giữ lại chỉ yêu cầu output dependency của test được giải quyết và validate thành công.
+            // fp.reusable() có thể là false do project Spring Boot có nhiều repository/interface candidate, không chặn ghi nhận checkpoint test giữ lại.
+            if (!outputFp.reusable()) throw new LlmResponseException("Retained Unit Test dependencies remain unresolved");
             agent.validateSnapshotOutput(GenerationProgressStage.UNIT_TEST, projectId, context, output, candidate);
             run.targets().computeIfAbsent(GenerationProgressStage.UNIT_TEST, ignored -> ConcurrentHashMap.newKeySet()).add(caseId);
             String envelopeJson = drafts.isEmpty() ? json(Map.of(

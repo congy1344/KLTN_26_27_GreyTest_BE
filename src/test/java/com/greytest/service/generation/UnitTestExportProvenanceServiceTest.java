@@ -52,6 +52,15 @@ class UnitTestExportProvenanceServiceTest {
     }
 
     @Test
+    void crlfLineEndingsNormalizeWithoutAstMismatch(@TempDir Path root) throws Exception {
+        Path source = root.resolve("Service.java");
+        Files.writeString(source, "class Service {\r\n    int value() {\r\n        return 1;\r\n    }\r\n}\r\n");
+        UnitTest unit = unit(metadata(GenerationSourceFingerprint.hash(Files.readString(source)))
+                + "class ServiceTest {\r\n    void testValue() {\r\n    }\r\n}\r\n");
+        assertThat(service.prepare(1L, List.of(unit), root)).containsExactly(unit);
+    }
+
+    @Test
     void missingAppliedCheckpointCannotReplaceHistoricalMetadata(@TempDir Path root) throws Exception {
         Files.writeString(root.resolve("Service.java"), "class Service { int value() { return 2; } }");
         UnitTest unit = unit(metadata("1".repeat(64)) + "class ServiceTest { void testValue() {} }");
@@ -61,6 +70,50 @@ class UnitTestExportProvenanceServiceTest {
         assertThat(unit.getSourceCode()).isEqualTo(original);
         org.mockito.Mockito.verify(agent).validateExistingUnitTest(1L, unit, root);
         verifyNoInteractions(fingerprints);
+    }
+
+    @Test
+    void appliedCheckpointWithInputDynamicDispatchWarningsCanStillExport(@TempDir Path root) throws Exception {
+        Files.writeString(root.resolve("Service.java"), "class Service { int value() { return 2; } }");
+        String testCode = metadata("1".repeat(64)) + "class ServiceTest { void testValue() {} }";
+        UnitTest unit = unit(testCode);
+
+        JdbcTemplate testJdbc = org.mockito.Mockito.mock(JdbcTemplate.class, invocation -> {
+            if ("query".equals(invocation.getMethod().getName())) {
+                org.springframework.jdbc.core.RowMapper<?> mapper = invocation.getArgument(1);
+                var rs = org.mockito.Mockito.mock(java.sql.ResultSet.class);
+                org.mockito.Mockito.when(rs.getLong(1)).thenReturn(405L);
+                org.mockito.Mockito.when(rs.getString(2)).thenReturn("matching-input-fp");
+                org.mockito.Mockito.when(rs.getString(3)).thenReturn("""
+                        {
+                            "outputReusable": true,
+                            "response": {"unitTests":[{"caseId":3,"testClassName":"ServiceTest","testMethodName":"testValue","packageName":null,"generationType":null,"sourceCode":"class ServiceTest { void testValue() {} }"}]},
+                            "outputFingerprint": "matching-output-fp"
+                        }
+                        """);
+                return List.of(mapper.mapRow(rs, 1));
+            }
+            return org.mockito.Mockito.RETURNS_DEFAULTS.answer(invocation);
+        });
+        UnitTestExportProvenanceService localService = new UnitTestExportProvenanceService(testJdbc, agent, fingerprints, new ObjectMapper());
+
+        var context = org.mockito.Mockito.mock(com.greytest.dto.agent.GenerationContextDtos.UnitTestContextDto.class);
+        org.mockito.Mockito.when(context.classes()).thenReturn(List.of());
+        org.mockito.Mockito.when(agent.snapshotContext(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any())).thenReturn(context);
+        org.mockito.Mockito.when(agent.parseSnapshotOutput(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyString()))
+                .thenReturn(new com.greytest.dto.agent.GenerationResponseDtos.UnitTestResponseDto(
+                        List.of(new com.greytest.dto.agent.GenerationResponseDtos.GeneratedUnitTestDto(3L, "ServiceTest", "testValue", null, null, "class ServiceTest { void testValue() {} }"))));
+
+        // currentInput.reusable() = false (mô phỏng cảnh báo dynamic dispatch trong input của Spring Boot)
+        org.mockito.Mockito.when(fingerprints.fingerprint(org.mockito.ArgumentMatchers.eq("unit-test"), org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any()))
+                .thenReturn(new GenerationFingerprintService.Fingerprint("matching-input-fp", "{}", false));
+        // currentOutput.reusable() = true
+        org.mockito.Mockito.when(fingerprints.outputFingerprint(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any()))
+                .thenReturn(new GenerationFingerprintService.Fingerprint("matching-output-fp", "{}", true));
+
+        List<UnitTest> prepared = localService.prepare(1L, List.of(unit), root);
+        assertThat(prepared).hasSize(1);
+        assertThat(prepared.get(0).getSourceCode()).contains("// GREYTEST_REVALIDATED_V1 applied_update=405");
     }
 
     private UnitTest unit(String source) {

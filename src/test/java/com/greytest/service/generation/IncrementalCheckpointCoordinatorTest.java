@@ -287,6 +287,18 @@ class IncrementalCheckpointCoordinatorTest {
         verify(fixture.store).complete(any(), eq("UNIT_TEST"), eq("3"), anyString(), anyString(), contains("SavedDraftTest"), anyString());
     }
 
+    @Test void retainedCaseSucceedsWhenInputFingerprintHasUnresolvedDynamicDispatchWarnings() throws Exception {
+        var fixture = new Fixture();
+        var active = new com.greytest.entity.UnitTest(); active.setId(9L); active.setTestCaseId(3L);
+        active.setSourceCode("class ActiveTest {}");
+        when(fixture.fingerprints.fingerprint(any(), any(), any()))
+                .thenReturn(new GenerationFingerprintService.Fingerprint("fp", "{}", false));
+        when(fixture.fingerprints.outputFingerprint(any(), any(), any()))
+                .thenReturn(new GenerationFingerprintService.Fingerprint("out", "{}", true));
+        fixture.run(() -> { fixture.coordinator.recordRetainedUnitTest(1L, 2L, 3L, active, Path.of("candidate")); return null; });
+        verify(fixture.store).complete(any(), eq("UNIT_TEST"), eq("3"), anyString(), anyString(), anyString(), anyString());
+    }
+
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(strings = {"invalid", "unresolved"})
     void invalidRetainedDraftCannotSilentlyDisappearFromStageValidation(String mode) throws Exception {
@@ -360,6 +372,39 @@ class IncrementalCheckpointCoordinatorTest {
         if (change.equals("semantic")) doThrow(new com.greytest.service.agent.LlmResponseException("invalid draft"))
                 .when(fixture.agent).validateSnapshotOutput(any(), anyLong(), any(), any(), any());
         return fixture;
+    }
+
+    @Test void isRecordedOutputReturnsTrueWhenItemIdInSucceededCheckpoint() {
+        var fixture = new Fixture();
+        var item = new SourceUpdateItem(); item.setId(10L); item.setSourceUpdateId(2L);
+        var checkpoint = new GenerationCheckpointStore.Checkpoint(
+            "BUSINESS_RULE", "1", "fp", "{}", "{\"itemIds\":[10,11]}", "digest", "SUCCEEDED"
+        );
+        when(fixture.store.list(2L)).thenReturn(List.of(checkpoint));
+        assertThat(fixture.coordinator.isRecordedOutput(item)).isTrue();
+    }
+
+    @Test void isRecordedOutputReturnsTrueWhenInItemDigestsOrRevisionsOfSucceededCheckpoint() {
+        var fixture = new Fixture();
+        var item = new SourceUpdateItem(); item.setId(10L); item.setSourceUpdateId(2L);
+        var checkpoint = new GenerationCheckpointStore.Checkpoint(
+            "TEST_PLAN", "1", "fp", "{}", "{\"itemDigests\":{\"10\":\"hash\"}}", "digest", "SUCCEEDED"
+        );
+        when(fixture.store.list(2L)).thenReturn(List.of(checkpoint));
+        assertThat(fixture.coordinator.isRecordedOutput(item)).isTrue();
+    }
+
+    @Test void isRecordedOutputReturnsFalseWhenCheckpointNotSucceededOrItemAbsent() {
+        var fixture = new Fixture();
+        var item = new SourceUpdateItem(); item.setId(10L); item.setSourceUpdateId(2L);
+        var failedCheckpoint = new GenerationCheckpointStore.Checkpoint(
+            "BUSINESS_RULE", "1", "fp", "{}", "{\"itemIds\":[10]}", "digest", "CONFLICT"
+        );
+        var otherCheckpoint = new GenerationCheckpointStore.Checkpoint(
+            "TEST_PLAN", "2", "fp", "{}", "{\"itemIds\":[99]}", "digest", "SUCCEEDED"
+        );
+        when(fixture.store.list(2L)).thenReturn(List.of(failedCheckpoint, otherCheckpoint));
+        assertThat(fixture.coordinator.isRecordedOutput(item)).isFalse();
     }
 
     private static class Fixture {

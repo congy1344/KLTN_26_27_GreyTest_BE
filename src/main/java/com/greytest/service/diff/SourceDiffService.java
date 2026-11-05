@@ -151,7 +151,7 @@ public class SourceDiffService {
                 Fingerprint before = baseEvidence.get(key);
                 Fingerprint after = candidateEvidence.get(key);
                 if (changeReason == null && before != null && after != null && !before.value().equals(after.value())) {
-                    if (!after.reusable() && after.provenance().contains("unresolved dynamic dispatch")) {
+                    if (hasChangedDynamicDispatch(before, after)) {
                         throw new IllegalArgumentException("Cannot analyze changed dynamic dispatch for " + cand.methodKey()
                                 + "; resolve the source implementation ambiguity before continuing");
                     }
@@ -194,6 +194,36 @@ public class SourceDiffService {
             return "Nội dung logic AST của method đã thay đổi";
         }
         return null;
+    }
+
+    /**
+     * Kiểm tra xem sự thay đổi giữa trước và sau có thực sự bắt nguồn từ dynamic dispatch bị nhập nhằng không.
+     * Chỉ chặn khi chính implementation ứng viên của dispatch bị thay đổi.
+     */
+    private boolean hasChangedDynamicDispatch(Fingerprint before, Fingerprint after) {
+        if (after.reusable() || !after.provenance().contains("unresolved dynamic dispatch")) {
+            return false;
+        }
+        try {
+            ObjectMapper mapper = new ObjectMapper();
+            var beforeDeps = mapper.readTree(before.provenance()).path("sourceDependencies");
+            var afterDeps = mapper.readTree(after.provenance()).path("sourceDependencies");
+            Set<String> allKeys = new HashSet<>();
+            beforeDeps.fieldNames().forEachRemaining(allKeys::add);
+            afterDeps.fieldNames().forEachRemaining(allKeys::add);
+            for (String depKey : allKeys) {
+                if (depKey.startsWith("dispatch-candidate:") || depKey.startsWith("dispatch-source-contract:")) {
+                    String beforeVal = beforeDeps.path(depKey).asText();
+                    String afterVal = afterDeps.path(depKey).asText();
+                    if (!beforeVal.equals(afterVal)) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        } catch (Exception exception) {
+            return false;
+        }
     }
 
     private Map<String, MethodSnapshotInfo> extractMethodSnapshots(SourceScanResult scanResult) {
@@ -279,6 +309,8 @@ public class SourceDiffService {
         Map<String, CompilationUnit> parsed = new HashMap<>();
         for (ParsedFile file : scan.productionFiles()) parsed.put(file.relativePath().replace('\\', '/'), file.compilationUnit());
         for (var info : methods.values()) {
+            // Chỉ cần bằng chứng phụ thuộc và caller graph cho service method; các class phụ trợ đã được resolve theo service.
+            if (info.classType() != ClassType.SERVICE) continue;
             CompilationUnit unit = parsed.get(info.relativePath().replace('\\', '/'));
             if (unit == null) continue;
             var declaration = unit.findAll(MethodDeclaration.class).stream().filter(method ->

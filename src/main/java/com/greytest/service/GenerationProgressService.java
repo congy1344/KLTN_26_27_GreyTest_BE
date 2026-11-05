@@ -226,6 +226,11 @@ public class GenerationProgressService {
         if (state != null) state.pause(message, clock.instant());
     }
 
+    public synchronized void cancel(Long projectId, GenerationProgressStage stage, String message) {
+        ProgressState state = states.get(new ProgressKey(projectId, stage));
+        if (state != null) state.fail(message, clock.instant());
+    }
+
     public boolean isPaused(Long projectId, GenerationProgressStage stage) {
         ProgressState state = states.get(new ProgressKey(projectId, stage));
         return state != null && state.isPaused();
@@ -422,7 +427,7 @@ public class GenerationProgressService {
         }
 
         private synchronized boolean isPaused() {
-            return status == GenerationProgressStatus.PAUSED;
+            return status == GenerationProgressStatus.PAUSED || status == GenerationProgressStatus.FAILED;
         }
 
         private synchronized void note(String message, Instant now) {

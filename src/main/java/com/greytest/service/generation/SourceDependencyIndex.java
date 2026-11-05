@@ -1046,6 +1046,7 @@ final class SourceDependencyIndex {
     private boolean isDto(TypeDeclaration<?> type, TypeDeclaration<?> caller, Set<String> visited) {
         if (visited.contains("output-dependency-mode") || identity(type).equals(identity(caller))
                 || visited.contains("target-type:" + identity(type))) return false;
+        if (type.isClassOrInterfaceDeclaration() && type.asClassOrInterfaceDeclaration().isInterface()) return false;
         return type.getAnnotations().stream().noneMatch(annotation -> Set.of("Service", "Repository", "Controller",
                 "RestController", "Component").contains(annotation.getName().getIdentifier()));
     }

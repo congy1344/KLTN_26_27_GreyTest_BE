@@ -468,6 +468,34 @@ class GenerationContextBuilderTest {
     }
 
     @Test
+    void ambiguousInterfaceImplementationsAreSkippedWithoutOverflowingSupportingSource() {
+        mockCommonInputs();
+        var base = analysis();
+        var method = new JavaMethodDto(11L, "createUser", "void", List.of(), List.of(), "PUBLIC",
+                "void createUser() { lookup.find(); }", 1, 1, List.of(), List.of());
+        var service = new JavaClassDto(10L, "demo", "UserService", "demo.UserService", "SERVICE",
+                "src/main/java/demo/UserService.java",
+                "package demo; import demo.repo.Lookup; class UserService { Lookup lookup; "
+                        + method.sourceCode() + " }", List.of(), List.of(method));
+        var repository = new JavaClassDto(81L, "demo.repo", "Lookup", "demo.repo.Lookup", "OTHER",
+                "src/main/java/demo/repo/Lookup.java", "package demo.repo; interface Lookup { void find(); }", List.of(), List.of());
+        var jdbcImpl = new JavaClassDto(82L, "demo.repo", "JdbcLookup", "demo.repo.JdbcLookup", "OTHER",
+                "src/main/java/demo/repo/JdbcLookup.java",
+                "package demo.repo; class JdbcLookup implements Lookup { public void find() {} }", List.of(), List.of());
+        var jpaImpl = new JavaClassDto(83L, "demo.repo", "JpaLookup", "demo.repo.JpaLookup", "OTHER",
+                "src/main/java/demo/repo/JpaLookup.java",
+                "package demo.repo; class JpaLookup implements Lookup { public void find() {} }", List.of(), List.of());
+        when(analysisService.getAnalysisResult(1L)).thenReturn(new AnalysisResultDto(
+                base.projectId(), base.projectName(), base.status(), 4, 1, 0, 0, 0, 1, 4, 4, 0,
+                List.of(), List.of(service, repository, jdbcImpl, jpaImpl), List.of(), List.of()));
+
+        var contextClasses = builder.buildBusinessRuleGenerationContext(1L, Set.of(11L)).classes();
+        assertThat(contextClasses).extracting("qualifiedName")
+                .contains("demo.UserService", "demo.repo.Lookup")
+                .doesNotContain("demo.repo.JdbcLookup", "demo.repo.JpaLookup");
+    }
+
+    @Test
     void businessRuleResourcesStayInTheSelectedModuleAndDoNotExpandEntities(@TempDir Path root) throws Exception {
         mockCommonInputs();
         var project = new com.greytest.entity.Project(); project.setStoragePath(root.toString());

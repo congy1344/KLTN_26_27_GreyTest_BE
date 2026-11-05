@@ -7,6 +7,21 @@ import org.junit.jupiter.api.Test;
 
 /** Kiểm tra profiler không đổi kết quả/lỗi và giữ correlation khi chuyển worker. */
 class CriticalPathProfilerTest {
+    @Test void transactionDetailKeepsPropagationAndPhysicalIdentity() throws Throwable {
+        String previous=System.getProperty("benchmark.transaction-detail");System.setProperty("benchmark.transaction-detail","true");
+        try {
+            var original=org.mockito.Mockito.mock(org.springframework.transaction.PlatformTransactionManager.class);
+            var status=new org.springframework.transaction.support.SimpleTransactionStatus(true);
+            var definition=new org.springframework.transaction.support.DefaultTransactionDefinition(3);definition.setReadOnly(true);
+            org.mockito.Mockito.when(original.getTransaction(definition)).thenReturn(status);
+            var observed=(org.springframework.transaction.PlatformTransactionManager)CriticalPathProfiler.Configuration.criticalPathObserver()
+                    .postProcessAfterInitialization(original,"transactionManager");var run=new CriticalPathProfiler.Run("propagation",1,2);
+            CriticalPathProfiler.bind(run,()->{var tx=observed.getTransaction(definition);observed.commit(tx);return null;});
+            var hold=run.spans().stream().filter(s->s.name().equals("transaction.hold")).findFirst().orElseThrow();
+            assertThat(run.transactionEvents).singleElement().satisfies(event->{assertThat(event.get("id")).isEqualTo(hold.id());
+                assertThat(event.get("propagation")).isEqualTo(3);assertThat(event.get("readOnly")).isEqualTo(true);});
+        } finally {if(previous==null)System.clearProperty("benchmark.transaction-detail");else System.setProperty("benchmark.transaction-detail",previous);}
+    }
     @Test void backendCorrelationIsScopedAndClearedAfterFailure() throws Throwable {
         var run=new CriticalPathProfiler.Run("pid",1,2);
         assertThatThrownBy(()->CriticalPathProfiler.bind(run,()->CriticalPathProfiler.observe("jdbc.executeQuery",123,()->{

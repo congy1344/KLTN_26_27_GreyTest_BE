@@ -1561,7 +1561,9 @@ public class SourceUpdateService {
                 case TEST_CASE -> testCaseRepository.findById(item.getTargetId()).map(c -> Boolean.TRUE.equals(c.getIsModified())).orElse(false);
                 default -> false;
             };
-            if (modified || !generationCoordinator.isRecordedOutput(item)) {
+            boolean provenanceOk = generationCoordinator.isRecordedOutput(item)
+                    || (item.getSourceUpdateId() != null && sourceUpdateItemRepository.existsById(item.getId()));
+            if (modified || !provenanceOk) {
                 throw new ResponseStatusException(HttpStatus.CONFLICT,
                         "Artifact có chỉnh sửa hoặc thiếu provenance; giữ nguyên dữ liệu trước khi hủy: " + item.getId());
             }

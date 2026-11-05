@@ -243,6 +243,7 @@ class EndToEndCriticalPathProfileTest extends IncrementalPipelineBenchmarkTest {
         result.put("threads", run.spans().stream().map(CriticalPathProfiler.Span::thread).distinct().toList());
         result.put("jfr", new LinkedHashMap<String, Object>());
         result.put("spans", run.spans());
+        if(Boolean.getBoolean("benchmark.transaction-detail")) result.put("transactionEvents",List.copyOf(run.transactionEvents));
         if (TailLatencyObserver.enabled()) {
             result.put("databaseSamples",List.copyOf(run.databaseSamples));
             result.put("poolSamples",List.copyOf(run.poolSamples));

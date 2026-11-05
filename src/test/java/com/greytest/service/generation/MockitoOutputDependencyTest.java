@@ -97,16 +97,62 @@ class MockitoOutputDependencyTest {
         });
     }
 
+    @Test
+    void resolvesMockitoOngoingStubbingReturningGenericCollection() throws Exception {
+        withIndex(index -> {
+            String source = """
+                package sample;
+                import static org.mockito.Mockito.*;
+                import java.util.Collection;
+                import java.util.List;
+                class GeneratedTest {
+                    @org.mockito.Mock Client client;
+                    void test() {
+                        Collection<Payload> repositoryResult = List.of(new Payload());
+                        when(client.fetchCollection(42)).thenReturn(repositoryResult);
+                    }
+                }
+                """;
+            var problems = new ArrayList<String>();
+            new GeneratedOutputDependencyResolver(index, problems, ".").resolve(List.of(source));
+            assertThat(problems).isEmpty();
+        });
+    }
+
+    @Test
+    void testInterfaceMethodStubbing() throws Exception {
+        withIndex(index -> {
+            String source = """
+                package sample;
+                import static org.mockito.Mockito.*;
+                import java.util.Collection;
+                import java.util.Arrays;
+                class GeneratedTest {
+                    @org.mockito.Mock VisitRepository visitRepository;
+                    void test() {
+                        Collection<Payload> repositoryResult = Arrays.asList(new Payload());
+                        when(visitRepository.findByPetId(42)).thenReturn(repositoryResult);
+                    }
+                }
+                """;
+            var problems = new ArrayList<String>();
+            new GeneratedOutputDependencyResolver(index, problems, ".").resolve(List.of(source));
+            assertThat(problems).isEmpty();
+        });
+    }
+
     private void withIndex(java.util.function.Consumer<SourceDependencyIndex> assertion) throws Exception {
         Path sources = root.resolve("src/main/java/sample"); Files.createDirectories(sources);
         Files.writeString(sources.resolve("Payload.java"), "package sample; public class Payload {}");
+        Files.writeString(sources.resolve("VisitRepository.java"), "package sample; public interface VisitRepository { java.util.Collection<Payload> findByPetId(int id); }");
         Files.writeString(sources.resolve("GenericClient.java"), "package sample; class GenericClient<T> { "
                 + "java.util.List<T> fetch(java.util.List<T> ids) { return ids; } }");
         Files.writeString(sources.resolve("NumberFactory.java"), "package sample; class NumberFactory { "
                 + "static <T extends Number> java.util.Optional<T> empty() { return java.util.Optional.empty(); } }");
         Files.writeString(sources.resolve("Client.java"), "package sample; public class Client { "
                 + "public Payload fetch(Long id) { return unavailableWebClient.call().map(value -> value.getData()); } "
-                + "public Payload fetch(Integer id) { return null; } public java.util.Optional<Payload> optional() { return null; } }");
+                + "public Payload fetch(Integer id) { return null; } public java.util.Optional<Payload> optional() { return null; } "
+                + "public java.util.Collection<Payload> fetchCollection(Integer id) { return null; } }");
         Files.writeString(sources.resolve("Subject.java"), "package sample; public class Subject { Client client; "
                 + "public Payload run(Long id) { return client.fetch(id); } }");
         Path manifest = root.resolve("classpath.json");
