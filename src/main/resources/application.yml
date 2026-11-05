@@ -50,6 +50,8 @@ greytest:
   ai-context-log-path: ${GREYTEST_AI_CONTEXT_LOG_PATH:../log}
   ai-context-log-enabled: ${GREYTEST_AI_CONTEXT_LOG_ENABLED:false}
   ai-context-log-console-enabled: ${GREYTEST_AI_CONTEXT_LOG_CONSOLE_ENABLED:false}
+  llm:
+    max-supporting-source-chars: ${GREYTEST_MAX_SUPPORTING_SOURCE_CHARS:150000}
 
 # Cổng thanh toán VNPay Sandbox
 vnpay:

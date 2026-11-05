@@ -18,6 +18,7 @@ import com.greytest.exception.GenerationInProgressException;
 /** Lưu checkpoint và điều phối lease có fencing để worker cũ không ghi đè kết quả mới. */
 @Service
 public class GenerationCheckpointStore {
+    private static final String SINGLE_STATEMENT_LEASE = "greytest.source-update.single-statement-lease-check-enabled";
 
     public record Lease(Long projectId, Long updateId, String owner, long fence) { }
     public record Checkpoint(String stage, String targetKey, String fingerprint, String provenance,
@@ -79,16 +80,33 @@ public class GenerationCheckpointStore {
         if (!TransactionSynchronizationManager.isActualTransactionActive()) {
             throw new IllegalStateException("Lease must be asserted inside the artifact transaction");
         }
+        Boolean override = com.greytest.service.GenerationJobContext.scopedValue(SINGLE_STATEMENT_LEASE);
+        boolean singleStatement = override != null ? override : Boolean.parseBoolean(System.getProperty(SINGLE_STATEMENT_LEASE,
+                System.getenv().getOrDefault("GREYTEST_SOURCE_UPDATE_SINGLE_STATEMENT_LEASE_CHECK_ENABLED", "false")));
+        Integer count;
+        if (singleStatement) {
+            // MATERIALIZED giữ predicate owner/expiry ở ngoài: phải lấy row lock trước khi đọc giờ DB.
+            count = jdbc.queryForObject("""
+                    WITH locked AS MATERIALIZED (
+                        SELECT owner,fence,state,lease_until FROM generation_checkpoint
+                        WHERE project_id=? AND source_update_id=? AND stage='PIPELINE' AND target_key='__run__'
+                        FOR UPDATE
+                    )
+                    SELECT COUNT(*) FROM locked WHERE owner=? AND fence=?
+                        AND state='RUNNING' AND lease_until > clock_timestamp()
+                    """, Integer.class, lease.projectId(), lease.updateId(), lease.owner(), lease.fence());
+        } else {
         jdbc.queryForList("""
                 SELECT id FROM generation_checkpoint WHERE project_id=? AND source_update_id=?
                     AND stage='PIPELINE' AND target_key='__run__' FOR UPDATE
                 """, lease.projectId(), lease.updateId());
         // Kiểm tra giờ DB sau khi lấy khóa, vì thời gian chờ khóa có thể làm lease hết hạn.
-        Integer count = jdbc.queryForObject("""
+        count = jdbc.queryForObject("""
                 SELECT COUNT(*) FROM generation_checkpoint WHERE project_id=? AND source_update_id=?
                     AND stage='PIPELINE' AND target_key='__run__' AND owner=? AND fence=?
                     AND state='RUNNING' AND lease_until > clock_timestamp()
                 """, Integer.class, lease.projectId(), lease.updateId(), lease.owner(), lease.fence());
+        }
         requireChanged(count == null ? 0 : count);
     }
 

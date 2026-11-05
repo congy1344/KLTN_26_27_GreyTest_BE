@@ -54,6 +54,9 @@ import com.greytest.entity.TestCase;
 import com.greytest.entity.TestPlan;
 import com.greytest.entity.TestPlanCoveredRule;
 import com.greytest.entity.enums.ReviewStatus;
+import com.greytest.entity.enums.SourceUpdateAction;
+import com.greytest.entity.enums.SourceUpdateReviewStatus;
+import com.greytest.entity.enums.SourceUpdateTargetType;
 import com.greytest.repository.BusinessRuleRepository;
 import com.greytest.repository.ProjectRepository;
 import com.greytest.repository.TestCaseRepository;
@@ -73,6 +76,16 @@ import com.greytest.service.GenerationJobContext;
 public class GenerationContextBuilder {
     private static final ThreadLocal<Map<Object,Object>> INPUT_SNAPSHOT=new ThreadLocal<>();
     private record InputReadKey(String type,Long projectId,boolean source) { }
+    private static final String JDBC_READ_FLAG = "greytest.source-update.jdbc-read-optimization-enabled";
+    @org.springframework.beans.factory.annotation.Value("${greytest.source-update.jdbc-read-optimization-enabled:true}")
+    private boolean jdbcReadOptimizationEnabled = true;
+    @org.springframework.beans.factory.annotation.Value("${greytest.source-update.overlay-read-bundle-enabled:true}")
+    private boolean overlayReadBundleEnabled = true;
+    private record DraftReadKey(Long projectId, Long updateId) { }
+    private record DraftOverlayItem(Long id, Long targetId, SourceUpdateTargetType targetType,
+            SourceUpdateAction action, SourceUpdateReviewStatus reviewStatus, String afterData,
+            Long version, Long userRevision) { }
+    private record DraftOverlayBundle(Long updateVersion, List<DraftOverlayItem> items) { }
 
     /** Chụp upstream bất biến trong một batch; scope lồng nhau luôn đọc mới trước commit. */
     public static <T> T withInputSnapshot(java.util.function.Supplier<T> action) {
@@ -190,7 +203,8 @@ public class GenerationContextBuilder {
     @Transactional(readOnly = true)
     public BusinessRuleGenerationContextDto buildSnapshotBusinessRuleGenerationContext(
             Long projectId, Set<Long> targetMethodIds, java.nio.file.Path snapshot) {
-        return buildBusinessRuleGenerationContext(sourceAnalysis(projectId, snapshot, true), targetMethodIds, snapshot);
+        return GenerationJobContext.measure("context.BUSINESS_RULE", () ->
+                buildBusinessRuleGenerationContext(sourceAnalysis(projectId, snapshot, true), targetMethodIds, snapshot));
     }
 
     private BusinessRuleGenerationContextDto buildBusinessRuleGenerationContext(
@@ -368,6 +382,7 @@ public class GenerationContextBuilder {
     private List<CollaboratorCallEvidence> collaboratorCalls(String sourceCode) {
         if (sourceCode == null || sourceCode.isBlank()) return List.of();
         try {
+            GenerationJobContext.increment("context.methodParses");
             var parsed = new JavaParser().parseMethodDeclaration(sourceCode);
             MethodDeclaration method = parsed.getResult().orElse(null);
             if (!parsed.isSuccessful() || method == null) return List.of();
@@ -397,6 +412,7 @@ public class GenerationContextBuilder {
     private Map<String, String> fieldTypes(String sourceCode) {
         if (sourceCode == null || sourceCode.isBlank()) return Map.of();
         try {
+            GenerationJobContext.increment("context.classParses");
             var parsed = new JavaParser().parse(sourceCode);
             CompilationUnit unit = parsed.getResult().orElse(null);
             if (!parsed.isSuccessful() || unit == null) return Map.of();
@@ -465,7 +481,8 @@ public class GenerationContextBuilder {
 
     @Transactional(readOnly = true)
     public TestPlanContextDto buildSnapshotTestPlanContext(Long projectId, Set<Long> targetRuleIds, java.nio.file.Path snapshot) {
-        return buildTestPlanContext(projectId, targetRuleIds, sourceAnalysis(projectId, snapshot, true), snapshot);
+        return GenerationJobContext.measure("context.TEST_PLAN", () ->
+                buildTestPlanContext(projectId, targetRuleIds, sourceAnalysis(projectId, snapshot, true), snapshot));
     }
 
     private TestPlanContextDto buildTestPlanContext(Long projectId, Set<Long> targetRuleIds,
@@ -499,7 +516,8 @@ public class GenerationContextBuilder {
 
     @Transactional(readOnly = true)
     public TestCaseContextDto buildSnapshotTestCaseContext(Long projectId, Set<Long> targetPlanIds, java.nio.file.Path snapshot) {
-        return buildTestCaseContext(projectId, targetPlanIds, sourceAnalysis(projectId, snapshot, true), snapshot);
+        return GenerationJobContext.measure("context.TEST_CASE", () ->
+                buildTestCaseContext(projectId, targetPlanIds, sourceAnalysis(projectId, snapshot, true), snapshot));
     }
 
     private TestCaseContextDto buildTestCaseContext(Long projectId, Set<Long> targetPlanIds,
@@ -548,7 +566,8 @@ public class GenerationContextBuilder {
     private AnalysisResultDto sourceAnalysis(Long projectId, java.nio.file.Path root, boolean strict) {
         AnalysisResultDto stored = storedAnalysis(projectId);
         java.nio.file.Path normalized = root.toAbsolutePath().normalize();
-        String digest = inputSnapshot(new SourceDigestKey(normalized),()->PersistentSourceAnalysisService.contentDigest(normalized));
+        String digest = com.greytest.service.generation.SourceSnapshotSession.sourceDigest(normalized,
+                () -> inputSnapshot(new SourceDigestKey(normalized), () -> PersistentSourceAnalysisService.contentDigest(normalized)));
         var parsed = GenerationJobContext.memoize(new ParsedSourceAnalysisKey(projectId, normalized, digest, strict),
                 () -> persistentAnalysis == null ? SnapshotAnalysisLoader.parse(normalized, strict)
                         : persistentAnalysis.load(projectId, normalized, strict, digest));
@@ -675,8 +694,8 @@ public class GenerationContextBuilder {
     /** Context Unit Test từ snapshot source của bản cập nhật. */
     @Transactional(readOnly = true)
     public UnitTestContextDto buildSnapshotUnitTestContext(Long projectId, Set<Long> targetCaseIds, java.nio.file.Path snapshot) {
-        return buildVerifiedUnitTestContext(projectId, targetCaseIds,
-                sourceAnalysis(projectId, snapshot, true), snapshot);
+        return GenerationJobContext.measure("context.UNIT_TEST", () -> buildVerifiedUnitTestContext(projectId, targetCaseIds,
+                sourceAnalysis(projectId, snapshot, true), snapshot));
     }
 
     private UnitTestContextDto buildVerifiedUnitTestContext(Long projectId, Set<Long> targetCaseIds,
@@ -777,6 +796,8 @@ public class GenerationContextBuilder {
             if (changed.beforeSource() == null) {
                 if (source == null || changed.afterSource() == null) return null;
                 if (source.contains(changed.afterSource())) continue;
+                GenerationJobContext.increment("context.classParses");
+                GenerationJobContext.increment("context.methodParses");
                 var parsedClass = new JavaParser().parse(source).getResult();
                 var parsedMethod = new JavaParser().parseMethodDeclaration(changed.afterSource()).getResult();
                 if (parsedClass.isEmpty() || parsedMethod.isEmpty()) return null;
@@ -827,15 +848,30 @@ public class GenerationContextBuilder {
         // Duyệt tiếp DTO/repository vừa tìm được để không thiếu kiểu generic, enum và lớp cha của chúng.
         for (int index = 0; index < result.size(); index++) {
             ClassContextDto owner = result.get(index);
+            if (owner.sourceCode() != null) GenerationJobContext.increment("context.classParses");
             CompilationUnit source = owner.sourceCode() == null ? null : new JavaParser(new ParserConfiguration()
                     .setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_21))
                     .parse(owner.sourceCode()).getResult().orElse(null);
             Set<String> references = sourceTypeReferences(source);
             ensureReferencedSourcesParsed(analysis, owner, source, references);
+            boolean ownerCanHaveImplementations = includeImplementations && source != null
+                    && source.findAll(com.github.javaparser.ast.body.ClassOrInterfaceDeclaration.class).stream()
+                            .anyMatch(type -> type.getFullyQualifiedName().filter(owner.qualifiedName()::equals).isPresent()
+                                    && (type.isInterface() || type.isAbstract()));
+            List<JavaClassDto> implementors = ownerCanHaveImplementations ? implementationCandidates.stream()
+                    .filter(type -> implementsSourceType(type, owner, source, candidates))
+                    .filter(type -> {
+                        try {
+                            return preferredDeclaration(type, owner, implementationCandidates);
+                        } catch (LlmResponseException ignored) {
+                            return false;
+                        }
+                    })
+                    .toList() : List.of();
             for (JavaClassDto candidate : candidates) {
                 boolean dependency = isUnitTestDependency(candidate, owner, source, references, candidates);
-                boolean implementation = includeImplementations && implementationCandidates.contains(candidate)
-                        && implementsSourceType(candidate, owner, source, candidates);
+                // Chỉ nhận implementation duy nhất trong module mục tiêu; nếu có nhiều class cùng implement (ví dụ nhiều profile persistence) thì giữ interface làm contract để tránh bùng nổ token/source.
+                boolean implementation = implementors.size() == 1 && implementors.contains(candidate);
                 if (!dependency && !implementation) continue;
                 if (!preferredDeclaration(candidate, owner, dependency ? candidates : implementationCandidates)) continue;
                 if (included.contains(candidate.qualifiedName())) {
@@ -873,6 +909,7 @@ public class GenerationContextBuilder {
         if (ownerSource == null || ownerSource.findAll(com.github.javaparser.ast.body.ClassOrInterfaceDeclaration.class).stream()
                 .noneMatch(type -> type.getFullyQualifiedName().filter(owner.qualifiedName()::equals).isPresent()
                         && (type.isInterface() || type.isAbstract()))) return false;
+        GenerationJobContext.increment("context.classParses");
         var parsed = new JavaParser(new ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_21))
                 .parse(candidate.sourceCode()).getResult();
         if (parsed.isEmpty()) return false;
@@ -1226,8 +1263,7 @@ public class GenerationContextBuilder {
     }
 
     private List<TestCaseContextItemDto> loadApprovedTestCases(Long projectId) {
-        Map<Long, TestCaseContextItemDto> contexts = approvedTestPlans(projectId).stream()
-                .flatMap(plan -> testCaseRepository.findByTestPlanId(plan.id()).stream())
+        Map<Long, TestCaseContextItemDto> contexts = casesForPlans(approvedTestPlans(projectId))
                 .filter(testCase -> testCase.getStatus() == ReviewStatus.APPROVED
                         || GenerationJobContext.sourceUpdateId() != null && testCase.getStatus() == ReviewStatus.PENDING_REVIEW)
                 .map(this::testCaseContext)
@@ -1244,55 +1280,94 @@ public class GenerationContextBuilder {
 
     /** Đọc proposal mỗi lần để stage sau nhìn thấy nội dung người dùng vừa sửa trong đúng draft. */
     private <T> void overlay(Long projectId, com.greytest.entity.enums.SourceUpdateTargetType type,
-            Map<Long, T> contexts, java.util.function.BiFunction<T, com.greytest.entity.SourceUpdateItem, T> apply) {
+            Map<Long, T> contexts, java.util.function.BiFunction<T, DraftOverlayItem, T> apply) {
         Long updateId = GenerationJobContext.sourceUpdateId();
         if (updateId == null || sourceUpdates == null || sourceUpdateItems == null) return;
-        sourceUpdates.findByIdAndProjectId(updateId, projectId)
-                .orElseThrow(() -> new IllegalArgumentException("Draft does not belong to selected project"));
-        for (var item : sourceUpdateItems.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId)) {
-            if (item.getTargetType() != type) continue;
-            if (item.getTargetId() == null) throw new IllegalArgumentException("Draft artifact has no logical ID");
-            boolean rejected = item.getReviewStatus() == com.greytest.entity.enums.SourceUpdateReviewStatus.REJECTED
-                    || item.getAction()==com.greytest.entity.enums.SourceUpdateAction.KEEP;
+        for (var item : draftOverlayItems(projectId, updateId)) {
+            if (item.targetType() != type) continue;
+            if (item.targetId() == null) throw new IllegalArgumentException("Draft artifact has no logical ID");
+            boolean rejected = item.reviewStatus() == com.greytest.entity.enums.SourceUpdateReviewStatus.REJECTED
+                    || item.action()==com.greytest.entity.enums.SourceUpdateAction.KEEP;
             if (rejected) {
-                if (item.getAction() == com.greytest.entity.enums.SourceUpdateAction.CREATE) contexts.remove(item.getTargetId());
+                if (item.action() == com.greytest.entity.enums.SourceUpdateAction.CREATE) contexts.remove(item.targetId());
                 continue;
             }
-            T previous = contexts.get(item.getTargetId());
+            T previous = contexts.get(item.targetId());
             if (previous == null) {
                 // Artifact con của một parent đã REMOVE không tham gia context downstream.
                 if (type == com.greytest.entity.enums.SourceUpdateTargetType.TEST_CASE) continue;
                 throw new IllegalArgumentException("Draft artifact is outside the selected project");
             }
-            if (item.getAction() == com.greytest.entity.enums.SourceUpdateAction.REMOVE) {
-                contexts.remove(item.getTargetId());
+            if (item.action() == com.greytest.entity.enums.SourceUpdateAction.REMOVE) {
+                contexts.remove(item.targetId());
             } else {
-                if (item.getAfterData() == null || item.getAfterData().isBlank()) continue;
+                if (item.afterData() == null || item.afterData().isBlank()) continue;
                 T updated = apply.apply(previous, item);
-                if (updated != null) contexts.put(item.getTargetId(), updated);
+                if (updated != null) contexts.put(item.targetId(), updated);
             }
         }
     }
 
-    private <T> T readDraft(com.greytest.entity.SourceUpdateItem item, Class<T> type) {
-        if (item == null || item.getAfterData() == null || item.getAfterData().isBlank()) {
+    /** Bundle chỉ sống trong input epoch của worker; nested precommit scope luôn đọc lại cả ownership/version. */
+    private List<DraftOverlayItem> draftOverlayItems(Long projectId, Long updateId) {
+        if (!optimizedJdbcReads() || !overlayReadBundleEnabled || INPUT_SNAPSHOT.get() == null
+                || Boolean.FALSE.equals(GenerationJobContext.scopedValue("greytest.source-update.overlay-read-bundle-enabled")))
+            return loadDraftOverlayBundle(projectId, updateId).items();
+        return inputSnapshot(new DraftReadKey(projectId, updateId), () -> {
+            GenerationJobContext.increment("jdbc.overlayReadBundles");
+            return loadDraftOverlayBundle(projectId, updateId);
+        }).items();
+    }
+
+    private DraftOverlayBundle loadDraftOverlayBundle(Long projectId, Long updateId) {
+        var update = sourceUpdates.findByIdAndProjectId(updateId, projectId)
+                .orElseThrow(() -> new IllegalArgumentException("Draft does not belong to selected project"));
+        var rows = sourceUpdateItems.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId).stream()
+                .map(item -> new DraftOverlayItem(item.getId(), item.getTargetId(), item.getTargetType(), item.getAction(),
+                        item.getReviewStatus(), item.getAfterData(), item.getVersion(), item.getUserRevision())).toList();
+        return new DraftOverlayBundle(update.getVersion(), rows);
+    }
+
+    private <T> T readDraft(DraftOverlayItem item, Class<T> type) {
+        if (item == null || item.afterData() == null || item.afterData().isBlank()) {
             return null;
         }
         try {
-            return objectMapper.readValue(item.getAfterData(), type);
+            return objectMapper.readValue(item.afterData(), type);
         } catch (Exception exception) {
-            throw new IllegalArgumentException("Invalid draft artifact " + item.getId(), exception);
+            throw new IllegalArgumentException("Invalid draft artifact " + item.id(), exception);
         }
     }
 
     private List<TestCaseContextItemDto> approvedTestCases(List<TestPlanContextItemDto> plans) {
-        return plans.stream()
-                .flatMap(plan -> testCaseRepository.findByTestPlanId(plan.id()).stream())
+        return casesForPlans(plans)
                 .filter(testCase -> testCase.getStatus() == ReviewStatus.APPROVED
                         || GenerationJobContext.sourceUpdateId() != null && testCase.getStatus() == ReviewStatus.PENDING_REVIEW)
                 .map(this::testCaseContext)
                 .sorted(Comparator.comparing(TestCaseContextItemDto::caseCode))
                 .toList();
+    }
+
+    private boolean optimizedJdbcReads() {
+        return jdbcReadOptimizationEnabled && GenerationJobContext.sourceUpdateId() != null
+                && !Boolean.FALSE.equals(GenerationJobContext.scopedValue(JDBC_READ_FLAG));
+    }
+
+    /** Bulk chỉ đổi số round-trip; case code trùng dùng lại query cũ để giữ ordering/batching. */
+    private Stream<TestCase> casesForPlans(List<TestPlanContextItemDto> plans) {
+        if (!optimizedJdbcReads() || plans.size() < 2) return legacyCasesForPlans(plans);
+        List<Long> planIds = plans.stream().map(TestPlanContextItemDto::id).toList();
+        Set<Long> allowed = Set.copyOf(planIds);
+        var cases = testCaseRepository.findByTestPlanIdIn(planIds).stream()
+                .filter(testCase -> allowed.contains(testCase.getTestPlanId())).toList();
+        Set<String> codes = new java.util.HashSet<>();
+        if (cases.stream().anyMatch(testCase -> !codes.add(testCase.getCaseCode()))) return legacyCasesForPlans(plans);
+        GenerationJobContext.increment("jdbc.caseBulkReads");
+        return cases.stream();
+    }
+
+    private Stream<TestCase> legacyCasesForPlans(List<TestPlanContextItemDto> plans) {
+        return plans.stream().flatMap(plan -> testCaseRepository.findByTestPlanId(plan.id()).stream());
     }
 
     private TestCaseContextItemDto testCaseContext(TestCase testCase) {

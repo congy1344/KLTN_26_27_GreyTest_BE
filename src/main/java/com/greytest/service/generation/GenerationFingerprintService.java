@@ -45,6 +45,11 @@ public class GenerationFingerprintService {
     }
 
     public Fingerprint fingerprint(String stage, Object context, Path sourceRoot) {
+        com.greytest.service.GenerationJobContext.increment("fingerprint.inputCalls");
+        return com.greytest.service.GenerationJobContext.measure("fingerprint.input", () -> inputFingerprint(stage, context, sourceRoot));
+    }
+
+    private Fingerprint inputFingerprint(String stage, Object context, Path sourceRoot) {
         Map<String, Object> manifest = new TreeMap<>();
         List<String> problems = new ArrayList<>();
         manifest.put("format", VERSION);
@@ -70,6 +75,8 @@ public class GenerationFingerprintService {
                 problems.add("unresolved: source context contains warnings");
                 manifest.put("contextWarnings", sorted(input.path("contextWarnings")));
             }
+        } catch (SourceSnapshotSession.SnapshotChangedException changed) {
+            throw changed;
         } catch (RuntimeException exception) {
             // Không cho skip nếu snapshot hoặc dependency không còn đủ bằng chứng an toàn.
             problems.add("unresolved: " + exception.getClass().getSimpleName());
@@ -87,6 +94,11 @@ public class GenerationFingerprintService {
 
     /** Module lấy từ context đã chọn, không suy đoán từ package do LLM sinh. */
     public Fingerprint outputFingerprint(Object response, Path sourceRoot, Object context) {
+        com.greytest.service.GenerationJobContext.increment("fingerprint.outputCalls");
+        return com.greytest.service.GenerationJobContext.measure("fingerprint.output", () -> fingerprintOutput(response, sourceRoot, context));
+    }
+
+    private Fingerprint fingerprintOutput(Object response, Path sourceRoot, Object context) {
         List<String> problems = new ArrayList<>();
         Map<String, Object> manifest = new TreeMap<>();
         manifest.put("format", "greytest-output-dependencies-v1");
@@ -122,6 +134,8 @@ public class GenerationFingerprintService {
                     } finally { index.outputModule(null); index.releaseUncachedFacades(); }
                 }
             }
+        } catch (SourceSnapshotSession.SnapshotChangedException changed) {
+            throw changed;
         } catch (RuntimeException | java.io.IOException exception) {
             problems.add("unresolved output dependencies: " + exception.getClass().getSimpleName());
         }

@@ -93,7 +93,7 @@ public class UnitTestExportProvenanceService {
                 var context = (UnitTestContextDto) agent.snapshotContext(GenerationProgressStage.UNIT_TEST,
                         projectId, Set.of(test.getTestCaseId()), sourceRoot);
                 var currentInput = fingerprints.fingerprint("unit-test", context, sourceRoot);
-                if (!currentInput.reusable() || !currentInput.value().equals(checkpoint.fingerprint())) continue;
+                if (!currentInput.value().equals(checkpoint.fingerprint())) continue;
                 var output = new UnitTestResponseDto(List.of(new GeneratedUnitTestDto(test.getTestCaseId(),
                         test.getTestClassName(), test.getTestMethodName(), test.getPackageName(),
                         test.getGenerationType(), source)));
@@ -148,7 +148,7 @@ public class UnitTestExportProvenanceService {
         CompilationUnit unit = parse(source);
         new ArrayList<>(unit.getAllContainedComments()).forEach(comment -> comment.remove());
         unit.removeComment();
-        return unit.toString();
+        return unit.toString().replace("\r\n", "\n").replace('\r', '\n');
     }
 
     private CompilationUnit parse(String source) {

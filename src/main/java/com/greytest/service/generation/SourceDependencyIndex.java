@@ -39,6 +39,7 @@ import com.greytest.service.ServiceScopeResolver;
 
 /** Index AST theo digest snapshot; chỉ giữ trong input bất biến của một generation run. */
 final class SourceDependencyIndex {
+    private static final String LOMBOK_DIRECTORY_REUSE = "greytest.source-update.lombok-directory-reuse-enabled";
     private static final Set<String> SKIP = Set.of(".git", "target", "build", "node_modules", ".gradle", "generated-sources");
     private final Path root;
     private final Map<String, CompilationUnit> units = new TreeMap<>();
@@ -125,15 +126,24 @@ final class SourceDependencyIndex {
     }
 
     static SourceDependencyIndex load(Path sourceRoot, Map<String, CompilationUnit> parsedUnits) {
+        GenerationJobContext.increment("dependency.loads");
+        return GenerationJobContext.measure("dependency.load", () -> loadIndex(sourceRoot, parsedUnits));
+    }
+
+    private static SourceDependencyIndex loadIndex(Path sourceRoot, Map<String, CompilationUnit> parsedUnits) {
         try {
             if (sourceRoot == null) throw new IllegalArgumentException("Missing source root");
             Path root = sourceRoot.toRealPath();
-            return com.greytest.service.agent.GenerationContextBuilder.inputSnapshot(new IndexReadKey(root),
-                    () -> loadVerified(root, parsedUnits));
+            SourceSnapshotSession.assertUnchanged();
+            return SourceSnapshotSession.index(root, () ->
+                    com.greytest.service.agent.GenerationContextBuilder.inputSnapshot(new IndexReadKey(root),
+                            () -> loadVerified(root, parsedUnits)));
         } catch (IOException exception) { throw new IllegalArgumentException("Unreadable snapshot", exception); }
     }
 
     private static SourceDependencyIndex loadVerified(Path root, Map<String, CompilationUnit> parsedUnits) {
+        GenerationJobContext.increment("dependency.walks");
+        GenerationJobContext.increment("dependency.hashPasses");
         try {
             Map<String, String> sources = new TreeMap<>();
             Files.walkFileTree(root, new SimpleFileVisitor<>() {
@@ -154,11 +164,28 @@ final class SourceDependencyIndex {
                 }
             });
             var classpath = ParserDependencyClasspath.load(root, sources.keySet().stream().map(ServiceScopeResolver::modulePath).collect(java.util.stream.Collectors.toSet()));
+            SourceSnapshotSession.verifyAtEnd(() -> {
+                var verified = ParserDependencyClasspath.load(root, sources.keySet().stream()
+                        .map(ServiceScopeResolver::modulePath).collect(java.util.stream.Collectors.toSet()));
+                if (!classpath.digest().equals(verified.digest())) throw new IllegalStateException("Analysis classpath changed during generation");
+            });
             StringBuilder manifest = new StringBuilder();
+            manifest.append("analyzer:source-dependency-index-v2\n");
+            manifest.append("snapshot:").append(SourceSnapshotSession.contentIdentity(root)).append('\n');
             manifest.append("analysis-classpath:").append(classpath.digest()).append('\n');
-            sources.forEach((path, source) -> manifest.append(path.length()).append(':').append(path)
-                    .append(':').append(GenerationFingerprintService.hash(source)).append(':')
-                    .append(LombokSourceSymbols.hasConfiguration(root.resolve(path).getParent())).append('\n'));
+            Boolean override = GenerationJobContext.scopedValue(LOMBOK_DIRECTORY_REUSE);
+            boolean reuseDirectories = override != null ? override : Boolean.parseBoolean(System.getProperty(LOMBOK_DIRECTORY_REUSE,
+                    System.getenv().getOrDefault("GREYTEST_SOURCE_UPDATE_LOMBOK_DIRECTORY_REUSE_ENABLED", "true")));
+            Map<Path, Boolean> configurations = new java.util.HashMap<>();
+            sources.forEach((path, source) -> {
+                Path directory = root.resolve(path).getParent();
+                // Chỉ gộp trong lần load có proof; vẫn watch cả config chưa tồn tại và giữ hash cuối stage.
+                boolean configured = reuseDirectories && SourceSnapshotSession.hasMonitoredSnapshot(root)
+                        ? configurations.computeIfAbsent(directory, LombokSourceSymbols::hasConfiguration)
+                        : LombokSourceSymbols.hasConfiguration(directory);
+                manifest.append(path.length()).append(':').append(path).append(':')
+                        .append(GenerationFingerprintService.hash(source)).append(':').append(configured).append('\n');
+            });
             String digest = GenerationFingerprintService.hash(manifest.toString());
             return GenerationJobContext.memoize("source-dependency-index-v1:" + root + ":" + digest,
                     () -> verifiedIndex(new VerifiedIndexKey(root, digest), sources, parsedUnits, classpath));
@@ -172,7 +199,8 @@ final class SourceDependencyIndex {
             if (cached != null) { GenerationJobContext.increment("dependencyIndexHits"); return cached.index(); }
         }
         GenerationJobContext.increment("dependencyIndexMisses");
-        SourceDependencyIndex created = new SourceDependencyIndex(key.root(), sources, parsedUnits, classpath);
+        SourceDependencyIndex created = GenerationJobContext.measure("dependency.build",
+                () -> new SourceDependencyIndex(key.root(), sources, parsedUnits, classpath));
         long characters = sources.values().stream().mapToLong(String::length).sum();
         if (characters > MAX_CACHED_SOURCE_CHARACTERS) { created.releaseUncachedFacades(); return created; }
         synchronized (VERIFIED_INDEXES) {
@@ -1018,6 +1046,7 @@ final class SourceDependencyIndex {
     private boolean isDto(TypeDeclaration<?> type, TypeDeclaration<?> caller, Set<String> visited) {
         if (visited.contains("output-dependency-mode") || identity(type).equals(identity(caller))
                 || visited.contains("target-type:" + identity(type))) return false;
+        if (type.isClassOrInterfaceDeclaration() && type.asClassOrInterfaceDeclaration().isInterface()) return false;
         return type.getAnnotations().stream().noneMatch(annotation -> Set.of("Service", "Repository", "Controller",
                 "RestController", "Component").contains(annotation.getName().getIdentifier()));
     }
@@ -1079,7 +1108,7 @@ final class SourceDependencyIndex {
         return Map.copyOf(result);
     }
 
-    Map<String, String> sourceResources(Map<String, String> dependencies, List<String> problems) {
+    synchronized Map<String, String> sourceResources(Map<String, String> dependencies, List<String> problems) {
         var classes = resourceClasses(dependencies);
         var evidence = com.greytest.service.agent.GenerationResourceEvidence.collect(root, classes);
         for (String warning : evidence.warnings()) problems.add("unresolved resource evidence: " + warning);

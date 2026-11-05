@@ -103,7 +103,10 @@ public class GenerationJobService {
 
     public void pause(Long projectId, GenerationProgressStage stage) {
         progressService.pause(projectId, stage, "Đã tạm dừng tác vụ. Các batch đã sinh được lưu an toàn. Bạn có thể nhấn 'Tiếp tục sinh' để tiếp tục.");
-        activeProjects.remove(projectId, stage);
+    }
+
+    public void cancel(Long projectId, GenerationProgressStage stage) {
+        progressService.cancel(projectId, stage, "Đã hủy tác vụ sinh AI.");
     }
 
     private void recordGenerationRequest(Long projectId, Long actorUserId, GenerationProgressStage stage) {

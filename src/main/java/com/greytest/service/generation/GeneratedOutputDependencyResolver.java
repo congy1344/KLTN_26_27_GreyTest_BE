@@ -109,6 +109,8 @@ final class GeneratedOutputDependencyResolver {
                 return;
             }
         } catch (RuntimeException exception) {
+            if (exception instanceof com.github.javaparser.resolution.UnsolvedSymbolException
+                    && resolveOngoingStubbingFallback(call, unit)) return;
             if (mockitoApi(call, unit)) {
                 problems.add("unresolved Mockito signature: " + call.getNameAsString() + " (" + exception.getClass().getSimpleName()
                         + ": " + java.util.Objects.toString(exception.getMessage(), "") + ")");
@@ -127,6 +129,114 @@ final class GeneratedOutputDependencyResolver {
             if (knownMockitoInvocation(call, unit) || knownExternal(call, unit) || ownTestHelper(call, unit)) return;
             problems.add("unresolved output call: " + call.getNameAsString());
         }
+    }
+
+    /**
+     * Fallback cho method chaining của Mockito (thenReturn, thenThrow...) khi JavaParser
+     * SymbolSolver không suy luận được generic type lồng nhau trên OngoingStubbing.
+     */
+    private boolean resolveOngoingStubbingFallback(MethodCallExpr call, CompilationUnit unit) {
+        if (!Set.of("thenReturn", "thenThrow", "thenAnswer", "thenCallRealMethod", "then").contains(call.getNameAsString())) {
+            return false;
+        }
+        if (call.getScope().isEmpty()) return false;
+        MethodCallExpr whenCall = findEnclosingWhenCall(call.getScope().get());
+        if (whenCall == null || whenCall.getArguments().size() != 1) return false;
+        try {
+            var expectedType = whenCall.getArgument(0).calculateResolvedType();
+            if ("thenCallRealMethod".equals(call.getNameAsString())) {
+                dependencies.put("resolved-mockito:org.mockito.stubbing.OngoingStubbing.thenCallRealMethod()", expectedType.describe());
+                return true;
+            }
+            if ("thenThrow".equals(call.getNameAsString())) {
+                dependencies.put("resolved-mockito:org.mockito.stubbing.OngoingStubbing.thenThrow()", expectedType.describe());
+                return true;
+            }
+            if ("thenAnswer".equals(call.getNameAsString()) || "then".equals(call.getNameAsString())) {
+                dependencies.put("resolved-mockito:org.mockito.stubbing.OngoingStubbing.thenAnswer()", expectedType.describe());
+                return true;
+            }
+            if ("thenReturn".equals(call.getNameAsString()) && !call.getArguments().isEmpty()) {
+                for (int i = 0; i < call.getArguments().size(); i++) {
+                    var arg = call.getArgument(i);
+                    var actualType = arg.calculateResolvedType();
+                    if (i > 0 && actualType.isArray()) {
+                        actualType = actualType.asArrayType().getComponentType();
+                    }
+                    if (!isStubCompatible(expectedType, actualType)) {
+                        return false;
+                    }
+                }
+                dependencies.put("resolved-mockito:org.mockito.stubbing.OngoingStubbing.thenReturn(" + expectedType.describe() + ")", expectedType.describe());
+                return true;
+            }
+        } catch (RuntimeException ignored) {
+        }
+        return false;
+    }
+
+    private MethodCallExpr findEnclosingWhenCall(Expression expr) {
+        if (expr.isMethodCallExpr()) {
+            MethodCallExpr call = expr.asMethodCallExpr();
+            if ("when".equals(call.getNameAsString())) return call;
+            if (call.getScope().isPresent()) return findEnclosingWhenCall(call.getScope().get());
+        }
+        return null;
+    }
+
+    private boolean isStubCompatible(com.github.javaparser.resolution.types.ResolvedType expected,
+                                     com.github.javaparser.resolution.types.ResolvedType actual) {
+        if (expected.describe().equals(actual.describe())) return true;
+        try {
+            if (expected.isAssignableBy(actual)) return true;
+        } catch (RuntimeException ignored) {
+        }
+        if (expected.isReferenceType() && actual.isReferenceType()) {
+            var expRef = expected.asReferenceType();
+            var actRef = actual.asReferenceType();
+            String expName = expRef.getQualifiedName();
+            String actName = actRef.getQualifiedName();
+            if (expName.equals(actName)) {
+                var expParams = expRef.typeParametersValues();
+                var actParams = actRef.typeParametersValues();
+                if (expParams.isEmpty() && actParams.isEmpty()) return true;
+                if (expParams.size() == actParams.size()) {
+                    for (int p = 0; p < expParams.size(); p++) {
+                        if (!isStubCompatible(expParams.get(p), actParams.get(p))) return false;
+                    }
+                    return true;
+                }
+                return false;
+            }
+            if (isCollectionAssignable(expName, actName)) {
+                var expParams = expRef.typeParametersValues();
+                var actParams = actRef.typeParametersValues();
+                if (expParams.isEmpty() || actParams.isEmpty()) return true;
+                if (expParams.size() == 1 && actParams.size() == 1) {
+                    return isStubCompatible(expParams.get(0), actParams.get(0));
+                }
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isCollectionAssignable(String expectedType, String actualType) {
+        if (expectedType.equals(actualType)) {
+            return Set.of("java.util.Collection", "java.util.List", "java.util.ArrayList",
+                    "java.util.Set", "java.util.HashSet", "java.lang.Iterable").contains(expectedType);
+        }
+        if ("java.util.Collection".equals(expectedType) || "java.lang.Iterable".equals(expectedType)) {
+            return Set.of("java.util.Collection", "java.util.List", "java.util.ArrayList",
+                    "java.util.Set", "java.util.HashSet").contains(actualType);
+        }
+        if ("java.util.List".equals(expectedType)) {
+            return Set.of("java.util.List", "java.util.ArrayList").contains(actualType);
+        }
+        if ("java.util.Set".equals(expectedType)) {
+            return Set.of("java.util.Set", "java.util.HashSet").contains(actualType);
+        }
+        return false;
     }
 
     /** Gán target type cho matcher generic khi chữ ký production duy nhất đã được chứng minh. */

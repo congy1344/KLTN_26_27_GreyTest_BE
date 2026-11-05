@@ -57,6 +57,91 @@ import com.greytest.service.analysis.AnalysisService;
 import com.greytest.service.analysis.ExistingTestService;
 
 class GenerationContextBuilderTest {
+    @Test void overlayBundleCopiesRowsAndNestedPrecommitScopeReadsFresh() {
+        mockCommonInputs(); stubApprovedUnitTestCase(11L);
+        var updates = mock(com.greytest.repository.SourceUpdateRepository.class);
+        var proposals = mock(com.greytest.repository.SourceUpdateItemRepository.class);
+        var update = new com.greytest.entity.SourceUpdate(); update.setId(100L); update.setProjectId(1L);
+        when(updates.findByIdAndProjectId(100L, 1L)).thenReturn(java.util.Optional.of(update));
+        var rule = draft(com.greytest.entity.enums.SourceUpdateTargetType.BUSINESS_RULE, 7L,
+                "{\"method_id\":11,\"description\":\"Rule snapshot\",\"category\":\"VALIDATION\"}");
+        var plan = draft(com.greytest.entity.enums.SourceUpdateTargetType.TEST_PLAN, 20L,
+                "{\"method_id\":11,\"rule_id\":7,\"covered_rule_ids\":[7],\"title\":\"Plan snapshot\",\"description\":\"Plan detail\",\"test_type\":\"HAPPY_PATH\"}");
+        var testCase = draft(com.greytest.entity.enums.SourceUpdateTargetType.TEST_CASE, 30L,
+                "{\"plan_id\":20,\"test_type\":\"HAPPY_PATH\",\"description\":\"Case\",\"preconditions\":\"setup\",\"test_data\":{\"input\":{},\"mocks\":{}},\"expected_result\":\"original revision\",\"priority\":\"HIGH\",\"trace_source\":\"BR-001 -> TP-001\"}");
+        when(proposals.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(100L)).thenReturn(List.of(rule, plan, testCase));
+        builder.configureIncrementalInputs(null, updates, proposals, objectMapper);
+        try (var job = com.greytest.service.GenerationJobContext.openScope(null)) {
+            com.greytest.service.GenerationJobContext.setSourceUpdateId(100L);
+            GenerationContextBuilder.withInputSnapshot(() -> {
+                builder.buildTestPlanContext(1L, Set.of(7L));
+                testCase.setAfterData(testCase.getAfterData().replace("original revision", "edited revision"));
+                testCase.setVersion(1L); testCase.setUserRevision(1L);
+                var preview = builder.buildUnitTestContext(1L, Set.of(30L));
+                assertThat(preview.approvedTestCases().get(0).expectedResult()).isEqualTo("original revision");
+                GenerationContextBuilder.withInputSnapshot(() -> {
+                    assertThat(builder.buildUnitTestContext(1L, Set.of(30L)).approvedTestCases().get(0).expectedResult()).isEqualTo("edited revision");
+                    return null;
+                });
+                when(updates.findByIdAndProjectId(100L, 1L)).thenReturn(java.util.Optional.empty());
+                assertThatThrownBy(() -> GenerationContextBuilder.withInputSnapshot(() -> builder.buildTestPlanContext(1L, Set.of(7L))))
+                        .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("Draft does not belong");
+                return null;
+            });
+        }
+        org.mockito.Mockito.verify(proposals, org.mockito.Mockito.times(2)).findBySourceUpdateIdOrderByTargetTypeAscIdAsc(100L);
+        org.mockito.Mockito.verify(updates, org.mockito.Mockito.times(3)).findByIdAndProjectId(100L, 1L);
+    }
+
+    @Test void incrementalCasesUseOneBulkReadAndFreshNestedSnapshot() {
+        var cases = stubTwoPlanCases();
+        try (var job = com.greytest.service.GenerationJobContext.openScope(null)) {
+            com.greytest.service.GenerationJobContext.setSourceUpdateId(100L);
+            GenerationContextBuilder.withInputSnapshot(() -> {
+                var first = builder.buildUnitTestContext(1L, Set.of(30L, 31L));
+                assertThat(first.approvedTestCases()).extracting("id").containsExactly(30L, 31L);
+                cases.get(0).setExpectedResult("fresh version before commit");
+                assertThat(builder.buildUnitTestContext(1L, Set.of(30L, 31L)).approvedTestCases().get(0).expectedResult()).isNull();
+                GenerationContextBuilder.withInputSnapshot(() -> {
+                    assertThat(builder.buildUnitTestContext(1L, Set.of(30L, 31L)).approvedTestCases().get(0).expectedResult())
+                            .isEqualTo("fresh version before commit");
+                    return null;
+                });
+                return null;
+            });
+        }
+        org.mockito.Mockito.verify(testCaseRepository, org.mockito.Mockito.times(2)).findByTestPlanIdIn(List.of(20L, 21L));
+        org.mockito.Mockito.verify(testCaseRepository, org.mockito.Mockito.never()).findByTestPlanId(org.mockito.ArgumentMatchers.anyLong());
+    }
+
+    @Test void duplicateCaseCodesKeepLegacyOrderingAndFlagDisablesBulkReads() {
+        var cases = stubTwoPlanCases();
+        cases.get(1).setCaseCode("TC-001");
+        try (var job = com.greytest.service.GenerationJobContext.openScope(null)) {
+            com.greytest.service.GenerationJobContext.setSourceUpdateId(100L);
+            var bulkFallback = GenerationContextBuilder.withInputSnapshot(() -> builder.buildUnitTestContext(1L, Set.of(30L, 31L)));
+            var legacy = com.greytest.service.GenerationJobContext.withValue("greytest.source-update.jdbc-read-optimization-enabled", false,
+                    () -> GenerationContextBuilder.withInputSnapshot(() -> builder.buildUnitTestContext(1L, Set.of(30L, 31L))));
+            assertThat(bulkFallback).isEqualTo(legacy);
+        }
+        org.mockito.Mockito.verify(testCaseRepository).findByTestPlanIdIn(List.of(20L, 21L));
+        org.mockito.Mockito.verify(testCaseRepository, org.mockito.Mockito.times(2)).findByTestPlanId(20L);
+        org.mockito.Mockito.verify(testCaseRepository, org.mockito.Mockito.times(2)).findByTestPlanId(21L);
+    }
+
+    private List<TestCase> stubTwoPlanCases() {
+        mockCommonInputs(); stubApprovedUnitTestCase(11L);
+        var first = testCaseRepository.findByTestPlanId(20L).get(0);
+        var second = new TestCase(); second.setId(31L); second.setTestPlanId(21L); second.setCaseCode("TC-002");
+        second.setStatus(ReviewStatus.APPROVED); second.setPriority(Priority.HIGH);
+        when(testPlanRepository.findByProjectId(1L)).thenReturn(List.of(testPlan(20L, 7L, "TP-001"), testPlan(21L, 7L, "TP-002")));
+        when(testPlanCoveredRuleRepository.findByTestPlanIdIn(List.of(20L, 21L))).thenReturn(List.of(coveredRule(20L, 7L), coveredRule(21L, 7L)));
+        when(testCaseRepository.findByTestPlanId(21L)).thenReturn(List.of(second));
+        when(testCaseRepository.findByTestPlanIdIn(List.of(20L, 21L))).thenReturn(List.of(second, first));
+        org.mockito.Mockito.clearInvocations(testCaseRepository);
+        return List.of(first, second);
+    }
+
     @Test void nestedUpstreamReadsInsideOneSnapshotDoNotMutateComputeIfAbsent() {
         mockCommonInputs(); stubApprovedUnitTestCase(11L);
         var context=GenerationContextBuilder.withInputSnapshot(()->builder.buildUnitTestContext(1L,Set.of(30L)));
@@ -380,6 +465,34 @@ class GenerationContextBuilderTest {
         assertThat(json.path("supportingResources").toString()).contains("coalesce(count(*)", "article.limit", "12", "20")
                 .doesNotContain("do-not-send", "unrelated-query", "unrelated-value");
         assertThat(json.path("supportingResources").toString()).contains("mapper/ArticleMapper.xml", "application.yml", "application-test.properties");
+    }
+
+    @Test
+    void ambiguousInterfaceImplementationsAreSkippedWithoutOverflowingSupportingSource() {
+        mockCommonInputs();
+        var base = analysis();
+        var method = new JavaMethodDto(11L, "createUser", "void", List.of(), List.of(), "PUBLIC",
+                "void createUser() { lookup.find(); }", 1, 1, List.of(), List.of());
+        var service = new JavaClassDto(10L, "demo", "UserService", "demo.UserService", "SERVICE",
+                "src/main/java/demo/UserService.java",
+                "package demo; import demo.repo.Lookup; class UserService { Lookup lookup; "
+                        + method.sourceCode() + " }", List.of(), List.of(method));
+        var repository = new JavaClassDto(81L, "demo.repo", "Lookup", "demo.repo.Lookup", "OTHER",
+                "src/main/java/demo/repo/Lookup.java", "package demo.repo; interface Lookup { void find(); }", List.of(), List.of());
+        var jdbcImpl = new JavaClassDto(82L, "demo.repo", "JdbcLookup", "demo.repo.JdbcLookup", "OTHER",
+                "src/main/java/demo/repo/JdbcLookup.java",
+                "package demo.repo; class JdbcLookup implements Lookup { public void find() {} }", List.of(), List.of());
+        var jpaImpl = new JavaClassDto(83L, "demo.repo", "JpaLookup", "demo.repo.JpaLookup", "OTHER",
+                "src/main/java/demo/repo/JpaLookup.java",
+                "package demo.repo; class JpaLookup implements Lookup { public void find() {} }", List.of(), List.of());
+        when(analysisService.getAnalysisResult(1L)).thenReturn(new AnalysisResultDto(
+                base.projectId(), base.projectName(), base.status(), 4, 1, 0, 0, 0, 1, 4, 4, 0,
+                List.of(), List.of(service, repository, jdbcImpl, jpaImpl), List.of(), List.of()));
+
+        var contextClasses = builder.buildBusinessRuleGenerationContext(1L, Set.of(11L)).classes();
+        assertThat(contextClasses).extracting("qualifiedName")
+                .contains("demo.UserService", "demo.repo.Lookup")
+                .doesNotContain("demo.repo.JdbcLookup", "demo.repo.JpaLookup");
     }
 
     @Test

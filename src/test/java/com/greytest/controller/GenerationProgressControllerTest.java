@@ -112,4 +112,36 @@ class GenerationProgressControllerTest {
                 .andExpect(status().isUnauthorized());
         verifyNoInteractions(jobService, progressService);
     }
+
+    @Test
+    void cancelsGenerationProgressSuccessfully() throws Exception {
+        AuthUser user = new AuthUser();
+        user.setId(10L);
+        user.setRole(UserRole.USER);
+        user.setEnabled(true);
+        when(authService.currentUser("Bearer token")).thenReturn(user);
+        when(progressService.get(1L, GenerationProgressStage.TEST_PLAN)).thenReturn(
+                new GenerationProgressDto(
+                        GenerationProgressStage.TEST_PLAN,
+                        GenerationProgressStatus.FAILED,
+                        50,
+                        1,
+                        2,
+                        List.of(),
+                        List.of()));
+
+        mockMvc.perform(post("/api/projects/1/generation-progress/TEST_PLAN/cancel")
+                        .header("Authorization", "Bearer token"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("FAILED"));
+
+        verify(jobService).cancel(1L, GenerationProgressStage.TEST_PLAN);
+    }
+
+    @Test
+    void cancelRequiresAuthorizationBeforeChangingJob() throws Exception {
+        mockMvc.perform(post("/api/projects/1/generation-progress/TEST_PLAN/cancel"))
+                .andExpect(status().isUnauthorized());
+        verifyNoInteractions(jobService, progressService);
+    }
 }
