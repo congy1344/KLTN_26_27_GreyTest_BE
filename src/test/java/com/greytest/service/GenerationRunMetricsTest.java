@@ -51,6 +51,71 @@ class GenerationRunMetricsTest {
         assertThat(finished.totalTokens()).isEqualTo(30);
     }
 
+    private void runWithTokens(GenerationJobService runner, GenerationProgressService target, long tokens, boolean succeed) {
+        var stage = GenerationProgressStage.TEST_CASE;
+        runner.submit(1L, stage, () -> {
+            target.start(1L, stage, 1, "Start");
+            recorder.record("test-case", "test", "test",
+                    new LlmTokenUsage(tokens, 0, 1, 0, tokens + 1, LlmTokenUsage.UsageSource.PROVIDER), 1);
+            try {
+                Thread.sleep(20);
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+            }
+            if (!succeed) throw new IllegalStateException("Dừng ở batch");
+            target.complete(1L, stage, "Done");
+        });
+    }
+
+    @Test
+    void addsEveryResumeToTheTotalsOfAnUnfinishedStage() {
+        runWithTokens(jobs, progress, 10, false);
+        var first = progress.get(1L, GenerationProgressStage.TEST_CASE).runMetrics();
+        runWithTokens(jobs, progress, 20, true);
+        var total = progress.get(1L, GenerationProgressStage.TEST_CASE).runMetrics();
+
+        assertThat(total.inputTokens()).isEqualTo(30);
+        assertThat(total.outputTokens()).isEqualTo(2);
+        assertThat(total.totalTokens()).isEqualTo(32);
+        assertThat(total.recordedCalls()).isEqualTo(2);
+        assertThat(total.elapsedMillis()).isGreaterThanOrEqualTo(first.elapsedMillis() + 20);
+        assertThat(total.startedAt()).isEqualTo(first.startedAt());
+        assertThat(total.runId()).isNotEqualTo(first.runId());
+    }
+
+    @Test
+    void startsFromZeroAfterTheStageCompleted() {
+        runWithTokens(jobs, progress, 10, true);
+        runWithTokens(jobs, progress, 20, true);
+        assertThat(progress.get(1L, GenerationProgressStage.TEST_CASE).runMetrics().totalTokens()).isEqualTo(21);
+    }
+
+    @Test
+    void keepsUnfinishedTotalsAfterTheProgressSnapshotExpires() {
+        var now = new java.util.concurrent.atomic.AtomicReference<>(java.time.Instant.parse("2026-11-06T00:00:00Z"));
+        var clock = new java.time.Clock() {
+            @Override public java.time.ZoneId getZone() { return java.time.ZoneOffset.UTC; }
+            @Override public java.time.Clock withZone(java.time.ZoneId zone) { return this; }
+            @Override public java.time.Instant instant() { return now.get(); }
+        };
+        var expiring = new GenerationProgressService(clock);
+        var runner = new GenerationJobService(Runnable::run, expiring);
+        runWithTokens(runner, expiring, 10, false);
+        now.set(now.get().plus(java.time.Duration.ofHours(2)));
+        assertThat(expiring.get(1L, GenerationProgressStage.TEST_CASE).status()).isEqualTo(GenerationProgressStatus.IDLE);
+
+        runWithTokens(runner, expiring, 20, true);
+        assertThat(expiring.get(1L, GenerationProgressStage.TEST_CASE).runMetrics().totalTokens()).isEqualTo(32);
+    }
+
+    @Test
+    void resetClearsUnfinishedTotals() {
+        runWithTokens(jobs, progress, 10, false);
+        progress.reset(1L);
+        runWithTokens(jobs, progress, 20, true);
+        assertThat(progress.get(1L, GenerationProgressStage.TEST_CASE).runMetrics().totalTokens()).isEqualTo(21);
+    }
+
     @Test
     void aggregatesParallelResponsesWithoutFileLoggingAndSurvivesLogTruncation() {
         var stage = GenerationProgressStage.TEST_PLAN;
@@ -81,7 +146,7 @@ class GenerationRunMetricsTest {
     }
 
     @Test
-    void keepsFailedRunUsageAndResetsItForTheNextRunAndOtherStage() {
+    void addsFailedRunUsageToTheNextRunButNotToOtherStages() {
         var stage = GenerationProgressStage.TEST_CASE;
         jobs.submit(1L, stage, () -> {
             progress.resume(1L, stage, List.of("Saved", "Pending"), 1, "Resume");
@@ -101,12 +166,12 @@ class GenerationRunMetricsTest {
         });
         var next = progress.get(1L, stage).runMetrics();
         assertThat(next.runId()).isNotEqualTo(failed.runMetrics().runId());
-        assertThat(next.totalTokens()).isEqualTo(30);
-        assertThat(next.estimatedCalls()).isZero();
+        assertThat(next.totalTokens()).isEqualTo(90);
+        assertThat(next.estimatedCalls()).isEqualTo(1);
 
         jobs.submit(1L, GenerationProgressStage.UNIT_TEST, () -> {});
         assertThat(progress.get(1L, GenerationProgressStage.UNIT_TEST).runMetrics().recordedCalls()).isZero();
-        assertThat(progress.get(1L, stage).runMetrics().totalTokens()).isEqualTo(30);
+        assertThat(progress.get(1L, stage).runMetrics().totalTokens()).isEqualTo(90);
     }
 
     private void record(LlmTokenUsage.UsageSource source) {

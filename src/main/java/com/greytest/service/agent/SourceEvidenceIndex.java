@@ -37,6 +37,14 @@ final class SourceEvidenceIndex {
 
     boolean declares(String name) { return types.containsKey(name); }
 
+    /** Chỉ thấy source đã cung cấp cho ngữ cảnh; lời gọi ở class ngoài ngữ cảnh không được phát hiện. */
+    boolean callsMethodOn(String method, String typeSimpleName) {
+        return types.values().stream().map(SourceType::unit).distinct()
+                .flatMap(unit -> unit.findAll(com.github.javaparser.ast.expr.MethodCallExpr.class).stream())
+                .anyMatch(call -> call.getNameAsString().equals(method) && call.getScope()
+                        .filter(scope -> scope.toString().contains(typeSimpleName)).isPresent());
+    }
+
     MethodDeclaration method(MethodContextDto dto) {
         if (dto == null || dto.sourceCode() == null) return null;
         var parsed = parser.parseMethodDeclaration(dto.sourceCode());

@@ -306,7 +306,11 @@ final class SourceExceptionMessageEvidence {
         var declaration = target.node().asClassOrInterfaceDeclaration();
         var targetUnit = target.unit();
         if (!declaration.getImplementedTypes().isEmpty() || declaration.getExtendedTypes().stream()
-                .anyMatch(t -> !"java.lang.Object".equals(index.resolve(t, targetUnit)))) return null;
+                .anyMatch(t -> {
+                    String parent = index.resolve(t, targetUnit);
+                    // Exception chuẩn của JDK không có static helper, nên lời gọi Class.helper() không thể là overload kế thừa.
+                    return !"java.lang.Object".equals(parent) && !(classCall && STANDARD.contains(parent));
+                })) return null;
         var values = call.getArguments().stream().map(e -> fragment(e, owner.unit(), env, 0)).toList();
         if (values.stream().anyMatch(Objects::isNull)) return null;
         var candidates = target.node().getMethodsByName(call.getNameAsString()).stream()
@@ -361,6 +365,8 @@ final class SourceExceptionMessageEvidence {
         }
         if (expression.isMethodCallExpr()) {
             var call = expression.asMethodCallExpr();
+            Text enumValue = enumGetterValue(call, unit, env);
+            if (enumValue != null) return enumValue;
             if (!call.getNameAsString().equals("format") || call.getScope().isEmpty()
                     || call.getScope().get().findAll(NameExpr.class).stream().anyMatch(e -> env.containsKey(e.getNameAsString()))
                     || !"java.lang.String".equals(index.resolve(call.getScope().get().toString(), unit))
@@ -401,6 +407,55 @@ final class SourceExceptionMessageEvidence {
         }
         // Biểu thức còn lại là giá trị runtime, không đoán kết quả helper/getter.
         return expression.isMethodCallExpr() || expression.isFieldAccessExpr() ? Text.hole(expression.toString(), false) : null;
+    }
+
+    /**
+     * Đọc giá trị của Enum.CONST.getter() khi getter chỉ trả field và field nhận literal qua constructor.
+     * Trường hợp khác trả null để giữ nguyên cách xử lý giá trị runtime, không đoán chuỗi.
+     */
+    private Text enumGetterValue(MethodCallExpr call, CompilationUnit unit, Map<String, Text> env) {
+        if (!call.getArguments().isEmpty() || call.getScope().isEmpty() || !call.getScope().get().isFieldAccessExpr()) return null;
+        var reference = call.getScope().get().asFieldAccessExpr();
+        if (reference.getScope().findAll(NameExpr.class).stream().anyMatch(name -> env.containsKey(name.getNameAsString()))) return null;
+        var type = index.type(index.resolve(reference.getScope().toString(), unit));
+        if (type == null || !type.node().isEnumDeclaration()) return null;
+        var declaration = type.node().asEnumDeclaration();
+        var constant = declaration.getEntries().stream()
+                .filter(entry -> entry.getNameAsString().equals(reference.getNameAsString())).findFirst().orElse(null);
+        if (constant == null || !constant.getClassBody().isEmpty()) return null;
+        var getters = declaration.getMethodsByName(call.getNameAsString()).stream().filter(m -> m.getParameters().isEmpty()).toList();
+        if (getters.size() != 1 || getters.get(0).getBody().isEmpty() || getters.get(0).getBody().get().getStatements().size() != 1) return null;
+        var statement = getters.get(0).getBody().get().getStatement(0);
+        if (!statement.isReturnStmt() || statement.asReturnStmt().getExpression().isEmpty()) return null;
+        String field = fieldName(statement.asReturnStmt().getExpression().get());
+        if (field == null || declaration.getFieldByName(field).isEmpty()) return null;
+        var constructors = declaration.getConstructors().stream()
+                .filter(c -> c.getParameters().size() == constant.getArguments().size()).toList();
+        if (constructors.size() != 1) return null;
+        var constructor = constructors.get(0);
+        // Field chỉ được phép đổi qua method có tên; method đó có lời gọi trong source thì giá trị không còn cố định.
+        for (var assign : declaration.findAll(AssignExpr.class)) {
+            if (!field.equals(fieldName(assign.getTarget()))) continue;
+            if (assign.findAncestor(ConstructorDeclaration.class).isPresent()) continue;
+            var writer = assign.findAncestor(MethodDeclaration.class).orElse(null);
+            if (writer == null || index.callsMethodOn(writer.getNameAsString(), declaration.getNameAsString())
+                    || declaration.findAll(MethodCallExpr.class).stream().anyMatch(c -> c.getNameAsString().equals(writer.getNameAsString()))) return null;
+        }
+        var assignments = constructor.findAll(AssignExpr.class).stream().filter(a -> field.equals(fieldName(a.getTarget()))).toList();
+        if (assignments.size() != 1 || !assignments.get(0).getValue().isNameExpr()) return null;
+        String parameter = assignments.get(0).getValue().asNameExpr().getNameAsString();
+        for (int i = 0; i < constructor.getParameters().size(); i++) {
+            if (!constructor.getParameter(i).getNameAsString().equals(parameter)) continue;
+            var argument = constant.getArgument(i);
+            return argument.isStringLiteralExpr() ? Text.literal(argument.asStringLiteralExpr().asString(), true) : null;
+        }
+        return null;
+    }
+
+    private static String fieldName(Expression expression) {
+        if (expression.isNameExpr()) return expression.asNameExpr().getNameAsString();
+        return expression.isFieldAccessExpr() && expression.asFieldAccessExpr().getScope().isThisExpr()
+                ? expression.asFieldAccessExpr().getNameAsString() : null;
     }
 
     private static String rootParameter(String argument) {

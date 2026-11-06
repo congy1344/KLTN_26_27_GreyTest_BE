@@ -126,6 +126,13 @@ class UpstreamSourceEvidenceRegressionTest {
         assertThat(GeneratedUnitTestSemanticValidator.validate(unitContext(f), json.treeToValue(f.get("response"), UnitTestResponseDto.class))).isEmpty();
     }
 
+    @Test void acceptsNotSameBetweenAnEntityAndItsMappedDto() throws Exception {
+        var f = fixture("hms-incompatible-identity");
+        var u = (ObjectNode) f.path("response").path("unit_tests").get(0);
+        u.put("source_code", u.path("source_code").asText().replace("assertSame(savedBill, result);", "org.junit.jupiter.api.Assertions.assertNotSame(savedBill, result);"));
+        assertThat(GeneratedUnitTestSemanticValidator.validate(unitContext(f), json.treeToValue(f.get("response"), UnitTestResponseDto.class))).isEmpty();
+    }
+
     @Test void rejectsAnUninitializedSpyWithoutASourceSupportedNoArgConstructor() throws Exception {
         var f = fixture("hms-uninitialized-spy");
         assertThat(GeneratedUnitTestSemanticValidator.validate(unitContext(f), json.treeToValue(f.get("response"), UnitTestResponseDto.class)))

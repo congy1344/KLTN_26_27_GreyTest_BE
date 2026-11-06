@@ -18,6 +18,7 @@ import com.greytest.dto.GenerationProgressStage;
 import com.greytest.dto.GenerationProgressStatus;
 import com.greytest.dto.GenerationProgressStepDto;
 import com.greytest.dto.GenerationProgressStepStatus;
+import com.greytest.dto.GenerationRunMetricsDto;
 import com.greytest.exception.GenerationInProgressException;
 
 /**
@@ -30,6 +31,8 @@ public class GenerationProgressService {
     private static final int MAX_LOGS = 40;
     private static final Duration TERMINAL_TTL = Duration.ofMinutes(15);
     private final ConcurrentMap<ProgressKey, ProgressState> states = new ConcurrentHashMap<>();
+    // Tổng của stage chưa hoàn tất, giữ qua TTL của snapshot để lần "Tiếp tục sinh" sau vẫn cộng dồn; mất khi backend khởi động lại.
+    private final ConcurrentMap<ProgressKey, GenerationRunMetricsDto> unfinishedTotals = new ConcurrentHashMap<>();
     private final Clock clock;
 
     public GenerationProgressService() {
@@ -43,11 +46,13 @@ public class GenerationProgressService {
     public synchronized void reset(Long projectId) {
         if (projectId == null) return;
         states.keySet().removeIf(key -> projectId.equals(key.projectId()));
+        unfinishedTotals.keySet().removeIf(key -> projectId.equals(key.projectId()));
     }
 
     public synchronized void reset(Long projectId, GenerationProgressStage stage) {
         if (projectId == null || stage == null) return;
         states.remove(new ProgressKey(projectId, stage));
+        unfinishedTotals.remove(new ProgressKey(projectId, stage));
     }
 
     public synchronized void start(Long projectId, GenerationProgressStage stage, List<String> stepLabels, String message) {
@@ -135,9 +140,12 @@ public class GenerationProgressService {
                     "Một tác vụ sinh AI đang chạy cho project này. Vui lòng chờ hoàn tất.");
         }
         ProgressKey key = new ProgressKey(projectId, stage);
+        ProgressState current = states.get(key);
+        GenerationRunMetricsDto carried = unfinishedTotals.remove(key);
+        if (current != null) carried = current.unfinishedTotals();
         ProgressState state = new ProgressState(stage, List.of("Đang chờ worker xử lý"),
                 message, clock.instant(), GenerationProgressStatus.QUEUED);
-        state.measurement = new GenerationRunMetrics(clock, java.util.Map::of);
+        state.measurement = new GenerationRunMetrics(clock, java.util.Map::of, carried);
         states.put(key, state);
     }
 
@@ -265,7 +273,12 @@ public class GenerationProgressService {
 
     private void cleanupExpired() {
         Instant threshold = clock.instant().minus(TERMINAL_TTL);
-        states.entrySet().removeIf(entry -> entry.getValue().isTerminalBefore(threshold));
+        states.entrySet().removeIf(entry -> {
+            if (!entry.getValue().isTerminalBefore(threshold)) return false;
+            GenerationRunMetricsDto totals = entry.getValue().unfinishedTotals();
+            if (totals != null) unfinishedTotals.put(entry.getKey(), totals);
+            return true;
+        });
     }
 
     private record ProgressKey(Long projectId, GenerationProgressStage stage) {}
@@ -289,6 +302,11 @@ public class GenerationProgressService {
             if (measurement == null || measurement.isFinished()) measurement = new GenerationRunMetrics(clock, metrics);
             else measurement.setMetrics(metrics);
             return measurement;
+        }
+
+        /** Stage đã hoàn tất thì lần sinh sau là lượt mới, không cộng dồn. */
+        private synchronized GenerationRunMetricsDto unfinishedTotals() {
+            return measurement == null || status == GenerationProgressStatus.COMPLETED ? null : measurement.snapshot();
         }
 
         private synchronized GenerationRunMetrics activeMeasurement() {

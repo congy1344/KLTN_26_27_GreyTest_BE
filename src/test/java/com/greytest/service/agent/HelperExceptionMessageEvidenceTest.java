@@ -13,6 +13,51 @@ class HelperExceptionMessageEvidenceTest {
             + "static void fail(Object code) { throw new ApiException(code); } "
             + "static void fail(String message) { throw new ApiException(message); } }";
 
+    private static final String RESULT_ENUM = "enum Result { DENIED(\"无权限！\"), OK(\"success\"); private String result; "
+            + "Result(String result) { this.result = result; } String getResult() { return result; } "
+            + "void setResult(String result) { this.result = result; } } ";
+
+    @Test void provesMessageFromAnEnumConstantGetter() {
+        var classes = sources("void run() { Asserts.fail(Result.DENIED.getResult()); }", API + ASSERTS + RESULT_ENUM);
+        assertThat(validate(classes, "ApiException message \"无权限！\" ")).isEmpty();
+        assertThat(validate(classes, "ApiException message \"success\" ")).isPresent();
+    }
+
+    @Test void provesEnumMessageThroughAStaticFailOnAnExceptionExtendingRuntimeException() {
+        var mall = "static class MallException extends RuntimeException { MallException(String message) { super(message); } "
+                + "static void fail(String message) { throw new MallException(message); } } ";
+        var classes = sources("void run() { MallException.fail(Result.DENIED.getResult()); }", mall + RESULT_ENUM);
+        assertThat(validate(classes, "MallException message \"无权限！\" ")).isEmpty();
+        assertThat(validate(classes, "MallException message \"success\" ")).isPresent();
+    }
+
+    @Test void doesNotTrustAStaticHelperInheritedFromAProjectBaseClass() {
+        var classes = sources("void run() { MallException.fail(\"bad\"); }",
+                "static class Base extends RuntimeException { } static class MallException extends Base { "
+                + "static void fail(String message) { throw new MallException(); } } ");
+        assertThat(validate(classes, "MallException message \"bad\" ")).isPresent();
+    }
+
+    @Test void doesNotTrustAnEnumValueRewrittenThroughItsSetter() {
+        var classes = sources("void run() { Result.DENIED.setResult(\"changed\"); Asserts.fail(Result.DENIED.getResult()); }",
+                API + ASSERTS + RESULT_ENUM);
+        assertThat(validate(classes, "ApiException message \"无权限！\" ")).isPresent();
+    }
+
+    @Test void doesNotTrustAnEnumGetterThatIsNotAPlainFieldRead() {
+        var classes = sources("void run() { Asserts.fail(Result.DENIED.getResult()); }", API + ASSERTS
+                + "enum Result { DENIED(\"a\"); private final String result; Result(String result) { this.result = result; } "
+                + "String getResult() { return result + \"b\"; } } ");
+        assertThat(validate(classes, "ApiException message \"a\" ")).isPresent();
+    }
+
+    @Test void doesNotTrustAConstantWithItsOwnBody() {
+        var classes = sources("void run() { Asserts.fail(Result.DENIED.getResult()); }", API + ASSERTS
+                + "enum Result { DENIED(\"a\") { String getResult() { return \"b\"; } }; private final String result; "
+                + "Result(String result) { this.result = result; } String getResult() { return result; } } ");
+        assertThat(validate(classes, "ApiException message \"a\" ")).isPresent();
+    }
+
     @Test void acceptsSpringUsernameMessageButRejectsInventedOrChangedUnicodeText() {
         var classes = sources("void run() { throw new UsernameNotFoundException(\"用户名或密码错误\"); }", "");
         assertThat(validate(classes, "UsernameNotFoundException message \"用户名或密码错误\" ")).isEmpty();

@@ -197,8 +197,9 @@ final class GeneratedTestApiValidator {
         var left = declaredValueType(leftExpr, test);
         var right = declaredValueType(rightExpr, test);
         if (left == null || right == null) return;
-        // Hai class cụ thể độc lập hoặc entity với kiểu vô hướng final không thể là cùng một instance.
-        if (incomparableTypes(left, right)) {
+        // Hai class cụ thể độc lập hoặc entity với kiểu vô hướng final không thể là cùng một instance;
+        // assertNotSame giữa hai kiểu này vẫn compile và luôn đúng nên không chặn.
+        if (call.getNameAsString().equals("assertSame") && incomparableTypes(left, right)) {
             problems.add("Impossible reference identity: " + left.type() + " and " + right.type()
                     + " are unrelated concrete types. Preserve approved mapped DTO fields; do not assert entity-to-DTO or entity-to-scalar identity.");
         }
