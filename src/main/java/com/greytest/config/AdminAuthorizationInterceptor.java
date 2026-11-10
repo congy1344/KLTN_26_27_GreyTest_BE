@@ -25,7 +25,19 @@ public class AdminAuthorizationInterceptor implements HandlerInterceptor {
 
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) {
-        AuthUser user = authService.currentUser(request.getHeader("Authorization"));
+        if ("OPTIONS".equalsIgnoreCase(request.getMethod())) {
+            return true;
+        }
+        String authHeader = request.getHeader("Authorization");
+        if ((authHeader == null || authHeader.isBlank())
+                && request.getRequestURI() != null
+                && request.getRequestURI().equals("/api/admin/monitoring/stream")) {
+            String queryToken = request.getParameter("token");
+            if (queryToken != null && !queryToken.isBlank()) {
+                authHeader = queryToken.startsWith("Bearer ") ? queryToken : "Bearer " + queryToken.trim();
+            }
+        }
+        AuthUser user = authService.currentUser(authHeader);
         if (user.getRole() != UserRole.ADMIN) {
             throw new AuthException("ADMIN_REQUIRED", "Bạn không có quyền truy cập trang quản trị", HttpStatus.FORBIDDEN);
         }

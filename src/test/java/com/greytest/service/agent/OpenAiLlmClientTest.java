@@ -176,4 +176,43 @@ class OpenAiLlmClientTest {
             server.stop(0);
         }
     }
+
+    @Test
+    void dynamicKeyRotationUsesSetApiKeys() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
+        java.util.List<String> seenAuthHeaders = new java.util.concurrent.CopyOnWriteArrayList<>();
+        server.createContext("/", exchange -> {
+            seenAuthHeaders.add(exchange.getRequestHeaders().getFirst("Authorization"));
+            byte[] bytes = "{\"choices\":[{\"message\":{\"content\":\"{}\"}}]}".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+        server.start();
+        try {
+            OpenAiLlmClient client = new OpenAiLlmClient(objectMapper, HttpClient.newHttpClient(), "init-key",
+                    "gpt-4o-mini", 0.3, 1000, Duration.ofSeconds(5),
+                    URI.create("http://127.0.0.1:" + server.getAddress().getPort()));
+
+            client.setApiKeys(java.util.List.of("slot0-key", "slot1-key"));
+            assertThat(client.getApiKeys()).containsExactly("slot0-key", "slot1-key");
+
+            client.complete("prompt 1");
+            client.complete("prompt 2");
+
+            assertThat(seenAuthHeaders).containsExactly("Bearer slot0-key", "Bearer slot1-key");
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void updatesModelDynamically() throws Exception {
+        OpenAiLlmClient client = new OpenAiLlmClient(objectMapper, HttpClient.newHttpClient(), "init-key",
+                "gpt-4o-mini", 0.3, 1000, Duration.ofSeconds(5), URI.create("http://127.0.0.1:8080"));
+        assertThat(client.getModel()).isEqualTo("gpt-4o-mini");
+
+        client.setModel("gpt-4o");
+        assertThat(client.getModel()).isEqualTo("gpt-4o");
+    }
 }

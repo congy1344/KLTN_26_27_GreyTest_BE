@@ -20,6 +20,8 @@ public interface AuthUserRepository extends JpaRepository<AuthUser, Long>, JpaSp
 
     long countByRoleAndEnabledTrue(UserRole role);
 
+    long countByTier(com.greytest.entity.enums.UserTier tier);
+
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select user from AuthUser user where user.role = com.greytest.entity.enums.UserRole.ADMIN "
             + "and user.enabled = true order by user.id")

@@ -147,7 +147,8 @@ public class UnitTestService {
             Map<Long,BlockedUnitTestDto> blockedCases = new java.util.concurrent.ConcurrentHashMap<>();
             var generated=generateBatches(projectId,batchesToRun,batchIndexes,allBatches.size(),blockedCases);
             generated.forEach(unit -> validatedIds.add(unit.caseId()));
-            if (generationProgress.isPaused(projectId, GenerationProgressStage.UNIT_TEST)) {
+            boolean hasRemaining = !target.stream().allMatch(tc -> validatedIds.contains(tc.getId()) || blockedCases.containsKey(tc.getId()));
+            if (hasRemaining && generationProgress.isPaused(projectId, GenerationProgressStage.UNIT_TEST)) {
                 generationProgress.log(projectId, GenerationProgressStage.UNIT_TEST,
                         "Tác vụ đã tạm dừng. Các Unit Test đã sinh được lưu an toàn vào CSDL. Nhấn 'Tiếp tục sinh' khi bạn sẵn sàng.");
                 return list(projectId, scope != null ? scope.servicePath() : null);

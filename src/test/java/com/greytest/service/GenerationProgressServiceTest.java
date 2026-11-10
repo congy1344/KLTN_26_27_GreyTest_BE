@@ -402,6 +402,22 @@ class GenerationProgressServiceTest {
         assertThat(progress.steps().get(2).status()).isEqualTo(GenerationProgressStepStatus.FAILED);
     }
 
+    @Test
+    void returnsOnlyActiveProgressItems() {
+        service.queue(10L, GenerationProgressStage.BUSINESS_RULE, "Chờ chạy.");
+        service.start(11L, GenerationProgressStage.TEST_PLAN, 2, "Đang xử lý.");
+        service.start(12L, GenerationProgressStage.TEST_CASE, 2, "Đã xong.");
+        service.complete(12L, GenerationProgressStage.TEST_CASE, "Hoàn tất.");
+        service.start(13L, GenerationProgressStage.UNIT_TEST, 2, "Bị lỗi.");
+        service.fail(13L, GenerationProgressStage.UNIT_TEST, "Lỗi cú pháp.");
+
+        var activeItems = service.getActiveProgressItems();
+
+        assertThat(activeItems).hasSize(2);
+        assertThat(activeItems).extracting(GenerationProgressService.ActiveProgressItem::projectId)
+                .containsExactlyInAnyOrder(10L, 11L);
+    }
+
     private static final class MutableClock extends Clock {
         private Instant instant;
 

@@ -226,7 +226,9 @@ public class TestCaseService {
                         }
                     });
 
-            if (generationProgress.isPaused(projectId, GenerationProgressStage.TEST_CASE)) {
+            boolean hasRemaining = approvedPlans.stream()
+                    .anyMatch(plan -> cases.findByTestPlanId(plan.getId()).isEmpty());
+            if (hasRemaining && generationProgress.isPaused(projectId, GenerationProgressStage.TEST_CASE)) {
                 generationProgress.log(projectId, GenerationProgressStage.TEST_CASE,
                         "Tác vụ đã tạm dừng. Các Test Case đã sinh được lưu an toàn vào CSDL. Nhấn 'Tiếp tục sinh' khi bạn sẵn sàng.");
                 return allSavedCases.isEmpty() ? list(projectId) : allSavedCases;

@@ -37,6 +37,14 @@ public class AuthUser {
 
     private String fullName;
 
+    @Column(length = 20)
+    private String phoneNumber;
+
+    @Column(length = 10)
+    private String gender;
+
+    private java.time.LocalDate dateOfBirth;
+
     @Enumerated(EnumType.STRING)
     private UserRole role;
 

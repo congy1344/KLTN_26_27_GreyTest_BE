@@ -205,6 +205,87 @@ class UsageQuotaServiceTest {
                 .isInstanceOf(UsageQuotaExceededException.class);
     }
 
+    @Test
+    void resetUsageResetsQuotaUsedToZeroAndNormalizesPeriod() {
+        UsageQuota finite = new UsageQuota();
+        finite.setUserId(7L);
+        finite.setQuotaLimit(100);
+        finite.setQuotaUsed(95);
+        finite.setPeriodStart(LocalDate.of(2026, 8, 15));
+        AtomicReference<UsageQuota> stored = new AtomicReference<>(finite);
+        UsageQuotaService service = new UsageQuotaService(repository(stored), null, 100, 300, AUGUST, "real");
+
+        UsageQuota reset = service.resetUsage(7L);
+
+        assertThat(reset.getQuotaUsed()).isZero();
+        assertThat(reset.getPeriodStart()).isEqualTo(LocalDate.of(2026, 8, 1));
+        assertThat(stored.get().getQuotaUsed()).isZero();
+    }
+
+    @Test
+    void resetUsagePreservesWeeklyCycleForPlusTier() {
+        UsageQuota plus = new UsageQuota();
+        plus.setUserId(7L);
+        plus.setQuotaLimit(200);
+        plus.setQuotaUsed(150);
+        plus.setPeriodStart(LocalDate.of(2026, 8, 19)); // 2 ngày trước, trong chu kỳ 1 tuần
+        AtomicReference<UsageQuota> stored = new AtomicReference<>(plus);
+        UsageQuotaService service = new UsageQuotaService(repository(stored), null, 100, 300, AUGUST, "real");
+
+        UsageQuota reset = service.resetUsage(7L);
+
+        assertThat(reset.getQuotaUsed()).isZero();
+        assertThat(reset.getPeriodStart()).isEqualTo(LocalDate.of(2026, 8, 19));
+    }
+
+    @Test
+    void proTierResetsOnWeeklyCycle() {
+        UsageQuota pro = new UsageQuota();
+        pro.setUserId(8L);
+        pro.setQuotaLimit(300);
+        pro.setQuotaUsed(100);
+        // Bắt đầu 10 ngày trước (ngày 11/08), vượt quá 1 tuần
+        pro.setPeriodStart(LocalDate.of(2026, 8, 11));
+        AtomicReference<UsageQuota> stored = new AtomicReference<>(pro);
+        UsageQuotaService service = new UsageQuotaService(repository(stored), null, 100, 200, 300, AUGUST, "real");
+
+        UsageQuota current = service.current(8L);
+
+        // PRO là chu kỳ tuần (300 lượt/tuần), do đó được reset sau 1 tuần
+        assertThat(current.getQuotaUsed()).isZero();
+        assertThat(current.getPeriodStart()).isEqualTo(LocalDate.of(2026, 8, 21));
+    }
+
+    @Test
+    void dynamicLimitsResolvedFromTierPackageRepository() {
+        UsageQuota q = new UsageQuota();
+        q.setUserId(9L);
+        q.setQuotaLimit(100);
+        q.setQuotaUsed(10);
+        q.setPeriodStart(LocalDate.of(2026, 8, 1));
+        AtomicReference<UsageQuota> stored = new AtomicReference<>(q);
+
+        com.greytest.repository.TierPackageRepository tierRepo = mock(com.greytest.repository.TierPackageRepository.class);
+        when(tierRepo.findById("PRO")).thenReturn(Optional.of(new com.greytest.entity.TierPackage(
+                "PRO", "Gói Pro VIP", 50_000L, "MONTHLY", 500, 5, "VIP", "Desc", true)));
+        when(tierRepo.findById("PLUS")).thenReturn(Optional.of(new com.greytest.entity.TierPackage(
+                "PLUS", "Gói Plus VIP", 25_000L, "WEEKLY", 250, 3, "Plus", "Desc", true)));
+        when(tierRepo.findById("FREE")).thenReturn(Optional.of(new com.greytest.entity.TierPackage(
+                "FREE", "Gói Free", 0L, "MONTHLY", 50, 2, "Free", "Desc", true)));
+
+        UsageQuotaService service = new UsageQuotaService(repository(stored), null, 100, 200, 300, AUGUST, "real");
+        service.setTierPackageRepository(tierRepo);
+
+        UsageQuota proResult = service.upgradeToPro(9L);
+        assertThat(proResult.getQuotaLimit()).isEqualTo(500);
+
+        UsageQuota plusResult = service.upgradeToPlus(9L);
+        assertThat(plusResult.getQuotaLimit()).isEqualTo(250);
+
+        UsageQuota freeResult = service.downgradeToFree(9L);
+        assertThat(freeResult.getQuotaLimit()).isEqualTo(50);
+    }
+
     private UsageQuotaRepository repository(AtomicReference<UsageQuota> stored) {
         UsageQuotaRepository repository = mock(UsageQuotaRepository.class);
         when(repository.findByUserId(any())).thenAnswer(invocation -> Optional.ofNullable(stored.get()));

@@ -129,8 +129,21 @@ public class GenerationProgressService {
                     "Một tác vụ sinh AI đang chạy cho project này. Vui lòng chờ hoàn tất.");
         }
         ProgressKey key = new ProgressKey(projectId, stage);
-        states.put(key,
-                new ProgressState(stage, List.of("Đang chờ worker xử lý"), message, clock.instant(), GenerationProgressStatus.QUEUED));
+        states.compute(key, (k, current) -> {
+            if (current != null && current.status == GenerationProgressStatus.PAUSED) {
+                current.toQueued(message, clock.instant());
+                return current;
+            }
+            return new ProgressState(stage, List.of("Đang chờ worker xử lý"), message, clock.instant(), GenerationProgressStatus.QUEUED);
+        });
+    }
+
+    public synchronized void markWorkerFinished(Long projectId, GenerationProgressStage stage) {
+        if (projectId == null || stage == null) return;
+        ProgressState state = states.get(new ProgressKey(projectId, stage));
+        if (state != null) {
+            state.markFinished(clock.instant());
+        }
     }
 
     public void setStepStatus(Long projectId, GenerationProgressStage stage, int stepIndex, GenerationProgressStepStatus status) {
@@ -249,6 +262,20 @@ public class GenerationProgressService {
                 : state.snapshot();
     }
 
+    public record ActiveProgressItem(Long projectId, GenerationProgressStage stage, GenerationProgressDto progress) {}
+
+    public synchronized List<ActiveProgressItem> getActiveProgressItems() {
+        cleanupExpired();
+        List<ActiveProgressItem> result = new ArrayList<>();
+        for (var entry : states.entrySet()) {
+            ProgressState state = entry.getValue();
+            if (state.isActive()) {
+                result.add(new ActiveProgressItem(entry.getKey().projectId(), entry.getKey().stage(), state.snapshot()));
+            }
+        }
+        return result;
+    }
+
     private void cleanupExpired() {
         Instant threshold = clock.instant().minus(TERMINAL_TTL);
         states.entrySet().removeIf(entry -> entry.getValue().isTerminalBefore(threshold));
@@ -263,7 +290,8 @@ public class GenerationProgressService {
         private final List<GenerationProgressStepStatus> stepStatuses = new ArrayList<>();
         private final List<String> stepErrors = new ArrayList<>();
         private final List<GenerationProgressLogDto> logs = new ArrayList<>();
-        private final boolean autoPromoteFirstWaitingStep;
+        private boolean autoPromoteFirstWaitingStep;
+        private boolean workerFinished = false;
         private GenerationProgressStatus status = GenerationProgressStatus.RUNNING;
         private int completedSteps;
         private String failureMessage;
@@ -308,8 +336,14 @@ public class GenerationProgressService {
 
         private synchronized void toQueued(String message, Instant now) {
             this.status = GenerationProgressStatus.QUEUED;
+            this.workerFinished = false;
             this.updatedAt = now;
             addLog(message, now);
+        }
+
+        private synchronized void markFinished(Instant now) {
+            this.workerFinished = true;
+            this.updatedAt = now;
         }
 
         private synchronized void setStepStatus(int stepIndex, GenerationProgressStepStatus newStatus, Instant now) {
@@ -455,8 +489,11 @@ public class GenerationProgressService {
         private synchronized GenerationProgressDto snapshot() {
             int percent = totalSteps == 0 ? 0 : completedSteps * 100 / totalSteps;
             if (status == GenerationProgressStatus.PARTIAL) percent = Math.min(percent, 99);
+            boolean busy = !workerFinished && (status == GenerationProgressStatus.RUNNING
+                    || status == GenerationProgressStatus.QUEUED
+                    || status == GenerationProgressStatus.PAUSED);
             return new GenerationProgressDto(
-                    stage, status, percent, completedSteps, totalSteps, stepSnapshots(), List.copyOf(logs));
+                    stage, status, percent, completedSteps, totalSteps, stepSnapshots(), List.copyOf(logs), busy);
         }
 
         private List<GenerationProgressStepDto> stepSnapshots() {

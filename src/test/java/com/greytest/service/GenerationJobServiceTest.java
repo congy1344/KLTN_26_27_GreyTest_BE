@@ -257,6 +257,50 @@ class GenerationJobServiceTest {
                 .contains("nâng cấp lên gói PRO");
     }
 
+    @Test
+    void skipsExecutionIfJobWasPausedWhileQueued() {
+        ManualExecutor executor = new ManualExecutor();
+        GenerationProgressService progress = new GenerationProgressService();
+        GenerationJobService jobs = new GenerationJobService(executor, progress);
+        java.util.concurrent.atomic.AtomicBoolean ran = new java.util.concurrent.atomic.AtomicBoolean(false);
+
+        jobs.submit(1L, GenerationProgressStage.TEST_PLAN, () -> ran.set(true));
+        jobs.pause(1L, GenerationProgressStage.TEST_PLAN);
+
+        executor.runNext();
+
+        assertThat(ran.get()).isFalse();
+        assertThat(progress.get(1L, GenerationProgressStage.TEST_PLAN).status())
+                .isEqualTo(GenerationProgressStatus.PAUSED);
+    }
+
+    @Test
+    void allowsResumedJobAfterQueuedJobWasPaused() {
+        ManualExecutor executor = new ManualExecutor();
+        GenerationProgressService progress = new GenerationProgressService();
+        GenerationJobService jobs = new GenerationJobService(executor, progress);
+        java.util.concurrent.atomic.AtomicInteger executedJob = new java.util.concurrent.atomic.AtomicInteger(0);
+
+        jobs.submit(1L, GenerationProgressStage.TEST_CASE, () -> executedJob.set(1));
+        jobs.pause(1L, GenerationProgressStage.TEST_CASE);
+
+        jobs.submit(1L, GenerationProgressStage.TEST_CASE, () -> {
+            progress.start(1L, GenerationProgressStage.TEST_CASE, 1, "Chạy resume.");
+            executedJob.set(2);
+            progress.complete(1L, GenerationProgressStage.TEST_CASE, "Hoàn tất resume.");
+        });
+
+        // Run the first worker (was paused while queued)
+        executor.runNext();
+        assertThat(executedJob.get()).isEqualTo(0);
+
+        // Run the resumed worker
+        executor.runNext();
+        assertThat(executedJob.get()).isEqualTo(2);
+        assertThat(progress.get(1L, GenerationProgressStage.TEST_CASE).status())
+                .isEqualTo(GenerationProgressStatus.COMPLETED);
+    }
+
     private static final class ManualExecutor implements Executor {
         private final Queue<Runnable> tasks = new ArrayDeque<>();
 

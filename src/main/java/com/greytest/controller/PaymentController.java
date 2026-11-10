@@ -14,6 +14,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import com.greytest.dto.admin.AdminDtos.TierPackageDto;
 import com.greytest.dto.payment.CreatePaymentRequest;
 import com.greytest.dto.payment.PaymentCallbackResponse;
 import com.greytest.dto.payment.PaymentUrlResponse;
@@ -23,10 +24,12 @@ import com.greytest.entity.enums.PaymentStatus;
 import com.greytest.entity.enums.UserTier;
 import com.greytest.repository.AuthUserRepository;
 import com.greytest.repository.PaymentTransactionRepository;
+import com.greytest.service.AdminService;
 import com.greytest.service.AuthService;
 import com.greytest.service.UserService;
 import com.greytest.service.payment.VnpayService;
 
+import org.springframework.beans.factory.annotation.Autowired;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.extern.slf4j.Slf4j;
 
@@ -43,6 +46,7 @@ public class PaymentController {
     private final AuthService authService;
     private final UserService userService;
     private final AuthUserRepository userRepository;
+    private final AdminService adminService;
 
     public PaymentController(
             VnpayService vnpayService,
@@ -50,16 +54,60 @@ public class PaymentController {
             AuthService authService,
             UserService userService,
             AuthUserRepository userRepository) {
+        this(vnpayService, paymentRepository, authService, userService, userRepository, null);
+    }
+
+    @Autowired
+    public PaymentController(
+            VnpayService vnpayService,
+            PaymentTransactionRepository paymentRepository,
+            AuthService authService,
+            UserService userService,
+            AuthUserRepository userRepository,
+            @Autowired(required = false) AdminService adminService) {
         this.vnpayService = vnpayService;
         this.paymentRepository = paymentRepository;
         this.authService = authService;
         this.userService = userService;
         this.userRepository = userRepository;
+        this.adminService = adminService;
+    }
+
+    /**
+     * Danh sách các gói dịch vụ đang hoạt động công khai để người dùng lựa chọn nâng cấp.
+     */
+    @GetMapping("/packages")
+    public ResponseEntity<List<TierPackageDto>> getPublicPackages() {
+        if (adminService == null) {
+            return ResponseEntity.ok(List.of(
+                    new TierPackageDto("PLUS", "Gói Tiêu Chuẩn (PLUS)", 10_000L, "WEEKLY", 200, 3,
+                            List.of("Toàn bộ tính năng gói FREE", "200 lượt gọi AI hồi lại hàng tuần", "Sinh tối đa 3 batch song song"),
+                            "Dành cho nhóm phát triển mở rộng", true, 0L),
+                    new TierPackageDto("PRO", "Gói Chuyên Nghiệp (PRO)", 20_000L, "MONTHLY", 300, 4,
+                            List.of("Toàn bộ tính năng gói PLUS", "Phân tích cú pháp AST & Call Graph sâu", "Sinh Unit Test JUnit 5 song song 4 luồng"),
+                            "Toàn bộ tính năng phân tích sâu & JaCoCo Refinement", true, 0L)
+            ));
+        }
+        List<TierPackageDto> active = adminService.getTierPackages().stream()
+                .filter(TierPackageDto::active)
+                .map(p -> new TierPackageDto(
+                        p.code(),
+                        p.name(),
+                        p.price(),
+                        p.cycle(),
+                        p.quotaLimit(),
+                        p.batchConcurrency(),
+                        p.features(),
+                        p.description(),
+                        p.active(),
+                        0L))
+                .toList();
+        return ResponseEntity.ok(active);
     }
 
     /**
      * Tạo đường dẫn thanh toán trực tuyến qua VNPay.
-     * Giá thử nghiệm: Gói PLUS = 10.000 VNĐ, Gói PRO = 20.000 VNĐ.
+     * Giá cước tự động áp dụng theo cấu hình động từ Admin.
      */
     @PostMapping("/create-vnpay-url")
     public ResponseEntity<PaymentUrlResponse> createPaymentUrl(
@@ -74,8 +122,19 @@ public class PaymentController {
             return ResponseEntity.badRequest().build();
         }
 
-        // Giá thử nghiệm phải đạt hạn mức thanh toán tối thiểu của VNPay.
+        // Lấy giá động do Admin thiết lập trong hệ thống
         long amount = (targetTier == UserTier.PLUS) ? 10_000L : 20_000L;
+        if (adminService != null) {
+            TierPackageDto configuredPkg = adminService.getTierPackage(targetTier.name());
+            if (configuredPkg != null) {
+                if (!configuredPkg.active()) {
+                    return ResponseEntity.badRequest().build();
+                }
+                if (configuredPkg.price() > 0) {
+                    amount = configuredPkg.price();
+                }
+            }
+        }
 
         String orderId = "GT_" + System.currentTimeMillis() + "_" + ThreadLocalRandom.current().nextInt(1000, 9999);
         String orderInfo = "GreyTest - Nang cap goi " + targetTier.name() + " - " + orderId;

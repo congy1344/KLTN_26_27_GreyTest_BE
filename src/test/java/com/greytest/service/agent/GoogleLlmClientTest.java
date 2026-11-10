@@ -509,6 +509,58 @@ class GoogleLlmClientTest {
                 .hasMessageContaining("LLM_API_KEY");
     }
 
+    @Test
+    void setApiKeysResizesCooldownArrayCorrectly() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
+        List<String> seenKeys = new CopyOnWriteArrayList<>();
+        server.createContext("/", exchange -> {
+            seenKeys.add(exchange.getRequestHeaders().getFirst("x-goog-api-key"));
+            String response = """
+                    {
+                      "candidates": [
+                        {
+                          "content": {
+                            "parts": [
+                              {
+                                "text": "{\\"rules\\":[]}"
+                              }
+                            ]
+                          }
+                        }
+                      ]
+                    }
+                    """;
+            byte[] bytes = response.getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+        server.start();
+        try {
+            GoogleLlmClient client = client("initial-single-key",
+                    URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/v1beta/interactions"));
+
+            // Expanding from 1 key to 4 keys dynamically must not throw ArrayIndexOutOfBoundsException
+            client.setApiKeys(List.of("k1", "k2", "k3", "k4"));
+            assertThat(client.getApiKeys()).containsExactly("k1", "k2", "k3", "k4");
+
+            String output = client.complete("Prompt test");
+            assertThat(output).contains("\"rules\"");
+            assertThat(seenKeys).isNotEmpty();
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void updatesModelDynamically() {
+        GoogleLlmClient client = client("test-key", URI.create("http://127.0.0.1:8080"));
+        assertThat(client.getModel()).isEqualTo("gemini-3.5-flash");
+
+        client.setModel("gemini-1.5-pro");
+        assertThat(client.getModel()).isEqualTo("gemini-1.5-pro");
+    }
+
     private GoogleLlmClient client(String apiKey, URI endpoint) {
         return client(apiKey, "", endpoint);
     }
