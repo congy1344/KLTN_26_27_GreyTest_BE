@@ -38,6 +38,40 @@ class HelperExceptionMessageEvidenceTest {
         assertThat(validate(classes, "MallException message \"bad\" ")).isPresent();
     }
 
+    @Test void provesTheLiteralPartOfAMessageConcatenatedWithALocalVariable() {
+        var classes = sources("void run(String raw) { String isbn = raw.trim(); throw new ApiException(\"ISBN exists: \" + isbn); }", API);
+        assertThat(validate(classes, "ApiException message \"ISBN exists: 978\" ")).isEmpty();
+        assertThat(validate(classes, "ApiException message equals the source expression \"ISBN exists: \" + isbn")).isEmpty();
+        assertThat(validate(classes, "ApiException message \"Duplicate ISBN: 978\" ")).isPresent();
+    }
+
+    @Test void doesNotInventAMessageWhenTheWholeMessageIsALocalVariable() {
+        var classes = sources("void run(String raw) { String text = raw.trim(); throw new ApiException(text); }", API);
+        assertThat(validate(classes, "ApiException message \"anything\" ")).isPresent();
+    }
+
+    @Test void readsMessagesThrownInsideAMultiStatementPrivateHelper() {
+        var classes = sources("void run(int capacity) { if (capacity < 0) throw new ApiException(\"Too small\"); assertValid(capacity); }", API
+                + "private static final int MAX = 200; private void assertValid(int capacity) { if (capacity > MAX) { "
+                + "throw new ApiException(\"Capacity up to \" + MAX); } }");
+        assertThat(validate(classes, "ApiException message \"Capacity up to 200\" ")).isEmpty();
+        assertThat(validate(classes, "ApiException message \"Too small\" ")).isEmpty();
+        assertThat(validate(classes, "ApiException message \"Invented\" ")).isPresent();
+    }
+
+    @Test void followsNestedPrivateHelpers() {
+        var classes = sources("void run() { first(); }", API
+                + "private void first() { second(); } private void second() { if (true) throw new ApiException(\"Deep\"); }");
+        assertThat(validate(classes, "ApiException message \"Deep\" ")).isEmpty();
+        assertThat(validate(classes, "ApiException message \"Other\" ")).isPresent();
+    }
+
+    @Test void doesNotBlockWhenAHelperMessageCannotBeRead() {
+        var classes = sources("void run(String raw) { if (raw == null) throw new ApiException(\"Null\"); check(raw); }", API
+                + "private void check(String text) { if (text.isEmpty()) throw new ApiException(text); }");
+        assertThat(validate(classes, "ApiException message \"Whatever the helper builds\" ")).isEmpty();
+    }
+
     @Test void doesNotTrustAnEnumValueRewrittenThroughItsSetter() {
         var classes = sources("void run() { Result.DENIED.setResult(\"changed\"); Asserts.fail(Result.DENIED.getResult()); }",
                 API + ASSERTS + RESULT_ENUM);
@@ -78,13 +112,14 @@ class HelperExceptionMessageEvidenceTest {
         assertThat(validate(classes, "ApiException message \"different\" ")).isPresent();
     }
 
-    @Test void doesNotTreatAnOverridableOrMultiStatementHelperAsProof() {
+    /** Helper không đọc được message: chưa đủ để nói phát biểu đúng hay sai, nên không chặn và chờ người duyệt. */
+    @Test void doesNotBlockOnAnOverridableOrRewrittenHelperMessage() {
         var overridable = sources("void run() { reject(\"bad\"); }", API
                 + "public void reject(String message) { throw new ApiException(message); }");
-        assertThat(validate(overridable, "ApiException message \"bad\" ")).isPresent();
+        assertThat(validate(overridable, "ApiException message \"bad\" ")).isEmpty();
         var rewritten = sources("void run() { reject(\"bad\"); }", API
                 + "private void reject(String message) { message = \"changed\"; throw new ApiException(message); }");
-        assertThat(validate(rewritten, "ApiException message \"bad\" ")).isPresent();
+        assertThat(validate(rewritten, "ApiException message \"bad\" ")).isEmpty();
     }
 
     @Test void doesNotTreatAnInstanceVariableNamedAfterAClassAsAStaticCall() {
@@ -114,10 +149,10 @@ class HelperExceptionMessageEvidenceTest {
         assertThat(validate(classes, "ApiException message \"wrong\" ")).isPresent();
     }
 
-    @Test void doesNotBindAVarargsArrayAsASingleStringArgument() {
+    @Test void doesNotBlockOnAVarargsHelperMessage() {
         var classes = sources("void run() { reject(\"bad\"); }", API
                 + "private static void reject(String... message) { throw new ApiException(message); }");
-        assertThat(validate(classes, "ApiException message \"bad\" ")).isPresent();
+        assertThat(validate(classes, "ApiException message \"bad\" ")).isEmpty();
     }
 
     @Test void doesNotInferTheBaseConstructorMessageForAnAnonymousExceptionSubclass() {

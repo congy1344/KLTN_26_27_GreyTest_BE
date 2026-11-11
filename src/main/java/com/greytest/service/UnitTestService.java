@@ -40,6 +40,20 @@ public class UnitTestService {
     private ServiceScopeResolver scopeResolver; private ServicePipelineStatusService scopedArtifacts; private LlmBatchExecutor batchExecutor;
     @org.springframework.beans.factory.annotation.Autowired(required=false)
     private com.greytest.service.generation.UnitTestExportProvenanceService exportProvenance;
+    @org.springframework.beans.factory.annotation.Autowired(required=false)
+    private com.greytest.repository.BusinessRuleRepository rules;
+    @org.springframework.beans.factory.annotation.Autowired(required=false)
+    private com.greytest.repository.JavaMethodRepository methods;
+    @org.springframework.beans.factory.annotation.Value("${greytest.llm-batch.unit-test-per-service:false}")
+    private boolean unitTestPerService;
+    /** Bộ test đã kiểm tra cho export; khóa gồm mọi đầu vào nên đổi test, case, plan, rule hoặc source là tự tính lại. Mất khi khởi động lại. */
+    private record ValidatedExport(String fingerprint, List<UnitTest> tests) { }
+    private final Map<String, ValidatedExport> validatedExports = new java.util.concurrent.ConcurrentHashMap<>();
+    @org.springframework.beans.factory.annotation.Value("${greytest.llm-batch.unit-test-per-service-max-cases:15}")
+    private int unitTestPerServiceMaxCases;
+    /** Số vòng hệ thống tự "Tiếp tục sinh" khi còn case chưa sinh được; 0 là tắt. */
+    @org.springframework.beans.factory.annotation.Value("${greytest.llm-batch.auto-resume-rounds:2}")
+    private int autoResumeRounds;
     public UnitTestService(UnitTestRepository units, TestCaseRepository cases, TestPlanRepository plans, ProjectRepository projects, AIAgentService ai, UnitTestFileService files, PlatformTransactionManager transactionManager, GenerationProgressService generationProgress){this.units=units;this.cases=cases;this.plans=plans;this.projects=projects;this.ai=ai;this.files=files;this.transactions=new TransactionTemplate(transactionManager);this.generationProgress=generationProgress;}
     @org.springframework.beans.factory.annotation.Autowired
     public UnitTestService(UnitTestRepository units,TestCaseRepository cases,TestPlanRepository plans,ProjectRepository projects,AIAgentService ai,UnitTestFileService files,PlatformTransactionManager transactionManager,GenerationProgressService generationProgress,ServiceScopeResolver scopeResolver,ServicePipelineStatusService scopedArtifacts,LlmBatchExecutor batchExecutor){
@@ -61,7 +75,8 @@ public class UnitTestService {
     public List<UnitTestDto> generate(Long projectId){return generate(projectId,(ServiceScopeResolver.ServiceScope)null,false);}
     public List<UnitTestDto> generate(Long projectId,String servicePath){return generate(projectId, (servicePath == null || scopeResolver == null) ? null : scopeResolver.resolve(projectId, servicePath), false);}
     public List<UnitTestDto> generate(Long projectId,String servicePath,boolean resume){return generate(projectId, (servicePath == null || scopeResolver == null) ? null : scopeResolver.resolve(projectId, servicePath), resume);}
-    private List<UnitTestDto> generate(Long projectId,ServiceScopeResolver.ServiceScope scope,boolean resume){
+    private List<UnitTestDto> generate(Long projectId,ServiceScopeResolver.ServiceScope scope,boolean resume){return generate(projectId,scope,resume,autoResumeRounds);}
+    private List<UnitTestDto> generate(Long projectId,ServiceScopeResolver.ServiceScope scope,boolean resume,int resumeRoundsLeft){
         Project project=ensure(projectId);
         if(scope==null)ensureCanGenerate(project);
         var approved=scope==null?approvedCases(projectId):approvedCases(projectId,scope);
@@ -174,11 +189,19 @@ public class UnitTestService {
                 }
                 return null;
             });
-            var saved = generated.stream().map(this::from).map(this::dto).toList();
-            var allTests = list(projectId, scope != null ? scope.servicePath() : null);
-            int totalCount = allTests != null && !allTests.isEmpty() ? allTests.size() : saved.size();
-            finishProgress(projectId, totalCount, blockedCases, false);
-            return saved != null && !saved.isEmpty() ? saved : allTests;
+            // Case hỏng do output AI thường đạt ở lượt gọi mới: tự làm thay thao tác "Tiếp tục sinh", có giới hạn vòng để không đốt credit.
+            long unfinished = blockedCases.values().stream()
+                    .filter(blocked -> blocked.details() != null && blocked.details().startsWith(UNFINISHED_CASE)).count();
+            if (unfinished > 0 && resumeRoundsLeft > 0) {
+                generationProgress.log(projectId, GenerationProgressStage.UNIT_TEST,
+                        "Còn " + unfinished + " Test Case chưa sinh được; hệ thống tự tiếp tục sinh (còn " + resumeRoundsLeft + " vòng).");
+            } else {
+                var saved = generated.stream().map(this::from).map(this::dto).toList();
+                var allTests = list(projectId, scope != null ? scope.servicePath() : null);
+                int totalCount = allTests != null && !allTests.isEmpty() ? allTests.size() : saved.size();
+                finishProgress(projectId, totalCount, blockedCases, false);
+                return saved != null && !saved.isEmpty() ? saved : allTests;
+            }
         } catch(RuntimeException exception){
             if (generationProgress.isPaused(projectId, GenerationProgressStage.UNIT_TEST)) {
                 return list(projectId, scope != null ? scope.servicePath() : null);
@@ -196,6 +219,9 @@ public class UnitTestService {
                     (originalBatch > 0 ? "Dừng ở batch " + originalBatch + ". " : "") + detailMsg);
             throw LlmBatchExecutor.originalFailure(exception);
         }
+        // Gọi ngoài try để lỗi của vòng tự tiếp tục không bị báo thất bại thêm lần nữa ở vòng này.
+        generate(projectId, scope, true, resumeRoundsLeft - 1);
+        return list(projectId, scope != null ? scope.servicePath() : null);
     }
     /** Sinh Unit Test chỉ cho case vòng mới, giữ nguyên toàn bộ output các vòng trước. */
     public List<UnitTestDto> generateSupplemental(Long projectId,String servicePath,List<Long> caseIds){
@@ -457,7 +483,25 @@ public class UnitTestService {
         generationProgress.start(projectId, GenerationProgressStage.UNIT_TEST, stepLabels,
                 message + " Tổng cộng " + target.size() + " Test Case trong " + batches.size() + " batch.");
     }
+    /** Khi bật, case của cùng class được gộp tới giới hạn mỗi request; output bị cắt vẫn tự chia nhỏ như batch thường. */
+    private Long testedClassId(TestCase testCase) {
+        return plans.findById(testCase.getTestPlanId())
+                .map(TestPlan::getBusinessRuleId).flatMap(rules::findById)
+                .map(com.greytest.entity.BusinessRule::getMethodId).flatMap(methods::findById)
+                .map(com.greytest.entity.JavaMethod::getClassId).orElse(-1L);
+    }
     private List<List<TestCase>> caseBatches(List<TestCase> testCases) {
+        if (unitTestPerService && rules != null && methods != null) {
+            List<List<TestCase>> batches = new ArrayList<>();
+            int limit = Math.max(1, unitTestPerServiceMaxCases);
+            for (List<TestCase> group : testCases.stream().collect(java.util.stream.Collectors.groupingBy(
+                    this::testedClassId, LinkedHashMap::new, java.util.stream.Collectors.toList())).values()) {
+                for (int start = 0; start < group.size(); start += limit) {
+                    batches.add(group.subList(start, Math.min(start + limit, group.size())));
+                }
+            }
+            return batches;
+        }
         List<List<TestCase>> batches = new ArrayList<>();
         for (int start = 0; start < testCases.size(); start += GenerationContextBuilder.MAX_UNIT_TEST_CASES) {
             batches.add(testCases.subList(start, Math.min(start + GenerationContextBuilder.MAX_UNIT_TEST_CASES, testCases.size())));
@@ -934,7 +978,7 @@ public class UnitTestService {
         var approved=cases.findAll().stream().filter(c->approvedCase(c,projectId)).toList();
         var codeByCaseId=approved.stream().collect(java.util.stream.Collectors.toMap(TestCase::getId,TestCase::getCaseCode));
         var tests=approved.stream().map(c->units.findByTestCaseId(c.getId())).filter(java.util.Objects::nonNull).toList();
-        var exportTests=exportProvenance==null?tests:exportProvenance.prepare(projectId,tests,exportSourceRoot(projectId));
+        var exportTests=validatedForListing(projectId,approved,tests);
         return files.mergeByClass(exportTests).stream()
                 .map(f->new com.greytest.dto.UnitTestFileDto(f.filePath(),f.testClassName(),f.packageName(),f.caseIds().size(),
                         f.caseIds().stream().map(codeByCaseId::get).filter(java.util.Objects::nonNull).toList(),com.greytest.service.agent.GenerationSourceFingerprint.withoutMetadata(f.sourceCode())))
@@ -945,7 +989,7 @@ public class UnitTestService {
         var approved=approvedCases(projectId,scopeResolver.resolve(projectId,servicePath));
         var codeByCaseId=approved.stream().collect(java.util.stream.Collectors.toMap(TestCase::getId,TestCase::getCaseCode));
         var tests=approved.stream().map(c->units.findByTestCaseId(c.getId())).filter(java.util.Objects::nonNull).toList();
-        var exportTests=exportProvenance==null?tests:exportProvenance.prepare(projectId,tests,exportSourceRoot(projectId));
+        var exportTests=validatedForListing(projectId,approved,tests);
         return files.mergeByClass(exportTests).stream()
                 .map(f->new com.greytest.dto.UnitTestFileDto(f.filePath(),f.testClassName(),f.packageName(),f.caseIds().size(),
                         f.caseIds().stream().map(codeByCaseId::get).filter(java.util.Objects::nonNull).toList(),com.greytest.service.agent.GenerationSourceFingerprint.withoutMetadata(f.sourceCode())))
@@ -975,21 +1019,66 @@ public class UnitTestService {
     }
 
     /** Test đã lưu không còn qua validator thì không xuất ra, vì biết trước sẽ fail; bản trong database vẫn giữ để sinh lại. */
+    private String exportKey(Long projectId,List<TestCase> approved){
+        return projectId+":"+com.greytest.service.agent.GenerationSourceFingerprint.hash(approved.stream().map(c->String.valueOf(c.getId())).collect(java.util.stream.Collectors.joining(",")));
+    }
+
+    /** Null nghĩa là không đủ dữ liệu để chắc kết quả cũ còn đúng, nên phải kiểm tra lại. */
+    private String exportFingerprint(Long projectId,List<TestCase> approved,List<UnitTest> tests){
+        if(rules==null||exportProvenance==null) return null;
+        try{
+            StringBuilder input=new StringBuilder();
+            for(UnitTest t:tests) input.append(java.util.Arrays.asList(t.getId(),t.getTestCaseId(),t.getTestClassName(),t.getTestMethodName(),t.getPackageName(),t.getFilePath(),t.getSourceCode())).append('\n');
+            for(TestCase c:approved) input.append(java.util.Arrays.asList(c.getId(),c.getCaseCode(),c.getTestPlanId(),c.getDescription(),c.getPreconditions(),c.getTestData(),c.getExpectedResult(),c.getStatus(),c.getIsModified())).append('\n');
+            for(TestPlan p:plans.findByProjectId(projectId)) input.append(java.util.Arrays.asList(p.getId(),p.getBusinessRuleId(),p.getTitle(),p.getDescription(),p.getStatus())).append('\n');
+            for(var r:rules.findByProjectId(projectId)) input.append(java.util.Arrays.asList(r.getId(),r.getMethodId(),r.getDescription(),r.getReviewNote(),r.getStatus())).append('\n');
+            var root=exportSourceRoot(projectId);
+            if(root!=null) input.append(com.greytest.service.agent.PersistentSourceAnalysisService.contentDigest(root));
+            return com.greytest.service.agent.GenerationSourceFingerprint.hash(input.toString());
+        }catch(RuntimeException unavailable){
+            return null;
+        }
+    }
+
+    private List<UnitTest> validatedForListing(Long projectId,List<TestCase> approved,List<UnitTest> tests){
+        if(exportProvenance==null) return tests;
+        String fingerprint=exportFingerprint(projectId,approved,tests);
+        String key=exportKey(projectId,approved);
+        var cached=validatedExports.get(key);
+        if(fingerprint!=null&&cached!=null&&fingerprint.equals(cached.fingerprint())) return cached.tests();
+        var prepared=exportProvenance.prepare(projectId,tests,exportSourceRoot(projectId));
+        if(fingerprint!=null) validatedExports.put(key,new ValidatedExport(fingerprint,prepared));
+        return prepared;
+    }
+
     private ExportArchive buildArchive(Long projectId,List<TestCase> approved){
         var codeByCaseId=approved.stream().collect(java.util.stream.Collectors.toMap(TestCase::getId,TestCase::getCaseCode));
-        List<UnitTest> valid=new ArrayList<>();
+        var stored=approved.stream().map(c->units.findByTestCaseId(c.getId())).filter(java.util.Objects::nonNull).toList();
+        String fingerprint=exportFingerprint(projectId,approved,stored);
+        String key=exportKey(projectId,approved);
+        var cached=validatedExports.get(key);
         Map<String,String> skipped=new LinkedHashMap<>();
-        for(TestCase testCase:approved){
-            UnitTest test=units.findByTestCaseId(testCase.getId());
-            if(test==null) continue;
-            try{
-                ai.validateExistingUnitTest(projectId,test,null);
-                valid.add(test);
-            }catch(LlmResponseException invalid){
-                skipped.put(testCase.getCaseCode(),invalid.getMessage());
-            }
+        List<UnitTest> exportTests;
+        if(fingerprint!=null&&cached!=null&&fingerprint.equals(cached.fingerprint())){
+            exportTests=cached.tests();
+        }else{
+            var root=exportSourceRoot(projectId);
+            java.util.function.Supplier<List<UnitTest>> validate=()->{
+                List<UnitTest> valid=new ArrayList<>();
+                for(UnitTest test:stored){
+                    try{
+                        ai.validateExistingUnitTest(projectId,test,root);
+                        valid.add(test);
+                    }catch(LlmResponseException invalid){
+                        skipped.put(codeByCaseId.get(test.getTestCaseId()),invalid.getMessage());
+                    }
+                }
+                return valid;
+            };
+            var valid=exportProvenance==null?validate.get():exportProvenance.inExportScope(validate);
+            exportTests=exportProvenance==null?valid:exportProvenance.prepareValidated(projectId,valid,root);
+            if(fingerprint!=null&&skipped.isEmpty()) validatedExports.put(key,new ValidatedExport(fingerprint,exportTests));
         }
-        var exportTests=exportProvenance==null?valid:exportProvenance.prepare(projectId,valid,exportSourceRoot(projectId));
         var fileList=files.mergeByClass(exportTests).stream()
                 .map(f->new com.greytest.dto.UnitTestFileDto(f.filePath(),f.testClassName(),f.packageName(),f.caseIds().size(),
                         f.caseIds().stream().map(codeByCaseId::get).filter(java.util.Objects::nonNull).toList(),f.sourceCode()))

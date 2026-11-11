@@ -113,6 +113,13 @@ public final class GenerationValidationGate {
     }
 
     /** Context cho lượt sửa: chỉ gồm case lỗi cùng rule, plan và source liên quan đến chúng. */
+    /** Chỉ đổi tập plan cần đối chiếu; source và rule giữ nguyên làm bằng chứng. */
+    public static TestCaseContextDto narrowTestCases(TestCaseContextDto context, Set<Long> planIds) {
+        return new TestCaseContextDto(context.project(), context.analysis(), context.classes(), context.approvedBusinessRules(),
+                context.approvedTestPlans().stream().filter(plan -> planIds.contains(plan.id())).toList(),
+                context.existingTests(), context.supportingResources(), context.contextWarnings());
+    }
+
     public static UnitTestContextDto narrowUnitTests(UnitTestContextDto context, Set<Long> caseIds) {
         var narrowed = withCases(context, context.approvedTestCases().stream().filter(c -> caseIds.contains(c.id())).toList());
         var planIds = narrowed.approvedTestCases().stream().map(TestCaseContextItemDto::testPlanId).collect(Collectors.toSet());

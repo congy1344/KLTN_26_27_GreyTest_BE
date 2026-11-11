@@ -120,6 +120,23 @@ public class AIAgentService {
     }
 
     /** Một phần Unit Test đã đạt: giữ lại chúng và chỉ gửi case còn lỗi cho lượt sửa. */
+    private static final String SCHEMA_ERROR = "LLM response không đúng schema:";
+
+    /** Plan đạt được giữ lại; plan lỗi hoặc thiếu được gửi lại trong lượt sửa tiếp theo. */
+    private static final class PartialTestCaseFailure extends LlmResponseException {
+        private final List<com.greytest.dto.agent.GenerationResponseDtos.GeneratedTestCaseDto> valid;
+        private final String rejectedJson;
+        private final Set<Long> failingPlanIds;
+
+        private PartialTestCaseFailure(String message, List<com.greytest.dto.agent.GenerationResponseDtos.GeneratedTestCaseDto> valid,
+                String rejectedJson, Set<Long> failingPlanIds) {
+            super(message, true);
+            this.valid = valid;
+            this.rejectedJson = rejectedJson;
+            this.failingPlanIds = failingPlanIds;
+        }
+    }
+
     private static final class PartialUnitTestFailure extends LlmResponseException {
         private final List<GeneratedUnitTestDto> valid;
         private final List<GeneratedUnitTestDto> invalid;
@@ -425,6 +442,7 @@ public class AIAgentService {
         Object attemptContext = context;
         var attemptRendered = rendered;
         Map<Long, GeneratedUnitTestDto> acceptedUnitTests = new java.util.LinkedHashMap<>();
+        List<com.greytest.dto.agent.GenerationResponseDtos.GeneratedTestCaseDto> acceptedTestCases = new ArrayList<>();
         int providerFailures = 0;
         for (int attempt = 1; attempt <= EXHAUSTED_POOL_MAX_ATTEMPTS; attempt++) {
             boolean validatingResponse = false;
@@ -440,7 +458,7 @@ public class AIAgentService {
                 lastResponse = response;
                 validatingResponse = true;
                 contextLogService.writeResponse(promptName, attempt, response);
-                T parsed = responseParser.parse(response, responseType);
+                T parsed = parseOutput(response, responseType, attemptContext, snapshot);
                 if (parsed instanceof UnitTestResponseDto unitTests && attemptContext instanceof UnitTestContextDto unitTestContext) {
                     parsed = responseType.cast(GeneratedImportRepair.repair(unitTestContext, unitTests));
                 }
@@ -450,6 +468,12 @@ public class AIAgentService {
                     var merged = new ArrayList<>(acceptedUnitTests.values());
                     merged.addAll(((UnitTestResponseDto) parsed).unitTests());
                     parsed = responseType.cast(new UnitTestResponseDto(merged));
+                    checkedOutput = null;
+                }
+                if (!acceptedTestCases.isEmpty()) {
+                    var merged = new ArrayList<>(acceptedTestCases);
+                    merged.addAll(((TestCaseResponseDto) parsed).cases());
+                    parsed = responseType.cast(new TestCaseResponseDto(merged));
                     checkedOutput = null;
                 }
                 var outputFingerprint=!durable ? null : checkedOutput != null ? checkedOutput
@@ -471,7 +495,7 @@ public class AIAgentService {
                     provenance.put("outputFingerprint",outputFingerprint.value()); provenance.put("outputProvenance",outputFingerprint.provenance());
                     // Cache chỉ lưu JSON từ DTO đã validate, không lưu Markdown do LLM trả về.
                     persistentCache.putValidated(projectId,promptName,fingerprint.value(),generationJson.valueToTree(parsed).toString(),provenance.toString());
-                } else if (fingerprints==null && responseCache != null && acceptedUnitTests.isEmpty()) {
+                } else if (fingerprints==null && responseCache != null && acceptedUnitTests.isEmpty() && acceptedTestCases.isEmpty()) {
                     responseCache.putAfterSuccessfulTransaction(prompt, response);
                 }
                 return attachSourceMetadata(parsed, responseType, sourceMetadata);
@@ -482,7 +506,8 @@ public class AIAgentService {
                 if (exception.isProviderFailure() || exception instanceof LlmResponseException.OutputTruncated) {
                     GenerationJobContext.refundLlmCall();
                 }
-                boolean canReturnPartial = !acceptedUnitTests.isEmpty() && snapshot == null && GenerationJobContext.sourceUpdateId() == null;
+                boolean canReturnPartial = (!acceptedUnitTests.isEmpty() || !acceptedTestCases.isEmpty())
+                        && snapshot == null && GenerationJobContext.sourceUpdateId() == null;
                 if (exception.isProviderFailure() && exception.isRetryable()) {
                     providerFailures++;
                     if (providerFailures < PROVIDER_MAX_ATTEMPTS && exception.getRetryAfterMillis() <= MAX_RETRY_DELAY_MILLIS) {
@@ -490,7 +515,9 @@ public class AIAgentService {
                         attempt--;
                         continue;
                     }
-                    if (canReturnPartial) return partialUnitTests(acceptedUnitTests, null, responseType, userId, projectId, promptName, attempt, sourceMetadata);
+                    if (canReturnPartial) return !acceptedTestCases.isEmpty()
+                            ? partialTestCases(acceptedTestCases, responseType, userId, projectId, promptName, attempt, sourceMetadata)
+                            : partialUnitTests(acceptedUnitTests, null, responseType, userId, projectId, promptName, attempt, sourceMetadata);
                     // Đã hết lượt hạ tầng ở tầng này; batch không được nhân thêm số lần gọi provider.
                     throw new LlmResponseException(exception.getMessage(), exception, false, exception.getRetryAfterMillis(),
                             LlmResponseException.ErrorClassification.PROVIDER_UNAVAILABLE);
@@ -506,6 +533,16 @@ public class AIAgentService {
                             .collect(Collectors.joining("\n\n"));
                     GenerationJobContext.log("Đã giữ " + acceptedUnitTests.size() + " Unit Test đạt kiểm tra; chỉ sửa lại các case "
                             + partial.failingCaseIds + ".");
+                }
+                if (exception instanceof PartialTestCaseFailure partial) {
+                    acceptedTestCases.addAll(partial.valid);
+                    canReturnPartial = true;
+                    attemptContext = contextBuilder.buildTestCaseContext(projectId, partial.failingPlanIds);
+                    attemptRendered = promptManager.renderPrompt(promptName, Map.of("context_json", attemptContext, "stable_guidance", stableGuidance));
+                    repairBase = composePrompt(promptName, attemptRendered, stableGuidance, attemptContext, correction);
+                    lastResponse = partial.rejectedJson;
+                    GenerationJobContext.log("Đã giữ " + acceptedTestCases.size() + " Test Case đạt kiểm tra; chỉ sửa lại các plan "
+                            + partial.failingPlanIds + ".");
                 }
                 // Giữ output lỗi làm dữ liệu sửa, không cho nó thay thế source và oracle đã duyệt.
                 String repairPrompt = repairBase + (lastResponse == null ? "" :
@@ -530,7 +567,9 @@ public class AIAgentService {
                         "Batch AI đã hết số lần thử. Các kết quả đã lưu được giữ lại; hãy dùng Tiếp tục sinh để bổ sung phần thiếu.");
                 if (!exception.isRetryable() || exception.getRetryAfterMillis() > MAX_RETRY_DELAY_MILLIS
                         || attempt >= maxAttemptsFor(exception) || budgetExhausted) {
-                    if (canReturnPartial) return partialUnitTests(acceptedUnitTests, repairNote(exception, lastResponse), responseType, userId, projectId, promptName, attempt, sourceMetadata);
+                    if (canReturnPartial) return !acceptedTestCases.isEmpty()
+                            ? partialTestCases(acceptedTestCases, responseType, userId, projectId, promptName, attempt, sourceMetadata)
+                            : partialUnitTests(acceptedUnitTests, repairNote(exception, lastResponse), responseType, userId, projectId, promptName, attempt, sourceMetadata);
                     if (budgetExhausted || (validatingResponse && exception.isRetryable() && attempt >= maxAttemptsFor(exception))) {
                         // Hết ngân sách batch hoặc lượt sửa output thì không khởi động lại chu kỳ gọi AI.
                         throw new LlmResponseException(exception.getMessage(), exception, false,
@@ -589,7 +628,7 @@ public class AIAgentService {
                                 + "Do not invent business behavior or change source-proven thresholds, outcomes or exception literals.";
                     }
                     continue;
-                } else if (exception.getMessage() != null && exception.getMessage().startsWith("LLM response không đúng schema:")) {
+                } else if (exception.getMessage() != null && exception.getMessage().startsWith(SCHEMA_ERROR)) {
                     GenerationJobContext.log("Output AI chưa đúng schema. Đang yêu cầu sửa cấu trúc JSON theo đường dẫn trường lỗi.");
                     attemptPrompt = repairPrompt + "\n\n# Schema correction\n" + exception.getMessage()
                             + "\nRegenerate the complete response for the same selected plans/methods using the original JSON schema. "
@@ -652,6 +691,62 @@ public class AIAgentService {
                     + "\n" + correctionGuidance;
         }
         return prompt;
+    }
+
+    private boolean keepsValidTestCasePlans(java.nio.file.Path snapshot) {
+        return snapshot == null && GenerationJobContext.sourceUpdateId() == null;
+    }
+
+    private <T> T parseOutput(String response, Class<T> responseType, Object context, java.nio.file.Path snapshot) {
+        try {
+            return responseParser.parse(response, responseType);
+        } catch (LlmResponseException exception) {
+            if (context instanceof TestCaseContextDto testCaseContext && keepsValidTestCasePlans(snapshot) && exception.isRetryable()
+                    && exception.getMessage() != null && exception.getMessage().startsWith(SCHEMA_ERROR)) {
+                var usable = responseParser.usableTestCases(response);
+                throw testCaseFailure(exception.getMessage(), testCaseContext, usable.valid(), usable.unusablePlanIds(), usable.rejectedJson());
+            }
+            throw exception;
+        }
+    }
+
+    /** Kiểm tra lại từng plan riêng; không tách được plan đạt thì sửa cả response như cũ. */
+    private LlmResponseException testCaseFailure(String message, TestCaseContextDto context,
+            List<com.greytest.dto.agent.GenerationResponseDtos.GeneratedTestCaseDto> generated, Set<Long> unusablePlanIds, String schemaRejectedJson) {
+        Set<Long> requested = context.approvedTestPlans().stream().map(plan -> plan.id()).collect(Collectors.toCollection(java.util.LinkedHashSet::new));
+        var byPlan = generated.stream().filter(Objects::nonNull).filter(item -> requested.contains(item.planId()))
+                .collect(Collectors.groupingBy(com.greytest.dto.agent.GenerationResponseDtos.GeneratedTestCaseDto::planId,
+                        java.util.LinkedHashMap::new, Collectors.toList()));
+        List<com.greytest.dto.agent.GenerationResponseDtos.GeneratedTestCaseDto> valid = new ArrayList<>();
+        List<com.greytest.dto.agent.GenerationResponseDtos.GeneratedTestCaseDto> invalid = new ArrayList<>();
+        Set<Long> failing = new java.util.LinkedHashSet<>(requested);
+        byPlan.forEach((planId, cases) -> {
+            var single = new TestCaseResponseDto(cases);
+            var narrowed = GenerationValidationGate.narrowTestCases(context, Set.of(planId));
+            // Giữ theo cả plan: giữ một phần case của plan dễ làm mất kịch bản mà không ai biết.
+            if (!unusablePlanIds.contains(planId) && GenerationValidationGate.validateReferences(narrowed, single).isEmpty()
+                    && GenerationValidationGate.validateTestCases(narrowed, single).isEmpty()) {
+                valid.addAll(cases);
+                failing.remove(planId);
+            } else {
+                invalid.addAll(cases);
+            }
+        });
+        if (valid.isEmpty() || failing.isEmpty()) return new LlmResponseException(message, true);
+        String rejected = schemaRejectedJson != null ? schemaRejectedJson
+                : invalid.isEmpty() ? null : generationJson.valueToTree(invalid).toString();
+        return new PartialTestCaseFailure(message, valid, rejected, failing);
+    }
+
+    /** Hết lượt sửa: trả các plan đã đạt để lưu; plan còn thiếu chờ "Tiếp tục sinh". */
+    private <T> T partialTestCases(List<com.greytest.dto.agent.GenerationResponseDtos.GeneratedTestCaseDto> accepted, Class<T> responseType,
+            Long userId, Long projectId, String promptName, int attempt, String sourceMetadata) {
+        GenerationJobContext.log("Hết lượt sửa AI; giữ " + accepted.size() + " Test Case đã đạt, các plan còn lại chờ Tiếp tục sinh.");
+        if (userId != null && quotaService != null) {
+            int units = Math.max((accepted.size() + 1) / 2, 1);
+            quotaService.consumeLlmCall(userId, projectId, units, Map.of("prompt", promptName, "attempt", attempt, "units", units));
+        }
+        return attachSourceMetadata(responseType.cast(new TestCaseResponseDto(List.copyOf(accepted))), responseType, sourceMetadata);
     }
 
     /** Hết lượt sửa: trả phần đã đạt để lưu; case còn thiếu đi tiếp vào luồng phục hồi của UnitTestService. */
@@ -744,8 +839,12 @@ public class AIAgentService {
             // Gom lỗi tham chiếu và lỗi nội dung để một lượt sửa thấy đủ mọi vấn đề của batch.
             List<String> problems = java.util.stream.Stream.of(referenceProblem,
                     GenerationValidationGate.validateTestCases(testCaseContext, testCaseResponse)).flatMap(Optional::stream).toList();
-            if (!problems.isEmpty()) throw new LlmResponseException(
-                    (referenceProblem.isPresent() ? VALIDATION_GATE_ERROR : TEST_CASE_SEMANTIC_ERROR) + String.join("\n", problems), true);
+            if (!problems.isEmpty()) {
+                String message = (referenceProblem.isPresent() ? VALIDATION_GATE_ERROR : TEST_CASE_SEMANTIC_ERROR) + String.join("\n", problems);
+                throw keepsValidTestCasePlans(snapshot)
+                        ? testCaseFailure(message, testCaseContext, testCaseResponse.cases(), Set.of(), null)
+                        : new LlmResponseException(message, true);
+            }
             return null;
         }
         referenceProblem.ifPresent(problem -> { throw new LlmResponseException(VALIDATION_GATE_ERROR + problem, true); });

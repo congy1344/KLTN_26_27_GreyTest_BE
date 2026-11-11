@@ -26,11 +26,14 @@ import com.greytest.entity.Project;
 import com.greytest.entity.BusinessRule;
 import com.greytest.entity.TestCase;
 import com.greytest.entity.TestPlan;
+import com.greytest.entity.JavaMethod;
 import com.greytest.entity.enums.Priority;
 import com.greytest.entity.enums.ProjectStatus;
 import com.greytest.entity.enums.ReviewStatus;
 import com.greytest.entity.enums.TestType;
+import com.greytest.entity.enums.Visibility;
 import com.greytest.exception.InvalidProjectStatusException;
+import com.greytest.repository.JavaMethodRepository;
 import com.greytest.repository.ProjectRepository;
 import com.greytest.repository.BusinessRuleRepository;
 import com.greytest.repository.TestCaseRepository;
@@ -48,6 +51,7 @@ class TestCaseServiceTest {
     @Mock private BusinessRuleRepository rules;
     @Mock private PlatformTransactionManager transactionManager;
     @Mock private GenerationProgressService generationProgress;
+    @Mock private JavaMethodRepository methods;
 
     @InjectMocks private TestCaseService service;
 
@@ -462,6 +466,62 @@ class TestCaseServiceTest {
     }
 
     @Test
+    void generateSavesKeptPlansAndLeavesTheProjectResumableWhenAPlanIsMissing() {
+        project(ProjectStatus.PLAN_APPROVED);
+        List<TestPlan> approvedPlans = LongStream.rangeClosed(1, 2).mapToObj(id -> {
+            TestPlan plan = new TestPlan();
+            plan.setId(id);
+            plan.setProjectId(1L);
+            plan.setPlanCode("TP-00" + id);
+            plan.setStatus(ReviewStatus.APPROVED);
+            org.mockito.Mockito.lenient().when(plans.existsById(id)).thenReturn(true);
+            org.mockito.Mockito.lenient().when(plans.findById(id)).thenReturn(Optional.of(plan));
+            return plan;
+        }).toList();
+        when(plans.findByProjectId(1L)).thenReturn(approvedPlans);
+        when(ai.generateTestCases(org.mockito.ArgumentMatchers.eq(1L), org.mockito.ArgumentMatchers.<Set<Long>>any()))
+                .thenReturn(new TestCaseResponseDto(List.of(generatedCase(1L, "kept"))));
+
+        service.generate(1L);
+
+        ArgumentCaptor<List<TestCase>> saved = ArgumentCaptor.forClass(List.class);
+        verify(cases).saveAll(saved.capture());
+        assertThat(saved.getValue()).extracting(TestCase::getTestPlanId).containsExactly(1L);
+        verify(projects, org.mockito.Mockito.never()).save(org.mockito.ArgumentMatchers.any());
+        verify(generationProgress).fail(org.mockito.ArgumentMatchers.eq(1L),
+                org.mockito.ArgumentMatchers.eq(com.greytest.dto.GenerationProgressStage.TEST_CASE),
+                org.mockito.ArgumentMatchers.contains("TP-002"));
+    }
+
+    @Test
+    void missingPlansAreResumedAutomaticallyInsteadOfWaitingForTheUser() {
+        org.springframework.test.util.ReflectionTestUtils.setField(service, "autoResumeRounds", 1);
+        Project project = project(ProjectStatus.PLAN_APPROVED);
+        mockPersistedCases();
+        List<TestPlan> approvedPlans = LongStream.rangeClosed(1, 2).mapToObj(id -> {
+            TestPlan plan = new TestPlan();
+            plan.setId(id);
+            plan.setProjectId(1L);
+            plan.setPlanCode("TP-00" + id);
+            plan.setStatus(ReviewStatus.APPROVED);
+            org.mockito.Mockito.lenient().when(plans.existsById(id)).thenReturn(true);
+            org.mockito.Mockito.lenient().when(plans.findById(id)).thenReturn(Optional.of(plan));
+            return plan;
+        }).toList();
+        when(plans.findByProjectId(1L)).thenReturn(approvedPlans);
+        when(ai.generateTestCases(1L, Set.of(1L, 2L))).thenReturn(new TestCaseResponseDto(List.of(generatedCase(1L, "kept"))));
+        when(ai.generateTestCases(1L, Set.of(2L))).thenReturn(new TestCaseResponseDto(List.of(generatedCase(2L, "resumed"))));
+
+        service.generate(1L);
+
+        // Lượt tự tiếp tục chỉ gọi AI cho plan còn thiếu và đưa project sang chờ review.
+        verify(ai).generateTestCases(1L, Set.of(2L));
+        assertThat(project.getStatus()).isEqualTo(ProjectStatus.CASE_PENDING_REVIEW);
+        verify(generationProgress, org.mockito.Mockito.never()).fail(org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
+    }
+
+    @Test
     void generateRejectsPlansChangedBeforeFinalPersistence() {
         project(ProjectStatus.PLAN_APPROVED);
         TestPlan plan = new TestPlan();
@@ -653,6 +713,82 @@ class TestCaseServiceTest {
                 java.math.BigDecimal.valueOf(50), List.of(12), List.of(12), "HIGH", "cover branch", true)), 2))
                 .isInstanceOf(LlmResponseException.class)
                 .hasMessageContaining("trùng");
+    }
+
+    @Test
+    void refinementAcceptsPrivateGapReachedThroughMethodOfSameClass() {
+        mockRefinementWithCaseOnlyForFirstMethod();
+        mockPersistedCases();
+        mockMethods(method(11L, 100L, Visibility.PUBLIC), method(12L, 100L, Visibility.PRIVATE));
+
+        assertThat(service.generateSupplemental(1L, List.of(gap(11L), gap(12L)), 2)).hasSize(1);
+    }
+
+    @Test
+    void refinementRejectsPublicGapWithoutItsOwnCase() {
+        mockRefinementWithCaseOnlyForFirstMethod();
+        mockMethods(method(11L, 100L, Visibility.PUBLIC), method(12L, 100L, Visibility.PUBLIC));
+
+        assertThatThrownBy(() -> service.generateSupplemental(1L, List.of(gap(11L), gap(12L)), 2))
+                .isInstanceOf(LlmResponseException.class);
+    }
+
+    @Test
+    void refinementRejectsPrivateGapOfAnotherClassWithoutItsOwnCase() {
+        mockRefinementWithCaseOnlyForFirstMethod();
+        mockMethods(method(11L, 100L, Visibility.PUBLIC), method(12L, 200L, Visibility.PRIVATE));
+
+        assertThatThrownBy(() -> service.generateSupplemental(1L, List.of(gap(11L), gap(12L)), 2))
+                .isInstanceOf(LlmResponseException.class);
+    }
+
+    /** Hai method đều có plan đã duyệt, nhưng AI chỉ trả case cho method 11. */
+    private void mockRefinementWithCaseOnlyForFirstMethod() {
+        project(ProjectStatus.COVERAGE_ANALYZED);
+        TestPlan firstPlan = approvedPlan(20L, 7L, 11L);
+        TestPlan secondPlan = approvedPlan(21L, 8L, 12L);
+        when(plans.findByProjectId(1L)).thenReturn(List.of(firstPlan, secondPlan));
+        when(plans.findById(20L)).thenReturn(Optional.of(firstPlan));
+        when(plans.existsById(20L)).thenReturn(true);
+        when(ai.generateCoverageRefinement(org.mockito.ArgumentMatchers.eq(1L),
+                org.mockito.ArgumentMatchers.eq(2), org.mockito.ArgumentMatchers.anyList()))
+                .thenReturn(new TestCaseResponseDto(List.of(generatedCase(20L, "Case through public method"))));
+    }
+
+    private TestPlan approvedPlan(Long planId, Long ruleId, Long methodId) {
+        TestPlan plan = new TestPlan();
+        plan.setId(planId);
+        plan.setProjectId(1L);
+        plan.setBusinessRuleId(ruleId);
+        plan.setStatus(ReviewStatus.APPROVED);
+        BusinessRule rule = new BusinessRule();
+        rule.setId(ruleId);
+        rule.setMethodId(methodId);
+        when(rules.findById(ruleId)).thenReturn(Optional.of(rule));
+        return plan;
+    }
+
+    private void mockMethods(JavaMethod... known) {
+        org.mockito.Mockito.lenient().when(methods.findAllById(org.mockito.ArgumentMatchers.any()))
+                .thenAnswer(invocation -> {
+                    Iterable<Long> ids = invocation.getArgument(0);
+                    Set<Long> requested = new java.util.HashSet<>();
+                    ids.forEach(requested::add);
+                    return java.util.Arrays.stream(known).filter(m -> requested.contains(m.getId())).toList();
+                });
+    }
+
+    private JavaMethod method(Long id, Long classId, Visibility visibility) {
+        JavaMethod method = new JavaMethod();
+        method.setId(id);
+        method.setClassId(classId);
+        method.setVisibility(visibility);
+        return method;
+    }
+
+    private CoverageGapDto gap(Long methodId) {
+        return new CoverageGapDto(methodId, "LoanService", "method" + methodId, java.math.BigDecimal.ZERO,
+                java.math.BigDecimal.ZERO, List.of(12), List.of(12), "HIGH", "cover branch", true);
     }
 
     private GeneratedTestCaseDto generatedCase(Long planId, String description) {

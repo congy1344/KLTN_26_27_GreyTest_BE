@@ -30,6 +30,9 @@ final class GeneratedImportRepair {
 
     private static final Pattern SOURCE_IMPORT = Pattern.compile("(?m)^\\s*import\\s+((?:[a-z_][\\w]*\\.)+([A-Z]\\w*))\\s*;");
 
+    /** AI đôi khi lặp từ khóa "import import x.Y;"; Java không có cú pháp hợp lệ nào như vậy nên gộp lại là an toàn. */
+    private static final Pattern REPEATED_IMPORT = Pattern.compile("(?m)^([ \\t]*import)(?:[ \\t]+import)+(?=[ \\t])");
+
     private GeneratedImportRepair() { }
 
     static UnitTestResponseDto repair(UnitTestContextDto context, UnitTestResponseDto response) {
@@ -59,6 +62,7 @@ final class GeneratedImportRepair {
 
     private static String repairSource(String source, Map<String, Set<String>> declared, Map<String, Set<String>> sourceImports) {
         if (source == null) return null;
+        source = REPEATED_IMPORT.matcher(source).replaceAll("$1");
         var parsed = new JavaParser(new ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_21)).parse(source);
         if (!parsed.isSuccessful() || parsed.getResult().isEmpty()) return source;
         CompilationUnit unit = parsed.getResult().get();

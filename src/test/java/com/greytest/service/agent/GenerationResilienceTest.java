@@ -93,6 +93,7 @@ class GenerationResilienceTest {
         var response = new TestCaseResponseDto(List.of());
         when(parser.parse(eq("broken"), eq(TestCaseResponseDto.class)))
                 .thenThrow(new LlmResponseException("LLM response không đúng schema: x", true));
+        when(parser.usableTestCases("broken")).thenReturn(new GenerationResponseParser.UsableTestCases(List.of(), java.util.Set.of(), null));
         when(parser.parse(eq("{\"cases\":[]}"), eq(TestCaseResponseDto.class))).thenReturn(response);
         // Output hỏng ở lượt 2 vẫn còn một lượt sửa dù lượt 1 đã lỗi hạ tầng.
         assertThat(caseAgent(client, parser).generateTestCases(1L)).isEqualTo(response);

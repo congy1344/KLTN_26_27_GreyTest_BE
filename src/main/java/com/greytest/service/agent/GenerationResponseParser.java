@@ -51,6 +51,35 @@ public class GenerationResponseParser {
         }
     }
 
+    /** Case hợp lệ và plan có case sai schema; JSON hỏng thì không có gì để giữ. */
+    public record UsableTestCases(java.util.List<com.greytest.dto.agent.GenerationResponseDtos.GeneratedTestCaseDto> valid,
+            java.util.Set<Long> unusablePlanIds, String rejectedJson) { }
+
+    /** Tách theo từng case để một case sai schema không làm mất các plan khác trong response. */
+    public UsableTestCases usableTestCases(String response) {
+        var valid = new java.util.ArrayList<com.greytest.dto.agent.GenerationResponseDtos.GeneratedTestCaseDto>();
+        var unusable = new java.util.HashSet<Long>();
+        var rejected = objectMapper.createArrayNode();
+        try {
+            for (JsonNode node : objectMapper.readTree(normalizeJsonNumericSuffixes(jsonPayload(response))).path("cases")) {
+                try {
+                    var item = objectMapper.treeToValue(node, com.greytest.dto.agent.GenerationResponseDtos.GeneratedTestCaseDto.class);
+                    if (validator.validate(item).isEmpty()) {
+                        valid.add(item);
+                        continue;
+                    }
+                } catch (JsonProcessingException invalidCase) {
+                    // Case không map được vào DTO được xử lý như case sai schema ở dưới.
+                }
+                rejected.add(node);
+                if (node.path("plan_id").canConvertToLong()) unusable.add(node.path("plan_id").asLong());
+            }
+        } catch (JsonProcessingException invalidJson) {
+            return new UsableTestCases(java.util.List.of(), java.util.Set.of(), null);
+        }
+        return new UsableTestCases(valid, unusable, rejected.toString());
+    }
+
     private void rejectUnitTestGenerationError(String payload) throws JsonProcessingException {
         JsonNode root = objectMapper.readTree(payload);
         if (root == null || !root.has("generation_error")) return;

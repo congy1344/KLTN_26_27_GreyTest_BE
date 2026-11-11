@@ -580,6 +580,36 @@ class UnitTestServiceTest {
     }
 
     @org.junit.jupiter.api.Test
+    void unfinishedCasesAreResumedAutomaticallyInsteadOfWaitingForTheUser() {
+        org.springframework.test.util.ReflectionTestUtils.setField(service, "autoResumeRounds", 1);
+        Project project = new Project(); project.setId(1L); project.setStatus(ProjectStatus.CASE_APPROVED);
+        TestPlan plan = new TestPlan(); plan.setId(20L); plan.setProjectId(1L); plan.setStatus(ReviewStatus.APPROVED);
+        List<TestCase> approved = List.of(approvedCase(1L, 20L), approvedCase(2L, 20L));
+        when(projects.findById(1L)).thenReturn(Optional.of(project));
+        when(projects.findByIdForUpdate(1L)).thenReturn(Optional.of(project));
+        when(cases.findAll()).thenReturn(approved);
+        when(plans.findById(20L)).thenReturn(Optional.of(plan));
+        when(cases.findById(1L)).thenReturn(Optional.of(approved.get(0)));
+        when(cases.findById(2L)).thenReturn(Optional.of(approved.get(1)));
+        var first =new UnitTestResponseDto(List.of(generated(1L, validSource("ServiceTest", "case1"))));
+        var second = new UnitTestResponseDto(List.of(generated(2L, validSource("ServiceTest", "case2"))));
+        when(ai.generateUnitTests(1L, Set.of(1L, 2L))).thenReturn(first);
+        // Lượt phục hồi trong batch vẫn hỏng; lượt tự tiếp tục sinh mới đạt.
+        when(ai.generateUnitTests(1L, Set.of(2L))).thenReturn(new UnitTestResponseDto(List.of()), second);
+        Map<Long, UnitTest> stored = new java.util.HashMap<>();
+        when(units.findByTestCaseId(org.mockito.ArgumentMatchers.anyLong())).thenAnswer(call -> stored.get(call.<Long>getArgument(0)));
+        when(units.saveAll(org.mockito.ArgumentMatchers.anyList())).thenAnswer(call -> {
+            List<UnitTest> saved = call.getArgument(0); saved.forEach(unit -> stored.put(unit.getTestCaseId(), unit)); return saved;
+        });
+
+        assertThat(service.generate(1L)).extracting("testCaseId").containsExactlyInAnyOrder(1L, 2L);
+
+        assertThat(project.getStatus()).isEqualTo(ProjectStatus.TEST_GENERATED);
+        verify(ai, org.mockito.Mockito.times(1)).generateUnitTests(1L, Set.of(1L, 2L));
+        verify(generationProgress, never()).partialAfterCommit(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
+    }
+
+    @org.junit.jupiter.api.Test
     void truncatedOutputSplitsTheBatchInsteadOfResendingIt() {
         Project project = new Project(); project.setId(1L); project.setStatus(ProjectStatus.CASE_APPROVED);
         TestPlan plan = new TestPlan(); plan.setId(20L); plan.setProjectId(1L); plan.setStatus(ReviewStatus.APPROVED);
@@ -898,6 +928,103 @@ class UnitTestServiceTest {
         verify(ai).generateUnitTests(1L, Set.of(2L));
         verify(ai, never()).generateUnitTests(1L, Set.of(1L));
         verify(units, never()).delete(existingUnit1);
+    }
+
+    private com.greytest.service.generation.UnitTestExportProvenanceService exportFixture() {
+        Project project = new Project();
+        project.setId(1L);
+        project.setStatus(ProjectStatus.TEST_GENERATED);
+        TestPlan plan = new TestPlan();
+        plan.setId(20L);
+        plan.setProjectId(1L);
+        plan.setStatus(ReviewStatus.APPROVED);
+        UnitTest stored = new UnitTest();
+        stored.setTestCaseId(1L);
+        stored.setSourceCode("class ServiceTest { }");
+        stored.setFilePath("ServiceTest.java");
+        var provenance = org.mockito.Mockito.mock(com.greytest.service.generation.UnitTestExportProvenanceService.class);
+        var rules = org.mockito.Mockito.mock(com.greytest.repository.BusinessRuleRepository.class);
+        org.springframework.test.util.ReflectionTestUtils.setField(service, "exportProvenance", provenance);
+        org.springframework.test.util.ReflectionTestUtils.setField(service, "rules", rules);
+        when(projects.findById(1L)).thenReturn(Optional.of(project));
+        when(cases.findAll()).thenReturn(List.of(approvedCase(1L, 20L)));
+        when(plans.findById(20L)).thenReturn(Optional.of(plan));
+        when(plans.findByProjectId(1L)).thenReturn(List.of(plan));
+        when(rules.findByProjectId(1L)).thenReturn(List.of());
+        when(units.findByTestCaseId(1L)).thenReturn(stored);
+        when(provenance.prepare(org.mockito.ArgumentMatchers.eq(1L), org.mockito.ArgumentMatchers.anyList(), org.mockito.ArgumentMatchers.any()))
+                .thenAnswer(call -> call.getArgument(1));
+        return provenance;
+    }
+
+    @Test
+    void repeatedFileListingReusesTheValidatedExportUntilATestChanges() {
+        var provenance = exportFixture();
+
+        service.listFiles(1L);
+        service.listFiles(1L);
+        verify(provenance, org.mockito.Mockito.times(1)).prepare(org.mockito.ArgumentMatchers.eq(1L), org.mockito.ArgumentMatchers.anyList(), org.mockito.ArgumentMatchers.any());
+
+        units.findByTestCaseId(1L).setSourceCode("class ServiceTest { void changed() { } }");
+        service.listFiles(1L);
+        verify(provenance, org.mockito.Mockito.times(2)).prepare(org.mockito.ArgumentMatchers.eq(1L), org.mockito.ArgumentMatchers.anyList(), org.mockito.ArgumentMatchers.any());
+    }
+
+    @Test
+    void downloadAfterFileListingDoesNotValidateAgain() {
+        exportFixture();
+
+        service.listFiles(1L);
+        service.exportArchive(1L);
+
+        verify(ai, never()).validateExistingUnitTest(org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
+    }
+
+    @Test
+    void perServiceModeSendsAllCasesOfOneTestedClassInOneRequest() {
+        assertFirstPerServiceRequest(5, Set.of(1L, 2L, 3L, 4L, 5L));
+    }
+
+    @Test
+    void perServiceModeSplitsALargeServiceAtTheCaseLimit() {
+        assertFirstPerServiceRequest(3, Set.of(1L, 2L, 3L));
+    }
+
+    private void assertFirstPerServiceRequest(int maxCases, Set<Long> expected) {
+        Project project = new Project();
+        project.setId(1L);
+        project.setStatus(ProjectStatus.CASE_APPROVED);
+        // 5 case của class 100 (nhiều hơn batch thường) và 1 case của class 200.
+        List<TestCase> approved = List.of(approvedCase(1L, 20L), approvedCase(2L, 20L), approvedCase(3L, 20L),
+                approvedCase(4L, 20L), approvedCase(5L, 20L), approvedCase(6L, 21L));
+        var rules = org.mockito.Mockito.mock(com.greytest.repository.BusinessRuleRepository.class);
+        var methods = org.mockito.Mockito.mock(com.greytest.repository.JavaMethodRepository.class);
+        org.springframework.test.util.ReflectionTestUtils.setField(service, "rules", rules);
+        org.springframework.test.util.ReflectionTestUtils.setField(service, "methods", methods);
+        org.springframework.test.util.ReflectionTestUtils.setField(service, "unitTestPerService", true);
+        org.springframework.test.util.ReflectionTestUtils.setField(service, "unitTestPerServiceMaxCases", maxCases);
+        for (long[] row : new long[][] {{20L, 30L, 40L, 100L}, {21L, 31L, 41L, 200L}}) {
+            TestPlan plan = new TestPlan();
+            plan.setStatus(ReviewStatus.APPROVED);
+            plan.setId(row[0]);
+            plan.setProjectId(1L);
+            plan.setBusinessRuleId(row[1]);
+            var rule = new com.greytest.entity.BusinessRule();
+            rule.setMethodId(row[2]);
+            var method = new com.greytest.entity.JavaMethod();
+            method.setClassId(row[3]);
+            when(plans.findById(row[0])).thenReturn(Optional.of(plan));
+            when(rules.findById(row[1])).thenReturn(Optional.of(rule));
+            when(methods.findById(row[2])).thenReturn(Optional.of(method));
+        }
+        when(projects.findById(1L)).thenReturn(Optional.of(project));
+        when(cases.findAll()).thenReturn(approved);
+        when(ai.generateUnitTests(1L, expected)).thenThrow(new LlmResponseException("stop after grouping"));
+
+        assertThatThrownBy(() -> service.generate(1L, (String) null, false)).isInstanceOf(LlmResponseException.class);
+
+        verify(ai).generateUnitTests(1L, expected);
+        verify(ai, never()).generateUnitTests(1L, Set.of(1L, 2L, 3L, 4L));
     }
 
     @Test

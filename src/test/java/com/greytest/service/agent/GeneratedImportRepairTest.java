@@ -53,6 +53,13 @@ class GeneratedImportRepairTest {
         assertThat(GeneratedImportRepair.repair(withSource, new UnitTestResponseDto(List.of(test))).unitTests().get(0).sourceCode()).isEqualTo(source);
     }
 
+    @Test void collapsesARepeatedImportKeywordSoTheSourceParsesAgain() {
+        // Lỗi thật trong log: AI viết "import import java.util.Collections;" làm cả case bị loại.
+        String body = "class ShopTest { Object empty = Collections.emptyList(); String text = \"import import x\"; }";
+        assertThat(repair("package com.acme.shop.app;\nimport java.util.List;\nimport import java.util.Collections;\n" + body))
+                .isEqualTo("package com.acme.shop.app;\nimport java.util.List;\nimport java.util.Collections;\n" + body);
+    }
+
     @Test void leavesLibraryImportsAndTestBodyUntouched() {
         String source = "package com.acme.shop.app;\nimport vendor.tools.TokenUtil;\nimport java.util.List;\nclass ShopTest { TokenUtil token; List<String> names; }";
         assertThat(repair(source)).isEqualTo(source);
