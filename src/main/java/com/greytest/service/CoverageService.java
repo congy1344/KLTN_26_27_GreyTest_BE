@@ -7,6 +7,7 @@ import java.math.RoundingMode;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
@@ -23,6 +24,7 @@ import org.springframework.web.multipart.MultipartFile;
 
 import com.greytest.dto.CoverageGapDto;
 import com.greytest.dto.CoverageReportDto;
+import com.greytest.dto.ServiceCoverageDto;
 import com.greytest.entity.CoverageDetail;
 import com.greytest.entity.CoverageReport;
 import com.greytest.entity.JavaClass;
@@ -45,14 +47,18 @@ import com.greytest.repository.TestCaseRepository;
 import com.greytest.repository.TestPlanCoveredRuleRepository;
 import com.greytest.repository.TestPlanRepository;
 import com.greytest.service.coverage.JacocoXmlParser;
+import com.greytest.service.coverage.JacocoXmlParser.ParsedClass;
 import com.greytest.service.coverage.JacocoXmlParser.ParsedMethod;
 import com.greytest.service.coverage.JacocoXmlParser.ParsedReport;
 import com.greytest.service.storage.FileStorageService;
+
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * Xử lý coverage: parse jacoco.xml user upload, lưu report + detail,
  * tính requirement coverage và phát hiện coverage gap.
  */
+@Slf4j
 @Service
 public class CoverageService {
 
@@ -312,7 +318,50 @@ public class CoverageService {
                 previous == null ? null : previous.getBranchCoverage(),
                 previous == null ? null : previous.getRequirementCoverage(),
                 report.getTotalLines(), report.getCoveredLines(), report.getTotalBranches(),
-                report.getCoveredBranches(), report.getUploadedAt(), gaps);
+                report.getCoveredBranches(), report.getUploadedAt(), gaps,
+                serviceCoverage(report, classById.values()));
+    }
+
+    /**
+     * Gộp counter các class Service trong phạm vi: số tổng của report tính cả config,
+     * controller, lớp main nên không phản ánh đúng phần GreyTest sinh test. Đọc lại XML đã
+     * lưu để report cũ cũng có số liệu mà không cần đổi schema.
+     */
+    private ServiceCoverageDto serviceCoverage(CoverageReport report, Collection<JavaClass> scopedClasses) {
+        if (report.getXmlFilePath() == null) {
+            return null;
+        }
+        List<ParsedClass> parsedClasses;
+        try {
+            parsedClasses = parseStoredXml(Path.of(report.getXmlFilePath())).classes();
+        } catch (StorageException | IllegalArgumentException e) {
+            // Chỉ số phụ: file XML mất hoặc hỏng không được làm hỏng số liệu đã lưu trong DB
+            log.warn("Bỏ qua Service coverage của report {}: {}", report.getId(), e.getMessage());
+            return null;
+        }
+        Set<String> serviceClassNames = scopedClasses.stream()
+                .filter(javaClass -> javaClass.getClassType() == ClassType.SERVICE)
+                .map(JavaClass::getQualifiedName)
+                .collect(Collectors.toSet());
+        List<ParsedClass> serviceClasses = parsedClasses.stream()
+                .filter(parsedClass -> serviceClassNames.contains(outerClassName(parsedClass.qualifiedName())))
+                .toList();
+        int totalLines = serviceClasses.stream().mapToInt(ParsedClass::totalLines).sum();
+        if (totalLines == 0) {
+            return null;
+        }
+        int coveredLines = serviceClasses.stream().mapToInt(ParsedClass::coveredLines).sum();
+        int totalBranches = serviceClasses.stream().mapToInt(ParsedClass::totalBranches).sum();
+        int coveredBranches = serviceClasses.stream().mapToInt(ParsedClass::coveredBranches).sum();
+        return new ServiceCoverageDto(totalLines, coveredLines, totalBranches, coveredBranches,
+                percent(coveredLines, totalLines),
+                totalBranches == 0 ? null : percent(coveredBranches, totalBranches));
+    }
+
+    /** Class lồng/ẩn danh (Foo$Bar, Foo$1) thuộc về class ngoài cùng Foo. */
+    private String outerClassName(String qualifiedName) {
+        int nested = qualifiedName.indexOf('$');
+        return nested < 0 ? qualifiedName : qualifiedName.substring(0, nested);
     }
 
     private CoverageGapDto toGap(CoverageDetail detail, CoverageDetail previousDetail, JavaMethod method,

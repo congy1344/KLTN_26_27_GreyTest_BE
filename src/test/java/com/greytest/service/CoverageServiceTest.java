@@ -7,11 +7,14 @@ import static org.mockito.Mockito.when;
 import static org.mockito.ArgumentMatchers.any;
 
 import java.math.BigDecimal;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -39,6 +42,8 @@ import com.greytest.repository.TestCaseRepository;
 import com.greytest.repository.TestPlanCoveredRuleRepository;
 import com.greytest.repository.TestPlanRepository;
 import com.greytest.service.coverage.JacocoXmlParser;
+import com.greytest.service.coverage.JacocoXmlParser.ParsedClass;
+import com.greytest.service.coverage.JacocoXmlParser.ParsedReport;
 import com.greytest.service.storage.FileStorageService;
 
 @ExtendWith(MockitoExtension.class)
@@ -199,6 +204,131 @@ class CoverageServiceTest {
 
         assertThat(gap.refinable()).isFalse();
         assertThat(gap.suggestion()).contains("Không thể cải thiện tự động");
+    }
+
+    @Test
+    void latestTinhCoverageRiengChoClassServiceTuXmlDaLuu(@TempDir Path dir) throws Exception {
+        stubServiceCoverage(dir, List.of(
+                javaClass(1L, "UserServiceImpl", ClassType.SERVICE, "com.acme.UserServiceImpl"),
+                javaClass(2L, "UserController", ClassType.CONTROLLER, "com.acme.UserController")),
+                List.of(
+                        new ParsedClass("com.acme.UserServiceImpl", 10, 9, 4, 3),
+                        // class lồng/ẩn danh của Service phải tính vào Service
+                        new ParsedClass("com.acme.UserServiceImpl$Helper", 3, 3, 0, 0),
+                        new ParsedClass("com.acme.UserController", 4, 0, 2, 0),
+                        new ParsedClass("com.acme.config.WebConfig", 33, 0, 0, 0)));
+
+        var coverage = service.latest(5L).orElseThrow().serviceCoverage();
+
+        assertThat(coverage.totalLines()).isEqualTo(13);
+        assertThat(coverage.coveredLines()).isEqualTo(12);
+        assertThat(coverage.lineCoverage()).isEqualTo(new BigDecimal("92.31"));
+        assertThat(coverage.totalBranches()).isEqualTo(4);
+        assertThat(coverage.coveredBranches()).isEqualTo(3);
+        assertThat(coverage.branchCoverage()).isEqualTo(new BigDecimal("75.00"));
+    }
+
+    @Test
+    void latestTraBranchNullKhiServiceKhongCoNhanh(@TempDir Path dir) throws Exception {
+        stubServiceCoverage(dir,
+                List.of(javaClass(1L, "UserServiceImpl", ClassType.SERVICE, "com.acme.UserServiceImpl")),
+                List.of(new ParsedClass("com.acme.UserServiceImpl", 10, 10, 0, 0)));
+
+        var coverage = service.latest(5L).orElseThrow().serviceCoverage();
+
+        assertThat(coverage.lineCoverage()).isEqualTo(new BigDecimal("100.00"));
+        assertThat(coverage.branchCoverage()).isNull();
+    }
+
+    @Test
+    void latestTraServiceCoverageNullKhiXmlKhongCoDongCodeCuaService(@TempDir Path dir) throws Exception {
+        stubServiceCoverage(dir,
+                List.of(javaClass(1L, "UserServiceImpl", ClassType.SERVICE, "com.acme.UserServiceImpl")),
+                List.of(new ParsedClass("com.acme.UserController", 4, 0, 0, 0)));
+
+        assertThat(service.latest(5L).orElseThrow().serviceCoverage()).isNull();
+    }
+
+    @Test
+    void latestTraServiceCoverageNullKhiFileXmlKhongConTonTai(@TempDir Path dir) {
+        Project project = new Project();
+        project.setId(5L);
+        when(projects.findById(5L)).thenReturn(Optional.of(project));
+        var stored = report(1L, "25.68");
+        stored.setXmlFilePath(dir.resolve("da-xoa.xml").toString());
+        when(reports.findTopByProjectIdOrderByIdDesc(5L)).thenReturn(Optional.of(stored));
+        when(reports.findByProjectId(5L)).thenReturn(List.of(stored));
+        when(details.findByReportId(1L)).thenReturn(List.of());
+        when(classes.findByProjectId(5L)).thenReturn(List.of());
+        when(plans.findByProjectId(5L)).thenReturn(List.of());
+
+        var dto = service.latest(5L).orElseThrow();
+
+        assertThat(dto.lineCoverage()).isEqualTo(new BigDecimal("25.68"));
+        assertThat(dto.serviceCoverage()).isNull();
+    }
+
+    @Test
+    void latestVanTraSoToanModuleKhiFileXmlDaLuuBiHong(@TempDir Path dir) throws Exception {
+        stubServiceCoverage(dir,
+                List.of(javaClass(1L, "UserServiceImpl", ClassType.SERVICE, "com.acme.UserServiceImpl")),
+                List.of());
+        when(parser.parse(any())).thenThrow(new IllegalArgumentException("File không phải JaCoCo XML hợp lệ"));
+
+        var dto = service.latest(5L).orElseThrow();
+
+        assertThat(dto.lineCoverage()).isEqualTo(new BigDecimal("25.68"));
+        assertThat(dto.serviceCoverage()).isNull();
+    }
+
+    @Test
+    void latestTheoModuleChiTinhServiceThuocModuleDo(@TempDir Path dir) throws Exception {
+        var scope = new ServiceScopeResolver.ServiceScope("auth", java.util.Set.of(1L), java.util.Set.of());
+        Path xml = Files.createFile(dir.resolve("jacoco.xml"));
+        var stored = report(1L, "50.00");
+        stored.setXmlFilePath(xml.toString());
+        when(scopeResolver.resolve(5L, "auth")).thenReturn(scope);
+        when(scopeResolver.listScopes(5L)).thenReturn(List.of(scope));
+        when(reports.findByProjectIdAndServicePath(5L, "auth")).thenReturn(List.of(stored));
+        when(reports.findByProjectIdAndServicePath(5L, ".")).thenReturn(List.of());
+        when(details.findByReportId(1L)).thenReturn(List.of());
+        when(classes.findByProjectId(5L)).thenReturn(List.of(
+                javaClass(1L, "AuthService", ClassType.SERVICE, "com.acme.AuthService"),
+                javaClass(2L, "OrderService", ClassType.SERVICE, "com.acme.OrderService")));
+        when(plans.findByProjectId(5L)).thenReturn(List.of());
+        when(parser.parse(any())).thenReturn(parsed(List.of(
+                new ParsedClass("com.acme.AuthService", 4, 4, 0, 0),
+                new ParsedClass("com.acme.OrderService", 6, 0, 0, 0))));
+
+        var coverage = service.latest(5L, "auth").orElseThrow().serviceCoverage();
+
+        assertThat(coverage.totalLines()).isEqualTo(4);
+        assertThat(coverage.coveredLines()).isEqualTo(4);
+    }
+
+    private void stubServiceCoverage(Path dir, List<JavaClass> javaClasses, List<ParsedClass> parsedClasses)
+            throws Exception {
+        Project project = new Project();
+        project.setId(5L);
+        when(projects.findById(5L)).thenReturn(Optional.of(project));
+        var stored = report(1L, "25.68");
+        stored.setXmlFilePath(Files.createFile(dir.resolve("jacoco.xml")).toString());
+        when(reports.findTopByProjectIdOrderByIdDesc(5L)).thenReturn(Optional.of(stored));
+        when(reports.findByProjectId(5L)).thenReturn(List.of(stored));
+        when(details.findByReportId(1L)).thenReturn(List.of());
+        when(classes.findByProjectId(5L)).thenReturn(javaClasses);
+        when(plans.findByProjectId(5L)).thenReturn(List.of());
+        when(parser.parse(any())).thenReturn(parsed(parsedClasses));
+    }
+
+    private ParsedReport parsed(List<ParsedClass> parsedClasses) {
+        return new ParsedReport(0, 0, 0, 0, List.of(), parsedClasses);
+    }
+
+    private JavaClass javaClass(Long id, String name, ClassType type, String qualifiedName) {
+        JavaClass javaClass = javaClass(id, name, type);
+        javaClass.setQualifiedName(qualifiedName);
+        return javaClass;
     }
 
     private com.greytest.entity.CoverageReport report(Long id, String lineCoverage) {

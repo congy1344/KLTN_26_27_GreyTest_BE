@@ -28,7 +28,12 @@ public class JacocoXmlParser {
 
     /** Kết quả parse toàn report. */
     public record ParsedReport(int totalLines, int coveredLines, int totalBranches, int coveredBranches,
-            List<ParsedMethod> methods) {
+            List<ParsedMethod> methods, List<ParsedClass> classes) {
+    }
+
+    /** Counter của một class, dùng để gộp coverage theo loại class (vd Service). */
+    public record ParsedClass(String qualifiedName, int totalLines, int coveredLines,
+            int totalBranches, int coveredBranches) {
     }
 
     /** Coverage của một method trong report. */
@@ -52,10 +57,21 @@ public class JacocoXmlParser {
         Counter line = readCounter(root, "LINE");
         Counter branch = readCounter(root, "BRANCH");
         List<ParsedMethod> methods = new ArrayList<>();
+        List<ParsedClass> classes = new ArrayList<>();
         for (Element pkg : children(root, "package")) {
             parsePackage(pkg, methods);
+            for (Element cls : children(pkg, "class")) {
+                classes.add(parseClass(cls));
+            }
         }
-        return new ParsedReport(line.total(), line.covered(), branch.total(), branch.covered(), methods);
+        return new ParsedReport(line.total(), line.covered(), branch.total(), branch.covered(), methods, classes);
+    }
+
+    private ParsedClass parseClass(Element cls) {
+        Counter line = readCounter(cls, "LINE");
+        Counter branch = readCounter(cls, "BRANCH");
+        return new ParsedClass(cls.getAttribute("name").replace('/', '.'),
+                line.total(), line.covered(), branch.total(), branch.covered());
     }
 
     private Document readDocument(InputStream xml) {

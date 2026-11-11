@@ -12,6 +12,7 @@ import java.util.List;
 
 import org.junit.jupiter.api.Test;
 
+import com.greytest.service.coverage.JacocoXmlParser.ParsedClass;
 import com.greytest.service.coverage.JacocoXmlParser.ParsedMethod;
 import com.greytest.service.coverage.JacocoXmlParser.ParsedReport;
 
@@ -83,6 +84,29 @@ class JacocoXmlParserTest {
         // không có counter BRANCH → coi như 100%
         assertEquals(new BigDecimal("100.00"), cancel.branchCoverage());
         assertTrue(cancel.missedLines().isEmpty());
+    }
+
+    @Test
+    void parseTraVeCounterTungClassKeCaClassKhongCoDongCode() {
+        ParsedReport report = parser.parse(stream("""
+                <report name="demo">
+                  <package name="com/example">
+                    <class name="com/example/OrderService" sourcefilename="OrderService.java">
+                      <method name="createOrder" desc="()V" line="10">
+                        <counter type="LINE" missed="9" covered="9"/>
+                      </method>
+                      <counter type="LINE" missed="3" covered="2"/>
+                      <counter type="BRANCH" missed="1" covered="1"/>
+                    </class>
+                    <class name="com/example/OrderPort" sourcefilename="OrderPort.java"/>
+                  </package>
+                  <counter type="LINE" missed="3" covered="2"/>
+                </report>
+                """));
+
+        assertEquals(List.of(
+                new ParsedClass("com.example.OrderService", 5, 2, 2, 1),
+                new ParsedClass("com.example.OrderPort", 0, 0, 0, 0)), report.classes());
     }
 
     @Test
