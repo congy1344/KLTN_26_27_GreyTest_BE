@@ -33,6 +33,7 @@ public final class TestFeasibilityAnalyzer {
     private static final Pattern RANDOM_CONTROL = Pattern.compile("(?iu)\\b(branch|force|control|when|given|nhánh|ép|đặt|giả sử|thực thi|giá trị)\\b");
     private static final Pattern NEGATED_CONTROL = Pattern.compile("(?iu)(?:do\\s+not|don't|without|no\\s+need\\s+to|không|chưa)\\s+[^.;\\r\\n]{0,45}?(?:force|control|ép|điều khiển|đặt)");
     private static final Set<String> MUTATIONS = Set.of("add", "addAll", "remove", "removeAll", "removeIf", "clear", "set", "put", "putAll", "sort", "replaceAll");
+    private static final ThreadLocal<Map<String, com.github.javaparser.ParseResult<com.github.javaparser.ast.CompilationUnit>>> PARSED_SOURCES = new ThreadLocal<>();
     private TestFeasibilityAnalyzer() {}
 
     public enum Status { READY, BLOCKED, UNKNOWN }
@@ -42,7 +43,25 @@ public final class TestFeasibilityAnalyzer {
     public record Report(List<MethodAssessment> methods, List<CaseAssessment> cases) {}
 
     public static Report analyze(Object context) {
-        Context selected = context(context);
+        // Một lần phân tích đọc nhiều method của cùng class; AST chỉ sống trong lần phân tích này.
+        PARSED_SOURCES.set(new java.util.HashMap<>());
+        try {
+            return analyzeSelected(context(context));
+        } finally {
+            PARSED_SOURCES.remove();
+        }
+    }
+
+    private static com.github.javaparser.ParseResult<com.github.javaparser.ast.CompilationUnit> parse(String source) {
+        var cache = PARSED_SOURCES.get();
+        return cache == null ? parseFresh(source) : cache.computeIfAbsent(source, TestFeasibilityAnalyzer::parseFresh);
+    }
+
+    private static com.github.javaparser.ParseResult<com.github.javaparser.ast.CompilationUnit> parseFresh(String source) {
+        return new JavaParser(new ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_21)).parse(source);
+    }
+
+    private static Report analyzeSelected(Context selected) {
         List<MethodAssessment> methods = new ArrayList<>();
         for (ClassContextDto owner : selected.classes()) {
             for (MethodContextDto method : safe(owner.methods())) {
@@ -83,8 +102,7 @@ public final class TestFeasibilityAnalyzer {
         if (owner.validationSourceCode() == null || owner.validationSourceCode().isBlank()) {
             return unknown(owner, target.id(), "MISSING_VALIDATION_SOURCE", "Thiếu source đầy đủ để kiểm chứng; source hiển thị có thể đã rút gọn.");
         }
-        var parsed = new JavaParser(new ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_21))
-                .parse(owner.validationSourceCode());
+        var parsed = parse(owner.validationSourceCode());
         if (!parsed.isSuccessful() || parsed.getResult().isEmpty()) {
             return unknown(owner, target.id(), "SOURCE_PARSE_FAILED", "Không parse được source đầy đủ bằng JavaParser; cần kiểm tra thủ công.");
         }
@@ -109,7 +127,12 @@ public final class TestFeasibilityAnalyzer {
         for (var local : method.findAll(VariableDeclarator.class)) types.put(local.getNameAsString(), local.getTypeAsString());
         boolean uncertain = false;
         boolean blocked = false;
-        if (method.isPrivate()) {
+        if (method.isPrivate() && !reachableFromEntryPoint(type, method)) {
+            findings.add(finding(owner, target, method, "NO_PUBLIC_ENTRY_POINT",
+                    "Method private không có đường gọi từ method public/package-visible nào trong source; không thể kiểm thử mà không dùng reflection."));
+            strategies.add("Không tốn lượt AI cho case này. Cần người dùng thêm entry point hoặc đánh giá lại Test Case; không gọi private method bằng reflection.");
+            blocked = true;
+        } else if (method.isPrivate()) {
             findings.add(finding(owner, target, method, "PRIVATE_HELPER_ENTRY_POINT",
                     "Method private phải được kiểm thử qua entry point hiện có, chưa phải một Act trực tiếp."));
             strategies.add("Chọn public entry point có trong source và lập fixture cho toàn bộ đường gọi tới helper: "
@@ -159,6 +182,27 @@ public final class TestFeasibilityAnalyzer {
                 List.copyOf(findings), List.copyOf(strategies));
     }
 
+    /** Xét theo tên trên toàn file nên chỉ thừa đường gọi, không thiếu: chỉ chặn khi chắc chắn không có đường gọi. */
+    private static boolean reachableFromEntryPoint(TypeDeclaration<?> type, MethodDeclaration target) {
+        Node root = type.findCompilationUnit().map(Node.class::cast).orElse(type);
+        Map<String, Set<String>> privateCalls = new LinkedHashMap<>();
+        Set<String> reached = new LinkedHashSet<>();
+        java.util.function.BiConsumer<Node, String> record = (node, name) -> {
+            var caller = node.findAncestor(MethodDeclaration.class).filter(MethodDeclaration::isPrivate);
+            if (caller.isPresent()) privateCalls.computeIfAbsent(caller.get().getNameAsString(), ignored -> new LinkedHashSet<>()).add(name);
+            else reached.add(name);
+        };
+        root.findAll(MethodCallExpr.class).forEach(call -> record.accept(call, call.getNameAsString()));
+        root.findAll(com.github.javaparser.ast.expr.MethodReferenceExpr.class).forEach(reference -> record.accept(reference, reference.getIdentifier()));
+        var pending = new java.util.ArrayDeque<>(reached);
+        while (!pending.isEmpty()) {
+            for (String next : privateCalls.getOrDefault(pending.poll(), Set.of())) {
+                if (reached.add(next)) pending.add(next);
+            }
+        }
+        return reached.contains(target.getNameAsString());
+    }
+
     private static void collectFinalFixtures(ClassContextDto owner, MethodContextDto target, TypeDeclaration<?> type,
             MethodDeclaration method, List<Finding> findings, Set<String> strategies) {
         for (var field : type.getFields()) {
@@ -173,7 +217,7 @@ public final class TestFeasibilityAnalyzer {
     }
 
     private static boolean requiresRandomValue(String scenario) {
-        scenario = scenario.replaceAll("(?m)^\\[GreyTest testability:[^\\r\\n]*", "");
+        scenario = com.greytest.util.TextSanitizer.withoutTestabilityNote(scenario);
         if (NEGATED_CONTROL.matcher(scenario).find()) return false;
         var comparison = RANDOM_VALUE.matcher(scenario);
         if (!comparison.find()) return false;

@@ -246,6 +246,12 @@ public final class GenerationSourceFingerprint {
                 .map(range -> range.begin.line - 1).collect(java.util.stream.Collectors.toSet());
     }
 
+    /** Dòng dấu vết chỉ phục vụ nội bộ: giữ trong database và manifest, không để lộ trong file test người dùng đọc. */
+    public static String withoutMetadata(String source) {
+        if (source == null || !source.contains("// GREYTEST_SOURCE")) return source;
+        return attach(source, "");
+    }
+
     public static String manifest(String metadata) {
         return metadata.lines().filter(line -> line.startsWith(PREFIX))
                 .map(line -> line.substring(PREFIX.length()))

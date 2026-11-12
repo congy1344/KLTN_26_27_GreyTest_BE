@@ -49,6 +49,7 @@ import com.greytest.dto.agent.GenerationContextDtos.TestPlanContextItemDto;
 import com.greytest.dto.agent.GenerationContextDtos.UnitTestContextDto;
 import com.greytest.exception.InvalidProjectStatusException;
 import com.greytest.entity.BusinessRule;
+import com.greytest.entity.enums.RuleSource;
 import com.greytest.entity.Project;
 import com.greytest.entity.TestCase;
 import com.greytest.entity.TestPlan;
@@ -530,9 +531,8 @@ public class GenerationContextBuilder {
                         java.util.stream.Stream.of(plan.businessRuleId()),
                         plan.coveredRuleIds().stream()))
                 .collect(java.util.stream.Collectors.toSet());
-        List<BusinessRuleContextDto> approvedRules = approvedBusinessRules(projectId).stream()
-                .filter(rule -> targetRuleIds.contains(rule.id()))
-                .toList();
+        List<BusinessRuleContextDto> approvedRules = UpstreamSourceEvidenceValidator.withUserAuthoredSiblings(
+                approvedBusinessRules(projectId), targetRuleIds);
         requireRequestedIds(targetPlanIds, targetPlans.stream().map(TestPlanContextItemDto::id).collect(java.util.stream.Collectors.toSet()), "Test Plan");
         requireApprovedRuleLinks(targetPlans, approvedRules);
         Set<Long> targetMethodIds = methodIds(approvedRules);
@@ -665,9 +665,8 @@ public class GenerationContextBuilder {
                         java.util.stream.Stream.of(plan.businessRuleId()),
                         plan.coveredRuleIds().stream()))
                 .collect(java.util.stream.Collectors.toSet());
-        List<BusinessRuleContextDto> targetRules = approvedBusinessRules(projectId).stream()
-                .filter(rule -> targetRuleIds.contains(rule.id()))
-                .toList();
+        List<BusinessRuleContextDto> targetRules = UpstreamSourceEvidenceValidator.withUserAuthoredSiblings(
+                approvedBusinessRules(projectId), targetRuleIds);
         requireRequestedIds(targetCaseIds, targetCases.stream().map(TestCaseContextItemDto::id).collect(java.util.stream.Collectors.toSet()), "Test Case");
         requireApprovedRuleLinks(targetPlans, targetRules);
         Set<Long> targetMethodIds = methodIds(targetRules);
@@ -1158,7 +1157,9 @@ public class GenerationContextBuilder {
                 rule.getMethodId(),
                 rule.getRuleCode(),
                 rule.getDescription(),
-                rule.getReviewNote(),
+                // Nhận xét của AI về hành vi source không được lái kỳ vọng của BR do người dùng viết.
+                rule.getSource() == RuleSource.USER_MODIFIED || rule.getSource() == RuleSource.USER_ADDED
+                        ? null : rule.getReviewNote(),
                 rule.getSource() == null ? null : rule.getSource().name(),
                 rule.getStatus() == null ? null : rule.getStatus().name(),
                 rule.getIsModified(),
@@ -1240,7 +1241,8 @@ public class GenerationContextBuilder {
 
     private TestPlanContextItemDto testPlanContext(TestPlan plan, List<Long> coveredRuleIds) {
         return new TestPlanContextItemDto(
-                plan.getId(), plan.getBusinessRuleId(), coveredRuleIds, plan.getPlanCode(), plan.getTitle(), plan.getDescription(),
+                plan.getId(), plan.getBusinessRuleId(), coveredRuleIds, plan.getPlanCode(), plan.getTitle(),
+                com.greytest.util.TextSanitizer.withoutTestabilityNote(plan.getDescription()),
                 plan.getTestType() == null ? null : plan.getTestType().name(),
                 plan.getStatus() == null ? null : plan.getStatus().name(), plan.getIsModified());
     }
@@ -1374,7 +1376,7 @@ public class GenerationContextBuilder {
         return new TestCaseContextItemDto(
                 testCase.getId(), testCase.getTestPlanId(), testCase.getCaseCode(),
                 testCase.getTestType() == null ? null : testCase.getTestType().name(), testCase.getDescription(),
-                testCase.getPreconditions(), testCase.getTestData(), testCase.getExpectedResult(),
+                com.greytest.util.TextSanitizer.withoutTestabilityNote(testCase.getPreconditions()), testCase.getTestData(), testCase.getExpectedResult(),
                 testCase.getPriority() == null ? null : testCase.getPriority().name(), testCase.getTraceSource(),
                 testCase.getStatus() == null ? null : testCase.getStatus().name(), testCase.getIsModified());
     }

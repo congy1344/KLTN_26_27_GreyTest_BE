@@ -7,3 +7,4 @@ greytest:
   ai-context-log-path: ${GREYTEST_AI_CONTEXT_LOG_PATH:/app/log}
   ai-context-log-enabled: false
   ai-context-log-console-enabled: false
+  ai-failure-log-enabled: ${GREYTEST_AI_FAILURE_LOG_ENABLED:false}

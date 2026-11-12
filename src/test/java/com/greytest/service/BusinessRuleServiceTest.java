@@ -61,6 +61,8 @@ import com.greytest.service.agent.AIAgentService;
 @ExtendWith(MockitoExtension.class)
 class BusinessRuleServiceTest {
 
+    @Mock private com.greytest.repository.TestPlanRepository testPlanRepository;
+    @Mock private com.greytest.repository.TestPlanCoveredRuleRepository coveredRuleRepository;
     @Mock private BusinessRuleRepository businessRuleRepository;
     @Mock private ProjectRepository projectRepository;
     @Mock private JavaClassRepository javaClassRepository;
@@ -1536,8 +1538,81 @@ class BusinessRuleServiceTest {
                 .hasMessageContaining("Quyết định source đã có Business Rule", "IF-1");
     }
 
+    private BusinessRuleService serviceWithPlans() {
+        BusinessRuleService service = service();
+        org.springframework.test.util.ReflectionTestUtils.setField(service, "testPlans", testPlanRepository);
+        org.springframework.test.util.ReflectionTestUtils.setField(service, "coveredRules", coveredRuleRepository);
+        return service;
+    }
+
+    private com.greytest.entity.TestPlan planFor(Long id, Long anchorRuleId) {
+        var plan = new com.greytest.entity.TestPlan();
+        plan.setId(id);
+        plan.setBusinessRuleId(anchorRuleId);
+        return plan;
+    }
+
     @Test
-    void updateAlwaysMarksRuleDirty() {
+    void refusesToDeletePlansWhileGenerationIsRunning() {
+        BusinessRule existingRule = rule(7L, 11L, "Email phai hop le.");
+        mockProject();
+        mockProjectServiceMethod(11L);
+        when(businessRuleRepository.findById(7L)).thenReturn(Optional.of(existingRule));
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(existingRule));
+        when(coveredRuleRepository.findByBusinessRuleId(7L)).thenReturn(List.of());
+        when(testPlanRepository.findByProjectId(1L)).thenReturn(List.of(planFor(20L, 7L)));
+        when(generationProgressService.hasActiveGeneration(1L)).thenReturn(true);
+
+        assertThatThrownBy(() -> serviceWithPlans().update(7L, new UpdateBusinessRuleRequest(11L, "Email moi.")))
+                .isInstanceOf(InvalidProjectStatusException.class);
+
+        org.mockito.Mockito.verify(testPlanRepository, org.mockito.Mockito.never()).deleteAll(org.mockito.ArgumentMatchers.anyList());
+    }
+
+    @Test
+    void savingAnEditWithoutAnyChangeLeavesTheRuleAndDownstreamUntouched() {
+        BusinessRule existingRule = rule(7L, 11L, "Email phai hop le.");
+        existingRule.setSource(RuleSource.AI_GENERATED);
+        existingRule.setStatus(ReviewStatus.APPROVED);
+        existingRule.setIsModified(false);
+        mockProject();
+        when(businessRuleRepository.findById(7L)).thenReturn(Optional.of(existingRule));
+
+        BusinessRuleDto result = serviceWithPlans().update(7L, new UpdateBusinessRuleRequest(11L, "  Email phai hop le.  "));
+
+        assertThat(result.isModified()).isFalse();
+        assertThat(existingRule.getSource()).isEqualTo(RuleSource.AI_GENERATED);
+        assertThat(existingRule.getStatus()).isEqualTo(ReviewStatus.APPROVED);
+        org.mockito.Mockito.verify(businessRuleRepository, org.mockito.Mockito.never()).save(existingRule);
+        org.mockito.Mockito.verify(projectRepository, org.mockito.Mockito.never()).save(org.mockito.ArgumentMatchers.any());
+        org.mockito.Mockito.verifyNoInteractions(testPlanRepository);
+    }
+
+    @Test
+    void changingARuleDropsOnlyThePlansThatCoverIt() {
+        BusinessRule existingRule = rule(7L, 11L, "Email phai hop le.");
+        mockProject();
+        mockProjectSave();
+        mockProjectServiceMethod(11L);
+        when(businessRuleRepository.findById(7L)).thenReturn(Optional.of(existingRule));
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(existingRule));
+        when(businessRuleRepository.save(existingRule)).thenReturn(existingRule);
+        var anchored = planFor(20L, 7L);
+        var coveredOnly = planFor(21L, 8L);
+        var unrelated = planFor(22L, 9L);
+        var covered = new com.greytest.entity.TestPlanCoveredRule();
+        covered.setTestPlanId(21L);
+        covered.setBusinessRuleId(7L);
+        when(coveredRuleRepository.findByBusinessRuleId(7L)).thenReturn(List.of(covered));
+        when(testPlanRepository.findByProjectId(1L)).thenReturn(List.of(anchored, coveredOnly, unrelated));
+
+        serviceWithPlans().update(7L, new UpdateBusinessRuleRequest(11L, "Email phai dung dinh dang."));
+
+        org.mockito.Mockito.verify(testPlanRepository).deleteAll(List.of(anchored, coveredOnly));
+    }
+
+    @Test
+    void updateWithNewTextMarksRuleDirty() {
         BusinessRule existingRule = rule(7L, 11L, "Email phai hop le.");
         mockProject();
         mockProjectSave();

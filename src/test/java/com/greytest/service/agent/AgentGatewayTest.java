@@ -99,10 +99,20 @@ class AgentGatewayTest {
         assertThat(LlmBatchExecutor.originalFailure(failure))
                 .isInstanceOf(LlmResponseException.class).hasMessageContaining("không phải JSON hợp lệ");
         var prompts = org.mockito.ArgumentCaptor.forClass(String.class);
+        var options = org.mockito.ArgumentCaptor.forClass(LlmRequestOptions.class);
         verify(client, org.mockito.Mockito.times(3)).complete(prompts.capture(),
-                org.mockito.ArgumentMatchers.any(LlmRequestOptions.class));
+                options.capture());
         assertThat(prompts.getAllValues().subList(1, 3))
                 .allSatisfy(prompt -> assertThat(prompt).contains("# JSON correction"));
+        assertThat(options.getAllValues()).allSatisfy(option -> {
+            assertThat(option.maxTokens()).isEqualTo(4096);
+            assertThat(option.cacheablePrefixes()).isNotEmpty()
+                    .isEqualTo(options.getAllValues().get(0).cacheablePrefixes());
+        });
+        for (int attempt = 0; attempt < 3; attempt++) {
+            assertThat(prompts.getAllValues().get(attempt))
+                    .startsWith(String.join("", options.getAllValues().get(attempt).cacheablePrefixes()));
+        }
     }
 
     @Test
@@ -194,7 +204,7 @@ class AgentGatewayTest {
                 + java.util.Base64.getEncoder().encodeToString(relative.getBytes(java.nio.charset.StandardCharsets.UTF_8)) + "\n";
         var cached = new GeneratedUnitTestDto(generated.caseId(), generated.testClassName(), generated.testMethodName(),
                 generated.packageName(), generated.generationType(), oldMetadata + generated.sourceCode());
-        cache.put(promptManager.render("unit-test", Map.of("context_json", context)) + "\n\n" + agent.languageInstruction(),
+        cache.put(promptManager.render("unit-test", Map.of("context_json", context, "stable_guidance", agent.languageInstruction())),
                 objectMapper.writeValueAsString(new UnitTestResponseDto(List.of(cached))));
 
         var result = agent.generateUnitTests(1L, java.util.Set.of(40L));
@@ -878,8 +888,8 @@ class AgentGatewayTest {
                 new AiContextLogService(objectMapper, tempDir.toString()),
                 mock(com.greytest.repository.ProjectRepository.class),
                 mock(com.greytest.service.UsageQuotaService.class), cache);
-        String prompt = promptManager.render("unit-test", Map.of("context_json", unitTestContext()))
-                + "\n\n" + service.languageInstruction();
+        String prompt = promptManager.render("unit-test", Map.of("context_json", unitTestContext(),
+                "stable_guidance", service.languageInstruction()));
         cache.put(prompt, invalid);
 
         UnitTestResponseDto response = service.generateUnitTests(1L, java.util.Set.of(40L));
@@ -1152,7 +1162,7 @@ class AgentGatewayTest {
         assertThat(agent.generateUnitTests(1L, java.util.Set.of(40L))).isEqualTo(expected);
         var prompts = org.mockito.ArgumentCaptor.forClass(String.class);
         verify(client).complete(prompts.capture(), org.mockito.ArgumentMatchers.any(LlmRequestOptions.class));
-        assertThat(prompts.getValue()).contains("EXCEPTION FLOW VERIFICATION", approvedCase.description(), approvedCase.expectedResult())
+        assertThat(prompts.getValue()).contains("Preserve every approved expected exception", approvedCase.description(), approvedCase.expectedResult())
                 .doesNotContain("# Unit Test semantic correction");
     }
 

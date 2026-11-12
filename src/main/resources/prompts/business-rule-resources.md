@@ -1,0 +1,3 @@
+# Relevant policy: resources
+- supportingResources contains related mapper XML and only configuration keys referenced by the supplied Java declarations, with file paths for provenance. Read them when explaining a reached collaborator call, SQL result mapping or configured value. Missing files, parse failures and evidence limits appear in contextWarnings: an omitted resource is unknown evidence, never proof of a fallback or missing validation.
+- Configuration values are declarations from separate files/documents/profiles; do not merge them into an assumed active environment. Preserve unresolved placeholders, distinguish source defaults from runtime overrides, and do not invent values for omitted or sensitive keys.

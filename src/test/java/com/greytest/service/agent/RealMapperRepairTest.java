@@ -52,7 +52,8 @@ class RealMapperRepairTest {
         var contexts = mock(GenerationContextBuilder.class);
         when(contexts.buildUnitTestContext(1L)).thenReturn(context());
         var prompts = mock(PromptManager.class);
-        when(prompts.render(anyString(), anyMap())).thenReturn("APPROVED_REAL_MAPPER_CONTEXT");
+        when(prompts.renderPrompt(anyString(), anyMap())).thenReturn(
+                new PromptManager.RenderedPrompt("APPROVED_REAL_MAPPER_CONTEXT", List.of()));
         var client = mock(LlmClient.class);
         when(client.complete(anyString(), any())).thenReturn(json.writeValueAsString(response("missing")),
                 json.writeValueAsString(correctedResponse()));

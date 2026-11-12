@@ -1,0 +1,2 @@
+# Relevant policy: switch
+- Never use null as input for a normal Java enum/string SWITCH default outcome. Null throws `NullPointerException` before case matching unless source explicitly handles it. Cover a SWITCH default only when context proves a non-null input can reach it; do not fabricate an unreachable default scenario. A separate approved null-input requirement may require an exception different from the current source; preserve that expectation.

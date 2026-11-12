@@ -23,7 +23,7 @@ class UnitTestFixtureExportTest {
         var files = service.mergeByClass(List.of(
                 test(1L, "check", fixture("int value = 1;", "", "assertEquals(1, value);")),
                 test(2L, "check", fixture("int value = 2;", "", "assertEquals(2, value);"))));
-        assertThat(files).hasSize(2);
+        assertThat(files).hasSize(1);
         assertThat(files).allSatisfy(file -> assertThat(file.testClassName())
                 .as("Maven Surefire default test discovery").matches("Test.*|.*Test|.*Tests|.*TestCase"));
     }
@@ -41,6 +41,35 @@ class UnitTestFixtureExportTest {
         assertThat(files.stream().map(f -> f.filePath().toLowerCase(java.util.Locale.ROOT)).distinct().count()).isEqualTo(2);
         assertThat(files).flatExtracting(UnitTestFileService.MergedFile::caseIds).containsExactlyInAnyOrder(1L, 2L);
         compileAndRun(files, directory);
+    }
+
+    @Test
+    void differentFixturesOfOneClassStayInOneFileAsIndependentClasses(@TempDir Path directory) throws Exception {
+        var files = service.mergeByClass(List.of(
+                test(1L, "check", fixture("int value = 1;", "", "assertEquals(1, value);")),
+                test(2L, "other", fixture("int value = 2;", "", "assertEquals(2, value);").replace("void check()", "void other()")),
+                test(3L, "third", fixture("static int shared = 3;", "", "assertEquals(3, shared);").replace("void check()", "void third()"))));
+
+        assertThat(files).hasSize(1);
+        var file = files.get(0);
+        assertThat(file.testClassName()).isEqualTo("UserServiceTest");
+        assertThat(file.filePath()).isEqualTo("src/test/java/com/example/UserServiceTest.java");
+        assertThat(file.caseIds()).containsExactlyInAnyOrder(1L, 2L, 3L);
+        var unit = com.github.javaparser.StaticJavaParser.parse(file.sourceCode());
+        assertThat(unit.getTypes()).hasSize(3);
+        // Chỉ class trùng tên file được public, class còn lại vẫn khớp mẫu tên Surefire.
+        assertThat(unit.getTypes().stream().filter(type -> type.isPublic()).map(type -> type.getNameAsString()))
+                .containsExactly("UserServiceTest");
+        assertThat(unit.getTypes()).allSatisfy(type -> assertThat(type.getNameAsString()).matches(".*Test").doesNotContain("_GreyTest_"));
+        compileAndRun(files, directory);
+    }
+
+    @Test
+    void junit4FixturesKeepTheirOwnFilesBecauseEachNeedsAPublicClass() {
+        String junit4 = "package com.example; public class UserServiceTest { int value = %d; @org.junit.Test public void check() { } }";
+        var files = service.mergeByClass(List.of(test(1L, "check", junit4.formatted(1)), test(2L, "check", junit4.formatted(2))));
+
+        assertThat(files).hasSize(2);
     }
 
     @Test
@@ -63,7 +92,7 @@ class UnitTestFixtureExportTest {
 
         compileAndRun(files, directory);
 
-        assertThat(files).hasSize(2);
+        assertThat(files).hasSize(1);
         assertThat(files).flatExtracting(UnitTestFileService.MergedFile::caseIds).containsExactlyInAnyOrder(1L, 2L);
         var dtos = files.stream().map(file -> new UnitTestFileDto(file.filePath(), file.testClassName(),
                 file.packageName(), file.caseIds().size(), List.of(), file.sourceCode())).toList();
@@ -77,7 +106,7 @@ class UnitTestFixtureExportTest {
 
         var files = service.mergeByClass(List.of(test(1L, "check", empty), test(2L, "check", setup)));
 
-        assertThat(files).hasSize(2);
+        assertThat(files).hasSize(1);
         compileAndRun(files, directory);
     }
 
@@ -89,7 +118,7 @@ class UnitTestFixtureExportTest {
                 test(2L, "check", fixture("String value = \"ab\";", "String expected() { return \"ab\"; }",
                         "assertEquals(expected(), value);"))));
 
-        assertThat(files).hasSize(2);
+        assertThat(files).hasSize(1);
         compileAndRun(files, directory);
     }
 
@@ -99,7 +128,7 @@ class UnitTestFixtureExportTest {
                 test(1L, "check", fixture("int value;", "", "assertEquals(0, value);")),
                 test(2L, "check", fixture("int value; int increment = ++value;", "", "assertEquals(1, value);"))));
 
-        assertThat(files).hasSize(2);
+        assertThat(files).hasSize(1);
         compileAndRun(files, directory);
     }
 
@@ -141,7 +170,7 @@ class UnitTestFixtureExportTest {
         var files = service.mergeByClass(List.of(test(1L, "check", first), test(2L, "other", second)));
 
         compileAndRun(files, directory);
-        assertThat(files).hasSize(2);
+        assertThat(files).hasSize(1);
     }
 
     @Test
@@ -150,7 +179,7 @@ class UnitTestFixtureExportTest {
                 test(1L, "check", fixture("", "", "assertEquals(1, 1);")),
                 test(2L, "check", fixture("", "", "assertEquals(2, 2);"))));
 
-        assertThat(files).hasSize(2);
+        assertThat(files).hasSize(1);
         assertThat(files).flatExtracting(UnitTestFileService.MergedFile::caseIds).containsExactlyInAnyOrder(1L, 2L);
         compileAndRun(files, directory);
     }
@@ -163,7 +192,7 @@ class UnitTestFixtureExportTest {
                 test(2L, "check", fixture("int value = 2;", nested, "assertEquals(2, new Reader().read());"))));
 
         compileAndRun(files, directory);
-        assertThat(files).hasSize(2);
+        assertThat(files).hasSize(1);
     }
 
     @Test
@@ -176,7 +205,7 @@ class UnitTestFixtureExportTest {
                 .replace("int value;", "int value; static class CustomExtension implements org.junit.jupiter.api.extension.BeforeEachCallback { public void beforeEach(org.junit.jupiter.api.extension.ExtensionContext context) {} }");
         var files = service.mergeByClass(List.of(test(1L, "check", first), test(2L, "other", second)));
 
-        assertThat(files).hasSize(2);
+        assertThat(files).hasSize(1);
         assertThat(files.stream().filter(file -> file.caseIds().contains(2L)).findFirst().orElseThrow().sourceCode())
                 .contains("CustomExtension.class");
     }
@@ -237,20 +266,28 @@ class UnitTestFixtureExportTest {
                 .as("exported fixture variants compile together").isZero();
         try (var loader = new URLClassLoader(new java.net.URL[] { directory.toUri().toURL() }, getClass().getClassLoader())) {
             for (var file : files) {
-                Class<?> type = loader.loadClass(file.packageName() + "." + file.testClassName());
-                for (var method : type.getDeclaredMethods()) {
-                    if (!method.isAnnotationPresent(Test.class)) continue;
-                    Object instance = type.getDeclaredConstructor().newInstance();
-                    for (var lifecycle : type.getDeclaredMethods()) {
-                        if (lifecycle.isAnnotationPresent(org.junit.jupiter.api.BeforeEach.class)) {
-                            lifecycle.setAccessible(true);
-                            lifecycle.invoke(instance);
-                        }
-                    }
-                    method.setAccessible(true);
-                    method.invoke(instance);
+                // Một file có thể chứa nhiều class test độc lập; chạy hết để không bỏ sót.
+                for (var declared : com.github.javaparser.StaticJavaParser.parse(file.sourceCode()).getTypes()) {
+                    runTests(loader.loadClass(file.packageName() + "." + declared.getNameAsString()));
                 }
             }
+        }
+    }
+
+    private void runTests(Class<?> type) throws Exception {
+        for (var method : type.getDeclaredMethods()) {
+            if (!method.isAnnotationPresent(Test.class)) continue;
+            var constructor = type.getDeclaredConstructor();
+            constructor.setAccessible(true);
+            Object instance = constructor.newInstance();
+            for (var lifecycle : type.getDeclaredMethods()) {
+                if (lifecycle.isAnnotationPresent(org.junit.jupiter.api.BeforeEach.class)) {
+                    lifecycle.setAccessible(true);
+                    lifecycle.invoke(instance);
+                }
+            }
+            method.setAccessible(true);
+            method.invoke(instance);
         }
     }
 }

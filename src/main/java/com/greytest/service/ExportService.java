@@ -76,8 +76,9 @@ public class ExportService {
         if (servicePath != null) {
             var scope = scopeResolver.resolve(projectId, servicePath);
             ProjectStatus status = scopedStatuses.status(projectId, scope);
-            if (status != ProjectStatus.COVERAGE_ANALYZED && status != ProjectStatus.COMPLETED) {
-                throw new InvalidProjectStatusException("Chỉ xuất báo cáo sau khi service đã phân tích coverage.");
+            if (status != ProjectStatus.COVERAGE_ANALYZED && status != ProjectStatus.COMPLETED
+                    && !scopedStatuses.onlyUnitTestsMissing(projectId, scope, ProjectStatus.COVERAGE_ANALYZED)) {
+                throw new InvalidProjectStatusException("Chỉ xuất báo cáo sau khi đã duyệt BR, sinh đủ Test Plan, Test Case và phân tích coverage.");
             }
         } else if (project.getStatus() != ProjectStatus.COVERAGE_ANALYZED && project.getStatus() != ProjectStatus.COMPLETED) {
             throw new InvalidProjectStatusException("Chỉ xuất báo cáo sau khi đã phân tích coverage.");

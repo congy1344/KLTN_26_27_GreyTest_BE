@@ -60,7 +60,8 @@ public class GenerationFingerprintService {
             manifest.put("project", input.path("project").path("id"));
             manifest.put("inputs", effectiveInputs(stage, input));
             manifest.put("configuration", configuration(stage));
-            manifest.put("promptDigest", hash(prompts.load(stage)));
+            manifest.put("promptDigest", hash(prompts.load(stage)
+                    + java.util.Objects.toString(prompts.promptPolicyIdentity(stage), "")));
             manifest.put("sourceContractDigest", hash(prompts.load("source-contract")));
             manifest.put("validator", validatorIdentity());
             List<ClassContextDto> targets = targets(classes(context), input);
@@ -253,7 +254,7 @@ public class GenerationFingerprintService {
     private Map<String, String> validatorIdentity() {
         Map<String, String> result = new TreeMap<>();
         result.put("version", environment.getProperty("llm.validator-version", "source-semantic-v1"));
-        for (String type : List.of("GenerationResponseParser", "GeneratedUnitTestSemanticValidator", "TestFeasibilityAnalyzer", "AIAgentService", "GenerationValidationGate")) {
+        for (String type : List.of("GenerationResponseParser", "GeneratedUnitTestSemanticValidator", "GeneratedTestApiValidator", "TestFeasibilityAnalyzer", "AIAgentService", "GenerationValidationGate")) {
             try (var stream = getClass().getResourceAsStream("/com/greytest/service/agent/" + type + ".class")) {
                 if (stream == null) throw new IllegalStateException("Missing validator " + type);
                 result.put(type, hash(stream.readAllBytes()));

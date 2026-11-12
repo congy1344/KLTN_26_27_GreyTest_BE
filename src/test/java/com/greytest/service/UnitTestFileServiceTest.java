@@ -22,6 +22,20 @@ class UnitTestFileServiceTest {
     private final UnitTestFileService service = new UnitTestFileService();
 
     @Test
+    void coverageScriptsSelectEveryTestClassInAFile() throws Exception {
+        var file = new com.greytest.dto.UnitTestFileDto("src/test/java/com/example/UserServiceTest.java", "UserServiceTest", "com.example", 2,
+                List.of("TC-001", "TC-002"), "package com.example; import org.junit.jupiter.api.Test; public class UserServiceTest { @Test void a() {} } "
+                        + "class UserServiceTest_Fixture2Test { @Test void b() {} } class Helper {}");
+
+        Map<String, String> entries = zipEntries(service.createCoverageArchive(List.of(file)));
+
+        assertThat(entries.get("run-greytest-coverage.cmd"))
+                .contains("-Dtest=com.example.UserServiceTest,com.example.UserServiceTest_Fixture2Test")
+                .contains("--tests \"com.example.UserServiceTest\" --tests \"com.example.UserServiceTest_Fixture2Test\"")
+                .doesNotContain("com.example.Helper");
+    }
+
+    @Test
     void mergePreservesSourceVersionsFromEveryRecord() {
         String first = "// GREYTEST_SOURCE_V1 " + "a".repeat(64) + " c3JjL21haW4vamF2YS9BLmphdmE=\n"
                 + "package com.example; class UserServiceTest { void first() {} }";
@@ -315,12 +329,12 @@ class UnitTestFileServiceTest {
                 .contains("jacoco-maven-plugin:0.8.15:prepare-agent")
                 .contains("jacoco-maven-plugin:0.8.15:report")
                 .contains("cd /d \"%~dp0\"", "call \"%MAVEN_COMMAND%\"", "%*")
-                .contains("-Djacoco.propertyName=greytestJacocoArgLine")
-                .contains("-DargLine=@{greytestJacocoArgLine} %GREYTEST_JVM_ARGS%")
+                .contains("-Djacoco.propertyName=argLine")
+                .contains("-DargLine=@{argLine} %GREYTEST_JVM_ARGS%")
                 .contains("set \"GREYTEST_JVM_ARGS=-Djdk.attach.allowAttachSelf=true -XX:+EnableDynamicAgentLoading\"")
                 .contains("Phát hiện module con của dự án Maven multi-module")
                 .contains("clean test-compile")
-                .contains("-DfailIfNoTests=true")
+                .contains("-DfailIfNoTests=true", "-DskipTests=false", "-Dmaven.test.skip=false", "-DreuseForks=false")
                 .contains("src\\test\\java\\*.java", "target\\test-classes\\*.class")
                 .contains("-Dtest=com.example.UserServiceTest")
                 .contains("target\\site\\jacoco\\jacoco.xml", "build.gradle", "gradlew.bat", "jacocoTestReport");
@@ -338,8 +352,8 @@ class UnitTestFileServiceTest {
                 .isGreaterThan(junctionRedirectIndex);
         assertThat(entries.get("run-greytest-coverage.sh"))
                 .contains("jacoco-maven-plugin:0.8.15:prepare-agent")
-                .contains("-Djacoco.propertyName=greytestJacocoArgLine")
-                .contains("-DargLine=@{greytestJacocoArgLine} ${GREYTEST_JVM_ARGS:-}")
+                .contains("-Djacoco.propertyName=argLine")
+                .contains("-DargLine=@{argLine} ${GREYTEST_JVM_ARGS:-}")
                 .contains("export GREYTEST_JVM_ARGS=\"${GREYTEST_JVM_ARGS:--Djdk.attach.allowAttachSelf=true -XX:+EnableDynamicAgentLoading}\"")
                 .contains("src/test/java", "target/test-classes", "*.java", "*.class")
                 .contains("-Dtest=com.example.UserServiceTest")
@@ -348,8 +362,15 @@ class UnitTestFileServiceTest {
                 .contains("target/site/jacoco/jacoco.xml");
         assertThat(entries.get("run-greytest-coverage.sh"))
                 .contains("--init-script", "--tests \"com.example.UserServiceTest\"");
+        // Test fail do BR khác source là kết quả hợp lệ: vẫn phải có coverage và phải báo rõ.
+        for (String script : List.of("run-greytest-coverage.cmd", "run-greytest-coverage.sh")) {
+            assertThat(entries.get(script)).contains("-Dmaven.test.failure.ignore=true", "surefire-reports", "test-results");
+        }
+        assertThat(entries.get("run-greytest-coverage.cmd")).contains("exit /b 3");
+        assertThat(entries.get("run-greytest-coverage.sh")).contains("exit 3");
+        assertThat(entries.get("greytest-jacoco.init.gradle")).contains("ignoreFailures = true");
         assertThat(entries.get("greytest-jacoco.init.gradle"))
-                .contains("jacoco", "jacocoTestReport", "xml.required = true",
+                .contains("forkEvery = 1", "jacoco", "jacocoTestReport", "xml.required = true",
                         "reports/jacoco/test/jacocoTestReport.xml")
                 .contains("allprojects { project ->", "project.plugins.withId('java')",
                         "project.apply plugin: 'jacoco'", "project.plugins.withId('jacoco')",
@@ -608,5 +629,38 @@ class UnitTestFileServiceTest {
 
     private int countOf(String text, String token) {
         return text.split(java.util.regex.Pattern.quote(token), -1).length - 1;
+    }
+
+    @Test
+    void exportedTestFilesCarryNoSourceMarkerWhileTheManifestKeepsTheCheck() throws Exception {
+        String hash = "a".repeat(64);
+        String path = java.util.Base64.getEncoder().encodeToString("src/main/java/demo/Kept.java".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        var file = new com.greytest.dto.UnitTestFileDto("src/test/java/demo/KeptTest.java", "KeptTest", "demo", 1, List.of("TC-001"),
+                "// GREYTEST_SOURCE_V1 " + hash + " " + path + "\npackage demo; class KeptTest { @org.junit.jupiter.api.Test void run() { } }");
+        var names = new java.util.HashMap<String, String>();
+        try (var zip = new java.util.zip.ZipInputStream(new java.io.ByteArrayInputStream(new UnitTestFileService().createCoverageArchive(List.of(file))))) {
+            for (var entry = zip.getNextEntry(); entry != null; entry = zip.getNextEntry()) names.put(entry.getName(), new String(zip.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8));
+        }
+        assertThat(names.get("src/test/java/demo/KeptTest.java")).doesNotContain("GREYTEST_SOURCE").contains("class KeptTest");
+        assertThat(names.get("greytest-source-version.txt")).contains(hash, path);
+        assertThat(names.get("run-greytest-coverage.cmd")).contains("GreyTestSourceCheck");
+    }
+
+    @Test
+    void listsSkippedCasesInTheirOwnArchiveFileOnlyWhenThereAreAny() throws Exception {
+        var file = new com.greytest.dto.UnitTestFileDto("src/test/java/demo/KeptTest.java", "KeptTest", "demo", 1, List.of("TC-001"),
+                "package demo; class KeptTest { @org.junit.jupiter.api.Test void run() { } }");
+        var service = new UnitTestFileService();
+        var names = new java.util.HashMap<String, String>();
+        try (var zip = new java.util.zip.ZipInputStream(new java.io.ByteArrayInputStream(
+                service.createCoverageArchive(List.of(file), null, List.of("TC-002: stub is never used"))))) {
+            for (var entry = zip.getNextEntry(); entry != null; entry = zip.getNextEntry()) names.put(entry.getName(), new String(zip.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8));
+        }
+        assertThat(names).containsKey("src/test/java/demo/KeptTest.java");
+        assertThat(names.get("GREYTEST-SKIPPED-CASES.txt")).contains("TC-002: stub is never used");
+
+        try (var zip = new java.util.zip.ZipInputStream(new java.io.ByteArrayInputStream(service.createCoverageArchive(List.of(file), null, List.of())))) {
+            for (var entry = zip.getNextEntry(); entry != null; entry = zip.getNextEntry()) assertThat(entry.getName()).isNotEqualTo("GREYTEST-SKIPPED-CASES.txt");
+        }
     }
 }

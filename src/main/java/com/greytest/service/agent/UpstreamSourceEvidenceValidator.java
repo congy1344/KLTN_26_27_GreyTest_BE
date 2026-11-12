@@ -31,9 +31,10 @@ final class UpstreamSourceEvidenceValidator {
             var plan = context.approvedTestPlans().stream().filter(p -> Objects.equals(p.id(), item.planId())).findFirst().orElse(null);
             if (plan == null) continue;
             var rules = linkedRules(context.approvedBusinessRules(), plan);
-            // Kỳ vọng do người dùng đặt/sửa có thể cố ý phơi bày lỗi source; không ép nó khớp implementation.
-            if (!sourceDerived(rules, plan)) continue;
             Set<Long> ids = new HashSet<>(); rules.forEach(r -> ids.add(r.methodId()));
+            // Kỳ vọng do người dùng đặt/sửa có thể cố ý phơi bày lỗi source; không ép nó khớp implementation.
+            // Xét theo method vì BR người dùng cũng đổi kỳ vọng của plan khác trên cùng method.
+            if (!sourceDerived(rules, plan) || ids.stream().anyMatch(id -> userAuthoredOnMethod(context.approvedBusinessRules(), id))) continue;
             for (var source : context.classes()) for (var method : source.methods()) if (ids.contains(method.id())) {
                 Map<String, Object> input = input(item);
                 var problem = messages.validate(context.classes(), method.id(), item.expectedResult(), input, requireProof);
@@ -75,6 +76,22 @@ final class UpstreamSourceEvidenceValidator {
             }
         }
         return Optional.empty();
+    }
+
+    /** BR do người dùng viết là oracle cao nhất: test trái source ở method đó là phát hiện lỗi, không phải lỗi sinh. */
+    static boolean userAuthored(BusinessRuleContextDto rule) {
+        return "USER_MODIFIED".equals(rule.source()) || "USER_ADDED".equals(rule.source());
+    }
+
+    static boolean userAuthoredOnMethod(List<BusinessRuleContextDto> rules, Long methodId) {
+        return rules != null && rules.stream().anyMatch(rule -> userAuthored(rule) && Objects.equals(rule.methodId(), methodId));
+    }
+
+    /** Giữ các rule được chọn và BR người dùng viết cùng method, để lô sinh khác không viết kỳ vọng trái với BR đó. */
+    static List<BusinessRuleContextDto> withUserAuthoredSiblings(List<BusinessRuleContextDto> rules, Set<Long> ruleIds) {
+        Set<Long> methods = new HashSet<>();
+        for (var rule : rules) if (ruleIds.contains(rule.id())) methods.add(rule.methodId());
+        return rules.stream().filter(rule -> ruleIds.contains(rule.id()) || userAuthored(rule) && methods.contains(rule.methodId())).toList();
     }
 
     private static boolean sourceDerived(BusinessRuleContextDto rule) {

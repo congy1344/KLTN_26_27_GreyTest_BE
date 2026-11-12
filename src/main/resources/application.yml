@@ -67,9 +67,16 @@ greytest:
     concurrency: ${GREYTEST_LLM_BATCH_CONCURRENCY:4}
     retry-attempts: ${GREYTEST_LLM_BATCH_RETRY_ATTEMPTS:2}
     retry-delay-millis: ${GREYTEST_LLM_BATCH_RETRY_DELAY_MILLIS:200}
+    # Số vòng tự "Tiếp tục sinh" khi Test Case/Unit Test còn thiếu sau lượt chính; 0 là tắt.
+    auto-resume-rounds: ${GREYTEST_LLM_BATCH_AUTO_RESUME_ROUNDS:2}
+    # Thử nghiệm: gọi Unit Test mỗi class được test một request thay vì 4 case một batch.
+    unit-test-per-service: ${GREYTEST_UNIT_TEST_PER_SERVICE:false}
+    # Service lớn tự chia nhóm để prompt không quá lớn và một lần lỗi chỉ ảnh hưởng một nhóm.
+    unit-test-per-service-max-cases: ${GREYTEST_UNIT_TEST_PER_SERVICE_MAX_CASES:15}
   ai-context-log-path: ${GREYTEST_AI_CONTEXT_LOG_PATH:../log}
   ai-context-log-enabled: ${GREYTEST_AI_CONTEXT_LOG_ENABLED:false}
   ai-context-log-console-enabled: ${GREYTEST_AI_CONTEXT_LOG_CONSOLE_ENABLED:false}
+  ai-failure-log-enabled: ${GREYTEST_AI_FAILURE_LOG_ENABLED:true}
   llm:
     max-supporting-source-chars: ${GREYTEST_MAX_SUPPORTING_SOURCE_CHARS:150000}
 

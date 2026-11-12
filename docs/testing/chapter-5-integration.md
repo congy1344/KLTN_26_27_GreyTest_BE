@@ -26,13 +26,14 @@ Suite biên dịch source/test bằng compiler của JDK và thực thi chính m
 
 ## Ánh xạ các nhóm IT
 
+Danh mục hiện hành được đồng bộ với Word ngày 29/10/2026: lớp pipeline còn IT-01 đến IT-04. Các kết quả và số lượng trong phần bằng chứng lịch sử bên dưới phản ánh lượt chạy cũ, không phải số lượng test hiện hành.
+
 | Mã | Method test | Input và kỳ vọng |
 | --- | --- | --- |
 | IT-01 | `it01UploadAnalyzeSeparatesProductionAndExistingTests` | ZIP hợp lệ; upload 201, analyze 200, manifest chỉ 1 production class/1 method, 1 existing test riêng; DB và storage khớp |
 | IT-02 | `it02ApprovedRulesDrivePersistedPlanCaseAndExecutableAssertion` | BR chưa duyệt: job FAILED, không Plan; sau duyệt: 202/QUEUED → COMPLETED từng stage; link BR→Plan→Case→Unit đúng; kỳ vọng 10 và input 100; generated test compile/chạy đạt; download ZIP |
 | IT-03 | `it03CoverageHistoryTraceabilityAndExportsPreserveStoredArtifacts` | Hai XML counter kiểm soát: line 50% rồi 100%; round/history 2, previous 50%; requirement 100% theo 1 BR có Case; trace đủ chuỗi; JSON/Markdown chứa artifact đã lưu |
 | IT-04 | `it04UnauthorizedReadsMutationsAndPauseCannotChangeOwnerState` | User khác đọc/sửa 403; pause thiếu/sai token 401, cross-owner 403; progress và BR trước/sau không đổi; owner pause 200/PAUSED |
-| IT-05 | `it05ProviderFailureAndDuplicateJobKeepApprovedRuleAndNoPartialPlans` | Provider bị chặn bằng latch; job cùng project và mutation nhận 409; provider lỗi không retry → FAILED; BR approved và trạng thái BR_APPROVED giữ nguyên; không partial Plan |
 
 XML IT-03 là fixture counter, không phải số đo JaCoCo từ chạy generated test.
 Requirement coverage 100% chỉ trên một BR fixture, không đại diện chất lượng hệ thống.
@@ -41,8 +42,7 @@ Requirement coverage 100% chỉ trên một BR fixture, không đại diện ch�
 
 Suite không có transaction rollback toàn test. Fixture được tạo qua API và commit trước
 khi worker chạy thread khác. Poll terminal `COMPLETED`/`FAILED`/`PAUSED` có timeout 20 giây.
-Trường hợp duplicate dùng latch để giữ provider trong trạng thái đang xử lý, không phụ thuộc
-vào `sleep` cố định. Cleanup nhả latch, đợi project mutation lock được nhả tối đa 15 giây,
+Trường hợp pause dùng latch để giữ provider trong trạng thái đang xử lý. Cleanup nhả latch, đợi project mutation lock được nhả tối đa 15 giây,
 xóa project qua API theo ID đã tạo rồi xóa user theo ID, cuối suite xóa storage tạm.
 
 ## Regression bảo mật

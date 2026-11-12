@@ -69,7 +69,7 @@ class GenerationSourceArchiveTest {
         String manifest = Files.readString(module.resolve("greytest-source-version.txt"));
         assertThat(manifest.lines()).hasSize(10);
         assertThat(manifest).isEqualTo(GenerationSourceFingerprint.manifest(current.toString()));
-        assertThat(Files.readString(module.resolve(test.filePath()))).startsWith(current.toString());
+        assertThat(Files.readString(module.resolve(test.filePath()))).doesNotContain("GREYTEST_SOURCE");
         Result result = verify(module);
         assertThat(result.exit).withFailMessage(result.output).isZero();
         assertThat(result.output).contains("Source version verified for 10 generation files");
@@ -142,7 +142,7 @@ class GenerationSourceArchiveTest {
         assertThat(manifest.lines()).hasSize(6);
         assertThat(manifest).isEqualTo(GenerationSourceFingerprint.manifest(currentMetadata));
         for (var test : tests) {
-            assertThat(Files.readString(module.resolve(test.filePath()))).startsWith(currentMetadata);
+            assertThat(Files.readString(module.resolve(test.filePath()))).doesNotContain("GREYTEST_SOURCE");
         }
         Result result = verify(module);
         assertThat(result.exit).withFailMessage(result.output).isZero();
@@ -219,8 +219,11 @@ class GenerationSourceArchiveTest {
         var archive = archiveAcrossModules("appointment-service");
         Files.delete(archive.dependency);
         Files.writeString(archive.module.resolve("src/main/java/Dependency.java"), "class Dependency {}\n");
+        // File export không còn dòng dấu vết; dựng lại bản lưu trong database từ manifest.
+        String headers = Files.readAllLines(archive.module.resolve("greytest-source-version.txt")).stream()
+                .map(line -> GenerationSourceFingerprint.PREFIX + line + "\n").collect(java.util.stream.Collectors.joining());
         var test = new UnitTestFileDto("src/test/java/SampleTest.java", "SampleTest", "", 1, List.of("TC-001"),
-                Files.readString(archive.module.resolve("src/test/java/SampleTest.java")));
+                headers + Files.readString(archive.module.resolve("src/test/java/SampleTest.java")));
 
         org.assertj.core.api.Assertions.assertThatThrownBy(() -> new UnitTestFileService()
                 .createCoverageArchive(List.of(test), archive.module))

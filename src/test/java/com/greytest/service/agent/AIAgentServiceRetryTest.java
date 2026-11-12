@@ -33,8 +33,8 @@ class AIAgentServiceRetryTest {
                         List.of(), List.of(), List.of(), List.of(),
                         List.of(), List.of(), List.of()));
         var prompts = mock(PromptManager.class);
-        when(prompts.render(anyString(), anyMap()))
-                .thenReturn("prompt");
+        when(prompts.renderPrompt(anyString(), anyMap()))
+                .thenReturn(new PromptManager.RenderedPrompt("prompt", List.of()));
         var client = mock(LlmClient.class);
         when(client.complete(anyString(), any()))
                 .thenThrow(new LlmResponseException("OpenAI API HTTP 504", true));
@@ -60,7 +60,7 @@ class AIAgentServiceRetryTest {
         when(contexts.buildTestCaseContext(1L)).thenReturn(new TestCaseContextDto(project, null,
                 List.of(), List.of(), List.of(), List.of()));
         var prompts = mock(PromptManager.class);
-        when(prompts.render(anyString(), anyMap())).thenReturn("prompt");
+        when(prompts.renderPrompt(anyString(), anyMap())).thenReturn(new PromptManager.RenderedPrompt("prompt", List.of()));
         var client = mock(LlmClient.class);
         when(client.complete(anyString(), any()))
                 .thenReturn("{\"cases\":[]}")

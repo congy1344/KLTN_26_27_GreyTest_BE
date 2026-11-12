@@ -1,7 +1,6 @@
 package com.greytest.service.analysis;
 
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -31,6 +30,7 @@ import com.greytest.dto.SourceBranchDto;
  * Trích xuất checklist decision/outcome từ control-flow của một Service method.
  */
 public final class MethodBranchAnalyzer {
+    private static final int MAX_STATEMENT_TEXT = 160;
 
     private MethodBranchAnalyzer() {
     }
@@ -49,9 +49,10 @@ public final class MethodBranchAnalyzer {
             method.walk(Node.TreeTraversal.PREORDER, node -> {
                 if (node instanceof IfStmt statement) {
                     String prefix = nextPrefix(counters, "IF");
-                    addBinary(branches, prefix, "IF", statement.getCondition(),
-                            statement.getThenStmt(), statement.getElseStmt().orElse(null),
-                            methodLineStart, "TRUE", "FALSE");
+                    int[] whole = lines(statement, methodLineStart);
+                    int[] then = {whole[0], lines(statement.getThenStmt(), methodLineStart)[1]};
+                    int[] otherwise = statement.getElseStmt().map(branch -> lines(branch, methodLineStart)).orElse(whole);
+                    addBinary(branches, prefix, "IF", statement.getCondition(), then, otherwise, "TRUE", "FALSE");
                 } else if (node instanceof SwitchExpr expression) {
                     addSwitch(branches, nextPrefix(counters, "SWITCH"), expression, expression,
                             methodLineStart);
@@ -59,32 +60,26 @@ public final class MethodBranchAnalyzer {
                     addSwitch(branches, nextPrefix(counters, "SWITCH"), statement, statement,
                             methodLineStart);
                 } else if (node instanceof ConditionalExpr expression) {
-                    String prefix = nextPrefix(counters, "TERNARY");
-                    addBinary(branches, prefix, "TERNARY", expression.getCondition(),
-                            expression.getThenExpr(), expression.getElseExpr(),
-                            methodLineStart, "TRUE", "FALSE");
+                    int[] whole = lines(expression, methodLineStart);
+                    addBinary(branches, nextPrefix(counters, "TERNARY"), "TERNARY", expression.getCondition(), whole, whole, "TRUE", "FALSE");
                 } else if (node instanceof ForStmt statement) {
                     String prefix = nextPrefix(counters, "FOR");
+                    int[] whole = lines(statement, methodLineStart);
                     Expression condition = statement.getCompare().orElse(null);
                     if (condition == null) {
-                        addOutcome(branches, prefix + "::ENTER", "FOR", "ENTER", "true",
-                                statement.getBody(), statement, methodLineStart);
+                        addOutcome(branches, prefix + "::ENTER", "FOR", "ENTER", "true", whole);
                     } else {
-                        addBinary(branches, prefix, "FOR", condition, statement.getBody(), null,
-                                methodLineStart, "ENTER", "SKIP");
+                        addBinary(branches, prefix, "FOR", condition, whole, whole, "ENTER", "SKIP");
                     }
                 } else if (node instanceof ForEachStmt statement) {
-                    String prefix = nextPrefix(counters, "FOREACH");
-                    addBinary(branches, prefix, "FOREACH", statement.getIterable(), statement.getBody(), null,
-                            methodLineStart, "ENTER", "SKIP");
+                    int[] whole = lines(statement, methodLineStart);
+                    addBinary(branches, nextPrefix(counters, "FOREACH"), "FOREACH", statement.getIterable(), whole, whole, "ENTER", "SKIP");
                 } else if (node instanceof WhileStmt statement) {
-                    String prefix = nextPrefix(counters, "WHILE");
-                    addBinary(branches, prefix, "WHILE", statement.getCondition(), statement.getBody(), null,
-                            methodLineStart, "ENTER", "SKIP");
+                    int[] whole = lines(statement, methodLineStart);
+                    addBinary(branches, nextPrefix(counters, "WHILE"), "WHILE", statement.getCondition(), whole, whole, "ENTER", "SKIP");
                 } else if (node instanceof DoStmt statement) {
-                    String prefix = nextPrefix(counters, "DO_WHILE");
-                    addBinary(branches, prefix, "DO_WHILE", statement.getCondition(), statement.getBody(), null,
-                            methodLineStart, "REPEAT", "EXIT");
+                    int[] whole = lines(statement, methodLineStart);
+                    addBinary(branches, nextPrefix(counters, "DO_WHILE"), "DO_WHILE", statement.getCondition(), whole, whole, "REPEAT", "EXIT");
                 }
             });
             List<SourceBranchDto> anchors = new ArrayList<>();
@@ -129,12 +124,12 @@ public final class MethodBranchAnalyzer {
                     ? prefix + "::DEFAULT"
                     : prefix + "::CASE-" + (++caseNumber);
             addOutcome(branches, branchId, "SWITCH", outcome,
-                    normalized(switchNode.getSelector()), entry, switchNode.getSelector(), methodLineStart);
+                    normalized(switchNode.getSelector()), lines(entry, methodLineStart));
         }
         if (node instanceof SwitchStmt
                 && switchNode.getEntries().stream().noneMatch(MethodBranchAnalyzer::isDefaultEntry)) {
             addOutcome(branches, prefix + "::NO_MATCH", "SWITCH", "NO_MATCH",
-                    normalized(switchNode.getSelector()), null, switchNode.getSelector(), methodLineStart);
+                    normalized(switchNode.getSelector()), lines(node, methodLineStart));
         }
     }
 
@@ -153,16 +148,13 @@ public final class MethodBranchAnalyzer {
             String prefix,
             String kind,
             Expression condition,
-            Node firstSourceNode,
-            Node secondSourceNode,
-            Integer methodLineStart,
+            int[] firstLines,
+            int[] secondLines,
             String firstOutcome,
             String secondOutcome) {
         String normalizedCondition = normalized(condition);
-        addOutcome(branches, outcomeId(prefix, firstOutcome), kind, firstOutcome,
-                normalizedCondition, firstSourceNode, condition, methodLineStart);
-        addOutcome(branches, outcomeId(prefix, secondOutcome), kind, secondOutcome,
-                normalizedCondition, secondSourceNode, condition, methodLineStart);
+        addOutcome(branches, outcomeId(prefix, firstOutcome), kind, firstOutcome, normalizedCondition, firstLines);
+        addOutcome(branches, outcomeId(prefix, secondOutcome), kind, secondOutcome, normalizedCondition, secondLines);
     }
 
     private static String outcomeId(String prefix, String outcome) {
@@ -177,47 +169,8 @@ public final class MethodBranchAnalyzer {
             String kind,
             String outcome,
             String condition,
-            Node sourceNode,
-            Node fallbackNode,
-            Integer methodLineStart) {
-        int[] lines = sourceLines(sourceNode, fallbackNode, methodLineStart);
-        branches.add(new SourceBranchDto(
-                branchId,
-                kind,
-                outcome,
-                condition,
-                lines[0],
-                lines[1]));
-    }
-
-    private static String nextPrefix(Map<String, Integer> counters, String kind) {
-        return kind + "-" + counters.merge(kind, 1, Integer::sum);
-    }
-
-    private static String normalized(Node node) {
-        return node.toString().replaceAll("\\s+", " ").trim();
-    }
-
-    private static int absoluteLine(Node node, Integer methodLineStart, boolean begin) {
-        int relative = node.getRange()
-                .map(range -> begin ? range.begin.line : range.end.line)
-                .orElse(1);
-        return methodLineStart == null || methodLineStart <= 0
-                ? relative
-                : methodLineStart + relative - 1;
-    }
-
-    private static int[] sourceLines(Node sourceNode, Node fallbackNode, Integer methodLineStart) {
-        Node first = firstExecutableNode(sourceNode);
-        Node last = lastExecutableNode(sourceNode);
-        if (first == null || last == null) {
-            first = fallbackNode;
-            last = fallbackNode;
-        }
-        return new int[] {
-                absoluteLine(first, methodLineStart, true),
-                absoluteLine(last, methodLineStart, false)
-        };
+            int[] lines) {
+        branches.add(new SourceBranchDto(branchId, kind, outcome, condition, lines[0], lines[1]));
     }
 
     private static void appendSourceStatementAnchors(
@@ -239,14 +192,8 @@ public final class MethodBranchAnalyzer {
             block.getStatements().forEach(child -> collectStatementAnchors(child, branches, counter, methodLineStart));
             return;
         }
-        int[] lines = sourceLines(statement, statement, methodLineStart);
-        branches.add(new SourceBranchDto(
-                "STMT-" + (++counter[0]),
-                "STATEMENT",
-                "EXECUTABLE",
-                "executable statement",
-                lines[0],
-                lines[1]));
+        addOutcome(branches, "STMT-" + (++counter[0]), "STATEMENT", "EXECUTABLE", statementText(statement),
+                lines(statement, methodLineStart));
     }
 
     private static boolean isDecisionStatement(Statement statement) {
@@ -260,27 +207,36 @@ public final class MethodBranchAnalyzer {
                 || statement.findFirst(SwitchExpr.class).isPresent();
     }
 
-    private static Node firstExecutableNode(Node node) {
-        if (node instanceof BlockStmt block) {
-            return block.getStatements().isEmpty() ? null : firstExecutableNode(block.getStatement(0));
-        }
-        if (node instanceof SwitchEntry entry) {
-            return entry.getStatements().isEmpty() ? entry : firstExecutableNode(entry.getStatement(0));
-        }
-        return node;
+    private static String nextPrefix(Map<String, Integer> counters, String kind) {
+        return kind + "-" + counters.merge(kind, 1, Integer::sum);
     }
 
-    private static Node lastExecutableNode(Node node) {
-        if (node instanceof BlockStmt block) {
-            return block.getStatements().isEmpty()
-                    ? null
-                    : lastExecutableNode(block.getStatement(block.getStatements().size() - 1));
-        }
-        if (node instanceof SwitchEntry entry) {
-            return entry.getStatements().isEmpty()
-                    ? entry
-                    : lastExecutableNode(entry.getStatement(entry.getStatements().size() - 1));
-        }
-        return node;
+    private static String normalized(Node node) {
+        return node.toString().replaceAll("\\s+", " ").trim();
+    }
+
+    private static int absoluteLine(Node node, Integer methodLineStart, boolean begin) {
+        int relative = node.getRange()
+                .map(range -> begin ? range.begin.line : range.end.line)
+                .orElse(1);
+        return methodLineStart == null || methodLineStart <= 0
+                ? relative
+                : methodLineStart + relative - 1;
+    }
+
+    /** Cả khối trong source, gồm dòng if và dấu đóng, để người đọc thấy đúng đoạn code của nhánh. */
+    private static int[] lines(Node node, Integer methodLineStart) {
+        return new int[] {
+                absoluteLine(node, methodLineStart, true),
+                absoluteLine(node, methodLineStart, false)
+        };
+    }
+
+    /** Dùng chính câu lệnh làm mô tả để giao diện hiện được code thay vì nhãn chung. */
+    private static String statementText(Statement statement) {
+        Statement copy = statement.clone();
+        copy.removeComment();
+        String text = normalized(copy);
+        return text.length() > MAX_STATEMENT_TEXT ? text.substring(0, MAX_STATEMENT_TEXT - 3) + "..." : text;
     }
 }

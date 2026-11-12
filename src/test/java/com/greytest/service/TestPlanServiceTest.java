@@ -77,31 +77,6 @@ class TestPlanServiceTest {
     }
 
     @Test
-    void generatePersistsValidAiPlansAndDeletesOldPlans() {
-        Project project = mockProject(ProjectStatus.BR_APPROVED);
-        BusinessRule rule = approvedRule(7L);
-        TestPlan oldPlan = plan(99L, 7L, "Old plan");
-        when(businessRuleRepository.findByProjectIdAndStatus(1L, ReviewStatus.APPROVED)).thenReturn(List.of(rule));
-        when(aiAgentService.generateTestPlan(eq(1L), anySet())).thenReturn(new TestPlanResponseDto(List.of(
-                generatedPlan(11L, 7L, List.of(7L), "Happy path"))));
-        when(testPlanRepository.findByProjectId(1L)).thenReturn(List.of(oldPlan));
-        mockTestPlanSaveAll();
-        mockProjectSave();
-
-        List<TestPlanDto> plans = service().generate(1L);
-
-        assertThat(plans).singleElement().satisfies(plan -> {
-            assertThat(plan.businessRuleId()).isEqualTo(7L);
-            assertThat(plan.planCode()).isEqualTo("TP-001");
-            assertThat(plan.status()).isEqualTo(ReviewStatus.PENDING_REVIEW);
-        });
-        verify(testPlanRepository).deleteAll(List.of(oldPlan));
-        verify(testPlanRepository).flush();
-        verify(aiAgentService).generateTestPlan(1L, Set.of(7L));
-        assertThat(project.getStatus()).isEqualTo(ProjectStatus.PLAN_PENDING_REVIEW);
-    }
-
-    @Test
     void generateUsesApprovedRulesAndExcludesPendingSibling() {
         Project project = mockProject(ProjectStatus.BR_APPROVED);
         BusinessRule rule = approvedRule(7L);

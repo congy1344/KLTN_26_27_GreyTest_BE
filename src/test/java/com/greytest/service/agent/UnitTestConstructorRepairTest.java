@@ -47,7 +47,8 @@ class UnitTestConstructorRepairTest {
         var contexts = mock(GenerationContextBuilder.class);
         when(contexts.buildUnitTestContext(1L)).thenReturn(context());
         var prompts = mock(PromptManager.class);
-        when(prompts.render(anyString(), anyMap())).thenReturn("APPROVED_NULL_INPUT_AND_ASSERTIONS");
+        when(prompts.renderPrompt(anyString(), anyMap())).thenReturn(
+                new PromptManager.RenderedPrompt("APPROVED_NULL_INPUT_AND_ASSERTIONS", List.of()));
         String invalid = json.writeValueAsString(invalidResponse());
         var client = mock(LlmClient.class);
         when(client.complete(anyString(), any())).thenReturn(invalid, json.writeValueAsString(response(correctedSource())));

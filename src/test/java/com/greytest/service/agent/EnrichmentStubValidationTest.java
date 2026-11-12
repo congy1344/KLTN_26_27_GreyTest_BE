@@ -100,7 +100,8 @@ class EnrichmentStubValidationTest {
         var contexts = org.mockito.Mockito.mock(GenerationContextBuilder.class);
         org.mockito.Mockito.when(contexts.buildUnitTestContext(911L)).thenReturn(context(f));
         var prompts = org.mockito.Mockito.mock(PromptManager.class);
-        org.mockito.Mockito.when(prompts.render(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyMap())).thenReturn("APPROVED_ENRICHMENT");
+        org.mockito.Mockito.when(prompts.renderPrompt(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyMap()))
+                .thenReturn(new PromptManager.RenderedPrompt("APPROVED_ENRICHMENT", java.util.List.of()));
         var client = org.mockito.Mockito.mock(LlmClient.class);
         org.mockito.Mockito.when(client.complete(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any()))
                 .thenReturn(invalid, json.writeValueAsString(f.path("response")));

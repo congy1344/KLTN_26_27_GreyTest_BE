@@ -46,16 +46,26 @@ public class UnitTestExportProvenanceService {
 
     @Transactional(readOnly = true)
     public List<UnitTest> prepare(Long projectId, List<UnitTest> tests, Path sourceRoot) {
+        return inExportScope(() -> tests.stream().map(test -> {
+                                if (sourceRoot != null && test.getSourceCode() != null && test.getSourceCode().contains(GenerationSourceFingerprint.PREFIX)) { agent.validateExistingUnitTest(projectId, test, sourceRoot); }
+                                return prepareOne(projectId, test, sourceRoot);
+                            }).toList());
+    }
+
+    /** Test đã được caller kiểm tra với cùng sourceRoot thì không kiểm tra lại. */
+    @Transactional(readOnly = true)
+    public List<UnitTest> prepareValidated(Long projectId, List<UnitTest> tests, Path sourceRoot) {
+        return inExportScope(() -> tests.stream().map(test -> prepareOne(projectId, test, sourceRoot)).toList());
+    }
+
+    /** Trong một request, source chỉ quét một lần cho mọi test thay vì quét lại từng test. */
+    public <T> T inExportScope(java.util.function.Supplier<T> action) {
         Long actor = GenerationJobContext.actorUserId();
         try (var previous = GenerationJobContext.openScope(actor)) {
             // Export phải đọc identity active mới, không mượn overlay/analysis của draft trong caller.
             GenerationJobContext.bind(actor, ignored -> { });
             return GenerationJobContext.withValue("greytest.export-read-only", Boolean.TRUE,
-                    () -> com.greytest.service.agent.GenerationContextBuilder.withInputSnapshot(
-                            () -> tests.stream().map(test -> {
-                                if (sourceRoot != null && test.getSourceCode() != null && test.getSourceCode().contains(GenerationSourceFingerprint.PREFIX)) { agent.validateExistingUnitTest(projectId, test, sourceRoot); }
-                                return prepareOne(projectId, test, sourceRoot);
-                            }).toList()));
+                    () -> com.greytest.service.agent.GenerationContextBuilder.withInputSnapshot(action));
         }
     }
 

@@ -338,6 +338,20 @@ public class LlmBatchExecutor {
         }
     }
 
+    /** Output bị cắt thì chia đôi input rồi gọi từng phần; gửi lại nguyên khối chỉ bị cắt tiếp. */
+    public static <I, O> List<O> splitOnTruncation(List<I> items, Function<List<I>, O> call) {
+        try {
+            return List.of(call.apply(items));
+        } catch (com.greytest.service.agent.LlmResponseException.OutputTruncated truncated) {
+            if (items.size() <= 1) throw truncated;
+            GenerationJobContext.log("Output AI bị cắt vì quá dài; đang chia " + items.size() + " mục thành hai nhóm nhỏ hơn.");
+            int middle = items.size() / 2;
+            List<O> results = new java.util.ArrayList<>(splitOnTruncation(items.subList(0, middle), call));
+            results.addAll(splitOnTruncation(items.subList(middle, items.size()), call));
+            return results;
+        }
+    }
+
     public static RuntimeException originalFailure(RuntimeException exception) {
         return exception instanceof BatchExecutionException batchException
                 ? batchException.originalFailure() : exception;

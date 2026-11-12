@@ -99,7 +99,7 @@ class ProjectControllerTest {
         when(authService.currentUser("Bearer token")).thenReturn(user);
         when(projectServiceScopes.list(1L)).thenReturn(java.util.List.of(
                 new com.greytest.dto.ProjectServiceDto(
-                        "account-service", "account-service", ProjectStatus.BR_APPROVED)));
+                        "account-service", "account-service", ProjectStatus.BR_APPROVED, ProjectStatus.BR_APPROVED)));
 
         mockMvc.perform(get("/api/projects/1/services")
                         .header("Authorization", "Bearer token"))

@@ -6,6 +6,17 @@ import org.junit.jupiter.api.Test;
 
 class TextSanitizerTest {
 
+    @org.junit.jupiter.api.Test
+    void removesTheStoredTestabilityNoteAndKeepsTheRealText() {
+        String stored = "Mô tả thật.\n[GreyTest testability: UNKNOWN] PRIVATE_HELPER_ENTRY_POINT @ A.java:1 run — ghi chú | Chọn entry point.";
+        org.assertj.core.api.Assertions.assertThat(TextSanitizer.withoutTestabilityNote(stored)).isEqualTo("Mô tả thật.");
+        org.assertj.core.api.Assertions.assertThat(TextSanitizer.cleanAiText(stored)).isEqualTo("Mô tả thật.");
+        org.assertj.core.api.Assertions.assertThat(TextSanitizer.withoutTestabilityNote("Dòng đầu\n[GreyTest testability: BLOCKED] x\nDòng sau")).isEqualTo("Dòng đầu\nDòng sau");
+        org.assertj.core.api.Assertions.assertThat(TextSanitizer.withoutTestabilityNote("Không có ghi chú")).isEqualTo("Không có ghi chú");
+        org.assertj.core.api.Assertions.assertThat(TextSanitizer.withoutTestabilityNote(null)).isNull();
+    }
+
+
     @Test
     void preservesQuotedExceptionMessagesAndCodeSpansVerbatim() {
         String input = "Ném \"Book not exist with id : \" và `id  :  1001` hoặc 'date : '.";

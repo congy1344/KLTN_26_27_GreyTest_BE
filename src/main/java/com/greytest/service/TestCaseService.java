@@ -19,13 +19,16 @@ import com.greytest.entity.Project;
 import com.greytest.entity.BusinessRule;
 import com.greytest.entity.TestCase;
 import com.greytest.entity.TestPlan;
+import com.greytest.entity.JavaMethod;
 import com.greytest.entity.enums.Priority;
 import com.greytest.entity.enums.ProjectStatus;
 import com.greytest.entity.enums.ReviewStatus;
 import com.greytest.entity.enums.TestType;
+import com.greytest.entity.enums.Visibility;
 import com.greytest.exception.InvalidProjectStatusException;
 import com.greytest.exception.ProjectNotFoundException;
 import com.greytest.exception.UsageQuotaExceededException;
+import com.greytest.repository.JavaMethodRepository;
 import com.greytest.repository.ProjectRepository;
 import com.greytest.repository.BusinessRuleRepository;
 import com.greytest.repository.TestCaseRepository;
@@ -37,22 +40,31 @@ import com.greytest.service.agent.LlmResponseException;
 /** Quan ly test case sinh tu test plan va review HITL. */
 @Service
 public class TestCaseService {
+    // Các batch chạy song song nên mã được đánh lại theo thứ tự source khi cả bước sinh xong.
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private ArtifactCodeRenumberService codeRenumber;
+
+    /** Số vòng hệ thống tự "Tiếp tục sinh" khi còn Test Plan chưa có case; 0 là tắt. */
+    @org.springframework.beans.factory.annotation.Value("${greytest.llm-batch.auto-resume-rounds:2}")
+    private int autoResumeRounds;
+
     private final TestCaseRepository cases; private final TestPlanRepository plans; private final ProjectRepository projects; private final AIAgentService ai; private final BusinessRuleRepository rules; private final TransactionTemplate transactions; private final GenerationProgressService generationProgress;
-    private ServiceScopeResolver scopeResolver; private LlmBatchExecutor batchExecutor;
+    private ServiceScopeResolver scopeResolver; private LlmBatchExecutor batchExecutor; private JavaMethodRepository methods;
     public TestCaseService(TestCaseRepository cases, TestPlanRepository plans, ProjectRepository projects, AIAgentService ai, BusinessRuleRepository rules, PlatformTransactionManager transactionManager, GenerationProgressService generationProgress) { this.cases=cases; this.plans=plans; this.projects=projects; this.ai=ai; this.rules=rules; this.transactions=new TransactionTemplate(transactionManager); this.generationProgress=generationProgress; }
     @org.springframework.beans.factory.annotation.Autowired
     public TestCaseService(TestCaseRepository cases, TestPlanRepository plans, ProjectRepository projects,
             AIAgentService ai, BusinessRuleRepository rules, PlatformTransactionManager transactionManager,
             GenerationProgressService generationProgress, ServiceScopeResolver scopeResolver,
-            LlmBatchExecutor batchExecutor) {
+            LlmBatchExecutor batchExecutor, JavaMethodRepository methods) {
         this(cases, plans, projects, ai, rules, transactionManager, generationProgress);
         this.scopeResolver=scopeResolver;
         this.batchExecutor=batchExecutor;
+        this.methods=methods;
     }
     public TestCaseService(TestCaseRepository cases, TestPlanRepository plans, ProjectRepository projects,
             AIAgentService ai, BusinessRuleRepository rules, PlatformTransactionManager transactionManager,
             GenerationProgressService generationProgress, ServiceScopeResolver scopeResolver) {
-        this(cases, plans, projects, ai, rules, transactionManager, generationProgress, scopeResolver, null);
+        this(cases, plans, projects, ai, rules, transactionManager, generationProgress, scopeResolver, null, null);
     }
 
     @Transactional(readOnly=true) public List<TestCaseDto> list(Long projectId) { ensureProject(projectId); return plans.findByProjectId(projectId).stream().flatMap(p->cases.findByTestPlanId(p.getId()).stream()).sorted(Comparator.comparing(TestCase::getCaseCode, Comparator.nullsLast(String::compareTo))).map(this::dto).toList(); }
@@ -71,6 +83,9 @@ public class TestCaseService {
         return generate(projectId, scope, resume);
     }
     private List<TestCaseDto> generate(Long projectId, ServiceScopeResolver.ServiceScope scope, boolean resume) {
+        return generate(projectId, scope, resume, autoResumeRounds);
+    }
+    private List<TestCaseDto> generate(Long projectId, ServiceScopeResolver.ServiceScope scope, boolean resume, int resumeRoundsLeft) {
         Project project = ensureProject(projectId);
         if(scope==null) ensureCanGenerate(project);
         List<TestPlan> projectPlans = scope==null?plans.findByProjectId(projectId):scopedPlans(projectId,scope);
@@ -104,20 +119,6 @@ public class TestCaseService {
         }
 
         ai.validateTestCasePrerequisites(projectId, targetPlans.stream().map(TestPlan::getId).collect(java.util.stream.Collectors.toSet()));
-
-        // Nếu sinh lại từ đầu: xóa case cũ TRƯỚC khi bắt đầu gọi AI,
-        // để mỗi batch mới lưu vào DB ngay mà không bị trùng.
-        if (!resume) {
-            List<TestCase> oldCases = approvedPlans.stream()
-                    .flatMap(plan -> cases.findByTestPlanId(plan.getId()).stream())
-                    .toList();
-            if (!oldCases.isEmpty()) {
-                transactions.executeWithoutResult(status -> {
-                    cases.deleteAll(oldCases);
-                    cases.flush();
-                });
-            }
-        }
 
         List<List<TestPlan>> allBatches = planBatches(approvedPlans);
         Set<Long> targetPlanIds = targetPlans.stream().map(TestPlan::getId).collect(java.util.stream.Collectors.toSet());
@@ -165,9 +166,11 @@ public class TestCaseService {
         int baseNumber = nextCaseNumber(projectId);
         java.util.concurrent.atomic.AtomicInteger caseCounter = new java.util.concurrent.atomic.AtomicInteger(baseNumber);
         List<TestCaseDto> allSavedCases = new java.util.concurrent.CopyOnWriteArrayList<>();
+        Set<Long> savedPlanIds = java.util.concurrent.ConcurrentHashMap.newKeySet();
         var expectedPlans = targetPlans.stream().collect(java.util.stream.Collectors.toMap(
                 TestPlan::getId, this::snapshot));
 
+        boolean autoResumed = false;
         try {
             List<List<GeneratedTestCaseDto>> generatedBatches = LlmBatchExecutor.mapOrSequential(
                     batchExecutor,
@@ -200,18 +203,31 @@ public class TestCaseService {
                                     .map(testCase -> from(testCase, number[0]++))
                                     .toList());
                             caseCounter.set(number[0]);
-                            currentBatchPlans.forEach(plan -> {
+                            // Plan chưa có case giữ nguyên để "Tiếp tục sinh" làm lại đúng phần còn thiếu.
+                            Set<Long> generatedPlanIds = validBatch.stream().map(GeneratedTestCaseDto::planId)
+                                    .collect(java.util.stream.Collectors.toSet());
+                            currentBatchPlans.stream().filter(plan -> generatedPlanIds.contains(plan.getId())).forEach(plan -> {
                                 plan.setStatus(ReviewStatus.APPROVED);
                                 plan.setIsModified(false);
                                 plans.save(plan);
                             });
+                            savedPlanIds.addAll(generatedPlanIds);
                             return savedEntities;
                         });
                         if (saved != null) {
                             allSavedCases.addAll(saved.stream().map(this::dto).toList());
                         }
                         String summary = formatPlanBatchSummary(currentBatchPlans);
-                        if (batchIndex >= 0) {
+                        List<TestPlan> unfinished = currentBatchPlans.stream()
+                                .filter(plan -> !savedPlanIds.contains(plan.getId())).toList();
+                        if (!unfinished.isEmpty()) {
+                            String partialMessage = "Đã lưu " + validBatch.size() + " Test Case; còn thiếu "
+                                    + formatPlanBatchSummary(unfinished) + ".";
+                            generationProgress.log(projectId, GenerationProgressStage.TEST_CASE, partialMessage);
+                            if (batchIndex >= 0) {
+                                generationProgress.failStep(projectId, GenerationProgressStage.TEST_CASE, batchIndex, partialMessage);
+                            }
+                        } else if (batchIndex >= 0) {
                             generationProgress.advanceStep(
                                     projectId,
                                     GenerationProgressStage.TEST_CASE,
@@ -234,16 +250,35 @@ public class TestCaseService {
                 return allSavedCases.isEmpty() ? list(projectId) : allSavedCases;
             }
 
+            List<TestPlan> missingPlans = targetPlans.stream().filter(plan -> !savedPlanIds.contains(plan.getId())).toList();
+            if (!missingPlans.isEmpty()) {
+                if (resumeRoundsLeft > 0) {
+                    // Plan thiếu do output AI hỏng thường đạt ở lượt gọi mới: tự làm thay thao tác "Tiếp tục sinh", có giới hạn vòng.
+                    generationProgress.log(projectId, GenerationProgressStage.TEST_CASE,
+                            "Còn " + missingPlans.size() + " Test Plan chưa sinh được; hệ thống tự tiếp tục sinh (còn " + resumeRoundsLeft + " vòng).");
+                    autoResumed = true;
+                    generate(projectId, scope, true, resumeRoundsLeft - 1);
+                    return list(projectId);
+                }
+                generationProgress.fail(projectId, GenerationProgressStage.TEST_CASE,
+                        "Đã lưu " + allSavedCases.size() + " Test Case; còn " + missingPlans.size() + " Test Plan chưa sinh được: "
+                                + formatPlanBatchSummary(missingPlans) + ". Bạn có thể nhấn 'Tiếp tục sinh' để chỉ làm lại phần này.");
+                return list(projectId);
+            }
+
             transactions.executeWithoutResult(status -> {
                 Project p = projects.findById(projectId).orElseThrow(() -> new ProjectNotFoundException(projectId));
                 p.setStatus(ProjectStatus.CASE_PENDING_REVIEW);
                 projects.save(p);
+                if (codeRenumber != null) codeRenumber.renumberCases(projectId);
             });
 
             generationProgress.completeAfterCommit(projectId, GenerationProgressStage.TEST_CASE,
                     "Hoàn tất: đã lưu " + allSavedCases.size() + " Test Case và đưa project vào trạng thái chờ review.");
             return allSavedCases.isEmpty() ? list(projectId) : allSavedCases;
         } catch (RuntimeException exception) {
+            // Vòng tự tiếp tục đã tự báo thất bại; không báo lại với số batch của vòng này.
+            if (autoResumed) throw exception;
             if (generationProgress.isPaused(projectId, GenerationProgressStage.TEST_CASE)) {
                 return allSavedCases.isEmpty() ? list(projectId) : allSavedCases;
             }
@@ -265,6 +300,11 @@ public class TestCaseService {
     }
 
     private List<GeneratedTestCaseDto> generateValidatedBatch(Long projectId, List<TestPlan> batch) {
+        return LlmBatchExecutor.splitOnTruncation(batch, part -> generatePlanCases(projectId, part)).stream()
+                .flatMap(List::stream).toList();
+    }
+
+    private List<GeneratedTestCaseDto> generatePlanCases(Long projectId, List<TestPlan> batch) {
         Set<Long> batchPlanIds = batch.stream()
                 .map(TestPlan::getId)
                 .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
@@ -273,10 +313,8 @@ public class TestCaseService {
                 .filter(testCase -> batchPlanIds.contains(testCase.planId()))
                 .filter(testCase -> isValid(testCase, projectId))
                 .toList();
-        Set<Long> generatedPlanIds = validBatch.stream()
-                .map(GeneratedTestCaseDto::planId)
-                .collect(java.util.stream.Collectors.toSet());
-        if (validBatch.isEmpty() || !generatedPlanIds.equals(batchPlanIds)) {
+        // AI service đã giữ các plan đạt; plan còn thiếu được báo sau khi xử lý xong mọi batch.
+        if (validBatch.isEmpty()) {
             throw new LlmResponseException("AI chưa sinh đủ Test Case cho mỗi Test Plan đã approve.", true);
         }
         return validBatch;
@@ -483,6 +521,21 @@ public class TestCaseService {
         }
         return generateSupplemental(projectId,gaps,round);
     }
+    /**
+     * Mỗi method có gap phải có case riêng, trừ method private: nó chỉ chạy được qua method khác cùng class,
+     * nên case của method cùng class được tính là đã phủ.
+     * ponytail: không dò call graph nên chưa chắc method cùng class đó gọi private này; dò thêm nếu gặp bỏ sót gap thật.
+     */
+    private boolean coversAllGaps(Set<Long> refinableMethodIds,Set<Long> generatedMethodIds) {
+        var missing=new java.util.HashSet<>(refinableMethodIds);
+        missing.removeAll(generatedMethodIds);
+        if(missing.isEmpty()) return true;
+        var generatedClassIds=methods.findAllById(generatedMethodIds).stream()
+                .map(JavaMethod::getClassId).collect(java.util.stream.Collectors.toSet());
+        var missingMethods=methods.findAllById(missing);
+        return missingMethods.size()==missing.size()&&missingMethods.stream()
+                .allMatch(m->m.getVisibility()==Visibility.PRIVATE&&generatedClassIds.contains(m.getClassId()));
+    }
     @Transactional public List<TestCaseDto> generateSupplemental(Long projectId,List<CoverageGapDto> gaps,int round) {
         Project p=ensureProject(projectId);
         if(!Set.of(ProjectStatus.COVERAGE_ANALYZED,ProjectStatus.COMPLETED).contains(p.getStatus()))
@@ -498,7 +551,7 @@ public class TestCaseService {
         var response=ai.generateCoverageRefinement(projectId,round,refinableGaps);
         var valid=response.cases().stream().filter(c->isValid(c,projectId)&&refinableMethodIds.contains(planMethodIds.get(c.planId()))).toList();
         var generatedMethodIds=valid.stream().map(c->planMethodIds.get(c.planId())).collect(java.util.stream.Collectors.toSet());
-        if(valid.isEmpty()||valid.size()!=response.cases().size()||!generatedMethodIds.containsAll(refinableMethodIds))
+        if(valid.isEmpty()||valid.size()!=response.cases().size()||!coversAllGaps(refinableMethodIds,generatedMethodIds))
             throw new LlmResponseException("AI sinh Test Case không liên kết đúng Test Plan đã duyệt.");
         var scenarioKeys=planMethodIds.entrySet().stream()
                 .filter(entry->refinableMethodIds.contains(entry.getValue()))
@@ -552,7 +605,7 @@ public class TestCaseService {
                 .mapToInt(code -> Integer.parseInt(code.substring(3))).max().orElse(0) + 1;
     }
     private SemanticScenarioKey scenarioKey(Long methodId,TestCase c){
-        return new SemanticScenarioKey(methodId,normalize(c.getPreconditions()),c.getTestData(),normalize(c.getExpectedResult()));
+        return new SemanticScenarioKey(methodId,normalize(com.greytest.util.TextSanitizer.withoutTestabilityNote(c.getPreconditions())),c.getTestData(),normalize(c.getExpectedResult()));
     }
     private SemanticScenarioKey scenarioKey(Long methodId,GeneratedTestCaseDto c){
         return new SemanticScenarioKey(methodId,normalize(c.preconditions()),c.testData(),normalize(c.expectedResult()));

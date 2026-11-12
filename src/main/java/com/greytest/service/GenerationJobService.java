@@ -199,12 +199,14 @@ public class GenerationJobService {
     private void run(Long projectId, Long actorUserId, ProjectStageLock lock, Locale locale, Runnable task) {
         Locale previousLocale = LocaleContextHolder.getLocale();
         GenerationProgressStage stage = lock.stage();
+        GenerationRunMetrics measurement = null;
         try {
             LocaleContextHolder.setLocale(locale);
             GenerationJobContext.bind(actorUserId, message -> progressService.log(projectId, stage, message));
             if (!lock.equals(activeProjects.get(projectId)) || progressService.isPaused(projectId, stage)) {
                 return;
             }
+            measurement = progressService.beginMeasurement(projectId, stage, GenerationJobContext.metricsSupplier());
             task.run();
             progressService.completeIfActive(
                     projectId,
@@ -220,6 +222,7 @@ public class GenerationJobService {
                 progressService.failIfActive(projectId, stage, userMessage(exception));
             }
         } finally {
+            if (measurement != null) measurement.finish();
             GenerationJobContext.clear();
             LocaleContextHolder.setLocale(previousLocale);
             if (progressService.isPaused(projectId, stage)) {

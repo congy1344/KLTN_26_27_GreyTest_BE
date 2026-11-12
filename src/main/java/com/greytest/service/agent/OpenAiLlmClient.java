@@ -164,7 +164,7 @@ public class OpenAiLlmClient implements LlmClient {
                 .timeout(timeout)
                 .header("Authorization", "Bearer " + activeKey)
                 .header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString(requestBody(prompt, options.maxTokens())))
+                .POST(HttpRequest.BodyPublishers.ofString(requestBody(prompt, options)))
                 .build();
 
         try {
@@ -172,12 +172,20 @@ public class OpenAiLlmClient implements LlmClient {
             HttpResponse<String> response = LlmHttpTransport.send(httpClient, request, timeout);
             if (response.statusCode() < 200 || response.statusCode() >= 300) {
                 int status = response.statusCode();
-                throw new LlmResponseException("OpenAI API lỗi HTTP "
-                        + status + ": " + snippet(response.body()), status == 429 || status >= 500);
+                String message = "OpenAI API lỗi HTTP " + status + ": " + snippet(response.body());
+                if (status == 429 || status >= 500) {
+                    throw LlmResponseException.provider(message, null, LlmHttpTransport.retryAfterMillis(response));
+                }
+                throw new LlmResponseException(message, false);
             }
             JsonNode root = responseRoot(response.body());
             String output = "";
             try {
+                JsonNode choice = root.path("choices").path(0);
+                output = choice.path("message").path("content").asText("");
+                if ("length".equals(choice.path("finish_reason").asText())) {
+                    throw new LlmResponseException.OutputTruncated("OpenAI đã cắt output vì đạt giới hạn max tokens.");
+                }
                 output = outputText(response.body());
                 return output;
             } finally {
@@ -189,26 +197,37 @@ public class OpenAiLlmClient implements LlmClient {
                         Duration.ofNanos(System.nanoTime() - startedAt).toMillis());
             }
         } catch (IOException exception) {
-            throw new LlmResponseException("Không gọi được OpenAI API: " + exception.getMessage(), exception, true);
+            throw LlmResponseException.provider("Không gọi được OpenAI API: " + exception.getMessage(), exception, 0);
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
             throw new LlmResponseException("Bi gian doan khi goi OpenAI API.", exception);
         }
     }
 
-    private String requestBody(String prompt, int requestMaxTokens) {
+    private String requestBody(String prompt, LlmRequestOptions options) {
         ObjectNode root = objectMapper.createObjectNode();
         root.put("model", model);
-        root.putArray("messages").addObject()
-                .put("role", "user")
-                .put("content", prompt);
+        var messages = root.putArray("messages");
+        String prefix = String.join("", options.cacheablePrefixes());
+        if ("gpt-6-luna".equals(model) && !prefix.isEmpty() && prompt.startsWith(prefix)) {
+            // Chỉ cache phần dùng chung; không ghi lại suffix thay đổi ở mỗi batch/retry.
+            root.putObject("prompt_cache_options").put("mode", "explicit");
+            for (String part : options.cacheablePrefixes()) {
+                var text = messages.addObject().put("role", "user").putArray("content").addObject();
+                text.put("type", "text").put("text", part);
+                text.putObject("prompt_cache_breakpoint").put("mode", "explicit");
+            }
+            messages.addObject().put("role", "user").put("content", prompt.substring(prefix.length()));
+        } else {
+            messages.addObject().put("role", "user").put("content", prompt);
+        }
         root.put("temperature", temperature);
         if ("gpt-6-luna".equals(model)) {
             // Luna cần tham số token mới; tắt reasoning để giữ temperature hiện tại.
-            root.put("max_completion_tokens", requestMaxTokens);
+            root.put("max_completion_tokens", options.maxTokens());
             root.put("reasoning_effort", "none");
         } else {
-            root.put("max_tokens", requestMaxTokens);
+            root.put("max_tokens", options.maxTokens());
         }
         if (jsonMode) {
             root.putObject("response_format").put("type", "json_object");
@@ -224,7 +243,7 @@ public class OpenAiLlmClient implements LlmClient {
         try {
             return objectMapper.readTree(responseBody);
         } catch (JsonProcessingException exception) {
-            throw new LlmResponseException("OpenAI response không phải JSON hợp lệ.", exception, true);
+            throw LlmResponseException.provider("OpenAI response không phải JSON hợp lệ.", exception, 0);
         }
     }
 
@@ -234,9 +253,9 @@ public class OpenAiLlmClient implements LlmClient {
             String outputText = root.path("choices").path(0).path("message").path("content").asText("");
             if (outputText.isBlank()) outputText = root.path("output_text").asText("");
             if (!outputText.isBlank()) return outputText;
-            throw new LlmResponseException("OpenAI response không có text output.", true);
+            throw LlmResponseException.provider("OpenAI response không có text output.", null, 0);
         } catch (JsonProcessingException exception) {
-            throw new LlmResponseException("OpenAI response không phải JSON hợp lệ.", exception, true);
+            throw LlmResponseException.provider("OpenAI response không phải JSON hợp lệ.", exception, 0);
         }
     }
 

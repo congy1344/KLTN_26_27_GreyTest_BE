@@ -46,6 +46,10 @@ import com.greytest.service.agent.LlmResponseException;
  */
 @Service
 public class TestPlanService {
+    // Các batch chạy song song nên mã được đánh lại theo thứ tự source khi cả bước sinh xong.
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private ArtifactCodeRenumberService codeRenumber;
+
 
     private static final int MAX_SEMANTIC_ATTEMPTS = 2;
 
@@ -320,10 +324,17 @@ public class TestPlanService {
                                     .filter(rule -> !alreadyCoveredRuleIds.contains(rule.getId()))
                                     .toList()
                             : batch;
-                    Set<Long> batchRuleIds = ruleIds(batchForGeneration);
-                    TestPlanResponseDto response = generateValidatedTestPlans(
-                            projectId, batchRuleIds, rulesByMethod(batchForGeneration), rulesByMethod(batch));
-                    return response.plans();
+                    // Plan được phép phủ thêm rule khác cùng method trong cả batch (đã có từ trước), nên kiểm tra theo toàn batch.
+                    Map<Long, Set<Long>> allBatchRulesByMethod = rulesByMethod(batch);
+                    // Giữ các rule cùng method trong một phần để không tạo plan thiếu rule khi output bị cắt.
+                    var methods = List.copyOf(rulesByMethod(batchForGeneration).entrySet());
+                    return LlmBatchExecutor.splitOnTruncation(methods, part -> {
+                        Map<Long, Set<Long>> expected = new java.util.LinkedHashMap<>();
+                        part.forEach(entry -> expected.put(entry.getKey(), entry.getValue()));
+                        Set<Long> partRuleIds = expected.values().stream().flatMap(Set::stream)
+                                .collect(Collectors.toCollection(LinkedHashSet::new));
+                        return generateValidatedTestPlans(projectId, partRuleIds, expected, allBatchRulesByMethod).plans();
+                    }).stream().flatMap(List::stream).toList();
                 },
                 (completedRunBatch, batchPlans) -> {
                     int actualBatchIdx = completedRunBatch <= batchIndexesToRun.size()
@@ -364,6 +375,7 @@ public class TestPlanService {
             Project p = projectRepository.findById(projectId).orElseThrow(() -> new ProjectNotFoundException(projectId));
             p.setStatus(ProjectStatus.PLAN_PENDING_REVIEW);
             projectRepository.save(p);
+            if (codeRenumber != null) codeRenumber.renumberPlans(projectId);
         });
 
         int totalSaved = allBatchResults.stream().mapToInt(List::size).sum();
@@ -652,10 +664,18 @@ public class TestPlanService {
         return batches;
     }
 
+    private static int ruleOrder(String code) {
+        if (code == null) return Integer.MAX_VALUE;
+        String digits = code.replaceAll("\\D", "");
+        return digits.isEmpty() || digits.length() > 9 ? Integer.MAX_VALUE : Integer.parseInt(digits);
+    }
+
     private Map<Long, Set<Long>> rulesByMethod(List<BusinessRule> rules) {
         List<BusinessRule> sortedRules = rules.stream()
+                // Theo mã BR để batch đi cùng thứ tự source; method_id chỉ phản ánh thứ tự phân tích.
                 .sorted(Comparator
-                        .comparing(BusinessRule::getMethodId, Comparator.nullsLast(Long::compareTo))
+                        .comparingInt((BusinessRule rule) -> ruleOrder(rule.getRuleCode()))
+                        .thenComparing(BusinessRule::getMethodId, Comparator.nullsLast(Long::compareTo))
                         .thenComparing(BusinessRule::getId))
                 .toList();
         Map<Long, Set<Long>> result = new LinkedHashMap<>();
@@ -666,12 +686,6 @@ public class TestPlanService {
             result.computeIfAbsent(rule.getMethodId(), ignored -> new TreeSet<>()).add(rule.getId());
         }
         return result;
-    }
-
-    private Set<Long> ruleIds(List<BusinessRule> rules) {
-        return rules.stream()
-                .map(BusinessRule::getId)
-                .collect(Collectors.toCollection(TreeSet::new));
     }
 
     private void ensureBatchMatchesMethods(

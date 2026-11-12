@@ -78,6 +78,10 @@ final class SourceExceptionMessageEvidence {
                     ? Text.literal(String.valueOf(value), string) : Text.hole(name, string);
             arguments.put(name, new Text(text.segments(), text.display(), text.string(), text.fixed(), text.format(), name));
         }
+        // Biến cục bộ là giá trị runtime: chỉ đối chiếu phần literal ghép cùng nó, không đoán giá trị.
+        method.findAll(com.github.javaparser.ast.body.VariableDeclarator.class).forEach(variable -> arguments.putIfAbsent(
+                variable.getNameAsString(), Text.hole(variable.getNameAsString(),
+                        "java.lang.String".equals(index.resolve(variable.getType(), owner.unit())))));
         var matcher = MESSAGE.matcher(description);
         int previousEnd = 0;
         while (matcher.find()) {
@@ -100,10 +104,12 @@ final class SourceExceptionMessageEvidence {
             Map<String, List<Text>> evidence = new LinkedHashMap<>();
             List<FormatTemplate> formats = new ArrayList<>();
             Set<String> unknown = new HashSet<>();
+            List<Expression> messageArguments = new ArrayList<>();
             for (var creation : method.findAll(ObjectCreationExpr.class)) {
                 // Không lấy exception trong method/class lồng nhau làm bằng chứng của method hiện tại.
                 if (creation.findAncestor(CallableDeclaration.class).orElse(null) != method
                         || creation.findAncestor(TypeDeclaration.class).isPresent()
+                        || creation.getAnonymousClassBody().isPresent()
                         || creation.findAncestor(ObjectCreationExpr.class).filter(c -> c.getAnonymousClassBody().isPresent()).isPresent()) continue;
                 // Chỉ xét exception nằm trong throw hoặc supplier của orElseThrow.
                 boolean thrown = creation.getParentNode().filter(ThrowStmt.class::isInstance)
@@ -112,6 +118,7 @@ final class SourceExceptionMessageEvidence {
                 if (!thrown) continue;
                 String simple = creation.getType().getNameAsString();
                 if (!simple.equals(associated)) continue;
+                messageArguments.addAll(creation.getArguments());
                 String qualified = index.resolve(creation.getType(), owner.unit());
                 var values = creation.getArguments().stream().map(e -> fragment(e, owner.unit(), arguments, 0)).toList();
                 Text text = constructor(qualified, values, 0);
@@ -119,6 +126,22 @@ final class SourceExceptionMessageEvidence {
                 if (text == null || text.fixed() == 0) unknown.add(simple);
                 else evidence.computeIfAbsent(simple, ignored -> new ArrayList<>()).add(text);
             }
+            var helperThrows = new HelperThrows();
+            for (var call : method.findAll(MethodCallExpr.class)) {
+                if (call.findAncestor(CallableDeclaration.class).orElse(null) != method
+                        || call.findAncestor(TypeDeclaration.class).isPresent()
+                        || call.findAncestor(LambdaExpr.class).isPresent()) continue;
+                Text text = helperMessage(call, owner, method, arguments, associated, 0);
+                if (text == null && call.getScope().isEmpty()) readHelperThrows(call, owner, arguments, associated, helperThrows, new HashSet<>());
+                if (text == null || text.fixed() == 0) continue;
+                if (text.format() != null) formats.add(text.format());
+                evidence.computeIfAbsent(associated, ignored -> new ArrayList<>()).add(text);
+            }
+            if (!helperThrows.messages.isEmpty()) evidence.computeIfAbsent(associated, ignored -> new ArrayList<>()).addAll(helperThrows.messages);
+            // Chỉ gợi ý format template khi source thật sự dùng formatter; message ghép chuỗi phải trích như message thường.
+            boolean usesFormatter = !formats.isEmpty() || messageArguments.stream()
+                    .anyMatch(argument -> usesMessageFormatter(argument, method));
+            var sourceMessages = evidence.values().stream().flatMap(List::stream).map(Text::display).toList();
             var formatClaim = ExceptionMessageFormatClaim.parse(beforeLiteral, claimed, description.substring(matcher.end()));
             if (!substringClaim && formatClaim.template()) {
                 Set<String> parameters = method.getParameters().stream().map(Parameter::getNameAsString)
@@ -131,12 +154,17 @@ final class SourceExceptionMessageEvidence {
                                 .anyMatch(parameter -> parameter.getNameAsString().equals(name) && !parameter.isVarArgs()
                                         && INTEGRAL_TYPES.contains(Objects.toString(index.resolve(parameter.getType(), owner.unit()), "")))));
                 if (proven) continue;
-                if (requireProof || !formats.isEmpty() || !evidence.isEmpty()) return Optional.of("method_id=" + methodId
+                if (requireProof || !formats.isEmpty() || !evidence.isEmpty()) return Optional.of(usesFormatter
+                        ? "method_id=" + methodId
                         + ": cannot verify source exception format template and unchanged arguments for " + associated
                         + ". Source formatter evidence (template, arguments bound at the calling method): " + formats
                         + ". Quote only the exact source format template and list its arguments in source order "
                         + "(e.g., from template \"<template>\" using <arguments> / từ mẫu \"<template>\" với các tham số <arguments>); "
-                        + "require the complete formatted message at test runtime.");
+                        + "require the complete formatted message at test runtime."
+                        : "method_id=" + methodId + ": source does not use a formatter for the " + associated
+                        + " message, so do not label it as a template or format. Source message(s): " + sourceMessages
+                        + ". Quote one listed message unchanged as a plain message, keeping <...> placeholders for runtime values; "
+                        + "if none is listed, describe the message without quoting it.");
                 continue;
             }
             boolean supported = evidence.values().stream().flatMap(List::stream)
@@ -148,19 +176,61 @@ final class SourceExceptionMessageEvidence {
                 boolean contradicted = excludedFragment ? entry.getValue().stream().allMatch(text -> text.containsLiteral(claimed))
                         : fragmentClaim ? entry.getValue().stream().allMatch(text -> text.segments().stream().allMatch(Objects::nonNull) && !text.containsLiteral(claimed))
                         : entry.getValue().stream().noneMatch(text -> text.matches(claimed));
-                if (contradicted)
+                // Chưa đọc được hết nơi ném lỗi thì không đủ bằng chứng để kết luận phát biểu là sai.
+                if (contradicted && !helperThrows.unread)
                     return Optional.of("method_id=" + methodId + ": source exception message for " + entry.getKey()
-                            + " does not support quoted message \"" + claimed + "\". Source template(s): "
-                            + entry.getValue().stream().map(Text::display).toList() + ". Preserve literal punctuation; do not invent a different message.");
+                            + " does not support quoted message \"" + claimed + "\". Source message(s): "
+                            + entry.getValue().stream().map(Text::display).toList()
+                            + ". Preserve literal punctuation and <...> placeholders for runtime values; do not invent a different message.");
+            }
+            if (helperThrows.unread) {
+                com.greytest.service.GenerationJobContext.log("Cần người duyệt kiểm tra: chưa kiểm chứng được thông báo \"" + claimed
+                        + "\" của " + associated + " vì method gọi helper chưa đọc được message (method_id=" + methodId + ").");
+                continue;
             }
             if (requireProof && (!unknown.isEmpty() || evidence.isEmpty() || fragmentClaim)) return Optional.of("method_id=" + methodId
                     + ": cannot verify the exact source exception message for " + associated
                     + ". Keep the proven exception type and describe dynamic/unknown message data instead of inventing a quoted literal. "
-                    + "For a locale-sensitive String.format expression, require the complete message computed with that same source formatter "
+                    + (usesFormatter ? "For a locale-sensitive String.format expression, require the complete message computed with that same source formatter "
                     + "and unchanged inputs at test runtime. Do not quote a guessed rendered message; identify a quoted format template "
-                    + "explicitly and list its unchanged source arguments in order. Do not reduce an approved message requirement to exception type alone.");
+                    + "explicitly and list its unchanged source arguments in order. " : "")
+                    + "Do not reduce an approved message requirement to exception type alone.");
         }
         return Optional.empty();
+    }
+
+    private static final class HelperThrows {
+        private final List<Text> messages = new ArrayList<>();
+        private boolean unread;
+    }
+
+    /** Đọc throw trong helper cùng class mà helperMessage không lần theo được, kể cả helper nhiều lệnh và helper lồng nhau. */
+    private void readHelperThrows(MethodCallExpr call, SourceEvidenceIndex.SourceType owner, Map<String, Text> env,
+            String exception, HelperThrows found, Set<MethodDeclaration> visited) {
+        if (!owner.node().isClassOrInterfaceDeclaration()) return;
+        var declaration = owner.node().asClassOrInterfaceDeclaration();
+        // Lớp cha chưa đọc có thể có overload khác, không dùng tập candidate thiếu làm bằng chứng.
+        if (declaration.getExtendedTypes().stream().anyMatch(t -> !"java.lang.Object".equals(index.resolve(t, owner.unit())))) return;
+        var candidates = owner.node().getMethodsByName(call.getNameAsString()).stream()
+                .filter(m -> m.getParameters().size() == call.getArguments().size()).toList();
+        var values = call.getArguments().stream().map(e -> fragment(e, owner.unit(), env, 0)).toList();
+        if (candidates.size() > 1 && values.stream().allMatch(v -> v != null && v.string())) candidates = candidates.stream()
+                .filter(m -> m.getParameters().stream().allMatch(p -> "java.lang.String".equals(index.resolve(p.getType(), owner.unit())))).toList();
+        for (var helper : candidates) {
+            if (!visited.add(helper)) continue;
+            Map<String, Text> locals = new HashMap<>();
+            helper.findAll(NameExpr.class).forEach(name -> locals.put(name.getNameAsString(), Text.hole(name.getNameAsString(), false)));
+            for (var creation : helper.findAll(ObjectCreationExpr.class)) {
+                if (!creation.getType().getNameAsString().equals(exception)
+                        || creation.getParentNode().filter(ThrowStmt.class::isInstance).isEmpty()) continue;
+                Text text = creation.getAnonymousClassBody().isPresent() ? null : constructor(index.resolve(creation.getType(), owner.unit()),
+                        creation.getArguments().stream().map(e -> fragment(e, owner.unit(), locals, 0)).toList(), 0);
+                if (text == null || text.fixed() == 0) found.unread = true;
+                else found.messages.add(text);
+            }
+            helper.findAll(MethodCallExpr.class).stream().filter(nested -> nested.getScope().isEmpty())
+                    .forEach(nested -> readHelperThrows(nested, owner, locals, exception, found, visited));
+        }
     }
 
     private static String messageNarrative(String description) {
@@ -248,6 +318,11 @@ final class SourceExceptionMessageEvidence {
     private Text constructor(String qualified, List<Text> args, int depth) {
         if (qualified == null || depth > 5 || args.stream().anyMatch(Objects::isNull)) return null;
         if (STANDARD.contains(qualified)) return args.size() == 1 && args.get(0).string() ? args.get(0) : null;
+        // Chỉ dùng hợp đồng framework đã biết khi project không khai báo đè hoặc làm mơ hồ kiểu đó.
+        if ("org.springframework.security.core.userdetails.UsernameNotFoundException".equals(qualified)
+                && !index.declares(qualified)) {
+            return args.size() == 1 && args.get(0).string() ? args.get(0) : null;
+        }
         var source = index.type(qualified);
         if (source == null || !source.node().isClassOrInterfaceDeclaration()) return null;
         var declaration = source.node().asClassOrInterfaceDeclaration();
@@ -273,13 +348,80 @@ final class SourceExceptionMessageEvidence {
         return constructor(parent, delegated, depth + 1);
     }
 
+    /** Chỉ lần theo helper một lệnh, có đích gọi và overload xác định từ source. */
+    private Text helperMessage(MethodCallExpr call, SourceEvidenceIndex.SourceType owner,
+            MethodDeclaration caller, Map<String, Text> env, String exception, int depth) {
+        if (depth > 5) return null;
+        var target = owner;
+        boolean classCall = call.getScope().isPresent() && !call.getScope().get().isThisExpr();
+        if (classCall) {
+            Expression scope = call.getScope().get();
+            var root = scope.findFirst(NameExpr.class);
+            if (root.isPresent() && variableType(root.get().getNameAsString(), call, owner, caller) != null) return null;
+            target = index.type(index.resolve(scope.toString(), owner.unit()));
+        }
+        if (target == null) return null;
+        // Chưa suy giải overload kế thừa: không dùng một tập candidate bị thiếu làm bằng chứng.
+        if (!target.node().isClassOrInterfaceDeclaration()) return null;
+        var declaration = target.node().asClassOrInterfaceDeclaration();
+        var targetUnit = target.unit();
+        if (!declaration.getImplementedTypes().isEmpty() || declaration.getExtendedTypes().stream()
+                .anyMatch(t -> {
+                    String parent = index.resolve(t, targetUnit);
+                    // Exception chuẩn của JDK không có static helper, nên lời gọi Class.helper() không thể là overload kế thừa.
+                    return !"java.lang.Object".equals(parent) && !(classCall && STANDARD.contains(parent));
+                })) return null;
+        var values = call.getArguments().stream().map(e -> fragment(e, owner.unit(), env, 0)).toList();
+        if (values.stream().anyMatch(Objects::isNull)) return null;
+        var candidates = target.node().getMethodsByName(call.getNameAsString()).stream()
+                .filter(m -> m.getParameters().size() == values.size()).toList();
+        if (candidates.size() > 1 && values.stream().allMatch(Text::string)) {
+            var unit = target.unit();
+            candidates = candidates.stream().filter(m -> m.getParameters().stream()
+                    .allMatch(p -> "java.lang.String".equals(index.resolve(p.getType(), unit)))).toList();
+        }
+        if (candidates.size() != 1) return null;
+        var helper = candidates.get(0);
+        if (helper.getParameters().stream().anyMatch(Parameter::isVarArgs)) return null;
+        // Chọn overload trước khi xét dispatch; không bỏ overload thực rồi nhận nhầm một overload khác.
+        if (classCall ? !helper.isStatic() : !helper.isStatic() && !helper.isPrivate() && !helper.isFinal()
+                && !target.node().hasModifier(com.github.javaparser.ast.Modifier.Keyword.FINAL)) return null;
+        if (helper.getBody().isEmpty() || helper.getBody().get().getStatements().size() != 1) return null;
+        Map<String, Text> bindings = new HashMap<>();
+        for (int i = 0; i < values.size(); i++) {
+            var value = values.get(i);
+            var parameter = helper.getParameter(i);
+            bindings.put(parameter.getNameAsString(), new Text(value.segments(), value.display(),
+                    "java.lang.String".equals(index.resolve(parameter.getType(), target.unit())),
+                    value.fixed(), value.format(), value.sourceArgument()));
+        }
+        var statement = helper.getBody().get().getStatement(0);
+        if (statement.isThrowStmt() && statement.asThrowStmt().getExpression().isObjectCreationExpr()) {
+            var creation = statement.asThrowStmt().getExpression().asObjectCreationExpr();
+            if (creation.getAnonymousClassBody().isPresent()) return null;
+            if (!creation.getType().getNameAsString().equals(exception)) return null;
+            var helperOwner = target;
+            var args = creation.getArguments().stream().map(e -> fragment(e, helperOwner.unit(), bindings, 0)).toList();
+            return constructor(index.resolve(creation.getType(), target.unit()), args, 0);
+        }
+        if (statement.isExpressionStmt() && statement.asExpressionStmt().getExpression().isMethodCallExpr()) {
+            return helperMessage(statement.asExpressionStmt().getExpression().asMethodCallExpr(), target,
+                    helper, bindings, exception, depth + 1);
+        }
+        return null;
+    }
+
     private Text fragment(Expression expression, CompilationUnit unit, Map<String, Text> env, int depth) {
         if (depth > 8) return null;
         if (expression.isEnclosedExpr()) return fragment(expression.asEnclosedExpr().getInner(), unit, env, depth + 1);
         if (expression.isStringLiteralExpr()) return Text.literal(expression.asStringLiteralExpr().asString(), true);
         if (expression.isIntegerLiteralExpr()) return Text.literal(expression.asIntegerLiteralExpr().asNumber().toString(), false);
         if (expression.isLongLiteralExpr()) return Text.literal(expression.asLongLiteralExpr().asNumber().toString(), false);
-        if (expression.isNameExpr()) return env.get(expression.asNameExpr().getNameAsString());
+        if (expression.isNameExpr()) {
+            String name = expression.asNameExpr().getNameAsString();
+            // Tham số/biến cục bộ che field cùng tên nên phải tra env trước.
+            return env.containsKey(name) ? env.get(name) : constantValue(name, unit, depth);
+        }
         if (expression.isBinaryExpr() && expression.asBinaryExpr().getOperator() == BinaryExpr.Operator.PLUS) {
             var binary = expression.asBinaryExpr();
             Text left = fragment(binary.getLeft(), unit, env, depth + 1), right = fragment(binary.getRight(), unit, env, depth + 1);
@@ -287,6 +429,8 @@ final class SourceExceptionMessageEvidence {
         }
         if (expression.isMethodCallExpr()) {
             var call = expression.asMethodCallExpr();
+            Text enumValue = enumGetterValue(call, unit, env);
+            if (enumValue != null) return enumValue;
             if (!call.getNameAsString().equals("format") || call.getScope().isEmpty()
                     || call.getScope().get().findAll(NameExpr.class).stream().anyMatch(e -> env.containsKey(e.getNameAsString()))
                     || !"java.lang.String".equals(index.resolve(call.getScope().get().toString(), unit))
@@ -327,6 +471,93 @@ final class SourceExceptionMessageEvidence {
         }
         // Biểu thức còn lại là giá trị runtime, không đoán kết quả helper/getter.
         return expression.isMethodCallExpr() || expression.isFieldAccessExpr() ? Text.hole(expression.toString(), false) : null;
+    }
+
+    /**
+     * Đọc hằng static final khai báo đúng một lần trong file khi initializer là literal hoặc ghép literal đúng kiểu.
+     * Hằng còn lại là giá trị runtime: chỉ đối chiếu phần literal ghép cùng nó, không đoán giá trị.
+     */
+    // ponytail: hằng kế thừa và static import vẫn chưa xác định; mở rộng khi source thực tế cần.
+    private Text constantValue(String name, CompilationUnit unit, int depth) {
+        var variables = unit.findAll(FieldDeclaration.class).stream().flatMap(field -> field.getVariables().stream())
+                .filter(variable -> variable.getNameAsString().equals(name)).toList();
+        if (variables.size() != 1 || !(variables.get(0).getParentNode().orElse(null) instanceof FieldDeclaration field)
+                || !field.isStatic() || !field.isFinal()) return null;
+        var variable = variables.get(0);
+        String type = index.resolve(variable.getType(), unit);
+        boolean string = "java.lang.String".equals(type);
+        Text value = variable.getInitializer().map(initializer -> fragment(initializer, unit, Map.of(), depth + 1)).orElse(null);
+        // Literal chỉ trùng chuỗi Java in ra khi cùng nhóm kiểu: double = 4 in "4.0", char = 65 in "A".
+        boolean exact = value != null && value.segments().stream().allMatch(Objects::nonNull)
+                && (value.string() ? string : INTEGRAL_TYPES.contains(Objects.toString(type, "")));
+        return exact ? value : Text.hole(name, string);
+    }
+
+    /** Message có dựng từ formatter chuỗi không, tính cả biến cục bộ được truyền vào exception. */
+    // ponytail: chỉ xét initializer của biến cục bộ; gán lại sau khai báo thì không nhận ra.
+    private static boolean usesMessageFormatter(Expression message, MethodDeclaration method) {
+        Set<String> names = new HashSet<>();
+        message.findAll(NameExpr.class).forEach(name -> names.add(name.getNameAsString()));
+        return hasMessageFormatter(message) || method.findAll(VariableDeclarator.class).stream()
+                .filter(variable -> names.contains(variable.getNameAsString()))
+                .flatMap(variable -> variable.getInitializer().stream())
+                .anyMatch(SourceExceptionMessageEvidence::hasMessageFormatter);
+    }
+
+    private static boolean hasMessageFormatter(Expression expression) {
+        return expression.findAll(MethodCallExpr.class).stream().anyMatch(call -> call.getNameAsString().equals("formatted")
+                || call.getNameAsString().equals("format") && call.getScope().map(Expression::toString)
+                        .map(Set.of("String", "java.lang.String", "MessageFormat", "java.text.MessageFormat")::contains)
+                        .orElse(call.getArguments().isNonEmpty() && call.getArgument(0).isStringLiteralExpr()));
+    }
+
+    /**
+     * Đọc giá trị của Enum.CONST.getter() khi getter chỉ trả field và field nhận literal qua constructor.
+     * Trường hợp khác trả null để giữ nguyên cách xử lý giá trị runtime, không đoán chuỗi.
+     */
+    private Text enumGetterValue(MethodCallExpr call, CompilationUnit unit, Map<String, Text> env) {
+        if (!call.getArguments().isEmpty() || call.getScope().isEmpty() || !call.getScope().get().isFieldAccessExpr()) return null;
+        var reference = call.getScope().get().asFieldAccessExpr();
+        if (reference.getScope().findAll(NameExpr.class).stream().anyMatch(name -> env.containsKey(name.getNameAsString()))) return null;
+        var type = index.type(index.resolve(reference.getScope().toString(), unit));
+        if (type == null || !type.node().isEnumDeclaration()) return null;
+        var declaration = type.node().asEnumDeclaration();
+        var constant = declaration.getEntries().stream()
+                .filter(entry -> entry.getNameAsString().equals(reference.getNameAsString())).findFirst().orElse(null);
+        if (constant == null || !constant.getClassBody().isEmpty()) return null;
+        var getters = declaration.getMethodsByName(call.getNameAsString()).stream().filter(m -> m.getParameters().isEmpty()).toList();
+        if (getters.size() != 1 || getters.get(0).getBody().isEmpty() || getters.get(0).getBody().get().getStatements().size() != 1) return null;
+        var statement = getters.get(0).getBody().get().getStatement(0);
+        if (!statement.isReturnStmt() || statement.asReturnStmt().getExpression().isEmpty()) return null;
+        String field = fieldName(statement.asReturnStmt().getExpression().get());
+        if (field == null || declaration.getFieldByName(field).isEmpty()) return null;
+        var constructors = declaration.getConstructors().stream()
+                .filter(c -> c.getParameters().size() == constant.getArguments().size()).toList();
+        if (constructors.size() != 1) return null;
+        var constructor = constructors.get(0);
+        // Field chỉ được phép đổi qua method có tên; method đó có lời gọi trong source thì giá trị không còn cố định.
+        for (var assign : declaration.findAll(AssignExpr.class)) {
+            if (!field.equals(fieldName(assign.getTarget()))) continue;
+            if (assign.findAncestor(ConstructorDeclaration.class).isPresent()) continue;
+            var writer = assign.findAncestor(MethodDeclaration.class).orElse(null);
+            if (writer == null || index.callsMethodOn(writer.getNameAsString(), declaration.getNameAsString())
+                    || declaration.findAll(MethodCallExpr.class).stream().anyMatch(c -> c.getNameAsString().equals(writer.getNameAsString()))) return null;
+        }
+        var assignments = constructor.findAll(AssignExpr.class).stream().filter(a -> field.equals(fieldName(a.getTarget()))).toList();
+        if (assignments.size() != 1 || !assignments.get(0).getValue().isNameExpr()) return null;
+        String parameter = assignments.get(0).getValue().asNameExpr().getNameAsString();
+        for (int i = 0; i < constructor.getParameters().size(); i++) {
+            if (!constructor.getParameter(i).getNameAsString().equals(parameter)) continue;
+            var argument = constant.getArgument(i);
+            return argument.isStringLiteralExpr() ? Text.literal(argument.asStringLiteralExpr().asString(), true) : null;
+        }
+        return null;
+    }
+
+    private static String fieldName(Expression expression) {
+        if (expression.isNameExpr()) return expression.asNameExpr().getNameAsString();
+        return expression.isFieldAccessExpr() && expression.asFieldAccessExpr().getScope().isThisExpr()
+                ? expression.asFieldAccessExpr().getNameAsString() : null;
     }
 
     private static String rootParameter(String argument) {

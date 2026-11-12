@@ -46,30 +46,15 @@ class GenerationValidationGateTest {
     }
 
     @Test
-    void annotatesDraftCasesWithoutChangingTheExpectedBusinessOutcome() {
-        var generated = testCase(30L);
-        var response = (TestCaseResponseDto) GenerationValidationGate.addFeasibilityNotes(context(), new TestCaseResponseDto(List.of(generated)));
-        assertThat(response.cases()).singleElement().satisfies(item -> {
-            assertThat(item.preconditions()).contains("[GreyTest testability: BLOCKED]", "Service.java", "Math.random");
-            assertThat(item.expectedResult()).isEqualTo("Approved business outcome");
-            assertThat(item.testData()).isEqualTo(generated.testData());
-            assertThat(item.planId()).isEqualTo(generated.planId());
-        });
-        var rulesResponse = new BusinessRuleResponseDto(List.of(new GeneratedBusinessRuleDto(10L, "Keep actual behavior", "BUSINESS_LOGIC")));
-        assertThat(GenerationValidationGate.addFeasibilityNotes(context(), rulesResponse)).isSameAs(rulesResponse);
-    }
-
-    @Test
     void feasibilityNotesDoNotChangeScenarioClassificationAcrossReviewStages() {
         for (boolean explicitControl : List.of(false, true)) {
             var input = new GeneratedTestCaseDto(30L, "HAPPY_PATH", "Run service",
                     explicitControl ? "Observe the selected branch" : "Source uses Math.random() > 0.8; verify generic error handling",
                     explicitControl ? Map.of("Math.random()", "<= 0.8") : Map.of(),
                     "Approved business outcome", "HIGH", "BR-20 -> TP-30");
-            var response = (TestCaseResponseDto) GenerationValidationGate.addFeasibilityNotes(context(), new TestCaseResponseDto(List.of(input)));
-            var item = response.cases().get(0);
-            var approved = new TestCaseContextItemDto(40L, item.planId(), "TC-40", item.testType(), item.description(),
-                    item.preconditions(), item.testData(), item.expectedResult(), item.priority(), item.traceSource(), "APPROVED", false);
+            // Dữ liệu cũ còn lưu ghi chú trong preconditions: ghi chú không được làm đổi kết luận.
+            var approved = new TestCaseContextItemDto(40L, input.planId(), "TC-40", input.testType(), input.description(),
+                    input.preconditions() + "\n[GreyTest testability: BLOCKED] Service.java Math.random() <= 0.8", input.testData(), input.expectedResult(), input.priority(), input.traceSource(), "APPROVED", false);
             var unitContext = new UnitTestContextDto(null, null, classes, rules, plans, List.of(approved), List.of(), List.of(), List.of());
 
             assertThat(TestFeasibilityAnalyzer.analyze(unitContext).cases()).singleElement().satisfies(assessment ->

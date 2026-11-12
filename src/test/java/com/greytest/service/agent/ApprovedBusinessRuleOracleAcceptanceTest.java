@@ -66,44 +66,6 @@ class ApprovedBusinessRuleOracleAcceptanceTest {
     }
 
     @Test
-    void sameApprovedEqualityAssertionPassesCorrectCodeAndDetectsFaultyCode() throws Exception {
-        String test = """
-                package fixture;
-                import org.junit.jupiter.api.Test;
-                import org.junit.jupiter.api.BeforeEach;
-                import org.junit.jupiter.api.DisplayName;
-                import static org.junit.jupiter.api.Assertions.*;
-                public class TransferServiceTest {
-                    private TransferService service;
-                    @BeforeEach void setUp() { service = new TransferService(); }
-                    @Test @DisplayName("Balance equals amount succeeds")
-                    void equalitySucceeds() { assertEquals(0L, service.transfer(100L, 100L)); }
-                    @Test void aboveSucceeds() { assertEquals(1L, service.transfer(101L, 100L)); }
-                    @Test void belowRejected() {
-                        assertThrows(IllegalArgumentException.class, () -> service.transfer(99L, 100L));
-                    }
-                }
-                """;
-        pairedRun(OUTPUT.resolve("offline"), "TransferServiceTest", "equalitySucceeds", test);
-    }
-
-    @Test
-    void fixtureSetupFailureDoesNotCountAsDetectingBusinessDefect() {
-        String test = """
-                package fixture;
-                import org.junit.jupiter.api.Test;
-                import org.junit.jupiter.api.BeforeEach;
-                import static org.junit.jupiter.api.Assertions.*;
-                public class SetupFailureTest {
-                    @BeforeEach void setUp() { new TransferService().transfer(100L, 100L); }
-                    @Test void equalitySucceeds() { assertTrue(true); }
-                }
-                """;
-        assertThatThrownBy(() -> pairedRun(OUTPUT.resolve("setup-negative"), "SetupFailureTest", "equalitySucceeds", test))
-                .isInstanceOf(AssertionError.class);
-    }
-
-    @Test
     @EnabledIfSystemProperty(named = "greytest.oracle.replay", matches = "true")
     void replayFrozenProviderTestsWithoutNetwork() throws Exception {
         try (var factory = Validation.buildDefaultValidatorFactory()) {

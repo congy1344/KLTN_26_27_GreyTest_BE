@@ -57,13 +57,252 @@ final class GeneratedOutputDependencyResolver {
             var calls = new java.util.ArrayList<>(unit.findAll(MethodCallExpr.class));
             java.util.Collections.reverse(calls);
             for (MethodCallExpr call : calls) resolveCall(call, unit, mockNames, mockTypes);
-            if (!unit.findAll(MethodReferenceExpr.class).isEmpty()) problems.add("unresolved output method reference");
+            // Method reference chỉ bị coi là lỗi khi có JAR để kiểm chứng; không có JAR thì để bước compile thật quyết định.
+            if (!unit.findAll(MethodReferenceExpr.class).isEmpty()) {
+                if (index.hasDependencyClasspath()) problems.add("unresolved output method reference");
+                else dependencies.put("resolved-call:outside-source:method-reference", "external-or-source");
+            }
+            requireDeclaredTypes(unit);
         }
         return dependencies;
     }
 
+    /** Tên kiểu không import, không cùng package, không thuộc java.lang chắc chắn không compile được. */
+    private void requireDeclaredTypes(CompilationUnit unit) {
+        if (unit.findAll(com.github.javaparser.ast.body.ClassOrInterfaceDeclaration.class).stream().anyMatch(type -> !type.getExtendedTypes().isEmpty())) return;
+        if (unit.getImports().stream().anyMatch(item -> !item.isStatic() && item.isAsterisk() && !item.getNameAsString().startsWith("java."))) return;
+        Set<String> names = new java.util.TreeSet<>();
+        unit.findAll(ClassOrInterfaceType.class).stream().filter(type -> type.getScope().isEmpty() && !isScopeFragment(type)).forEach(type -> names.add(type.getNameAsString()));
+        unit.findAll(com.github.javaparser.ast.expr.NameExpr.class).stream()
+                .filter(name -> name.getParentNode().filter(parent -> parent instanceof MethodCallExpr call && call.getScope().filter(scope -> scope == name).isPresent()
+                        || parent instanceof com.github.javaparser.ast.expr.FieldAccessExpr).isPresent())
+                .map(com.github.javaparser.ast.expr.NameExpr::getNameAsString)
+                .filter(name -> Character.isUpperCase(name.charAt(0)) && declaredVariableTypes(name, unit).isEmpty()).forEach(names::add);
+        for (String name : names) {
+            boolean declaredInTest = unit.findAll(TypeDeclaration.class).stream().anyMatch(type -> type.getNameAsString().equals(name))
+                    || unit.findAll(com.github.javaparser.ast.type.TypeParameter.class).stream().anyMatch(type -> type.getNameAsString().equals(name));
+            boolean imported = unit.getImports().stream().anyMatch(item -> !item.isAsterisk() && item.getName().getIdentifier().equals(name));
+            var reference = new ClassOrInterfaceType(null, name);
+            String qualified = index.qualifiedReference(reference, unit, module);
+            boolean known = qualified.contains(".") || sourceType(name, unit) != null || isTestHelperInPackage(name, unit);
+            if (!declaredInTest && !imported && !known) problems.add("unresolved output type: " + name);
+        }
+    }
+
+    /** Field đặt qua ReflectionTestUtils phải tồn tại, trừ khi owner có cha ngoài source chưa kiểm chứng được. */
+    private void requireFixtureField(MethodCallExpr call, CompilationUnit unit) {
+        if (call.getArguments().size() < 2 || !call.getArgument(1).isStringLiteralExpr()) return;
+        String field = call.getArgument(1).asStringLiteralExpr().getValue();
+        Expression target = call.getArgument(0);
+        if (target.isThisExpr()) {
+            var test = call.findAncestor(com.github.javaparser.ast.body.ClassOrInterfaceDeclaration.class).orElse(null);
+            if (test != null && test.getExtendedTypes().isEmpty() && test.getFieldByName(field).isEmpty()) problems.add("unresolved output field: " + field);
+            return;
+        }
+        TypeDeclaration<?> owner = target.isClassExpr() ? sourceType(target.asClassExpr().getType().asString(), unit) : receiverType(target, unit);
+        if (owner != null && !index.mayDeclareField(owner, field, module)) problems.add("unresolved output field: " + identityName(owner) + "#" + field);
+    }
+
+    private String identityName(TypeDeclaration<?> type) { return type.getFullyQualifiedName().orElse(type.getNameAsString()); }
+
+    /** Không có JAR dependency thì phần đi qua thư viện ngoài chỉ kiểm chứng được khi compile thật ở máy chạy test. */
+    private boolean reachesOutsideSource(MethodCallExpr call, CompilationUnit unit) {
+        if (index.hasDependencyClasspath()) return false;
+        if (lambdaParameterOfCallOutsideSource(call, unit)) return true;
+        TypeDeclaration<?> receiver = call.getScope().map(scope -> receiverType(scope, unit)).orElse(null);
+        if (receiver != null) {
+            String method = call.getNameAsString();
+            if (index.inheritedFromOutsideSource(receiver, method, module) || index.signatureLeavesSource(receiver, method, module)) return true;
+            // Solver không tính được kiểu của receiver có cha ngoài source, nên chỉ từ chối khi tự so đối số thấy sai chắc chắn.
+            if (index.leavesSource(receiver, module)) return !argumentsProvablyWrong(receiver, call);
+            // Source đã kết luận được method này: chỉ đối số mới có thể làm solver thiếu thông tin.
+            return index.declaresCall(receiver, method, call.getArguments().size(), module)
+                    && call.getArguments().stream().anyMatch(argument -> expressionReachesOutside(argument, unit));
+        }
+        if (call.getScope().filter(this::hasResolvedType).isPresent()) {
+            return namesTypeOutsideSource(call, unit)
+                    || call.getArguments().stream().anyMatch(argument -> expressionReachesOutside(argument, unit));
+        }
+        return expressionReachesOutside(call, unit);
+    }
+
+    /** Mọi overload cùng số tham số trong source đều không nhận được ít nhất một đối số đã biết kiểu. */
+    private boolean argumentsProvablyWrong(TypeDeclaration<?> owner, MethodCallExpr call) {
+        var candidates = index.declaredOverloads(owner, call.getNameAsString(), call.getArguments().size(), module);
+        return !candidates.isEmpty() && candidates.stream().allMatch(method -> {
+            for (int i = 0; i < call.getArguments().size(); i++) {
+                if (argumentMismatch(method.getParameter(i), call.getArgument(i))) return true;
+            }
+            return false;
+        });
+    }
+
+    private boolean argumentMismatch(com.github.javaparser.ast.body.Parameter parameter, Expression argument) {
+        if (parameter.isVarArgs()) return false;
+        try {
+            var actual = argument.calculateResolvedType();
+            return !actual.isTypeVariable() && !actual.isNull() && !parameter.getType().resolve().isAssignableBy(actual);
+        } catch (RuntimeException unknown) {
+            return false;
+        }
+    }
+
+    /** Receiver tính được kiểu thì lỗi không đến từ nó, ví dụ thenReturn sau một stub đã resolve. */
+    private boolean hasResolvedType(Expression expression) {
+        try {
+            expression.calculateResolvedType();
+            return true;
+        } catch (RuntimeException unresolved) {
+            return false;
+        }
+    }
+
+    private boolean expressionReachesOutside(com.github.javaparser.ast.Node expression, CompilationUnit unit) {
+        if (namesTypeOutsideSource(expression, unit)) return true;
+        if (expression.findAll(ClassOrInterfaceType.class).stream().anyMatch(type -> !isScopeFragment(type) && sourceTypeLeavesSource(type, unit))) return true;
+        for (var name : expression.findAll(com.github.javaparser.ast.expr.NameExpr.class)) {
+            if (declaredVariableTypes(name.getNameAsString(), unit).stream().anyMatch(type -> typeOutsideSource(type, unit) || sourceTypeLeavesSource(type, unit))) return true;
+        }
+        for (MethodCallExpr nested : expression.findAll(MethodCallExpr.class)) {
+            Expression scope = nested.getScope().orElse(null);
+            if (scope == null) continue;
+            if (scope.isFieldAccessExpr() && Character.isLowerCase(scope.toString().charAt(0))
+                    && !scope.asFieldAccessExpr().getScope().isThisExpr() && !testFramework(scope.toString())
+                    && index.outsideSource(scope.toString(), module)) return true;
+            if (scope.isNameExpr() && (importedOutsideSource(scope.asNameExpr().getNameAsString(), unit)
+                    || isTestHelperInPackage(scope.asNameExpr().getNameAsString(), unit))) return true;
+            TypeDeclaration<?> owner = receiverType(scope, unit);
+            if (owner != null && (index.inheritedFromOutsideSource(owner, nested.getNameAsString(), module)
+                    || index.signatureLeavesSource(owner, nested.getNameAsString(), module))) return true;
+        }
+        return false;
+    }
+
+    private boolean namesTypeOutsideSource(com.github.javaparser.ast.Node expression, CompilationUnit unit) {
+        return expression.findAll(ClassOrInterfaceType.class).stream().anyMatch(type -> !isScopeFragment(type) && typeOutsideSource(type, unit));
+    }
+
+    private boolean isTestHelperInPackage(String name, CompilationUnit unit) {
+        return index.isTestSource(unit.getPackageDeclaration().map(pkg -> pkg.getNameAsString() + ".").orElse("") + name, module);
+    }
+
+    /** Tham số lambda không khai báo kiểu lấy kiểu từ lời gọi bao ngoài, nên phụ thuộc lời gọi đó. */
+    private boolean lambdaParameterOfCallOutsideSource(MethodCallExpr call, CompilationUnit unit) {
+        Expression scope = call.getScope().orElse(null);
+        if (scope == null || !scope.isNameExpr()) return false;
+        String name = scope.asNameExpr().getNameAsString();
+        for (var node = call.getParentNode().orElse(null); node != null; node = node.getParentNode().orElse(null)) {
+            if (!(node instanceof com.github.javaparser.ast.expr.LambdaExpr lambda)
+                    || lambda.getParameters().stream().noneMatch(parameter -> parameter.getNameAsString().equals(name) && parameter.getType().isUnknownType())) continue;
+            MethodCallExpr outer = null;
+            for (var parent = lambda.getParentNode().orElse(null); parent != null; parent = parent.getParentNode().orElse(null)) {
+                if (parent instanceof MethodCallExpr candidate) outer = candidate;
+            }
+            return outer != null && reachesOutsideSource(outer, unit);
+        }
+        return false;
+    }
+
+    /** JavaParser tách java.util.List thành các type lồng nhau; đoạn package không phải tham chiếu kiểu. */
+    private boolean isScopeFragment(ClassOrInterfaceType type) {
+        return type.getParentNode().filter(ClassOrInterfaceType.class::isInstance)
+                .map(ClassOrInterfaceType.class::cast).flatMap(ClassOrInterfaceType::getScope).filter(scope -> scope == type).isPresent();
+    }
+
+    private boolean typeOutsideSource(ClassOrInterfaceType type, CompilationUnit unit) {
+        if (type.getTypeArguments().stream().flatMap(List::stream).filter(com.github.javaparser.ast.type.Type::isClassOrInterfaceType)
+                .anyMatch(argument -> typeOutsideSource(argument.asClassOrInterfaceType(), unit))) return true;
+        String name = type.getNameWithScope();
+        boolean imported = unit.getImports().stream().anyMatch(item -> !item.isStatic() && !item.isAsterisk()
+                && item.getName().getIdentifier().equals(name.contains(".") ? name.substring(0, name.indexOf('.')) : name));
+        if (!imported && !name.contains(".")) {
+            return isTestHelperInPackage(name, unit) || sourceType(name, unit) == null
+                    && !index.qualifiedReference(type, unit, module).contains(".") && index.wildcardMayProvide(name, unit);
+        }
+        if (!imported && !Character.isLowerCase(name.charAt(0))) return false;
+        String qualified = index.qualifiedReference(type, unit, module);
+        return !testFramework(qualified) && index.outsideSource(qualified, module);
+    }
+
+    /** Class của project có cha ngoài source: solver không tính được kiểu của nó. */
+    private boolean sourceTypeLeavesSource(ClassOrInterfaceType type, CompilationUnit unit) {
+        TypeDeclaration<?> source = sourceType(type.getNameWithScope(), unit);
+        return source != null && index.leavesSource(source, module);
+    }
+
+    private boolean importedOutsideSource(String name, CompilationUnit unit) {
+        return unit.getImports().stream().anyMatch(item -> !item.isStatic() && !item.isAsterisk() && item.getName().getIdentifier().equals(name)
+                && !testFramework(item.getNameAsString()) && index.outsideSource(item.getNameAsString(), module));
+    }
+
+    private List<ClassOrInterfaceType> declaredVariableTypes(String name, CompilationUnit unit) {
+        var result = new java.util.ArrayList<ClassOrInterfaceType>();
+        for (var variable : unit.findAll(com.github.javaparser.ast.body.VariableDeclarator.class)) {
+            if (variable.getNameAsString().equals(name) && variable.getType().isClassOrInterfaceType()) result.add(variable.getType().asClassOrInterfaceType());
+        }
+        for (var parameter : unit.findAll(com.github.javaparser.ast.body.Parameter.class)) {
+            if (parameter.getNameAsString().equals(name) && parameter.getType().isClassOrInterfaceType()) result.add(parameter.getType().asClassOrInterfaceType());
+        }
+        return result;
+    }
+
+    /** Lời gọi gán field static của class khác SUT sẽ làm rò trạng thái sang test sau nếu không khôi phục. */
+    private void requireStaticStateRestored(MethodCallExpr call, CompilationUnit unit, Set<String> mockNames) {
+        Expression scope = call.getScope().orElse(null);
+        if (scope == null || scope.isNameExpr() && mockNames.contains(scope.asNameExpr().getNameAsString())) return;
+        TypeDeclaration<?> owner = receiverType(scope, unit);
+        if (owner == null || isClassUnderTest(owner, unit)) return;
+        for (var method : owner.getMethodsByName(call.getNameAsString())) {
+            if (method.getParameters().size() != call.getArguments().size()) continue;
+            for (var assignment : method.findAll(com.github.javaparser.ast.expr.AssignExpr.class)) {
+                String field = assignment.getTarget().isFieldAccessExpr() ? assignment.getTarget().asFieldAccessExpr().getNameAsString()
+                        : assignment.getTarget().isNameExpr() ? assignment.getTarget().asNameExpr().getNameAsString() : null;
+                if (field == null || owner.getFieldByName(field).filter(com.github.javaparser.ast.body.FieldDeclaration::isStatic).isEmpty()) continue;
+                // Tham số hoặc biến cục bộ trùng tên che field static, phép gán không đổi trạng thái chung.
+                if (assignment.getTarget().isNameExpr() && (method.getParameterByName(field).isPresent()
+                        || method.findAll(com.github.javaparser.ast.body.VariableDeclarator.class).stream().anyMatch(local -> local.getNameAsString().equals(field)))) continue;
+                boolean restored = unit.findAll(MethodCallExpr.class).stream().anyMatch(other -> other.getNameAsString().equals("setField")
+                        && other.getArguments().size() >= 2 && other.getArgument(0).isClassExpr()
+                        && other.getArgument(0).asClassExpr().getType().asString().endsWith(owner.getNameAsString())
+                        && other.getArgument(1).isStringLiteralExpr() && other.getArgument(1).asStringLiteralExpr().getValue().equals(field))
+                        || cleanedUpInTest(owner, unit);
+                if (!restored) problems.add("unresolved output static state: " + owner.getNameAsString() + "." + field + " is changed through " + call.getNameAsString()
+                        + "; save it before the change and restore it with ReflectionTestUtils.setField(" + owner.getNameAsString() + ".class, \"" + field + "\", saved) in @AfterEach");
+            }
+        }
+    }
+
+    /** Chỉ các lỗi này là kết luận của solver về output; lỗi khác là giới hạn của chính JavaParser. */
+    private boolean solverGaveUp(RuntimeException exception) {
+        return !(exception instanceof com.github.javaparser.resolution.UnsolvedSymbolException
+                || exception instanceof com.github.javaparser.resolution.MethodAmbiguityException
+                || exception instanceof IllegalArgumentException);
+    }
+
+    /** Khối dọn dẹp của test gọi lại class đó: để method của project tự khôi phục, không ép dùng reflection. */
+    private boolean cleanedUpInTest(TypeDeclaration<?> owner, CompilationUnit unit) {
+        var cleanups = new java.util.ArrayList<com.github.javaparser.ast.Node>();
+        unit.findAll(MethodDeclaration.class).stream()
+                .filter(method -> Set.of("AfterEach", "After", "AfterAll", "AfterClass").stream().anyMatch(name -> method.getAnnotationByName(name).isPresent()))
+                .forEach(cleanups::add);
+        unit.findAll(com.github.javaparser.ast.stmt.TryStmt.class).forEach(attempt -> attempt.getFinallyBlock().ifPresent(cleanups::add));
+        return cleanups.stream().flatMap(block -> block.findAll(MethodCallExpr.class).stream())
+                .anyMatch(call -> call.getScope().map(scope -> receiverType(scope, unit)).filter(type -> type == owner).isPresent());
+    }
+
+    /** Class đang được test tự đổi trạng thái của nó là hành vi cần kiểm thử, không phải fixture bị rò. */
+    private boolean isClassUnderTest(TypeDeclaration<?> type, CompilationUnit unit) {
+        return unit.findAll(com.github.javaparser.ast.body.FieldDeclaration.class).stream().anyMatch(field -> field.getAnnotationByName("InjectMocks").isPresent()
+                && field.getElementType().asString().endsWith(type.getNameAsString()))
+                || unit.getTypes().stream().anyMatch(test -> test.getNameAsString().startsWith(type.getNameAsString()));
+    }
+
     private void resolveCall(MethodCallExpr call, CompilationUnit unit, Set<String> mockNames, Set<String> mockTypes) {
-        if (knownSpringFixture(call, unit)) return;
+        requireStaticStateRestored(call, unit, mockNames);
+        if (knownSpringFixture(call, unit)) {
+            requireFixtureField(call, unit);
+            return;
+        }
         try {
             bindMockitoMatchers(call, unit);
             bindPolyFactoryArguments(call);
@@ -111,9 +350,23 @@ final class GeneratedOutputDependencyResolver {
         } catch (RuntimeException exception) {
             if (exception instanceof com.github.javaparser.resolution.UnsolvedSymbolException
                     && resolveOngoingStubbingFallback(call, unit)) return;
+            // Gọi method production qua reflection luôn bị chặn, kể cả khi thư viện reflection không có trên classpath.
+            boolean reflective = call.getNameAsString().startsWith("invoke") && calledOnSpringFixture(call, unit);
+            // Hai kiểu đã resolve mà vẫn không gán được thì source bác bỏ được, trừ khi kiểu đó thuộc thư viện ngoài.
+            boolean provenMismatch = exception instanceof IllegalArgumentException;
+            // JavaParser tự lỗi khi suy luận kiểu (ví dụ new HashSet<>(...) trong thenReturn) thì chưa kết luận được gì về output.
+            if (!reflective && solverGaveUp(exception)) {
+                dependencies.put("resolved-call:solver-gave-up:" + call.getNameAsString(), "external-or-source");
+                return;
+            }
+            if (!reflective && !index.hasDependencyClasspath()
+                    && (provenMismatch ? namesTypeOutsideSource(call, unit) : reachesOutsideSource(call, unit))) {
+                dependencies.put("resolved-call:outside-source:" + call.getNameAsString(), "external-or-source");
+                return;
+            }
             if (mockitoApi(call, unit)) {
                 problems.add("unresolved Mockito signature: " + call.getNameAsString() + " (" + exception.getClass().getSimpleName()
-                        + ": " + java.util.Objects.toString(exception.getMessage(), "") + ")");
+                        + ": " + java.util.Objects.toString(exception.getMessage(), "") + ")" + bareAnyHint(call));
                 return;
             }
             TypeDeclaration<?> owner = call.getScope().map(scope -> receiverType(scope, unit)).orElse(null);
@@ -409,7 +662,10 @@ final class GeneratedOutputDependencyResolver {
         return false;
     }
     private boolean knownSpringFixture(MethodCallExpr call, CompilationUnit unit) {
-        if (!Set.of("setField", "getField").contains(call.getNameAsString())) return false;
+        return Set.of("setField", "getField").contains(call.getNameAsString()) && calledOnSpringFixture(call, unit);
+    }
+
+    private boolean calledOnSpringFixture(MethodCallExpr call, CompilationUnit unit) {
         String fixture = "org.springframework.test.util.ReflectionTestUtils";
         if (productionType(fixture) != null) return false;
         if (call.getScope().isEmpty()) return unit.getImports().stream().anyMatch(imported -> imported.isStatic()
@@ -437,6 +693,15 @@ final class GeneratedOutputDependencyResolver {
             if (type.isReferenceType()) return productionType(type.asReferenceType().getQualifiedName());
         } catch (RuntimeException exception) { /* Static type qualifiers are not value expressions. */ }
         return sourceType(scope.toString(), unit);
+    }
+
+    /** Thông điệp thô của solver không chỉ ra cách sửa, nên AI lặp lại đúng lỗi này ở lượt sau. */
+    private String bareAnyHint(MethodCallExpr call) {
+        boolean bareAny = call.getArguments().stream().anyMatch(argument -> argument.isMethodCallExpr()
+                && argument.asMethodCallExpr().getNameAsString().equals("any")
+                && argument.asMethodCallExpr().getArguments().isEmpty()
+                && argument.asMethodCallExpr().getTypeArguments().isEmpty());
+        return bareAny ? " If the method is overloaded, a bare any() does not compile (ambiguous); keep it null-inclusive with an explicit type, for example ArgumentMatchers.<java.util.List<String>>any(), once per overload the ban covers." : "";
     }
 
     private boolean mockitoApi(MethodCallExpr call, CompilationUnit unit) {

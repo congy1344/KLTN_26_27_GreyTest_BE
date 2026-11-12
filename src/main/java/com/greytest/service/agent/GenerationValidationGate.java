@@ -25,9 +25,16 @@ public final class GenerationValidationGate {
         return GeneratedUnitTestSemanticValidator.validate(context, response, framework, mockitoVersion);
     }
 
+    public static GeneratedUnitTestSemanticValidator.Validation validateUnitTestsByCase(UnitTestContextDto context,
+            UnitTestResponseDto response, TestFramework framework, MockitoVersionInfo mockitoVersion) {
+        return GeneratedUnitTestSemanticValidator.validateByCase(context, response, framework, mockitoVersion);
+    }
+
     public static Optional<String> validateTestCases(TestCaseContextDto context, TestCaseResponseDto response) {
-        var setup = SourceMockingSupport.validateTestCases(context, response);
-        return setup.isPresent() ? setup : UpstreamSourceEvidenceValidator.cases(context, response);
+        // Gửi đủ lỗi setup lẫn lỗi bằng chứng trong một lượt sửa, không để AI chỉ thấy nhóm lỗi đầu tiên.
+        var problems = java.util.stream.Stream.of(SourceMockingSupport.validateTestCases(context, response),
+                UpstreamSourceEvidenceValidator.cases(context, response)).flatMap(Optional::stream).toList();
+        return problems.isEmpty() ? Optional.empty() : Optional.of(String.join("\n", problems));
     }
 
     public static Optional<String> validatePrerequisites(Object context) {
@@ -80,12 +87,14 @@ public final class GenerationValidationGate {
                     + ". Regenerate the complete plans array; preserve every approved rule and method_id.");
         } else if (context instanceof TestCaseContextDto c && response instanceof TestCaseResponseDto result) {
             var plans = c.approvedTestPlans().stream().map(TestPlanContextItemDto::id).collect(Collectors.toSet());
+            Set<String> problems = new LinkedHashSet<>();
             for (var item : result.cases()) {
-                if (!plans.contains(item.planId())) return Optional.of("plan_id=" + item.planId() + " is outside the selected approved plans.");
+                if (!plans.contains(item.planId())) problems.add("plan_id=" + item.planId() + " is outside the selected approved plans.");
             }
             var covered = result.cases().stream().map(GeneratedTestCaseDto::planId).collect(Collectors.toSet());
             var missing = plans.stream().filter(id -> !covered.contains(id)).sorted().toList();
-            if (!missing.isEmpty()) return Optional.of("Missing test cases for approved plan IDs " + missing + ".");
+            if (!missing.isEmpty()) problems.add("Missing test cases for approved plan IDs " + missing + ".");
+            if (!problems.isEmpty()) return Optional.of(String.join("\n", problems));
         }
         return Optional.empty();
     }
@@ -100,6 +109,38 @@ public final class GenerationValidationGate {
         if (blocked.isEmpty()) return new PreparedUnitTests(context, List.of());
         var blockedIds = blocked.stream().map(BlockedUnitTestDto::caseId).collect(Collectors.toSet());
         var eligible = context.approvedTestCases().stream().filter(c -> !blockedIds.contains(c.id())).toList();
+        return new PreparedUnitTests(withCases(context, eligible), blocked);
+    }
+
+    /** Context cho lượt sửa: chỉ gồm case lỗi cùng rule, plan và source liên quan đến chúng. */
+    /** Chỉ đổi tập plan cần đối chiếu; source và rule giữ nguyên làm bằng chứng. */
+    public static TestCaseContextDto narrowTestCases(TestCaseContextDto context, Set<Long> planIds) {
+        return new TestCaseContextDto(context.project(), context.analysis(), context.classes(), context.approvedBusinessRules(),
+                context.approvedTestPlans().stream().filter(plan -> planIds.contains(plan.id())).toList(),
+                context.existingTests(), context.supportingResources(), context.contextWarnings());
+    }
+
+    public static UnitTestContextDto narrowUnitTests(UnitTestContextDto context, Set<Long> caseIds) {
+        var narrowed = withCases(context, context.approvedTestCases().stream().filter(c -> caseIds.contains(c.id())).toList());
+        var planIds = narrowed.approvedTestCases().stream().map(TestCaseContextItemDto::testPlanId).collect(Collectors.toSet());
+        var plans = narrowed.approvedTestPlans().stream().filter(p -> planIds.contains(p.id())).toList();
+        Set<Long> ruleIds = new HashSet<>();
+        plans.forEach(p -> {
+            ruleIds.add(p.businessRuleId());
+            if (p.coveredRuleIds() != null) ruleIds.addAll(p.coveredRuleIds());
+        });
+        var rules = UpstreamSourceEvidenceValidator.withUserAuthoredSiblings(narrowed.approvedBusinessRules(), ruleIds);
+        var originalTargets = context.classes().stream().filter(c -> !c.methods().isEmpty()).map(ClassContextDto::qualifiedName).collect(Collectors.toSet());
+        var targetSources = narrowed.classes().stream().filter(c -> !c.methods().isEmpty()).map(c -> Objects.toString(c.validationSourceCode(), "")).toList();
+        // Class target của case đã đạt chỉ giữ lại khi source của case còn lỗi vẫn nhắc tới nó.
+        var classes = narrowed.classes().stream().filter(c -> !c.methods().isEmpty() || !originalTargets.contains(c.qualifiedName())
+                || targetSources.stream().anyMatch(source -> source.contains(c.className()))).toList();
+        return new UnitTestContextDto(narrowed.project(), narrowed.analysis(), classes, rules, plans, narrowed.approvedTestCases(),
+                narrowed.existingApprovedTestCases(), narrowed.previousGeneratedUnitTests(), narrowed.existingTests(),
+                narrowed.supportingResources(), narrowed.contextWarnings());
+    }
+
+    private static UnitTestContextDto withCases(UnitTestContextDto context, List<TestCaseContextItemDto> eligible) {
         var eligiblePlans = eligible.stream().map(TestCaseContextItemDto::testPlanId).collect(Collectors.toSet());
         Set<Long> ruleIds = new HashSet<>();
         context.approvedTestPlans().stream().filter(p -> eligiblePlans.contains(p.id())).forEach(p -> {
@@ -111,50 +152,9 @@ public final class GenerationValidationGate {
         var classes = context.classes().stream().map(c -> new ClassContextDto(c.id(), c.packageName(), c.className(),
                 c.qualifiedName(), c.classType(), c.filePath(), c.sourceCode(), c.annotations(),
                 c.methods().stream().filter(m -> methodIds.contains(m.id())).toList(), c.validationSourceCode())).toList();
-        return new PreparedUnitTests(new UnitTestContextDto(context.project(), context.analysis(), classes,
+        return new UnitTestContextDto(context.project(), context.analysis(), classes,
                 context.approvedBusinessRules(), context.approvedTestPlans(), eligible, context.existingApprovedTestCases(),
-                context.previousGeneratedUnitTests(), context.existingTests(), context.supportingResources(), context.contextWarnings()), blocked);
-    }
-
-    /** Chỉ gắn chú thích cho artifact mới chờ review; giữ nguyên BR và expected result đã duyệt. */
-    public static Object addFeasibilityNotes(Object context, Object response) {
-        if (context instanceof TestPlanContextDto c && response instanceof TestPlanResponseDto result) {
-            var assessments = TestFeasibilityAnalyzer.analyze(c).methods().stream()
-                    .collect(Collectors.toMap(MethodAssessment::methodId, item -> item, (left, right) -> left));
-            return new TestPlanResponseDto(result.plans().stream().map(p -> {
-                var assessment = assessments.get(p.methodId());
-                String description = assessment == null ? p.description()
-                        : note(p.description(), assessment.status(), assessment.findings(), assessment.strategies());
-                return new GeneratedTestPlanDto(p.methodId(), p.ruleId(), p.coveredRuleIds(), p.title(), description, p.testType());
-            }).toList());
-        }
-        if (context instanceof TestCaseContextDto c && response instanceof TestCaseResponseDto result) {
-            return new TestCaseResponseDto(result.cases().stream().map(item -> {
-                var plan = c.approvedTestPlans().stream().filter(p -> Objects.equals(p.id(), item.planId())).findFirst();
-                if (plan.isEmpty()) return item;
-                Set<Long> ruleIds = new HashSet<>();
-                ruleIds.add(plan.get().businessRuleId());
-                if (plan.get().coveredRuleIds() != null) ruleIds.addAll(plan.get().coveredRuleIds());
-                var methodIds = c.approvedBusinessRules().stream().filter(r -> ruleIds.contains(r.id()))
-                        .map(BusinessRuleContextDto::methodId).filter(Objects::nonNull).distinct().toList();
-                // Không tự chọn một method nếu plan đang gộp nhiều method khác nhau.
-                if (methodIds.size() != 1) return item;
-                String scenario = item.description() + "\n" + item.preconditions() + "\n" + item.testData();
-                var assessment = TestFeasibilityAnalyzer.analyzeScenario(c.classes(), methodIds.get(0), scenario);
-                return new GeneratedTestCaseDto(item.planId(), item.testType(), item.description(),
-                        note(item.preconditions(), assessment.status(), assessment.findings(), assessment.strategies()),
-                        item.testData(), item.expectedResult(), item.priority(), item.traceSource());
-            }).toList());
-        }
-        return response;
-    }
-
-    private static String note(String original, Status status, List<Finding> findings, List<String> strategies) {
-        if (status == Status.READY && findings.isEmpty()) return original;
-        String prefix = "[GreyTest testability: ";
-        String text = original == null ? "" : original;
-        String generatedNote = prefix + status + "] " + evidence(findings, strategies).replace('\n', ' ').replace('\r', ' ');
-        return text.endsWith(generatedNote) ? text : text + "\n" + generatedNote;
+                context.previousGeneratedUnitTests(), context.existingTests(), context.supportingResources(), context.contextWarnings());
     }
 
     public static String evidence(List<Finding> findings, List<String> strategies) {

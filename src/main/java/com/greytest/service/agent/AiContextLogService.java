@@ -26,22 +26,32 @@ public class AiContextLogService {
 
     private static final DateTimeFormatter FILE_TIME = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss-SSS");
     private static final AtomicLong FILE_SEQUENCE = new AtomicLong();
+    private static final String FAILURE_LOG = "generation-failures.jsonl";
+    private static final int FAILURE_MESSAGE_LIMIT = 4_000;
+    static final long FAILURE_LOG_MAX_BYTES = 10L * 1024 * 1024;
 
     private final ObjectMapper objectMapper;
     private final Path logDir;
     private final boolean enabled;
     private final boolean consoleEnabled;
+    private final boolean failureLogEnabled;
+
+    public AiContextLogService(ObjectMapper objectMapper, String logPath, boolean enabled, boolean consoleEnabled) {
+        this(objectMapper, logPath, enabled, consoleEnabled, enabled);
+    }
 
     @Autowired
     public AiContextLogService(
             ObjectMapper objectMapper,
             @Value("${greytest.ai-context-log-path:../log}") String logPath,
             @Value("${greytest.ai-context-log-enabled:false}") boolean enabled,
-            @Value("${greytest.ai-context-log-console-enabled:false}") boolean consoleEnabled) {
+            @Value("${greytest.ai-context-log-console-enabled:false}") boolean consoleEnabled,
+            @Value("${greytest.ai-failure-log-enabled:true}") boolean failureLogEnabled) {
         this.objectMapper = objectMapper;
         this.logDir = resolveLogDir(logPath, Path.of("").toAbsolutePath());
         this.enabled = enabled;
         this.consoleEnabled = consoleEnabled;
+        this.failureLogEnabled = failureLogEnabled;
         if (enabled) {
             log.info("AI context log dir: {}", logDir.toAbsolutePath());
         }
@@ -79,6 +89,35 @@ public class AiContextLogService {
             log.info("AI response saved to {} ({} bytes)", file.toAbsolutePath(), Files.size(file));
         } catch (IOException exception) {
             log.warn("Không ghi được AI response log cho {}", promptName, exception);
+        }
+    }
+
+    /** Mỗi lần thất bại là một dòng JSON để tra cứu dự án nào hỏng vì đâu; lỗi ghi file không làm hỏng job. */
+    public synchronized void writeFailure(String promptName, Long projectId, Long caseId, int attempt, LlmResponseException failure) {
+        if (!failureLogEnabled) return;
+        try {
+            var line = objectMapper.createObjectNode();
+            line.put("time", LocalDateTime.now().toString());
+            line.put("projectId", projectId);
+            line.put("stage", promptName);
+            line.put("caseId", caseId);
+            line.put("attempt", attempt);
+            line.put("errorType", failure.getClass().getSimpleName());
+            line.put("classification", failure.getClassification().name());
+            line.put("retryable", failure.isRetryable());
+            line.put("retryAfterMillis", failure.getRetryAfterMillis());
+            String message = String.valueOf(failure.getMessage());
+            line.put("message", message.substring(0, Math.min(message.length(), FAILURE_MESSAGE_LIMIT)));
+            Files.createDirectories(logDir);
+            Path file = logDir.resolve(FAILURE_LOG);
+            // Giữ một bản cũ để file không lớn vô hạn trên máy chủ chạy lâu dài.
+            if (Files.exists(file) && Files.size(file) >= FAILURE_LOG_MAX_BYTES) {
+                Files.move(file, logDir.resolve(FAILURE_LOG + ".1"), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            }
+            Files.writeString(file, line + System.lineSeparator(), StandardCharsets.UTF_8,
+                    java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+        } catch (IOException exception) {
+            log.warn("Không ghi được log thất bại AI cho {}", promptName, exception);
         }
     }
 

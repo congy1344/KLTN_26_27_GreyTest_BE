@@ -1572,6 +1572,22 @@ class GeneratedUnitTestSemanticValidatorTest {
     }
 
     @Test
+    void verifyInTheSameBlockAsAssertThrowsRunsEvenInsideTryFinally() {
+        String production = "public Object load(String id) { return repository.findById(id).orElseThrow(() -> new IllegalArgumentException(id)); }";
+        String source = "@org.junit.jupiter.api.extension.ExtendWith(org.mockito.junit.jupiter.MockitoExtension.class) "
+                + "class ServiceTest { @org.mockito.Mock Repository repository; @org.mockito.InjectMocks Service service; "
+                + "@org.junit.jupiter.api.Test void testCase() { try { org.mockito.Mockito.when(repository.findById(\"missing\")).thenReturn(java.util.Optional.empty()); "
+                + "org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class, () -> service.load(\"missing\")); "
+                + "org.mockito.Mockito.verify(repository).findById(\"missing\"); } finally { System.clearProperty(\"fixture\"); } } }";
+        var context = contextWithServiceSource("demo.Service", "load", production, "package demo; class Service { Repository repository; " + production + " }");
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context, response(source))).isEmpty();
+        // verify nằm trong khối riêng sau assertThrows vẫn không được coi là cùng khối.
+        assertThat(GeneratedUnitTestSemanticValidator.validate(context, response(source.replace(
+                "org.mockito.Mockito.verify(repository).findById(\"missing\"); }", "if (service != null) { org.mockito.Mockito.verify(repository).findById(\"missing\"); } }"))))
+                .hasValueSatisfying(message -> assertThat(message).contains("cannot run after the expected exception"));
+    }
+
+    @Test
     void approvedSuccessAssertionIsNotReplacedBySourceDerivedRepositoryFixtures() {
         String production = "public Object load(String id) { return repository.findById(id).orElseThrow(() -> new IllegalArgumentException(id)); }";
         String source = "@org.junit.runner.RunWith(org.mockito.junit.MockitoJUnitRunner.class) "
@@ -3043,6 +3059,33 @@ class GeneratedUnitTestSemanticValidatorTest {
                 40L, "ServiceTest", methodName, "demo", "NEW_TEST", source)));
     }
 
+    /** Case 1374 của realworld: test này chạy pass thật vì SUT đổi field qua method của chính entity. */
+    private java.util.Optional<String> validateEntityUpdate(String assertion, String entitySource) {
+        String production = "public Article updateArticle(Article article, String title) { article.update(title); repository.save(article); return article; }";
+        var base = contextWithServiceSource("demo.Service", "updateArticle", production,
+                "package demo; public class Service { Repository repository; " + production + " }");
+        var context = entitySource == null ? base : withSupportingClass(base, new ClassContextDto(2L, "demo", "Article", "demo.Article", "ENTITY",
+                "src/main/java/demo/Article.java", entitySource, List.of(), List.of()));
+        String source = "package demo; import static org.junit.jupiter.api.Assertions.assertEquals; class ServiceTest { "
+                + "@org.mockito.Mock Repository repository; @org.mockito.InjectMocks Service service; "
+                + "@org.junit.jupiter.api.Test void testCase() { Article article = new Article(); service.updateArticle(article, \"Tiêu đề\"); " + assertion + " } }";
+        return GeneratedUnitTestSemanticValidator.validate(context, response(source));
+    }
+
+    @Test
+    void fieldChangedThroughAMethodOfTheObjectItselfIsNotReportedAsNeverArranged() {
+        String entity = "package demo; public class Article { private String title; private String slug; private String body; "
+                + "public void update(String title) { this.title = title; refresh(); } private void refresh() { slug = title; } "
+                + "public String getTitle() { return title; } public String getSlug() { return slug; } public String getBody() { return body; } }";
+        String rule = "was instantiated with a default constructor";
+        assertThat(validateEntityUpdate("assertEquals(\"Tiêu đề\", article.getTitle());", entity)).isNotPresent();
+        assertThat(validateEntityUpdate("assertEquals(\"tieu-de\", article.getSlug());", entity)).isNotPresent();
+        assertThat(validateEntityUpdate("assertEquals(\"Nội dung\", article.getBody());", entity))
+                .hasValueSatisfying(message -> assertThat(message).contains(rule, "getBody"));
+        // Không có source của class thì không chứng minh được field chưa đổi, nên không kết luận sai.
+        assertThat(validateEntityUpdate("assertEquals(\"Nội dung\", article.getBody());", null)).isNotPresent();
+    }
+
     @Test
     void rejectsFixtureAssertionWhenFieldNeverArrangedAndNotModifiedBySut() {
         String sutSource = """
@@ -3206,5 +3249,36 @@ class GeneratedUnitTestSemanticValidatorTest {
 
         var result = GeneratedUnitTestSemanticValidator.validate(context, response("testCase", testSource));
         org.assertj.core.api.Assertions.assertThat(result).isEmpty();
+    }
+
+    private UnitTestContextDto withRuleSource(UnitTestContextDto base, String source) {
+        var rules = base.approvedBusinessRules().stream().map(rule -> new BusinessRuleContextDto(rule.id(), rule.methodId(),
+                rule.ruleCode(), rule.description(), rule.reviewNote(), source, rule.status(), rule.isModified(),
+                rule.sourceBranchId())).toList();
+        return new UnitTestContextDto(base.project(), base.analysis(), base.classes(), rules, base.approvedTestPlans(),
+                base.approvedTestCases(), base.existingApprovedTestCases(), base.previousGeneratedUnitTests(), base.existingTests());
+    }
+
+    @Test
+    void assertionTheSourceCannotSatisfyIsAFindingOnlyWhenTheUserWroteTheRule() {
+        String production = "public Article updateArticle(Article article, String title) { article.update(title); return article; }";
+        var base = withSupportingClass(contextWithServiceSource("demo.Service", "updateArticle", production,
+                "package demo; public class Service { " + production + " }"),
+                new ClassContextDto(2L, "demo", "Article", "demo.Article", "ENTITY", "src/main/java/demo/Article.java",
+                        "package demo; public class Article { private String title; private String body; "
+                                + "public void update(String title) { this.title = title; } "
+                                + "public String getBody() { return body; } }", List.of(), List.of()));
+        String test = "package demo; import static org.junit.jupiter.api.Assertions.assertEquals; class ServiceTest { "
+                + "@org.mockito.InjectMocks Service service; @org.junit.jupiter.api.Test void testCase() { "
+                + "Article article = new Article(); service.updateArticle(article, \"a\"); "
+                + "assertEquals(\"b\", article.getBody()); } }";
+        String rule = "was instantiated with a default constructor";
+
+        assertThat(GeneratedUnitTestSemanticValidator.validate(withRuleSource(base, "AI_GENERATED"), response(test)))
+                .hasValueSatisfying(message -> assertThat(message).contains(rule));
+        for (String source : List.of("USER_MODIFIED", "USER_ADDED")) {
+            assertThat(GeneratedUnitTestSemanticValidator.validate(withRuleSource(base, source), response(test)).orElse(""))
+                    .doesNotContain(rule);
+        }
     }
 }

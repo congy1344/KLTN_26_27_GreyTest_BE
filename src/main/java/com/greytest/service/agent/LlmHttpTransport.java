@@ -14,6 +14,22 @@ import java.util.concurrent.TimeoutException;
 final class LlmHttpTransport {
     private LlmHttpTransport() { }
 
+    /** Retry-After theo RFC 9110: số giây hoặc HTTP-date; không có/không đọc được thì trả 0. */
+    static long retryAfterMillis(HttpResponse<?> response) {
+        String header = response.headers().firstValue("Retry-After").orElse("").trim();
+        if (header.isEmpty()) return 0;
+        try {
+            return Math.max(Math.round(Double.parseDouble(header) * 1_000), 0);
+        } catch (NumberFormatException notSeconds) {
+            try {
+                return Math.max(Duration.between(java.time.Instant.now(), java.time.ZonedDateTime.parse(
+                        header, java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME)).toMillis(), 0);
+            } catch (java.time.format.DateTimeParseException notDate) {
+                return 0;
+            }
+        }
+    }
+
     static HttpResponse<String> send(HttpClient client, HttpRequest request, Duration timeout)
             throws IOException, InterruptedException {
         var response = client.sendAsync(request, HttpResponse.BodyHandlers.ofString());

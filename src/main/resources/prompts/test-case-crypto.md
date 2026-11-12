@@ -1,0 +1,2 @@
+# Relevant policy: crypto
+- Cryptographic fixture validity: inspect the exact algorithm and key construction in source. For a successful JWT HMAC scenario, provide a deterministic ASCII test secret with enough bytes for that algorithm (HS256: at least 32; HS384: 48; HS512: 64). Do not translate opaque keys into natural-language placeholders or use a short `secret` string. Preserve intentionally weak keys and expected exceptions when the approved plan requires that negative scenario; never replace an explicitly required input or expected result to make source pass.
