@@ -35,6 +35,10 @@ class ProjectControllerTest {
     @Autowired
     private MockMvc mockMvc;
 
+    // ServerRequestLoggingFilter cần bean này; @WebMvcTest không nạp @Service.
+    @MockBean
+    private com.greytest.service.ServerTelemetryService serverTelemetryService;
+
     @MockBean
     private ProjectService projectService;
 

@@ -35,6 +35,10 @@ import com.greytest.service.ProjectService;
 class GenerationProgressControllerTest {
 
     @Autowired private MockMvc mockMvc;
+
+    // ServerRequestLoggingFilter cần bean này; @WebMvcTest không nạp @Service.
+    @MockBean
+    private com.greytest.service.ServerTelemetryService serverTelemetryService;
     @MockBean private GenerationProgressService progressService;
     @MockBean private AuthService authService;
     @MockBean private ProjectService projectService;
