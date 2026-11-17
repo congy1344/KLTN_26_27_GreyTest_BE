@@ -6,6 +6,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.util.List;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.ObjectProvider;
@@ -30,7 +31,10 @@ public class OpenAiLlmClient implements LlmClient {
     private final ObjectMapper objectMapper;
     private final HttpClient httpClient;
     private final String apiKey;
-    private final String model;
+    private final List<String> apiKeys = new java.util.concurrent.CopyOnWriteArrayList<>();
+    private final java.util.concurrent.atomic.AtomicInteger keyIndex = new java.util.concurrent.atomic.AtomicInteger(0);
+    private volatile boolean runtimeKeysConfigured = false;
+    private volatile String model;
     private final double temperature;
     private final int maxTokens;
     private final Duration timeout;
@@ -45,7 +49,7 @@ public class OpenAiLlmClient implements LlmClient {
             @Value("${llm.openai-model:${llm.model:gpt-4o-mini}}") String model,
             @Value("${llm.temperature:0.3}") double temperature,
             @Value("${llm.max-tokens:4096}") int maxTokens,
-            @Value("${llm.timeout-seconds:60}") long timeoutSeconds,
+            @Value("${llm.timeout-seconds:180}") long timeoutSeconds,
             @Value("${llm.openai-url:https://api.openai.com/v1/chat/completions}") String endpoint,
             @Value("${llm.openai-json-mode:true}") boolean jsonMode,
             ObjectProvider<LlmUsageRecorder> usageRecorderProvider) {
@@ -110,6 +114,39 @@ public class OpenAiLlmClient implements LlmClient {
         this.endpoint = endpoint;
         this.jsonMode = jsonMode;
         this.usageRecorder = usageRecorder;
+        if (apiKey != null && !apiKey.isBlank()) {
+            this.apiKeys.add(apiKey);
+        }
+    }
+
+    public synchronized void setApiKeys(java.util.List<String> keys) {
+        this.runtimeKeysConfigured = true;
+        this.apiKeys.clear();
+        if (keys != null) {
+            keys.stream().filter(k -> k != null && !k.isBlank()).forEach(this.apiKeys::add);
+        }
+    }
+
+    public java.util.List<String> getApiKeys() {
+        return java.util.List.copyOf(apiKeys);
+    }
+
+    public void setModel(String model) {
+        if (model != null && !model.isBlank()) {
+            this.model = model.trim();
+        }
+    }
+
+    public String getModel() {
+        return this.model;
+    }
+
+    private String resolveApiKey() {
+        if (!apiKeys.isEmpty()) {
+            int idx = Math.floorMod(keyIndex.getAndIncrement(), apiKeys.size());
+            return apiKeys.get(idx);
+        }
+        return runtimeKeysConfigured ? null : this.apiKey;
     }
 
     @Override
@@ -119,12 +156,13 @@ public class OpenAiLlmClient implements LlmClient {
 
     @Override
     public String complete(String prompt, LlmRequestOptions options) {
-        if (apiKey == null || apiKey.isBlank()) {
+        String activeKey = resolveApiKey();
+        if (activeKey == null || activeKey.isBlank()) {
             throw new LlmResponseException("LLM_API_KEY chưa được cấu hình.");
         }
         HttpRequest request = HttpRequest.newBuilder(endpoint)
                 .timeout(timeout)
-                .header("Authorization", "Bearer " + apiKey)
+                .header("Authorization", "Bearer " + activeKey)
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(requestBody(prompt, options)))
                 .build();
@@ -135,6 +173,11 @@ public class OpenAiLlmClient implements LlmClient {
             if (response.statusCode() < 200 || response.statusCode() >= 300) {
                 int status = response.statusCode();
                 String message = "OpenAI API lỗi HTTP " + status + ": " + snippet(response.body());
+                if (status == 429 && isInsufficientQuota(response.body())) {
+                    // Hết credit là lỗi vĩnh viễn: retry chỉ tốn thời gian, vẫn tính là lỗi provider để hoàn lượt gọi.
+                    throw new LlmResponseException("Tài khoản LLM đã hết credit (insufficient_quota). " + message,
+                            null, false, 0, LlmResponseException.ErrorClassification.PROVIDER_UNAVAILABLE);
+                }
                 if (status == 429 || status >= 500) {
                     throw LlmResponseException.provider(message, null, LlmHttpTransport.retryAfterMillis(response));
                 }
@@ -198,6 +241,16 @@ public class OpenAiLlmClient implements LlmClient {
             return objectMapper.writeValueAsString(root);
         } catch (JsonProcessingException exception) {
             throw new LlmResponseException("Không tạo được request OpenAI.", exception);
+        }
+    }
+
+    private boolean isInsufficientQuota(String responseBody) {
+        try {
+            JsonNode error = objectMapper.readTree(responseBody == null ? "" : responseBody).path("error");
+            return "insufficient_quota".equals(error.path("type").asText())
+                    || "insufficient_quota".equals(error.path("code").asText());
+        } catch (JsonProcessingException exception) {
+            return false;
         }
     }
 

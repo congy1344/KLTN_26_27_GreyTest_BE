@@ -145,6 +145,10 @@ public class TestPlanService {
 
     @Transactional(readOnly = true)
     public List<TestPlanDto> list(Long projectId, String servicePath) {
+        ensureProjectExists(projectId);
+        if (servicePath == null || servicePath.isBlank() || scopeResolver == null) {
+            return list(projectId);
+        }
         Set<Long> methodIds = scopeResolver.resolve(projectId, servicePath).methodIds();
         Set<Long> ruleIds = businessRuleRepository.findByProjectId(projectId).stream()
                 .filter(rule -> rule.getMethodId() != null && methodIds.contains(rule.getMethodId()))
@@ -160,7 +164,6 @@ public class TestPlanService {
                 .getProjectId();
     }
 
-    @Transactional
     public List<TestPlanDto> generate(Long projectId) {
         return generate(projectId, (String) null, false);
     }
@@ -170,7 +173,7 @@ public class TestPlanService {
     }
 
     public List<TestPlanDto> generate(Long projectId, String servicePath, boolean resume) {
-        Set<Long> methodIds = servicePath == null || servicePath.isBlank()
+        Set<Long> methodIds = servicePath == null || servicePath.isBlank() || scopeResolver == null
                 ? null
                 : scopeResolver.resolve(projectId, servicePath).methodIds();
         return generate(projectId, methodIds, resume);
@@ -191,7 +194,7 @@ public class TestPlanService {
         }
         List<BusinessRule> allApprovedRules = queriedRules.stream()
                 .filter(rule -> rule.getStatus() == ReviewStatus.APPROVED)
-                .filter(rule -> scopedMethodIds == null || (rule.getMethodId() != null && scopedMethodIds.contains(rule.getMethodId()))).toList();
+                .filter(rule -> rule.getMethodId() != null && (scopedMethodIds == null || scopedMethodIds.contains(rule.getMethodId()))).toList();
         if (allApprovedRules.isEmpty()) {
             throw new InvalidProjectStatusException("Cần có ít nhất một Business Rule APPROVED trước khi sinh Test Plan.");
         }
@@ -263,15 +266,13 @@ public class TestPlanService {
             }
         }
 
-        List<List<BusinessRule>> batchesToRun = resume
-                ? allBatches.stream()
-                        .filter(batch -> batch.stream().anyMatch(rule -> !alreadyCoveredRuleIds.contains(rule.getId())))
-                        .toList()
-                : allBatches;
-
         List<Integer> batchIndexesToRun = java.util.stream.IntStream.range(0, totalBatches)
                 .filter(i -> !completedBatchIndices.contains(i))
                 .boxed()
+                .toList();
+
+        List<List<BusinessRule>> batchesToRun = batchIndexesToRun.stream()
+                .map(allBatches::get)
                 .toList();
 
         String batchDetailList = batchIndexesToRun.stream()
@@ -309,7 +310,10 @@ public class TestPlanService {
                 batchesToRun,
                 () -> generationProgressService.isPaused(projectId, GenerationProgressStage.TEST_PLAN),
                 batch -> {
-                    int batchIdx = allBatches.indexOf(batch);
+                    int runIdx = batchesToRun.indexOf(batch);
+                    int batchIdx = runIdx >= 0 && runIdx < batchIndexesToRun.size()
+                            ? batchIndexesToRun.get(runIdx)
+                            : allBatches.indexOf(batch);
                     String summary = formatRuleBatchSummary(batch);
                     generationProgressService.setStepStatus(projectId, GenerationProgressStage.TEST_PLAN, batchIdx, com.greytest.dto.GenerationProgressStepStatus.RUNNING);
                     generationProgressService.log(projectId, GenerationProgressStage.TEST_PLAN,
@@ -320,6 +324,8 @@ public class TestPlanService {
                                     .filter(rule -> !alreadyCoveredRuleIds.contains(rule.getId()))
                                     .toList()
                             : batch;
+                    // Plan được phép phủ thêm rule khác cùng method trong cả batch (đã có từ trước), nên kiểm tra theo toàn batch.
+                    Map<Long, Set<Long>> allBatchRulesByMethod = rulesByMethod(batch);
                     // Giữ các rule cùng method trong một phần để không tạo plan thiếu rule khi output bị cắt.
                     var methods = List.copyOf(rulesByMethod(batchForGeneration).entrySet());
                     return LlmBatchExecutor.splitOnTruncation(methods, part -> {
@@ -327,19 +333,23 @@ public class TestPlanService {
                         part.forEach(entry -> expected.put(entry.getKey(), entry.getValue()));
                         Set<Long> partRuleIds = expected.values().stream().flatMap(Set::stream)
                                 .collect(Collectors.toCollection(LinkedHashSet::new));
-                        return generateValidatedTestPlans(projectId, partRuleIds, expected).plans();
+                        return generateValidatedTestPlans(projectId, partRuleIds, expected, allBatchRulesByMethod).plans();
                     }).stream().flatMap(List::stream).toList();
                 },
                 (completedRunBatch, batchPlans) -> {
-                    List<BusinessRule> currentBatch = batchesToRun.get(completedRunBatch - 1);
-                    int actualBatchIdx = allBatches.indexOf(currentBatch);
+                    int actualBatchIdx = completedRunBatch <= batchIndexesToRun.size()
+                            ? batchIndexesToRun.get(completedRunBatch - 1)
+                            : -1;
+                    List<BusinessRule> currentBatch = completedRunBatch <= batchesToRun.size()
+                            ? batchesToRun.get(completedRunBatch - 1)
+                            : List.of();
                     List<BusinessRule> generatedBatch = resume
                             ? currentBatch.stream()
                                     .filter(rule -> !alreadyCoveredRuleIds.contains(rule.getId()))
                                     .toList()
                             : currentBatch;
                     // Lưu ngay batch này vào CSDL để không mất dữ liệu nếu bị ngắt quãng giữa chừng
-                    List<TestPlan> saved = transactions.execute(status -> persistBatch(projectId, targetRules, batchPlans, planCounter, deletedPlanIds));
+                    List<TestPlan> saved = transactions.execute(status -> persistBatch(projectId, allApprovedRules, batchPlans, planCounter, deletedPlanIds));
                     if (saved != null) allSavedPlans.addAll(saved);
                     String summary = formatRuleBatchSummary(generatedBatch);
                     if (actualBatchIdx >= 0) {
@@ -352,7 +362,8 @@ public class TestPlanService {
                     }
                 });
 
-        if (generationProgressService.isPaused(projectId, GenerationProgressStage.TEST_PLAN)) {
+        boolean hasRemaining = allBatchResults.size() < batchesToRun.size();
+        if (hasRemaining && generationProgressService.isPaused(projectId, GenerationProgressStage.TEST_PLAN)) {
             generationProgressService.log(projectId, GenerationProgressStage.TEST_PLAN,
                     "Tác vụ đã tạm dừng. Các Test Plan đã sinh được lưu an toàn vào CSDL. Nhấn 'Tiếp tục sinh' khi bạn sẵn sàng.");
             List<TestPlanDto> fromRepo = testPlanRepository.findByProjectId(projectId).stream().map(this::toDto).toList();
@@ -434,12 +445,13 @@ public class TestPlanService {
     }
 
     /**
-     * Sinh va kiem tra coverage cua mot batch Test Plan, tu sua semantic mot lan.
+     * Sinh và kiểm tra coverage của một batch Test Plan, tự sửa semantic một lần.
      */
     private TestPlanResponseDto generateValidatedTestPlans(
             Long projectId,
             Set<Long> batchRuleIds,
-            Map<Long, Set<Long>> expectedRulesByMethod) {
+            Map<Long, Set<Long>> expectedRulesByMethod,
+            Map<Long, Set<Long>> allBatchRulesByMethod) {
         LlmResponseException lastValidationError = null;
         for (int attempt = 1; attempt <= MAX_SEMANTIC_ATTEMPTS; attempt++) {
             TestPlanResponseDto response = lastValidationError == null
@@ -450,7 +462,7 @@ public class TestPlanService {
                 if (response == null || response.plans() == null) {
                     throw new LlmResponseException("AI không trả về danh sách Test Plan hợp lệ.");
                 }
-                ensureBatchMatchesMethods(response.plans(), expectedRulesByMethod);
+                ensureBatchMatchesMethods(response.plans(), expectedRulesByMethod, allBatchRulesByMethod);
                 return response;
             } catch (LlmResponseException exception) {
                 lastValidationError = exception;
@@ -467,6 +479,9 @@ public class TestPlanService {
 
     @Transactional
     public TestPlanDto create(Long projectId, String servicePath, CreateTestPlanRequest request) {
+        if (servicePath == null || servicePath.isBlank() || scopeResolver == null) {
+            return create(projectId, request);
+        }
         Set<Long> methodIds = scopeResolver.resolve(projectId, servicePath).methodIds();
         BusinessRule rule = businessRuleRepository.findById(request.businessRuleId())
                 .orElseThrow(() -> new IllegalArgumentException("Không tìm thấy Business Rule"));
@@ -535,6 +550,9 @@ public class TestPlanService {
 
     @Transactional
     public List<TestPlanDto> approve(Long projectId, String servicePath) {
+        if (servicePath == null || servicePath.isBlank() || scopeResolver == null) {
+            return approve(projectId);
+        }
         return approve(projectId, scopeResolver.resolve(projectId, servicePath).methodIds());
     }
 
@@ -670,17 +688,20 @@ public class TestPlanService {
         return result;
     }
 
-    private void ensureBatchMatchesMethods(List<GeneratedTestPlanDto> plans, Map<Long, Set<Long>> expectedRulesByMethod) {
+    private void ensureBatchMatchesMethods(
+            List<GeneratedTestPlanDto> plans,
+            Map<Long, Set<Long>> expectedRulesByMethod,
+            Map<Long, Set<Long>> allBatchRulesByMethod) {
         Map<Long, Set<Long>> returnedRulesByMethod = new LinkedHashMap<>();
         // Gom mọi lỗi mapping để lần retry sửa đủ batch, không chỉ lỗi đầu tiên.
         List<String> errors = new ArrayList<>();
         for (GeneratedTestPlanDto plan : plans) {
-            if (plan == null || plan.methodId() == null || !expectedRulesByMethod.containsKey(plan.methodId())) {
+            if (plan == null || plan.methodId() == null || !allBatchRulesByMethod.containsKey(plan.methodId())) {
                 errors.add("AI trả về Test Plan nằm ngoài batch method: method_id="
-                        + (plan == null ? null : plan.methodId()) + "; expected=" + expectedRulesByMethod.keySet());
+                        + (plan == null ? null : plan.methodId()) + "; expected=" + allBatchRulesByMethod.keySet());
                 continue;
             }
-            Set<Long> expectedRuleIds = expectedRulesByMethod.get(plan.methodId());
+            Set<Long> methodAllRuleIds = allBatchRulesByMethod.get(plan.methodId());
             if (plan.coveredRuleIds() == null
                     || plan.coveredRuleIds().stream().anyMatch(java.util.Objects::isNull)) {
                 errors.add("AI trả về covered_rule_ids có giá trị null cho method " + plan.methodId() + ".");
@@ -688,12 +709,12 @@ public class TestPlanService {
             }
             Set<Long> coveredRuleIds = new TreeSet<>(plan.coveredRuleIds());
             Set<Long> unexpectedRuleIds = new TreeSet<>(coveredRuleIds);
-            unexpectedRuleIds.removeAll(expectedRuleIds);
+            unexpectedRuleIds.removeAll(methodAllRuleIds);
             if (plan.coveredRuleIds().size() != coveredRuleIds.size()
                     || coveredRuleIds.isEmpty()
                     || !unexpectedRuleIds.isEmpty()) {
                 errors.add("AI trả về covered_rule_ids rỗng, trùng lặp hoặc nằm ngoài method "
-                        + plan.methodId() + ": expected=" + expectedRuleIds
+                        + plan.methodId() + ": expected=" + methodAllRuleIds
                         + "; actual=" + plan.coveredRuleIds() + "; unexpected=" + unexpectedRuleIds);
             }
             if (plan.ruleId() == null || !coveredRuleIds.contains(plan.ruleId())) {
@@ -829,7 +850,7 @@ public class TestPlanService {
                         .collect(Collectors.collectingAndThen(
                                 Collectors.toCollection(TreeSet::new),
                                 ruleIds -> ruleIds.isEmpty()
-                                        ? List.of(plan.getBusinessRuleId())
+                                        ? (plan.getBusinessRuleId() != null ? List.of(plan.getBusinessRuleId()) : List.of())
                                         : List.copyOf(ruleIds))));
     }
 

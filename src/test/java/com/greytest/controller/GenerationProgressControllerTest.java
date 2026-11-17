@@ -35,6 +35,10 @@ import com.greytest.service.ProjectService;
 class GenerationProgressControllerTest {
 
     @Autowired private MockMvc mockMvc;
+
+    // ServerRequestLoggingFilter cần bean này; @WebMvcTest không nạp @Service.
+    @MockBean
+    private com.greytest.service.ServerTelemetryService serverTelemetryService;
     @MockBean private GenerationProgressService progressService;
     @MockBean private AuthService authService;
     @MockBean private ProjectService projectService;
@@ -63,6 +67,7 @@ class GenerationProgressControllerTest {
                                         GenerationProgressStepStatus.RUNNING, 0, null)),
                         List.of(new GenerationProgressLogDto(
                                 Instant.parse("2026-08-14T12:00:00Z"), "Đã xử lý batch 1/1.")),
+                        true,
                         new GenerationRunMetricsDto("run-1", Instant.parse("2026-08-14T12:00:00Z"),
                                 null, 12500, 2, 100, 50, 150, 0)));
 

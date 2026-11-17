@@ -21,6 +21,29 @@ import com.greytest.entity.enums.ActivityAction;
 class GenerationJobServiceTest {
 
     @Test
+    void allowsOnlyMutationsFromTheActiveJobAndPreservesActorAndLogger() {
+        var progress = new GenerationProgressService();
+        var activity = mock(UserActivityService.class);
+        var jobs = new GenerationJobService(Runnable::run, progress, null, activity, null);
+        jobs.submit(1L, 7L, GenerationProgressStage.UNIT_TEST, () -> {
+            var worker = GenerationJobContext.wrap(() -> jobs.executeAiMutation(1L, 7L,
+                    ActivityAction.GENERATE_UNIT_TEST, () -> {
+                        assertThat(GenerationJobContext.actorUserId()).isEqualTo(7L);
+                        GenerationJobContext.log("repair");
+                        return jobs.executeMutation(1L, () -> "nested");
+                    }));
+            assertThat(java.util.concurrent.CompletableFuture.supplyAsync(worker).join()).isEqualTo("nested");
+            assertThatThrownBy(() -> java.util.concurrent.CompletableFuture.supplyAsync(
+                    () -> jobs.executeMutation(1L, () -> "external")).join())
+                    .hasCauseInstanceOf(GenerationInProgressException.class);
+            assertThat(GenerationJobContext.actorUserId()).isEqualTo(7L);
+        });
+        assertThat(progress.get(1L, GenerationProgressStage.UNIT_TEST).logs())
+                .extracting(item -> item.message()).contains("repair");
+        assertThat(GenerationJobContext.actorUserId()).isNull();
+    }
+
+    @Test
     void attributesGenerationAndWorkerContextToAuthenticatedActor() {
         ManualExecutor executor = new ManualExecutor();
         UserActivityService activity = mock(UserActivityService.class);
@@ -200,7 +223,7 @@ class GenerationJobServiceTest {
     }
 
     @Test
-    void pausedJobKeepsProjectLockUntilItsWorkerStops() {
+    void pausesRunningJobAndReleasesProjectLock() {
         ManualExecutor executor = new ManualExecutor();
         GenerationProgressService progress = new GenerationProgressService();
         GenerationJobService jobs = new GenerationJobService(executor, progress);
@@ -219,10 +242,7 @@ class GenerationJobServiceTest {
         assertThat(progress.get(1L, GenerationProgressStage.TEST_PLAN).status())
                 .isEqualTo(GenerationProgressStatus.PAUSED);
 
-        // Worker có thể còn đang ghi batch dở nên vẫn giữ lock cho tới khi nó dừng hẳn.
-        assertThatThrownBy(() -> jobs.executeMutation(1L, () -> "mutation"))
-                .isInstanceOf(GenerationInProgressException.class);
-        executor.runNext();
+        // Lock đã được giải phóng, mutation chạy được
         assertThat(jobs.executeMutation(1L, () -> "mutation")).isEqualTo("mutation");
     }
 
@@ -258,6 +278,50 @@ class GenerationJobServiceTest {
         assertThat(snapshot.logs().get(snapshot.logs().size() - 1).message())
                 .contains("hết quota LLM")
                 .contains("nâng cấp lên gói PRO");
+    }
+
+    @Test
+    void skipsExecutionIfJobWasPausedWhileQueued() {
+        ManualExecutor executor = new ManualExecutor();
+        GenerationProgressService progress = new GenerationProgressService();
+        GenerationJobService jobs = new GenerationJobService(executor, progress);
+        java.util.concurrent.atomic.AtomicBoolean ran = new java.util.concurrent.atomic.AtomicBoolean(false);
+
+        jobs.submit(1L, GenerationProgressStage.TEST_PLAN, () -> ran.set(true));
+        jobs.pause(1L, GenerationProgressStage.TEST_PLAN);
+
+        executor.runNext();
+
+        assertThat(ran.get()).isFalse();
+        assertThat(progress.get(1L, GenerationProgressStage.TEST_PLAN).status())
+                .isEqualTo(GenerationProgressStatus.PAUSED);
+    }
+
+    @Test
+    void allowsResumedJobAfterQueuedJobWasPaused() {
+        ManualExecutor executor = new ManualExecutor();
+        GenerationProgressService progress = new GenerationProgressService();
+        GenerationJobService jobs = new GenerationJobService(executor, progress);
+        java.util.concurrent.atomic.AtomicInteger executedJob = new java.util.concurrent.atomic.AtomicInteger(0);
+
+        jobs.submit(1L, GenerationProgressStage.TEST_CASE, () -> executedJob.set(1));
+        jobs.pause(1L, GenerationProgressStage.TEST_CASE);
+
+        jobs.submit(1L, GenerationProgressStage.TEST_CASE, () -> {
+            progress.start(1L, GenerationProgressStage.TEST_CASE, 1, "Chạy resume.");
+            executedJob.set(2);
+            progress.complete(1L, GenerationProgressStage.TEST_CASE, "Hoàn tất resume.");
+        });
+
+        // Run the first worker (was paused while queued)
+        executor.runNext();
+        assertThat(executedJob.get()).isEqualTo(0);
+
+        // Run the resumed worker
+        executor.runNext();
+        assertThat(executedJob.get()).isEqualTo(2);
+        assertThat(progress.get(1L, GenerationProgressStage.TEST_CASE).status())
+                .isEqualTo(GenerationProgressStatus.COMPLETED);
     }
 
     private static final class ManualExecutor implements Executor {

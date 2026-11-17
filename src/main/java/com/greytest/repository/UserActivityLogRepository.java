@@ -26,7 +26,15 @@ public interface UserActivityLogRepository
 
     long countByActionTypeIn(List<ActivityAction> actionTypes);
 
+    long countByActionTypeAndCreatedAtAfter(ActivityAction actionType, LocalDateTime fromDate);
+
+    long countByActionTypeInAndCreatedAtAfter(List<ActivityAction> actionTypes, LocalDateTime fromDate);
+
     List<UserActivityLog> findByUserIdOrderByCreatedAtDesc(Long userId, Pageable pageable);
+
+    List<UserActivityLog> findByUserIdAndActionTypeOrderByCreatedAtDesc(Long userId, ActivityAction actionType, Pageable pageable);
+
+    Optional<UserActivityLog> findFirstByUserIdAndActionTypeOrderByCreatedAtDesc(Long userId, ActivityAction actionType);
 
     @Query(value = """
             SELECT date_trunc(CAST(:granularity AS text), created_at) AS bucket,
@@ -39,6 +47,22 @@ public interface UserActivityLogRepository
             """, nativeQuery = true)
     List<UsageTrendProjection> usageTrend(
             @Param("fromDate") LocalDateTime fromDate,
+            @Param("granularity") String granularity,
+            @Param("actionType") String actionType);
+
+    @Query(value = """
+            SELECT date_trunc(CAST(:granularity AS text), created_at) AS bucket,
+                   COUNT(*) AS total
+            FROM user_activity_log
+            WHERE created_at >= :fromDate
+              AND created_at <= :toDate
+              AND (:actionType IS NULL OR action_type = :actionType)
+            GROUP BY bucket
+            ORDER BY bucket
+            """, nativeQuery = true)
+    List<UsageTrendProjection> usageTrendBetween(
+            @Param("fromDate") LocalDateTime fromDate,
+            @Param("toDate") LocalDateTime toDate,
             @Param("granularity") String granularity,
             @Param("actionType") String actionType);
 

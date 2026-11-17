@@ -31,9 +31,14 @@ public final class GenerationValidationGate {
     }
 
     public static Optional<String> validateTestCases(TestCaseContextDto context, TestCaseResponseDto response) {
+        return validateTestCases(context, response, null);
+    }
+
+    /** reviewWarnings khác null: lỗi diễn đạt thông báo exception được trả về đó để người duyệt xem, không làm case thất bại. */
+    public static Optional<String> validateTestCases(TestCaseContextDto context, TestCaseResponseDto response, List<String> reviewWarnings) {
         // Gửi đủ lỗi setup lẫn lỗi bằng chứng trong một lượt sửa, không để AI chỉ thấy nhóm lỗi đầu tiên.
         var problems = java.util.stream.Stream.of(SourceMockingSupport.validateTestCases(context, response),
-                UpstreamSourceEvidenceValidator.cases(context, response)).flatMap(Optional::stream).toList();
+                UpstreamSourceEvidenceValidator.cases(context, response, reviewWarnings)).flatMap(Optional::stream).toList();
         return problems.isEmpty() ? Optional.empty() : Optional.of(String.join("\n", problems));
     }
 

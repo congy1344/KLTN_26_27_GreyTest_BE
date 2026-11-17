@@ -230,4 +230,42 @@ class PaymentControllerTest {
         verify(quotas, Mockito.times(1)).upgradeToTier(5L, UserTier.PRO);
         verify(paymentRepository, Mockito.times(1)).save(tx);
     }
+
+    @Test
+    void getPublicPackagesReturnsActivePackagesWithMaskedSubscribers() {
+        com.greytest.service.AdminService adminService = Mockito.mock(com.greytest.service.AdminService.class);
+        PaymentController customController = new PaymentController(vnpayService, paymentRepository, authService, userService, userRepository, adminService);
+
+        when(adminService.getTierPackages()).thenReturn(List.of(
+                new com.greytest.dto.admin.AdminDtos.TierPackageDto("PLUS", "Gói Tiêu Chuẩn", 15_000L, "WEEKLY", 200, 3, List.of("Feature 1"), "Desc", true, 42L),
+                new com.greytest.dto.admin.AdminDtos.TierPackageDto("PRO", "Gói PRO", 30_000L, "MONTHLY", 300, 4, List.of("Feature 2"), "Desc", false, 10L)
+        ));
+
+        ResponseEntity<List<com.greytest.dto.admin.AdminDtos.TierPackageDto>> response = customController.getPublicPackages();
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(response.getBody()).hasSize(1);
+        var pkg = response.getBody().get(0);
+        assertThat(pkg.code()).isEqualTo("PLUS");
+        assertThat(pkg.price()).isEqualTo(15_000L);
+        assertThat(pkg.activeUsersCount()).isEqualTo(0L); // Masked
+    }
+
+    @Test
+    void createPaymentUrlRejectsInactiveTierPackage() {
+        com.greytest.service.AdminService adminService = Mockito.mock(com.greytest.service.AdminService.class);
+        PaymentController customController = new PaymentController(vnpayService, paymentRepository, authService, userService, userRepository, adminService);
+
+        AuthUser user = new AuthUser();
+        user.setId(10L);
+        when(authService.currentUser("Bearer token")).thenReturn(user);
+
+        when(adminService.getTierPackage("PLUS")).thenReturn(
+                new com.greytest.dto.admin.AdminDtos.TierPackageDto("PLUS", "Gói Tiêu Chuẩn", 15_000L, "WEEKLY", 200, 3, List.of(), "Desc", false, 0L)
+        );
+
+        MockHttpServletRequest request = new MockHttpServletRequest();
+        ResponseEntity<PaymentUrlResponse> response = customController.createPaymentUrl("Bearer token", new CreatePaymentRequest(UserTier.PLUS), request);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+    }
 }

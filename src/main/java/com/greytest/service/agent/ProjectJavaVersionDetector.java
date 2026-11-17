@@ -12,6 +12,8 @@ import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 import org.springframework.stereotype.Service;
+import org.w3c.dom.Element;
+import org.w3c.dom.Node;
 
 import com.greytest.entity.Project;
 import com.greytest.repository.ProjectRepository;
@@ -38,6 +40,9 @@ public class ProjectJavaVersionDetector {
             "(?s)<parent>.*?<artifactId>\\s*spring-boot-starter-parent\\s*</artifactId>.*?"
                     + "<version>\\s*([0-9]+)\\.([0-9]+)[^<]*</version>.*?</parent>",
             Pattern.CASE_INSENSITIVE);
+
+    private static final java.util.Set<String> TEST_BUILD_PLUGINS = java.util.Set.of(
+            "maven-compiler-plugin", "maven-surefire-plugin", "maven-failsafe-plugin");
 
     private final ProjectRepository projects;
 
@@ -184,12 +189,119 @@ public class ProjectJavaVersionDetector {
         int remaining = 64_000;
         for (Path build : buildFiles(root)) {
             if (sources.stream().noneMatch(source -> source.startsWith(build.getParent()))) continue;
-            String content = readBuildSource(build).orElse("");
+            String content = evidenceText(build, readBuildSource(build).orElse(""));
             if (content.isBlank() || content.length() > remaining) continue;
             evidence.put(root.relativize(build).toString().replace('\\', '/'), content);
             remaining -= content.length();
         }
         return java.util.Collections.unmodifiableMap(evidence);
+    }
+
+    /**
+     * Prompt chỉ cần starter, parent, version và exclusion để chọn API thư viện; XML thô (plugin docker, repository,
+     * mô tả) làm phình prompt. Không parse được thì giữ nguyên text để không mất bằng chứng.
+     */
+    private String evidenceText(Path build, String content) {
+        if (!"pom.xml".equals(build.getFileName().toString())) {
+            return content.lines().map(String::stripTrailing).filter(line -> !line.isBlank())
+                    .collect(java.util.stream.Collectors.joining("\n"));
+        }
+        try {
+            return mavenSummary(content);
+        } catch (Exception malformed) {
+            return content;
+        }
+    }
+
+    private String mavenSummary(String content) throws Exception {
+        var factory = javax.xml.parsers.DocumentBuilderFactory.newInstance();
+        // Build file là dữ liệu không tin cậy: chặn DOCTYPE để không phân giải entity ngoài (XXE).
+        factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+        factory.setFeature(javax.xml.XMLConstants.FEATURE_SECURE_PROCESSING, true);
+        factory.setXIncludeAware(false);
+        factory.setExpandEntityReferences(false);
+        factory.setNamespaceAware(true);
+        var builder = factory.newDocumentBuilder();
+        builder.setErrorHandler(new org.xml.sax.helpers.DefaultHandler());
+        Element project = builder.parse(new org.xml.sax.InputSource(new java.io.StringReader(content))).getDocumentElement();
+        List<String> lines = new ArrayList<>();
+        Element parent = child(project, "parent");
+        if (parent != null) lines.add("parent: " + coordinates(parent));
+        List<String> modules = children(child(project, "modules"), "module").stream()
+                .map(module -> module.getTextContent().trim()).toList();
+        if (!modules.isEmpty()) lines.add("modules: " + String.join(", ", modules));
+        List<String> properties = children(child(project, "properties"), null).stream()
+                .filter(property -> property.getLocalName().startsWith("maven.compiler.")
+                        || property.getLocalName().endsWith(".version") || property.getLocalName().endsWith("-version"))
+                .map(property -> property.getLocalName() + "=" + property.getTextContent().trim()).toList();
+        if (!properties.isEmpty()) lines.add("properties: " + String.join(", ", properties));
+        addSection(lines, "dependencyManagement:", dependencyLines(child(child(project, "dependencyManagement"), "dependencies")));
+        addSection(lines, "dependencies:", dependencyLines(child(project, "dependencies")));
+        Element build = child(project, "build");
+        List<Element> plugins = new ArrayList<>(children(child(build, "plugins"), "plugin"));
+        plugins.addAll(children(child(child(build, "pluginManagement"), "plugins"), "plugin"));
+        // Chỉ plugin quyết định mức Java hoặc cách chạy JUnit mới ảnh hưởng test sinh ra.
+        addSection(lines, "plugins:", plugins.stream()
+                .filter(plugin -> TEST_BUILD_PLUGINS.contains(text(plugin, "artifactId"))).map(this::pluginLine).toList());
+        return String.join("\n", lines);
+    }
+
+    private void addSection(List<String> lines, String title, List<String> entries) {
+        if (entries.isEmpty()) return;
+        lines.add(title);
+        lines.addAll(entries);
+    }
+
+    private List<String> dependencyLines(Element dependencies) {
+        return children(dependencies, "dependency").stream().map(dependency -> {
+            String line = coordinates(dependency);
+            if (!text(dependency, "scope").isEmpty()) line += " scope=" + text(dependency, "scope");
+            List<String> exclusions = children(child(dependency, "exclusions"), "exclusion").stream()
+                    .map(exclusion -> text(exclusion, "groupId") + ":" + text(exclusion, "artifactId")).toList();
+            return exclusions.isEmpty() ? line : line + " exclusions=" + String.join(",", exclusions);
+        }).toList();
+    }
+
+    private String pluginLine(Element plugin) {
+        StringBuilder line = new StringBuilder(coordinates(plugin));
+        Element configuration = child(plugin, "configuration");
+        if (configuration != null) {
+            var nested = configuration.getElementsByTagNameNS("*", "*");
+            for (int index = 0; index < nested.getLength(); index++) {
+                Element setting = (Element) nested.item(index);
+                if (children(setting, null).isEmpty()) {
+                    line.append(' ').append(setting.getLocalName()).append('=').append(setting.getTextContent().trim());
+                }
+            }
+        }
+        List<String> dependencies = children(child(plugin, "dependencies"), "dependency").stream().map(this::coordinates).toList();
+        if (!dependencies.isEmpty()) line.append(" dependencies=").append(String.join(",", dependencies));
+        return line.toString();
+    }
+
+    private String coordinates(Element element) {
+        String version = text(element, "version");
+        return text(element, "groupId") + ":" + text(element, "artifactId") + (version.isEmpty() ? "" : ":" + version);
+    }
+
+    private String text(Element parent, String name) {
+        Element value = child(parent, name);
+        return value == null ? "" : value.getTextContent().trim();
+    }
+
+    private Element child(Element parent, String name) {
+        List<Element> matches = children(parent, name);
+        return matches.isEmpty() ? null : matches.get(0);
+    }
+
+    /** Chỉ lấy con trực tiếp: dependency của plugin không được lẫn vào dependency của project. */
+    private List<Element> children(Element parent, String name) {
+        if (parent == null) return List.of();
+        List<Element> result = new ArrayList<>();
+        for (Node node = parent.getFirstChild(); node != null; node = node.getNextSibling()) {
+            if (node instanceof Element element && (name == null || name.equals(element.getLocalName()))) result.add(element);
+        }
+        return result;
     }
 
     /** Chỉ dùng version có bằng chứng trong build của module; không lấy Mockito của GreyTest. */

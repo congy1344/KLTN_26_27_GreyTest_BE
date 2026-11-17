@@ -22,12 +22,60 @@ import java.util.Map;
 public class UsageQuotaService {
 
     private final UsageQuotaRepository repository;
-    private final int defaultLimit;
-    private final int plusLimit;
-    private final int proLimit;
+    private volatile int defaultLimit;
+    private volatile int plusLimit;
+    private volatile int proLimit;
     private final Clock clock;
     private final UserActivityLogRepository activityRepository;
     private final String llmProvider;
+
+    @Autowired(required = false)
+    private com.greytest.repository.TierPackageRepository tierPackageRepository;
+
+    public void setTierPackageRepository(com.greytest.repository.TierPackageRepository tierPackageRepository) {
+        this.tierPackageRepository = tierPackageRepository;
+    }
+
+    @Autowired(required = false)
+    private com.greytest.repository.AuthUserRepository userRepository;
+
+    public void setUserRepository(com.greytest.repository.AuthUserRepository userRepository) {
+        this.userRepository = userRepository;
+    }
+
+    /**
+     * Chu kỳ reset quota lấy từ trường cycle của gói user đang dùng (admin sửa được trong trang Gói).
+     * Khi chưa có dữ liệu gói (unit test dựng tay, DB trống) thì giữ cách suy luận cũ theo hạn mức.
+     */
+    private boolean isWeeklyCycle(UsageQuota quota) {
+        String cycle = configuredCycle(quota.getUserId());
+        if (cycle != null) return "WEEKLY".equals(cycle);
+        return quota.getQuotaLimit() != null
+                && (quota.getQuotaLimit().equals(getPlusLimit()) || quota.getQuotaLimit().equals(getProLimit())
+                        || quota.getQuotaLimit() > defaultLimit);
+    }
+
+    private String configuredCycle(Long userId) {
+        if (userRepository == null || tierPackageRepository == null || userId == null) return null;
+        com.greytest.entity.enums.UserTier tier = userRepository.findById(userId)
+                .map(com.greytest.entity.AuthUser::getTier)
+                .orElse(com.greytest.entity.enums.UserTier.FREE);
+        if (tier == null) tier = com.greytest.entity.enums.UserTier.FREE;
+        return tierPackageRepository.findById(tier.name())
+                .map(com.greytest.entity.TierPackage::getCycle)
+                .filter(cycle -> !cycle.isBlank())
+                .map(cycle -> cycle.trim().toUpperCase())
+                .orElse(null);
+    }
+
+    private int resolveTierLimit(String tierCode, int fallback) {
+        if (tierPackageRepository != null) {
+            return tierPackageRepository.findById(tierCode)
+                    .map(com.greytest.entity.TierPackage::getQuotaLimit)
+                    .orElse(fallback);
+        }
+        return fallback;
+    }
 
     @Autowired
     public UsageQuotaService(
@@ -91,7 +139,7 @@ public class UsageQuotaService {
     @Transactional
     public synchronized UsageQuota upgradeToPlus(Long userId) {
         UsageQuota quota = currentForUpdate(userId);
-        quota.setQuotaLimit(plusLimit);
+        quota.setQuotaLimit(resolveTierLimit("PLUS", plusLimit));
         quota.setPeriodStart(LocalDate.now(clock));
         quota.setQuotaUsed(0);
         return repository.save(quota);
@@ -100,7 +148,7 @@ public class UsageQuotaService {
     @Transactional
     public synchronized UsageQuota upgradeToPro(Long userId) {
         UsageQuota quota = currentForUpdate(userId);
-        quota.setQuotaLimit(proLimit);
+        quota.setQuotaLimit(resolveTierLimit("PRO", proLimit));
         quota.setPeriodStart(LocalDate.now(clock));
         quota.setQuotaUsed(0);
         return repository.save(quota);
@@ -120,22 +168,49 @@ public class UsageQuotaService {
     @Transactional
     public synchronized UsageQuota downgradeToFree(Long userId) {
         UsageQuota quota = currentForUpdate(userId);
-        quota.setQuotaLimit(defaultLimit);
+        quota.setQuotaLimit(resolveTierLimit("FREE", defaultLimit));
         // Chuẩn hóa về tháng để lần đọc kế tiếp không vô tình xóa số lượt đã dùng.
         quota.setPeriodStart(LocalDate.now(clock).withDayOfMonth(1));
         return repository.save(quota);
     }
 
+    /**
+     * Đặt lại số lượt đã sử dụng về 0 cho người dùng mà không làm hỏng chu kỳ tuần/tháng hiện tại.
+     */
+    @Transactional
+    public synchronized UsageQuota resetUsage(Long userId) {
+        UsageQuota quota = currentForUpdate(userId);
+        quota.setQuotaUsed(0);
+        boolean isWeekly = isWeeklyCycle(quota);
+        if (!isWeekly) {
+            quota.setPeriodStart(LocalDate.now(clock).withDayOfMonth(1));
+        }
+        return repository.save(quota);
+    }
+
     public int getPlusLimit() {
-        return plusLimit;
+        return resolveTierLimit("PLUS", plusLimit);
     }
 
     public int getProLimit() {
-        return proLimit;
+        return resolveTierLimit("PRO", proLimit);
     }
 
     public int getDefaultLimit() {
-        return defaultLimit;
+        return resolveTierLimit("FREE", defaultLimit);
+    }
+
+    /**
+     * Cập nhật hạn mức quota động theo cấu hình gói của quản trị viên.
+     */
+    public synchronized void setTierLimit(com.greytest.entity.enums.UserTier tier, int limit) {
+        if (tier == com.greytest.entity.enums.UserTier.FREE) {
+            this.defaultLimit = limit;
+        } else if (tier == com.greytest.entity.enums.UserTier.PLUS) {
+            this.plusLimit = limit;
+        } else if (tier == com.greytest.entity.enums.UserTier.PRO) {
+            this.proLimit = limit;
+        }
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
@@ -217,16 +292,15 @@ public class UsageQuotaService {
         UsageQuota quota = repository.findByUserIdForUpdate(userId)
                 .orElseGet(() -> newQuota(userId, today.withDayOfMonth(1)));
 
-        boolean isWeekly = quota.getQuotaLimit() != null && quota.getQuotaLimit() > defaultLimit;
+        boolean isWeekly = isWeeklyCycle(quota);
         if (isWeekly) {
-            LocalDate resetDate = quota.getPeriodStart().plusWeeks(1);
-            if (!today.isBefore(resetDate)) {
+            if (quota.getPeriodStart() == null || !today.isBefore(quota.getPeriodStart().plusWeeks(1))) {
                 quota.setPeriodStart(today);
                 quota.setQuotaUsed(0);
             }
         } else {
             LocalDate periodStart = today.withDayOfMonth(1);
-            if (!periodStart.equals(quota.getPeriodStart())) {
+            if (quota.getPeriodStart() == null || quota.getPeriodStart().isBefore(periodStart)) {
                 quota.setPeriodStart(periodStart);
                 quota.setQuotaUsed(0);
             }
@@ -237,7 +311,7 @@ public class UsageQuotaService {
     private UsageQuota newQuota(Long userId, LocalDate periodStart) {
         UsageQuota quota = new UsageQuota();
         quota.setUserId(userId);
-        quota.setQuotaLimit(defaultLimit);
+        quota.setQuotaLimit(resolveTierLimit("FREE", defaultLimit));
         quota.setQuotaUsed(0);
         quota.setPeriodStart(periodStart);
         return quota;

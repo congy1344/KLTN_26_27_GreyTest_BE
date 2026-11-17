@@ -10,10 +10,17 @@ public record GenerationProgressDto(
         int totalSteps,
         List<GenerationProgressStepDto> steps,
         List<GenerationProgressLogDto> logs,
+        Boolean busy,
         GenerationRunMetricsDto runMetrics) {
-    public GenerationProgressDto(GenerationProgressStage stage, GenerationProgressStatus status,
-            int percent, int completedSteps, int totalSteps, List<GenerationProgressStepDto> steps,
+
+    public GenerationProgressDto(
+            GenerationProgressStage stage,
+            GenerationProgressStatus status,
+            int percent,
+            int completedSteps,
+            int totalSteps,
+            List<GenerationProgressStepDto> steps,
             List<GenerationProgressLogDto> logs) {
-        this(stage, status, percent, completedSteps, totalSteps, steps, logs, null);
+        this(stage, status, percent, completedSteps, totalSteps, steps, logs, false, null);
     }
 }

@@ -54,6 +54,47 @@ class TestabilityGenerationGatewayTest {
     }
 
     @Test
+    void unitTestPromptCompactsTestabilityWithoutDroppingFindings() throws Exception {
+        String source = "package demo; class Service {\n void execute() {\n helper();\n helper();\n if (Math.random() > 0.8) return; }\n"
+                + " int count() { return 1; }\n private void helper() { } }";
+        var methods = List.of(method(10L, "execute", "void", "void execute() { helper(); helper(); if (Math.random() > 0.8) return; }"),
+                method(11L, "count", "int", "int count() { return 1; }"));
+        var classes = List.of(new ClassContextDto(1L, "demo", "Service", "demo.Service", "SERVICE",
+                "src/main/java/demo/Service.java", source, List.of(), methods));
+        var unit = new UnitTestContextDto(null, null, classes, List.of(rule(20L, 10L), rule(21L, 11L)), List.of(plan(30L, 20L), plan(31L, 21L)),
+                List.of(new TestCaseContextItemDto(40L, 30L, "TC-40", "HAPPY_PATH", "Execute the selected branch",
+                                "Force Math.random() <= 0.8 for this scenario", Map.of(), "returns", "HIGH", "BR-20 -> TP-30", "APPROVED", false),
+                        new TestCaseContextItemDto(41L, 31L, "TC-41", "HAPPY_PATH", "Returns one",
+                                "Construct the service", Map.of(), "returns 1", "HIGH", "BR-21 -> TP-31", "APPROVED", false)),
+                List.of(), List.of(), List.of());
+
+        String prompt = new PromptManager(mapper).render("unit-test", Map.of("context_json", unit));
+        String section = prompt.substring(prompt.indexOf("# Testability assessment"));
+        var report = mapper.readTree(section.substring(section.indexOf("\n{") + 1));
+
+        var execute = report.path("methods").get(0);
+        assertThat(execute.path("filePath").asText()).isEqualTo("src/main/java/demo/Service.java");
+        assertThat(execute.path("methodName").asText()).isEqualTo("execute");
+        // Hai lời gọi helper cùng code/detail gộp thành một finding với đủ hai dòng; vị trí đã đưa lên cấp method.
+        assertThat(execute.path("findings")).hasSize(2);
+        assertThat(execute.path("findings").get(0).toString()).doesNotContain("filePath", "methodName");
+        assertThat(execute.path("findings").get(0).path("code").asText()).isEqualTo("UNRESOLVED_HELPER_PATH");
+        assertThat(execute.path("findings").get(0).path("lines").toString()).isEqualTo("[3,4]");
+        assertThat(execute.path("findings").get(1).path("code").asText()).isEqualTo("UNCONTROLLED_RANDOM_BRANCH");
+        assertThat(execute.path("strategies")).hasSize(2);
+        assertThat(report.path("methods").get(1).toString()).isEqualTo("{\"methodId\":11,\"status\":\"READY\"}");
+        // Case 40 khác đánh giá method (BLOCKED) nên giữ đủ; case 41 trùng hoàn toàn với method nên chỉ còn tham chiếu.
+        assertThat(report.path("cases").get(0).path("status").asText()).isEqualTo("BLOCKED");
+        assertThat(report.path("cases").get(0).path("findings")).hasSize(2);
+        assertThat(report.path("cases").get(1).toString()).isEqualTo("{\"caseId\":41,\"methodId\":11}");
+        assertThat(section).contains("lines lists every line");
+
+        var plan = new TestPlanContextDto(null, null, classes, unit.approvedBusinessRules(), List.of());
+        assertThat(new PromptManager(mapper).render("test-plan", Map.of("context_json", plan)))
+                .contains("\"findings\":[{\"filePath\":\"src/main/java/demo/Service.java\",\"methodName\":\"execute\",\"line\":3");
+    }
+
+    @Test
     void doesNotAcceptLlmSuppliedBlockedMetadata() throws Exception {
         var parser = new GenerationResponseParser(mapper, Validation.buildDefaultValidatorFactory().getValidator());
         String json = mapper.writeValueAsString(validResponse()).replaceFirst("\\{",

@@ -32,11 +32,13 @@ public class LlmBatchExecutor {
 
     private static final long MAX_RETRY_DELAY_MILLIS = 2_000L;
 
-    private final int concurrency;
+    /** Trần số batch song song toàn hệ thống; admin chỉnh được qua khoá ai.batch_concurrency. */
+    private volatile int concurrency;
     private final int retryAttempts;
     private final long retryDelayMillis;
     private final ExecutorService executor;
     private final AuthUserRepository users;
+    private com.greytest.repository.TierPackageRepository tierPackages;
 
     private static final class BatchTask<I> {
         final int index;
@@ -80,7 +82,8 @@ public class LlmBatchExecutor {
         this.retryDelayMillis = retryDelayMillis;
         this.users = users;
         AtomicInteger threadNumber = new AtomicInteger();
-        this.executor = Executors.newFixedThreadPool(concurrency, runnable -> {
+        // Pool không cố định kích thước vì trần có thể được nâng lúc chạy; số worker vẫn bị giới hạn ở map().
+        this.executor = Executors.newCachedThreadPool(runnable -> {
             Thread thread = new Thread(runnable, "greytest-llm-batch-" + threadNumber.incrementAndGet());
             thread.setDaemon(true);
             return thread;
@@ -217,17 +220,44 @@ public class LlmBatchExecutor {
         });
     }
 
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setTierPackageRepository(com.greytest.repository.TierPackageRepository tierPackages) {
+        this.tierPackages = tierPackages;
+    }
+
+    public int getConcurrency() {
+        return concurrency;
+    }
+
+    /** Đổi trần batch song song lúc đang chạy; tác vụ mới sẽ dùng giá trị này. */
+    public void setConcurrency(int concurrency) {
+        if (concurrency <= 0) throw new IllegalArgumentException("LLM batch concurrency phải lớn hơn 0.");
+        this.concurrency = concurrency;
+    }
+
     private int concurrencyForActor() {
-        if (users == null) return concurrency;
+        int cap = concurrency;
+        if (users == null) return cap;
         Long actorUserId = GenerationJobContext.actorUserId();
         UserTier tier = actorUserId == null ? UserTier.FREE
                 : users.findById(actorUserId).map(AuthUser::getTier).orElse(UserTier.FREE);
-        int tierConcurrency = switch (tier) {
+        if (tier == null) tier = UserTier.FREE;
+        return Math.min(cap, tierConcurrency(tier));
+    }
+
+    /** Số batch song song của gói lấy từ bảng tier_package (admin sửa được); thiếu thì dùng mặc định 2/3/4. */
+    private int tierConcurrency(UserTier tier) {
+        if (tierPackages != null) {
+            Integer configured = tierPackages.findById(tier.name())
+                    .map(com.greytest.entity.TierPackage::getBatchConcurrency)
+                    .orElse(null);
+            if (configured != null && configured > 0) return configured;
+        }
+        return switch (tier) {
             case FREE -> 2;
             case PLUS -> 3;
             case PRO -> 4;
         };
-        return Math.min(concurrency, tierConcurrency);
     }
 
     /** Giữ tương thích cho unit test/service được khởi tạo thủ công ngoài Spring. */

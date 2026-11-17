@@ -22,7 +22,9 @@ import org.springframework.core.env.MapPropertySource;
 
 import com.greytest.entity.AuthUser;
 import com.greytest.entity.enums.UserTier;
+import com.greytest.entity.TierPackage;
 import com.greytest.repository.AuthUserRepository;
+import com.greytest.repository.TierPackageRepository;
 
 class LlmBatchTierConcurrencyTest {
 
@@ -67,6 +69,35 @@ class LlmBatchTierConcurrencyTest {
         GenerationJobContext.bind(42L, ignored -> { });
 
         assertConcurrentBatches(executor(4), 2);
+    }
+
+    @Test
+    void usesTheBatchConcurrencyConfiguredOnTheTierPackage() throws Exception {
+        AuthUser actor = new AuthUser();
+        actor.setTier(UserTier.PLUS);
+        when(users.findById(42L)).thenReturn(Optional.of(actor));
+        TierPackageRepository packages = mock(TierPackageRepository.class);
+        when(packages.findById("PLUS")).thenReturn(Optional.of(
+                new TierPackage("PLUS", "Plus", 10_000L, "WEEKLY", 200, 1, "", "", true)));
+        GenerationJobContext.bind(42L, ignored -> { });
+        LlmBatchExecutor executor = executor(4);
+        executor.setTierPackageRepository(packages);
+
+        assertConcurrentBatches(executor, 1);
+    }
+
+    @Test
+    void adminCanRaiseTheGlobalCapWhileTheServerIsRunning() throws Exception {
+        AuthUser actor = new AuthUser();
+        actor.setTier(UserTier.PRO);
+        when(users.findById(42L)).thenReturn(Optional.of(actor));
+        GenerationJobContext.bind(42L, ignored -> { });
+        LlmBatchExecutor executor = executor(2);
+
+        executor.setConcurrency(4);
+
+        assertThat(executor.getConcurrency()).isEqualTo(4);
+        assertConcurrentBatches(executor, 4);
     }
 
     private LlmBatchExecutor executor(int cap) {

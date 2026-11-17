@@ -15,4 +15,5 @@ public interface PaymentTransactionRepository extends JpaRepository<PaymentTrans
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     Optional<PaymentTransaction> findByOrderId(String orderId);
     List<PaymentTransaction> findByUserIdOrderByCreatedAtDesc(Long userId);
+    void deleteByUserId(Long userId);
 }

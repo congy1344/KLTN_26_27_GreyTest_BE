@@ -22,9 +22,28 @@ spring:
     multipart:
       max-file-size: 50MB
       max-request-size: 50MB
+  mail:
+    host: ${SPRING_MAIL_HOST:smtp.gmail.com}
+    port: ${SPRING_MAIL_PORT:587}
+    username: ${SPRING_MAIL_USERNAME:}
+    password: ${SPRING_MAIL_PASSWORD:}
+    default-encoding: UTF-8
+    properties:
+      mail:
+        smtp:
+          auth: true
+          starttls:
+            enable: true
+            required: true
+          connectiontimeout: 5000
+          timeout: 5000
+          writetimeout: 5000
 
 server:
   port: 8080
+  # Cấu hình xử lý X-Forwarded-* từ Reverse Proxy (mặc định none để chống giả mạo IP khi chạy trực tiếp)
+  # server.forward-headers-strategy=${GREYTEST_FORWARD_HEADERS_STRATEGY:none}
+  forward-headers-strategy: ${GREYTEST_FORWARD_HEADERS_STRATEGY:none}
 
 springdoc:
   swagger-ui:
@@ -32,10 +51,13 @@ springdoc:
 
 # Thư mục lưu source code đã upload/clone
 greytest:
+  frontend-url: ${GREYTEST_FRONTEND_URL:http://localhost:3000}
   storage:
     path: ${GREYTEST_STORAGE_PATH:./storage}
   auth:
     token-secret: ${GREYTEST_AUTH_TOKEN_SECRET:}
+  # Mã hoá khoá API AI mà admin lưu vào DB; để trống thì chỉ dùng được khoá trong biến môi trường.
+  settings-secret: ${GREYTEST_SETTINGS_SECRET:}
   usage:
     default-monthly-llm-quota: ${GREYTEST_DEFAULT_MONTHLY_LLM_QUOTA:100}
     plus-weekly-llm-quota: ${GREYTEST_PLUS_WEEKLY_LLM_QUOTA:200}
@@ -88,10 +110,11 @@ llm:
     business-rule: ${LLM_MAX_TOKENS_BUSINESS_RULE:4096}
     business-rule-review: ${LLM_MAX_TOKENS_BUSINESS_RULE_REVIEW:4096}
     test-plan: ${LLM_MAX_TOKENS_TEST_PLAN:6144}
-    test-case: ${LLM_MAX_TOKENS_TEST_CASE:8192}
+    # 8192 từng bị cắt output với batch 4 plan tiếng Việt, phải chia đôi và gọi lại; timeout 180 giây đủ cho 12288 token.
+    test-case: ${LLM_MAX_TOKENS_TEST_CASE:12288}
     unit-test: ${LLM_MAX_TOKENS_UNIT_TEST:12288}
     coverage-refinement: ${LLM_MAX_TOKENS_COVERAGE_REFINEMENT:6144}
-  timeout-seconds: ${LLM_TIMEOUT_SECONDS:60}
+  timeout-seconds: ${LLM_TIMEOUT_SECONDS:180}
   openai-url: ${LLM_OPENAI_URL:https://api.vietapi.tech/v1/chat/completions}
   google-url: ${LLM_GOOGLE_URL:https://generativelanguage.googleapis.com/v1beta/interactions}
   usage:

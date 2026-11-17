@@ -47,6 +47,9 @@ public class TestCaseService {
     /** Số vòng hệ thống tự "Tiếp tục sinh" khi còn Test Plan chưa có case; 0 là tắt. */
     @org.springframework.beans.factory.annotation.Value("${greytest.llm-batch.auto-resume-rounds:2}")
     private int autoResumeRounds;
+    /** Bật khi chạy thật: lỗi output AI của một batch không làm dừng cả lượt sinh. Test đơn vị thuần để mặc định false. */
+    @org.springframework.beans.factory.annotation.Value("${greytest.llm-batch.isolate-batch-failures:true}")
+    private boolean isolateBatchFailures;
 
     private final TestCaseRepository cases; private final TestPlanRepository plans; private final ProjectRepository projects; private final AIAgentService ai; private final BusinessRuleRepository rules; private final TransactionTemplate transactions; private final GenerationProgressService generationProgress;
     private ServiceScopeResolver scopeResolver; private LlmBatchExecutor batchExecutor; private JavaMethodRepository methods;
@@ -183,7 +186,16 @@ public class TestCaseService {
                         generationProgress.log(projectId, GenerationProgressStage.TEST_CASE,
                                 "Đang gọi AI sinh Test Case cho batch " + (batchIdx + 1) + "/" + allBatches.size()
                                         + " (" + summary + ")...");
-                        return generateValidatedBatch(projectId, batch);
+                        try {
+                            return generateValidatedBatch(projectId, batch);
+                        } catch (com.greytest.service.agent.LlmResponseException failure) {
+                            // Lỗi output AI của riêng batch này không được làm dừng cả lượt sinh: để trống batch,
+                            // các plan của nó được tính là còn thiếu và lượt tự tiếp tục sinh sẽ làm lại. Hết quota hoặc bị hủy vẫn dừng như cũ.
+                            if (!isolateBatchFailures || isUsageQuotaExceeded(failure) || Thread.currentThread().isInterrupted()) throw failure;
+                            generationProgress.log(projectId, GenerationProgressStage.TEST_CASE, "Batch " + (batchIdx + 1) + "/" + allBatches.size()
+                                    + " chưa sinh được; các batch khác vẫn tiếp tục và batch này sẽ được thử lại: " + failure.getMessage());
+                            return List.<GeneratedTestCaseDto>of();
+                        }
                     },
                     (batchNumber, validBatch) -> {
                         int batchIndex = batchNumber <= batchIndexes.size() ? batchIndexes.get(batchNumber - 1) : -1;
@@ -242,7 +254,9 @@ public class TestCaseService {
                         }
                     });
 
-            if (generationProgress.isPaused(projectId, GenerationProgressStage.TEST_CASE)) {
+            boolean hasRemaining = approvedPlans.stream()
+                    .anyMatch(plan -> cases.findByTestPlanId(plan.getId()).isEmpty());
+            if (hasRemaining && generationProgress.isPaused(projectId, GenerationProgressStage.TEST_CASE)) {
                 generationProgress.log(projectId, GenerationProgressStage.TEST_CASE,
                         "Tác vụ đã tạm dừng. Các Test Case đã sinh được lưu an toàn vào CSDL. Nhấn 'Tiếp tục sinh' khi bạn sẵn sàng.");
                 return allSavedCases.isEmpty() ? list(projectId) : allSavedCases;

@@ -21,6 +21,68 @@ class UnitTestFileServiceTest {
 
     private final UnitTestFileService service = new UnitTestFileService();
 
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({"false,false,false", "true,false,false", "true,true,false", "true,false,true"})
+    void unixFastRerunOnlyDeletesTestOutputsAndKeepsDefaultMavenArguments(boolean fast, boolean compileFails, boolean empty,
+            @org.junit.jupiter.api.io.TempDir Path workspace) throws Exception {
+        Path shell = Path.of(System.getProperty("os.name").startsWith("Windows")
+                ? "C:/Program Files/Git/bin/bash.exe" : "/bin/sh");
+        Assumptions.assumeTrue(Files.isRegularFile(shell));
+        var file = new com.greytest.dto.UnitTestFileDto("src/test/java/demo/ShopTest.java", "ShopTest", "demo", 1,
+                List.of("TC-1"), "package demo; class ShopTest { @org.junit.jupiter.api.Test void first() {} }");
+        for (var entry : zipEntries(empty ? service.createEmptySandboxArchive() : service.createCoverageArchive(List.of(file))).entrySet()) {
+            Path target = workspace.resolve(entry.getKey());
+            Files.createDirectories(target.getParent());
+            Files.writeString(target, entry.getValue());
+        }
+        Files.writeString(workspace.resolve("pom.xml"), "<project/>");
+        Files.createDirectories(workspace.resolve(".mvn/wrapper"));
+        Files.writeString(workspace.resolve(".mvn/wrapper/maven-wrapper.properties"), "");
+        for (String output : List.of("target/classes/Main.class", "target/test-classes/Old.class",
+                "target/surefire-reports/TEST-old.xml", "target/jacoco.exec", "target/site/jacoco/jacoco.xml")) {
+            Path target = workspace.resolve(output);
+            Files.createDirectories(target.getParent());
+            Files.writeString(target, "old");
+        }
+        Files.writeString(workspace.resolve("mvnw"), """
+                [ "$1" = "-v" ] && exit 0
+                printf '%s\\n' "$*" >> maven-args.txt
+                if [ "$1" = "clean" ] || [ "$1" = "test-compile" ]; then
+                  if [ "${GREYTEST_FAST_RERUN:-}" = "1" ]; then
+                    for output in target/test-classes/Old.class target/surefire-reports/TEST-old.xml target/jacoco.exec target/site/jacoco/jacoco.xml; do
+                      [ ! -e "$output" ] || exit 9
+                    done
+                  fi
+                  [ "${GREYTEST_FAKE_COMPILATION_FAILURE:-}" != "1" ] || exit 1
+                  mkdir -p target/test-classes
+                  [ "${GREYTEST_ALLOW_EMPTY:-}" = "1" ] || touch target/test-classes/New.class
+                else
+                  mkdir -p target/site/jacoco
+                  echo '<report/>' > target/site/jacoco/jacoco.xml
+                fi
+                """);
+        var process = new ProcessBuilder(shell.toString(), "run-greytest-coverage.sh", "-B", "-ntp")
+                .directory(workspace.toFile()).redirectErrorStream(true);
+        process.environment().remove("GREYTEST_FAST_RERUN");
+        if (fast) process.environment().put("GREYTEST_FAST_RERUN", "1");
+        if (compileFails) process.environment().put("GREYTEST_FAKE_COMPILATION_FAILURE", "1");
+        Process run = process.start();
+        assertThat(run.waitFor(30, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+        assertThat(run.exitValue()).withFailMessage(new String(run.getInputStream().readAllBytes(), StandardCharsets.UTF_8)).isEqualTo(compileFails ? 1 : 0);
+        List<String> arguments = Files.readAllLines(workspace.resolve("maven-args.txt"));
+        assertThat(arguments).hasSize(compileFails ? 1 : 2);
+        assertThat(arguments.get(0)).isEqualTo((fast ? "" : "clean ") + "test-compile -Dmaven.test.skip=false "
+                + "-Dfile.encoding=UTF-8 -Dproject.build.sourceEncoding=UTF-8 -Dproject.reporting.outputEncoding=UTF-8 -B -ntp");
+        assertThat(Files.readString(workspace.resolve("target/classes/Main.class"))).isEqualTo("old");
+        assertThat(Files.exists(workspace.resolve("target/test-classes/Old.class"))).isEqualTo(!fast);
+        if(empty){
+            assertThat(arguments.get(1)).contains("-Dtest=__GreyTestEmptyPackage__", "-Dsurefire.failIfNoSpecifiedTests=false", "-DfailIfNoTests=false");
+            assertThat(workspace.resolve("target/test-classes/New.class")).doesNotExist();
+            assertThat(Files.size(workspace.resolve("target/jacoco.exec"))).isZero();
+        }
+        if (compileFails) assertThat(workspace.resolve("target/site/jacoco/jacoco.xml")).doesNotExist();
+    }
+
     @Test
     void coverageScriptsSelectEveryTestClassInAFile() throws Exception {
         var file = new com.greytest.dto.UnitTestFileDto("src/test/java/com/example/UserServiceTest.java", "UserServiceTest", "com.example", 2,

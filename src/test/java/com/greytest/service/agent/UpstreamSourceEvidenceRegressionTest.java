@@ -362,8 +362,10 @@ class UpstreamSourceEvidenceRegressionTest {
         when(client.complete(anyString(), any(LlmRequestOptions.class))).thenReturn(invalid);
         assertThatThrownBy(() -> agent(contexts, client, root).generateBusinessRules(1L)).isInstanceOf(LlmResponseException.class);
         var prompts = org.mockito.ArgumentCaptor.forClass(String.class);
-        verify(client, times(3)).complete(prompts.capture(), any(LlmRequestOptions.class));
-        assertThat(prompts.getAllValues().get(1)).contains("# JSON correction", invalid, "BusinessRuleResponseDto", "[0]");
+        // JSON đúng cú pháp nhưng phần tử sai kiểu là lỗi schema: lượt sửa nhận đúng đường dẫn thay vì lời nhắc JSON chung.
+        verify(client, times(2)).complete(prompts.capture(), any(LlmRequestOptions.class));
+        assertThat(prompts.getAllValues().get(1)).contains("# Schema correction", invalid, "rules[0]", "must be a JSON object")
+                .doesNotContain("# JSON correction");
     }
 
     @Test void acceptsTheLiveCredentialExceptionMessageWithItsActualConstructor() throws Exception {

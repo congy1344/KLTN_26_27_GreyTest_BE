@@ -1117,7 +1117,7 @@ class AgentGatewayTest {
         verify(client, org.mockito.Mockito.times(api.equals("verifyZeroInteractions") ? 2 : 1))
                 .complete(prompts.capture(), org.mockito.ArgumentMatchers.any(LlmRequestOptions.class));
         assertThat(prompts.getValue()).contains("Mockito compatibility detected", version);
-        assertThat(prompts.getValue()).contains("Build dependency evidence", "pom.xml", "<mockito.version>", "<artifactId>junit</artifactId>");
+        assertThat(prompts.getValue()).contains("Build dependency evidence", "pom.xml", "properties: mockito.version=" + version, "\ndependencies:\njunit:junit");
     }
 
     @org.junit.jupiter.params.ParameterizedTest

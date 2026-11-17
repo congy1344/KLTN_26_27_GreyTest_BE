@@ -331,6 +331,7 @@ public class BusinessRuleService {
         int firstRuleNumber = nextRuleNumber(businessRuleRepository.findByProjectId(projectId));
         List<BusinessRuleBatch> batchesToRun = pendingBatches;
         AtomicInteger failedSaveBatch = new AtomicInteger();
+        java.util.Set<Integer> finishedRunBatchIndices = java.util.concurrent.ConcurrentHashMap.newKeySet();
         int lastAttemptedBatchNumber = firstPendingBatchIndex + 1;
         try {
         LlmBatchExecutor.mapOrSequential(
@@ -360,6 +361,7 @@ public class BusinessRuleService {
                                 current.methodIds(), Set.of(), existingRuleKeys,
                                 firstRuleNumber + created.size(), backfillAiRules);
                         created.addAll(saved);
+                        finishedRunBatchIndices.add(completedRunBatch);
                         generationProgressService.advanceStep(projectId, GenerationProgressStage.BUSINESS_RULE,
                                 current.number() - 1,
                                 "Batch " + current.number() + "/" + totalBatches + ": đã sinh "
@@ -371,7 +373,8 @@ public class BusinessRuleService {
                     }
                 });
 
-        if (generationProgressService.isPaused(projectId, GenerationProgressStage.BUSINESS_RULE)) {
+        boolean hasRemaining = finishedRunBatchIndices.size() < batchesToRun.size();
+        if (hasRemaining && generationProgressService.isPaused(projectId, GenerationProgressStage.BUSINESS_RULE)) {
             generationProgressService.log(projectId, GenerationProgressStage.BUSINESS_RULE,
                     "Tác vụ đã tạm dừng. Các Business Rule đã sinh được lưu an toàn vào CSDL. Nhấn 'Tiếp tục sinh' khi bạn sẵn sàng.");
             return created;

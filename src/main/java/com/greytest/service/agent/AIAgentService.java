@@ -720,22 +720,31 @@ public class AIAgentService {
         List<com.greytest.dto.agent.GenerationResponseDtos.GeneratedTestCaseDto> valid = new ArrayList<>();
         List<com.greytest.dto.agent.GenerationResponseDtos.GeneratedTestCaseDto> invalid = new ArrayList<>();
         Set<Long> failing = new java.util.LinkedHashSet<>(requested);
+        List<String> reviewWarnings = new ArrayList<>();
         byPlan.forEach((planId, cases) -> {
             var single = new TestCaseResponseDto(cases);
             var narrowed = GenerationValidationGate.narrowTestCases(context, Set.of(planId));
+            List<String> planWarnings = new ArrayList<>();
             // Giữ theo cả plan: giữ một phần case của plan dễ làm mất kịch bản mà không ai biết.
             if (!unusablePlanIds.contains(planId) && GenerationValidationGate.validateReferences(narrowed, single).isEmpty()
-                    && GenerationValidationGate.validateTestCases(narrowed, single).isEmpty()) {
+                    && GenerationValidationGate.validateTestCases(narrowed, single, planWarnings).isEmpty()) {
                 valid.addAll(cases);
                 failing.remove(planId);
+                reviewWarnings.addAll(planWarnings);
             } else {
                 invalid.addAll(cases);
             }
         });
         if (valid.isEmpty() || failing.isEmpty()) return new LlmResponseException(message, true);
+        logReviewWarnings(reviewWarnings);
         String rejected = schemaRejectedJson != null ? schemaRejectedJson
                 : invalid.isEmpty() ? null : generationJson.valueToTree(invalid).toString();
         return new PartialTestCaseFailure(message, valid, rejected, failing);
+    }
+
+    private static void logReviewWarnings(List<String> reviewWarnings) {
+        if (reviewWarnings == null) return;
+        reviewWarnings.stream().distinct().forEach(warning -> GenerationJobContext.log("Cần người duyệt kiểm tra: " + warning));
     }
 
     /** Hết lượt sửa: trả các plan đã đạt để lưu; plan còn thiếu chờ "Tiếp tục sinh". */
@@ -837,14 +846,18 @@ public class AIAgentService {
         if ("test-case".equals(promptName) && context instanceof TestCaseContextDto testCaseContext
                 && parsed instanceof TestCaseResponseDto testCaseResponse) {
             // Gom lỗi tham chiếu và lỗi nội dung để một lượt sửa thấy đủ mọi vấn đề của batch.
+            // Luồng sinh thường: Test Case luôn được người duyệt ngay sau đó, nên lỗi diễn đạt thông báo exception chỉ cảnh báo.
+            // Luồng cập nhật source/snapshot vẫn chặn vì checkpoint cần kết quả đã kiểm chứng.
+            List<String> reviewWarnings = keepsValidTestCasePlans(snapshot) ? new ArrayList<>() : null;
             List<String> problems = java.util.stream.Stream.of(referenceProblem,
-                    GenerationValidationGate.validateTestCases(testCaseContext, testCaseResponse)).flatMap(Optional::stream).toList();
+                    GenerationValidationGate.validateTestCases(testCaseContext, testCaseResponse, reviewWarnings)).flatMap(Optional::stream).toList();
             if (!problems.isEmpty()) {
                 String message = (referenceProblem.isPresent() ? VALIDATION_GATE_ERROR : TEST_CASE_SEMANTIC_ERROR) + String.join("\n", problems);
                 throw keepsValidTestCasePlans(snapshot)
                         ? testCaseFailure(message, testCaseContext, testCaseResponse.cases(), Set.of(), null)
                         : new LlmResponseException(message, true);
             }
+            logReviewWarnings(reviewWarnings);
             return null;
         }
         referenceProblem.ifPresent(problem -> { throw new LlmResponseException(VALIDATION_GATE_ERROR + problem, true); });

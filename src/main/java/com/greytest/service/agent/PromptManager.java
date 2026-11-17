@@ -12,6 +12,7 @@ import org.springframework.stereotype.Service;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 /**
@@ -119,13 +120,61 @@ public class PromptManager {
             if (prefixes.isEmpty()) prompt += "\n\n" + load("source-contract");
             var report = TestFeasibilityAnalyzer.analyze(variables.get("context_json"));
             if (!report.methods().isEmpty() || !report.cases().isEmpty()) {
+                boolean unitTest = "unit-test".equals(stage);
                 prompt += "\n\n# Testability assessment\nThe following backend-derived findings are bounded static evidence, not proof that tests executed. "
                         + "Use their fixture strategies while preserving approved requirements. READY means no recognized blocker; "
-                        + "UNKNOWN requires checking the missing evidence. Keep source-defined business rules even when their unit tests are blocked.\n"
-                        + variableValue(report);
+                        + "UNKNOWN requires checking the missing evidence. Keep source-defined business rules even when their unit tests are blocked."
+                        + (unitTest ? " Each method or case states filePath and methodName once; a finding repeats them only when different. "
+                                + "lines lists every line with the same code and detail. A case with only caseId and methodId has exactly its method's assessment." : "")
+                        + "\n" + variableValue(unitTest ? compactTestability(report) : report);
             }
         }
         return new RenderedPrompt(prompt, List.copyOf(prefixes));
+    }
+
+    /**
+     * Bước Unit Test gửi cùng các finding nhưng không lặp đường dẫn/tên method và finding trùng code/detail;
+     * case có đánh giá trùng hệt method chỉ giữ tham chiếu. Validation vẫn dùng Report gốc, không đọc lại JSON này.
+     */
+    private ObjectNode compactTestability(TestFeasibilityAnalyzer.Report report) {
+        ObjectNode json = objectMapper.createObjectNode();
+        var methods = json.putArray("methods");
+        var byMethod = new java.util.HashMap<Long, TestFeasibilityAnalyzer.MethodAssessment>();
+        for (var method : report.methods()) {
+            byMethod.putIfAbsent(method.methodId(), method);
+            compactAssessment(methods.addObject().put("methodId", method.methodId()), method.status(), method.findings(), method.strategies());
+        }
+        var cases = json.putArray("cases");
+        for (var item : report.cases()) {
+            ObjectNode entry = cases.addObject().put("caseId", item.caseId());
+            if (item.methodId() != null) entry.put("methodId", item.methodId());
+            var method = byMethod.get(item.methodId());
+            boolean sameAsMethod = method != null && method.status() == item.status()
+                    && method.findings().equals(item.findings()) && method.strategies().equals(item.strategies());
+            if (!sameAsMethod) compactAssessment(entry, item.status(), item.findings(), item.strategies());
+        }
+        return json;
+    }
+
+    private void compactAssessment(ObjectNode entry, TestFeasibilityAnalyzer.Status status,
+            List<TestFeasibilityAnalyzer.Finding> findings, List<String> strategies) {
+        entry.put("status", status.name());
+        String filePath = findings.isEmpty() ? null : findings.get(0).filePath();
+        String methodName = findings.isEmpty() ? null : findings.get(0).methodName();
+        if (filePath != null) entry.put("filePath", filePath);
+        if (methodName != null) entry.put("methodName", methodName);
+        var merged = new java.util.LinkedHashMap<List<String>, ObjectNode>();
+        for (var finding : findings) {
+            ObjectNode item = merged.computeIfAbsent(java.util.Arrays.asList(finding.filePath(), finding.methodName(), finding.code(), finding.detail()), key -> {
+                ObjectNode created = objectMapper.createObjectNode();
+                if (!java.util.Objects.equals(finding.filePath(), filePath)) created.put("filePath", finding.filePath());
+                if (!java.util.Objects.equals(finding.methodName(), methodName)) created.put("methodName", finding.methodName());
+                return created.put("code", finding.code()).put("detail", finding.detail());
+            });
+            if (finding.line() != null) (item.has("lines") ? (ArrayNode) item.get("lines") : item.putArray("lines")).add(finding.line());
+        }
+        if (!merged.isEmpty()) entry.putArray("findings").addAll(merged.values());
+        if (!strategies.isEmpty()) strategies.forEach(entry.putArray("strategies")::add);
     }
 
     private String variableValue(Object value) {

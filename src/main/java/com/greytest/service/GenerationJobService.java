@@ -33,6 +33,8 @@ public class GenerationJobService {
     private final UserActivityService activityService;
     private final UsageQuotaService quotaService;
     private static final Object MANUAL_MUTATION = new Object();
+    private static final Object JOB_LOCK = new Object();
+    private record ProjectStageLock(GenerationProgressStage stage, long runId) {}
     private final ConcurrentMap<Long, Object> activeProjects = new ConcurrentHashMap<>();
 
     @Autowired
@@ -78,19 +80,43 @@ public class GenerationJobService {
             quotaService.checkQuotaAvailable(actorUserId);
         }
 
-        Object activeWork = activeProjects.putIfAbsent(projectId, stage);
+        ProjectStageLock lock = new ProjectStageLock(stage, System.nanoTime());
+        Object activeWork = activeProjects.putIfAbsent(projectId, lock);
         if (activeWork != null) {
-            throw new GenerationInProgressException(
-                    "Một tác vụ sinh AI đang chạy cho project này. Vui lòng theo dõi trong Log.");
+            boolean acquired = false;
+            if (progressService.isPaused(projectId, stage)) {
+                // Worker cũ đang hoàn tất lưu batch cuối trước khi dừng hoàn toàn.
+                // Chờ ngắn để worker cũ giải phóng lock thay vì báo lỗi ngay.
+                for (int i = 0; i < 20; i++) {
+                    try {
+                        Thread.sleep(200);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                    if (activeProjects.putIfAbsent(projectId, lock) == null) {
+                        acquired = true;
+                        break;
+                    }
+                }
+            }
+            if (!acquired) {
+                if (progressService.isPaused(projectId, stage)) {
+                    throw new GenerationInProgressException(
+                            "Tác vụ đang lưu nốt batch hiện tại trước khi tạm dừng. Vui lòng đợi vài giây rồi nhấn 'Tiếp tục sinh'.");
+                }
+                throw new GenerationInProgressException(
+                        "Một tác vụ sinh AI đang chạy cho project này. Vui lòng theo dõi trong Log.");
+            }
         }
 
         try {
             progressService.queue(projectId, stage, "Tác vụ đã vào hàng đợi và sẽ tự chạy nền.");
             recordGenerationRequest(projectId, actorUserId, stage);
             Locale locale = LocaleContextHolder.getLocale();
-            executor.execute(() -> run(projectId, actorUserId, stage, locale, task));
+            executor.execute(() -> run(projectId, actorUserId, lock, locale, task));
         } catch (RuntimeException exception) {
-            activeProjects.remove(projectId, stage);
+            activeProjects.remove(projectId, lock);
             progressService.fail(projectId, stage, "Không thể đưa tác vụ vào hàng đợi. Vui lòng thử lại.");
             throw exception;
         }
@@ -102,7 +128,16 @@ public class GenerationJobService {
     }
 
     public void pause(Long projectId, GenerationProgressStage stage) {
-        progressService.pause(projectId, stage, "Đã tạm dừng tác vụ. Các batch đã sinh được lưu an toàn. Bạn có thể nhấn 'Tiếp tục sinh' để tiếp tục.");
+        GenerationProgressStatus currentStatus = progressService.get(projectId, stage).status();
+        progressService.pause(projectId, stage, "Đang tạm dừng tác vụ: hệ thống đang lưu nốt các batch đang xử lý...");
+        if (currentStatus == GenerationProgressStatus.QUEUED) {
+            // Tác vụ chưa được worker lấy chạy, có thể giải phóng lock ngay lập tức
+            Object currentLock = activeProjects.get(projectId);
+            if (currentLock instanceof ProjectStageLock psl && psl.stage() == stage) {
+                activeProjects.remove(projectId, currentLock);
+            }
+            progressService.markWorkerFinished(projectId, stage);
+        }
     }
 
     public void cancel(Long projectId, GenerationProgressStage stage) {
@@ -128,6 +163,9 @@ public class GenerationJobService {
      * Marker được giữ đến khi service hoàn tất để loại bỏ race giữa kiểm tra và ghi dữ liệu.
      */
     public <T> T executeMutation(Long projectId, Supplier<T> mutation) {
+        Object jobLock = GenerationJobContext.scopedValue(JOB_LOCK);
+        // Chỉ worker mang đúng khóa của job mới được sửa lồng nhau trong lúc xác minh.
+        if (jobLock != null && jobLock == activeProjects.get(projectId)) return mutation.get();
         if (activeProjects.putIfAbsent(projectId, MANUAL_MUTATION) != null) {
             throw new GenerationInProgressException(
                     "Một tác vụ sinh AI đang chạy cho project này. Vui lòng chờ hoàn tất trước khi thay đổi dữ liệu.");
@@ -153,23 +191,24 @@ public class GenerationJobService {
             if (activityService != null) {
                 activityService.record(actorUserId, action, projectId, java.util.Map.of());
             }
-            try {
-                GenerationJobContext.bind(actorUserId, message -> {});
-                return mutation.get();
-            } finally {
-                GenerationJobContext.clear();
+            try (var scope = GenerationJobContext.openScope(actorUserId)) {
+                return GenerationJobContext.withActor(actorUserId, mutation);
             }
         });
     }
 
-    private void run(Long projectId, Long actorUserId, GenerationProgressStage stage, Locale locale, Runnable task) {
+    private void run(Long projectId, Long actorUserId, ProjectStageLock lock, Locale locale, Runnable task) {
         Locale previousLocale = LocaleContextHolder.getLocale();
+        GenerationProgressStage stage = lock.stage();
         GenerationRunMetrics measurement = null;
         try {
             LocaleContextHolder.setLocale(locale);
             GenerationJobContext.bind(actorUserId, message -> progressService.log(projectId, stage, message));
+            if (!lock.equals(activeProjects.get(projectId)) || progressService.isPaused(projectId, stage)) {
+                return;
+            }
             measurement = progressService.beginMeasurement(projectId, stage, GenerationJobContext.metricsSupplier());
-            task.run();
+            GenerationJobContext.withValue(JOB_LOCK, lock, () -> { task.run(); return null; });
             progressService.completeIfActive(
                     projectId,
                     stage,
@@ -187,7 +226,12 @@ public class GenerationJobService {
             if (measurement != null) measurement.finish();
             GenerationJobContext.clear();
             LocaleContextHolder.setLocale(previousLocale);
-            activeProjects.remove(projectId, stage);
+            if (progressService.isPaused(projectId, stage)) {
+                progressService.log(projectId, stage,
+                        "Đã tạm dừng tác vụ. Các batch đã sinh được lưu an toàn. Bạn có thể nhấn 'Tiếp tục sinh' để tiếp tục.");
+            }
+            progressService.markWorkerFinished(projectId, stage);
+            activeProjects.remove(projectId, lock);
         }
     }
 

@@ -21,4 +21,6 @@ public interface UsageQuotaRepository extends JpaRepository<UsageQuota, Long> {
     @Query("select count(quota) from UsageQuota quota "
             + "where quota.periodStart = :periodStart and quota.quotaUsed >= quota.quotaLimit")
     long countExceededInPeriod(@Param("periodStart") java.time.LocalDate periodStart);
+
+    void deleteByUserId(Long userId);
 }

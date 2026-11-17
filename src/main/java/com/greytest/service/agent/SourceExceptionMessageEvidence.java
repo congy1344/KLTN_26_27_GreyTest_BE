@@ -92,7 +92,8 @@ final class SourceExceptionMessageEvidence {
                     + "|\\bkhông\\s+(?:được\\s+)?(?:chứa|bao\\s+gồm)\\b|\\b(?:contains?|includes?)\\s+no\\s*$)").matcher(claimKind).find();
             String afterClaim = description.substring(matcher.end()).stripLeading();
             boolean fragmentClaim = substringClaim || afterClaim.startsWith("+")
-                    || Pattern.compile("(?iuU)^(?:,\\s*)?(?:(?:nối|ghép|cộng)(?:\\s+chuỗi)?\\s+(?:với|cùng|và)|(?:với|cùng|và)\\s+(?:giá\\s+trị|tham\\s+số|biến|ID|id|mã)\\b)").matcher(afterClaim).find()
+                    // "followed by" là cách AI viết tiếng Anh cho "nối với" khi mô tả message ghép chuỗi.
+                    || Pattern.compile("(?iuU)^(?:,\\s*)?(?:(?:nối|ghép|cộng)(?:\\s+chuỗi)?\\s+(?:với|cùng|và)|(?:với|cùng|và)\\s+(?:giá\\s+trị|tham\\s+số|biến|ID|id|mã)\\b|followed\\s+by\\b)").matcher(afterClaim).find()
                     || Pattern.compile("(?iuU)(?:(?<!\\bkết\\s)(?:(?:ghép|nối)\\s+chuỗi|(?:được|bằng(?:\\s+cách)?)\\s+(?:ghép|nối)|(?:ghép|nối)\\s+(?:từ|bởi|với|cùng|các\\s+phần))\\b|gồm\\s+(?:các\\s+phần|phần|chuỗi)|\\b(?:tiền\\s+tố|hậu\\s+tố|prefix|suffix|bắt\\s+đầu\\s+(?:bằng|với)|kết\\s+thúc\\s+(?:bằng|với)|starts?\\s+with|ends?\\s+with)\\b|concatenat|literal\\s+fragment)").matcher(claimKind).find();
             String prefix = description.substring(previousEnd, matcher.start());
             String beforeLiteral = description.substring(previousEnd, matcher.start(1) - 1);

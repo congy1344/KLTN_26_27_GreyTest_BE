@@ -51,6 +51,31 @@ public class VnpayService {
      * @param ipAddress IP của client thực hiện giao dịch
      * @return link điều hướng người dùng tới cổng VNPay
      */
+    private com.greytest.repository.SystemSettingRepository systemSettings;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setSystemSettingRepository(com.greytest.repository.SystemSettingRepository systemSettings) {
+        this.systemSettings = systemSettings;
+    }
+
+    /**
+     * Mã TMN và URL cổng thanh toán do admin sửa ở trang Cài đặt được ưu tiên; trống thì dùng biến môi trường.
+     * Lưu ý: hash secret vẫn chỉ lấy từ biến môi trường, nên mã TMN mới phải đi cùng secret tương ứng.
+     */
+    private String adminSetting(String key, String fallback) {
+        if (systemSettings == null) return fallback;
+        try {
+            return systemSettings.findById(key)
+                    .map(com.greytest.entity.SystemSetting::getSettingValue)
+                    .map(String::trim)
+                    .filter(value -> !value.isEmpty())
+                    .orElse(fallback);
+        } catch (RuntimeException ex) {
+            log.warn("Không đọc được cấu hình VNPay '{}' từ DB, dùng giá trị mặc định: {}", key, ex.getMessage());
+            return fallback;
+        }
+    }
+
     public String createPaymentUrl(String orderId, long amount, String orderInfo, String ipAddress) {
         return createPaymentUrl(orderId, amount, orderInfo, ipAddress, null);
     }
@@ -77,7 +102,7 @@ public class VnpayService {
         Map<String, String> vnpParams = new HashMap<>();
         vnpParams.put("vnp_Version", "2.1.0");
         vnpParams.put("vnp_Command", "pay");
-        vnpParams.put("vnp_TmnCode", tmnCode);
+        vnpParams.put("vnp_TmnCode", adminSetting("vnpay.tmn_code", tmnCode));
         // VNPay yêu cầu số tiền nhân 100 để bỏ phần thập phân
         vnpParams.put("vnp_Amount", String.valueOf(amount * 100));
         vnpParams.put("vnp_CurrCode", "VND");
@@ -114,7 +139,7 @@ public class VnpayService {
         String vnpSecureHash = hmacSHA512(hashSecret, hashData.toString());
         query.append("&vnp_SecureHash=").append(vnpSecureHash);
 
-        return payUrl + "?" + query;
+        return adminSetting("vnpay.url", payUrl) + "?" + query;
     }
 
     /**

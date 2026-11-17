@@ -17,6 +17,16 @@ public final class GenerationJobContext {
     private static final ThreadLocal<Integer> LLM_CALLS_REMAINING = new ThreadLocal<>();
     private static final ThreadLocal<Long> SOURCE_UPDATE_ID = new ThreadLocal<>();
     private static final ThreadLocal<Map<String, LongAdder>> METRICS = new ThreadLocal<>();
+    private static final Object REPAIR_QUOTA_EXHAUSTED = new Object();
+
+    public static void markRepairQuotaExhausted() {
+        Map<Object, Object> inputs = JOB_INPUTS.get();
+        if (inputs != null) inputs.put(REPAIR_QUOTA_EXHAUSTED, true);
+    }
+
+    public static boolean repairQuotaExhausted() {
+        return Boolean.TRUE.equals(scopedValue(REPAIR_QUOTA_EXHAUSTED));
+    }
 
     private GenerationJobContext() {}
 

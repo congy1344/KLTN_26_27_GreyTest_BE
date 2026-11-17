@@ -34,6 +34,24 @@ public class GenerationProgressService {
     // Tổng của stage chưa hoàn tất, giữ qua TTL của snapshot để lần "Tiếp tục sinh" sau vẫn cộng dồn; mất khi backend khởi động lại.
     private final ConcurrentMap<ProgressKey, GenerationRunMetricsDto> unfinishedTotals = new ConcurrentHashMap<>();
     private final Clock clock;
+    private static final Object DEFERRED_COMPLETION = new Object();
+    private static final class DeferredCompletion {
+        Runnable completion;
+        String verification = "";
+    }
+
+    /** Giữ stage hoạt động đến khi pha xác minh sau sinh đã kết thúc. */
+    public static void deferCompletion(Runnable task) {
+        DeferredCompletion deferred = new DeferredCompletion();
+        GenerationJobContext.withValue(DEFERRED_COMPLETION, deferred, () -> { task.run(); return null; });
+        if (deferred.completion != null) deferred.completion.run();
+    }
+
+    public static boolean verificationFinished(String message) {
+        DeferredCompletion deferred = GenerationJobContext.scopedValue(DEFERRED_COMPLETION);
+        if (deferred != null) deferred.verification = " " + message;
+        return deferred != null;
+    }
 
     public GenerationProgressService() {
         this(Clock.systemUTC());
@@ -142,11 +160,24 @@ public class GenerationProgressService {
         ProgressKey key = new ProgressKey(projectId, stage);
         ProgressState current = states.get(key);
         GenerationRunMetricsDto carried = unfinishedTotals.remove(key);
+        // Tiếp tục từ trạng thái tạm dừng: giữ nguyên state (kèm số liệu đo đang dở) để không mất tiến độ.
+        if (current != null && current.status == GenerationProgressStatus.PAUSED) {
+            current.toQueued(message, clock.instant());
+            return;
+        }
         if (current != null) carried = current.unfinishedTotals();
         ProgressState state = new ProgressState(stage, List.of("Đang chờ worker xử lý"),
                 message, clock.instant(), GenerationProgressStatus.QUEUED);
         state.measurement = new GenerationRunMetrics(clock, java.util.Map::of, carried);
         states.put(key, state);
+    }
+
+    public synchronized void markWorkerFinished(Long projectId, GenerationProgressStage stage) {
+        if (projectId == null || stage == null) return;
+        ProgressState state = states.get(new ProgressKey(projectId, stage));
+        if (state != null) {
+            state.markFinished(clock.instant());
+        }
     }
 
     public void setStepStatus(Long projectId, GenerationProgressStage stage, int stepIndex, GenerationProgressStepStatus status) {
@@ -181,6 +212,12 @@ public class GenerationProgressService {
 
     /** Chỉ công bố hoàn tất sau khi transaction ngoài cùng commit thành công. */
     public void completeAfterCommit(Long projectId, GenerationProgressStage stage, String message) {
+        DeferredCompletion deferred = GenerationJobContext.scopedValue(DEFERRED_COMPLETION);
+        if (deferred != null && stage == GenerationProgressStage.UNIT_TEST) {
+            deferred.completion = () -> completeAfterCommit(projectId, stage, message + deferred.verification);
+            log(projectId, stage, "Đã lưu Unit Test; đang chờ xác minh tự động.");
+            return;
+        }
         if (!TransactionSynchronizationManager.isSynchronizationActive()) {
             complete(projectId, stage, message);
             return;
@@ -202,6 +239,12 @@ public class GenerationProgressService {
 
     /** Chỉ công bố kết quả một phần khi dữ liệu hợp lệ đã commit thành công. */
     public void partialAfterCommit(Long projectId, GenerationProgressStage stage, String message) {
+        DeferredCompletion deferred = GenerationJobContext.scopedValue(DEFERRED_COMPLETION);
+        if (deferred != null && stage == GenerationProgressStage.UNIT_TEST) {
+            deferred.completion = () -> partialAfterCommit(projectId, stage, message + deferred.verification);
+            log(projectId, stage, message.replace("Hoàn tất một phần:", "Đã sinh một phần:"));
+            return;
+        }
         if (!TransactionSynchronizationManager.isSynchronizationActive()) {
             partial(projectId, stage, message);
             return;
@@ -265,6 +308,20 @@ public class GenerationProgressService {
                 : state.snapshot();
     }
 
+    public record ActiveProgressItem(Long projectId, GenerationProgressStage stage, GenerationProgressDto progress) {}
+
+    public synchronized List<ActiveProgressItem> getActiveProgressItems() {
+        cleanupExpired();
+        List<ActiveProgressItem> result = new ArrayList<>();
+        for (var entry : states.entrySet()) {
+            ProgressState state = entry.getValue();
+            if (state.isActive()) {
+                result.add(new ActiveProgressItem(entry.getKey().projectId(), entry.getKey().stage(), state.snapshot()));
+            }
+        }
+        return result;
+    }
+
     GenerationRunMetrics beginMeasurement(Long projectId, GenerationProgressStage stage,
             java.util.function.Supplier<java.util.Map<String, Object>> metrics) {
         ProgressState state = states.get(new ProgressKey(projectId, stage));
@@ -290,7 +347,8 @@ public class GenerationProgressService {
         private final List<GenerationProgressStepStatus> stepStatuses = new ArrayList<>();
         private final List<String> stepErrors = new ArrayList<>();
         private final List<GenerationProgressLogDto> logs = new ArrayList<>();
-        private final boolean autoPromoteFirstWaitingStep;
+        private boolean autoPromoteFirstWaitingStep;
+        private boolean workerFinished = false;
         private GenerationProgressStatus status = GenerationProgressStatus.RUNNING;
         private int completedSteps;
         private String failureMessage;
@@ -352,8 +410,14 @@ public class GenerationProgressService {
 
         private synchronized void toQueued(String message, Instant now) {
             this.status = GenerationProgressStatus.QUEUED;
+            this.workerFinished = false;
             this.updatedAt = now;
             addLog(message, now);
+        }
+
+        private synchronized void markFinished(Instant now) {
+            this.workerFinished = true;
+            this.updatedAt = now;
         }
 
         private synchronized void setStepStatus(int stepIndex, GenerationProgressStepStatus newStatus, Instant now) {
@@ -504,8 +568,11 @@ public class GenerationProgressService {
             int percent = totalSteps == 0 ? 0 : completedSteps * 100 / totalSteps;
             // Chỉ công bố 100% sau khi bước hoàn tất đã chốt thời gian và lưu kết quả.
             if (status != GenerationProgressStatus.COMPLETED) percent = Math.min(percent, 99);
+            boolean busy = !workerFinished && (status == GenerationProgressStatus.RUNNING
+                    || status == GenerationProgressStatus.QUEUED
+                    || status == GenerationProgressStatus.PAUSED);
             return new GenerationProgressDto(
-                    stage, status, percent, completedSteps, totalSteps, stepSnapshots(), List.copyOf(logs),
+                    stage, status, percent, completedSteps, totalSteps, stepSnapshots(), List.copyOf(logs), busy,
                     measurement == null ? null : measurement.snapshot());
         }
 

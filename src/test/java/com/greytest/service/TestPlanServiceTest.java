@@ -557,6 +557,73 @@ class TestPlanServiceTest {
                 org.mockito.ArgumentMatchers.anyString());
     }
 
+    @Test
+    void listWithNullServicePathFallsBackToProjectPlans() {
+        mockProject(ProjectStatus.PLAN_PENDING_REVIEW);
+        TestPlan plan = plan(101L, 7L, "Plan in project");
+        when(testPlanRepository.findByProjectId(1L)).thenReturn(List.of(plan));
+
+        List<TestPlanDto> result = service().list(1L, null);
+
+        assertThat(result).hasSize(1);
+        assertThat(result.get(0).title()).isEqualTo("Plan in project");
+        org.mockito.Mockito.verifyNoInteractions(scopeResolver);
+    }
+
+    @Test
+    void resumeAllowsPlanCoveringBothUncoveredAndAlreadyCoveredRulesOfSameMethod() {
+        mockProject(ProjectStatus.PLAN_PENDING_REVIEW);
+        BusinessRule rule1 = approvedRule(7L, 11L);
+        BusinessRule rule2 = approvedRule(8L, 11L);
+        TestPlan existingPlan = plan(101L, 7L, "Existing Plan");
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(rule1, rule2));
+        when(testPlanRepository.findByProjectId(1L)).thenReturn(List.of(existingPlan));
+        when(testPlanCoveredRuleRepository.findByTestPlanId(101L)).thenReturn(List.of(coveredRule(101L, 7L)));
+
+        // AI sinh plan cho method bao phủ rule 8 (còn thiếu) và cả rule 7 (đã có từ trước)
+        when(aiAgentService.generateTestPlan(1L, Set.of(8L))).thenReturn(new TestPlanResponseDto(List.of(
+                generatedPlan(11L, 7L, List.of(7L, 8L), "Comprehensive Method Plan"))));
+        mockTestPlanSaveAll();
+        mockProjectSave();
+
+        List<TestPlanDto> plans = service().generate(1L, (String) null, true);
+
+        assertThat(plans).isNotEmpty();
+        verify(aiAgentService).generateTestPlan(1L, Set.of(8L));
+    }
+
+    @Test
+    void toDtoDoesNotThrowNpeWhenBusinessRuleIdIsNull() {
+        mockProject(ProjectStatus.PLAN_PENDING_REVIEW);
+        TestPlan planWithoutRule = plan(102L, null, "Manual Plan");
+        when(testPlanRepository.findByProjectId(1L)).thenReturn(List.of(planWithoutRule));
+        when(testPlanCoveredRuleRepository.findByTestPlanId(102L)).thenReturn(List.of());
+
+        List<TestPlanDto> result = service().list(1L);
+
+        assertThat(result).hasSize(1);
+        assertThat(result.get(0).coveredRuleIds()).isEmpty();
+        assertThat(result.get(0).businessRuleId()).isNull();
+    }
+
+    @Test
+    void generateFiltersOutRulesWithoutMethodId() {
+        mockProject(ProjectStatus.BR_APPROVED);
+        BusinessRule validRule = approvedRule(7L, 11L);
+        BusinessRule unlinkedRule = approvedRule(8L, null);
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(validRule, unlinkedRule));
+        when(aiAgentService.generateTestPlan(eq(1L), anySet())).thenReturn(new TestPlanResponseDto(List.of(
+                generatedPlan(11L, 7L, List.of(7L), "Happy path"))));
+        when(testPlanRepository.findByProjectId(1L)).thenReturn(List.of());
+        mockTestPlanSaveAll();
+        mockProjectSave();
+
+        List<TestPlanDto> plans = service().generate(1L);
+
+        assertThat(plans).hasSize(1);
+        verify(aiAgentService).generateTestPlan(1L, Set.of(7L));
+    }
+
     private TestPlan plan(Long id, Long ruleId, String title) {
         TestPlan plan = new TestPlan();
         plan.setId(id);

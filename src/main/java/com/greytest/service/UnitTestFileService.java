@@ -378,7 +378,16 @@ public class UnitTestFileService {
     }
 
     private byte[] createCoverageArchive(List<UnitTestFileDto> testFiles, List<String> skippedCases) {
-        if (testFiles == null || testFiles.isEmpty()) {
+        return createCoverageArchive(testFiles, skippedCases, false);
+    }
+
+    /** Sau khi loại hết test lỗi, vẫn biên dịch phần còn lại và xuất coverage bằng 0. */
+    public byte[] createEmptySandboxArchive() {
+        return createCoverageArchive(List.of(), List.of(), true);
+    }
+
+    private byte[] createCoverageArchive(List<UnitTestFileDto> testFiles, List<String> skippedCases, boolean allowEmpty) {
+        if (testFiles == null || (testFiles.isEmpty() && !allowEmpty)) {
             throw new StorageException("Không có Unit Test để đóng gói", null);
         }
         testFiles.forEach(this::validateArchiveFile);
@@ -389,6 +398,7 @@ public class UnitTestFileService {
                 .flatMap(this::testClassesInFile)
                 .distinct()
                 .collect(Collectors.joining(","));
+        if (allowEmpty) testSelector = "__GreyTestEmptyPackage__";
         String gradleTestFilters = testFiles.stream()
                 .flatMap(this::testClassesInFile)
                 .distinct()
@@ -401,7 +411,9 @@ public class UnitTestFileService {
                         GenerationSourceFingerprint.withoutMetadata(ensureMockitoRunner(testFile.sourceCode())));
             }
             writeArchiveEntry(zip, WINDOWS_SCRIPT_NAME, windowsCoverageScript(testSelector, gradleTestFilters, sourceMetadata));
-            writeArchiveEntry(zip, UNIX_SCRIPT_NAME, unixCoverageScript(testSelector, gradleTestFilters, sourceMetadata));
+            String unixScript = unixCoverageScript(testSelector, gradleTestFilters, sourceMetadata);
+            if (allowEmpty) unixScript = unixScript.replace("set -u", "set -u\nexport GREYTEST_ALLOW_EMPTY=1\nmkdir -p src/test/java");
+            writeArchiveEntry(zip, UNIX_SCRIPT_NAME, unixScript);
             writeArchiveEntry(zip, GRADLE_INIT_SCRIPT_NAME, gradleJacocoInitScript());
             for (String resource : List.of("mvnw", "mvnw.cmd", ".mvn/wrapper/maven-wrapper.properties", "LICENSE", "NOTICE")) {
                 writeCoverageResource(zip, ".greytest/maven/" + resource, "maven-wrapper/" + resource);
@@ -793,6 +805,10 @@ public class UnitTestFileService {
                 set -u
                 cd "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)" || exit 1
 
+                if [ "${GREYTEST_FAST_RERUN:-}" = "1" ] && [ -f "pom.xml" ]; then
+                  rm -rf target/test-classes target/surefire-reports target/site/jacoco target/jacoco.exec || exit 1
+                fi
+
                 case "$(uname -s)" in
                   CYGWIN*|MINGW*|MSYS*)
                     if [ -n "${JAVA_HOME:-}" ]; then JAVA_HOME="$(cygpath -u "$JAVA_HOME")"; export JAVA_HOME; fi
@@ -833,7 +849,7 @@ public class UnitTestFileService {
                   exit 1
                 fi
 
-                if ! find "src/test/java" -type f -name '*.java' -print -quit | grep -q .; then
+                if [ "${GREYTEST_ALLOW_EMPTY:-}" != "1" ] && ! find "src/test/java" -type f -name '*.java' -print -quit | grep -q .; then
                   echo "[GreyTest] ERROR: No generated Java test file was found under src/test/java."
                   echo "[GreyTest] Do not paste tests into src/service or src/main/test. Extract the complete ZIP at the module root."
                   exit 1
@@ -864,7 +880,7 @@ public class UnitTestFileService {
 
                 %6$s
 
-                if [ -f "../pom.xml" ] && [ "$build_kind" = "maven" ]; then
+                if [ -f "../pom.xml" ] && [ "$build_kind" = "maven" ] && [ "${GREYTEST_FAST_RERUN:-}" != "1" ]; then
                   echo "[GreyTest] Phát hiện module con. Đang cài đặt parent POM vào Maven local repository..."
                   (cd .. && run_maven -N install -DskipTests) || {
                     echo "[GreyTest] ERROR: Maven parent POM installation failed. Review the Maven output above."
@@ -873,16 +889,25 @@ public class UnitTestFileService {
                 fi
 
                 echo "[GreyTest] Running tests and generating JaCoCo XML..."
-                run_maven clean test-compile \
+                clean_goal=clean
+                if [ "${GREYTEST_FAST_RERUN:-}" = "1" ]; then
+                  clean_goal=
+                fi
+                run_maven $clean_goal test-compile \
                   -Dmaven.test.skip=false \
                   -Dfile.encoding=UTF-8 -Dproject.build.sourceEncoding=UTF-8 -Dproject.reporting.outputEncoding=UTF-8 \
                   "$@" || exit 1
 
-                if ! find "target/test-classes" -type f -name '*.class' -print -quit | grep -q .; then
+                if [ "${GREYTEST_ALLOW_EMPTY:-}" != "1" ] && ! find "target/test-classes" -type f -name '*.class' -print -quit | grep -q .; then
                   echo "[GreyTest] ERROR: Maven compiled no generated test class. Check Maven test source configuration."
                   exit 1
                 fi
 
+                empty_test_args=
+                if [ "${GREYTEST_ALLOW_EMPTY:-}" = "1" ]; then
+                  empty_test_args="-DfailIfNoTests=false -Dsurefire.failIfNoSpecifiedTests=false"
+                  mkdir -p target && : > target/jacoco.exec || exit 1
+                fi
                 run_maven \
                   -Djacoco.propertyName=argLine \
                   "-DargLine=@{argLine} ${GREYTEST_JVM_ARGS:-}" \
@@ -891,7 +916,7 @@ public class UnitTestFileService {
                   -Dmaven.test.skip=false \
                   -Dmaven.test.failure.ignore=true \
                   -DforkCount=1 -DreuseForks=false \
-                  -DfailIfNoTests=true \
+                  -DfailIfNoTests=true $empty_test_args \
                   org.jacoco:jacoco-maven-plugin:%3$s:prepare-agent \
                   org.apache.maven.plugins:maven-surefire-plugin:test \
                   org.jacoco:jacoco-maven-plugin:%4$s:report "$@" || exit 1

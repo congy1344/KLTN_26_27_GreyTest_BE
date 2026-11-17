@@ -40,15 +40,15 @@ public class GoogleLlmClient implements LlmClient {
 
     private final ObjectMapper objectMapper;
     private final HttpClient httpClient;
-    private final List<String> apiKeys;
-    private final String model;
+    private final List<String> apiKeys = new java.util.concurrent.CopyOnWriteArrayList<>();
+    private volatile String model;
     private final double temperature;
     private final int maxTokens;
     private final Duration timeout;
     private final URI endpoint;
     private final LlmUsageRecorder usageRecorder;
     private final AtomicInteger activeKeyIndex = new AtomicInteger();
-    private final AtomicLongArray cooldownUntilMillis;
+    private volatile AtomicLongArray cooldownUntilMillis;
 
     @Autowired
     public GoogleLlmClient(
@@ -64,7 +64,7 @@ public class GoogleLlmClient implements LlmClient {
             @Value("${llm.google-model:${llm.model:gemini-3.5-flash}}") String model,
             @Value("${llm.temperature:0.3}") double temperature,
             @Value("${llm.max-tokens:4096}") int maxTokens,
-            @Value("${llm.timeout-seconds:60}") long timeoutSeconds,
+            @Value("${llm.timeout-seconds:180}") long timeoutSeconds,
             @Value("${llm.google-url:https://generativelanguage.googleapis.com/v1beta/interactions}") String endpoint,
             ObjectProvider<LlmUsageRecorder> usageRecorderProvider) {
         this(
@@ -123,8 +123,11 @@ public class GoogleLlmClient implements LlmClient {
             LlmUsageRecorder usageRecorder) {
         this.objectMapper = objectMapper;
         this.httpClient = httpClient;
-        this.apiKeys = List.copyOf(apiKeys);
-        this.cooldownUntilMillis = new AtomicLongArray(apiKeys.size());
+        this.apiKeys.clear();
+        if (apiKeys != null) {
+            apiKeys.stream().filter(k -> k != null && !k.isBlank()).distinct().forEach(this.apiKeys::add);
+        }
+        this.cooldownUntilMillis = new AtomicLongArray(Math.max(this.apiKeys.size(), 1));
         this.model = model;
         this.temperature = temperature;
         this.maxTokens = maxTokens;
@@ -133,12 +136,40 @@ public class GoogleLlmClient implements LlmClient {
         this.usageRecorder = usageRecorder;
     }
 
+    public synchronized void setApiKeys(List<String> keys) {
+        this.apiKeys.clear();
+        if (keys != null) {
+            keys.stream().filter(k -> k != null && !k.isBlank()).distinct().forEach(this.apiKeys::add);
+        }
+        this.cooldownUntilMillis = new AtomicLongArray(Math.max(this.apiKeys.size(), 1));
+    }
+
+    public List<String> getApiKeys() {
+        return List.copyOf(apiKeys);
+    }
+
+    public void setModel(String model) {
+        if (model != null && !model.isBlank()) {
+            this.model = model.trim();
+        }
+    }
+
+    public String getModel() {
+        return this.model;
+    }
+
     @Override
     public String complete(String prompt) {
+        return complete(prompt, new LlmRequestOptions(maxTokens));
+    }
+
+    @Override
+    public String complete(String prompt, LlmRequestOptions options) {
         if (apiKeys.isEmpty()) {
             throw new LlmResponseException("LLM_API_KEY hoặc LLM_API_KEY1 chưa được cấu hình.");
         }
-        String body = requestBody(prompt);
+        int tokens = (options != null && options.maxTokens() > 0) ? options.maxTokens() : maxTokens;
+        String body = requestBody(prompt, tokens);
         // Mỗi worker giữ một điểm bắt đầu khác nhau để không dồn request đồng thời vào cùng key.
         int startIndex = Math.floorMod(activeKeyIndex.getAndIncrement(), apiKeys.size());
         String lastQuotaResponse = null;
@@ -229,12 +260,16 @@ public class GoogleLlmClient implements LlmClient {
     }
 
     String requestBody(String prompt) {
+        return requestBody(prompt, maxTokens);
+    }
+
+    String requestBody(String prompt, int outputTokens) {
         ObjectNode root = objectMapper.createObjectNode();
         root.put("model", model);
         root.put("input", prompt);
         ObjectNode generationConfig = root.putObject("generation_config");
         generationConfig.put("temperature", temperature);
-        generationConfig.put("max_output_tokens", maxTokens);
+        generationConfig.put("max_output_tokens", outputTokens > 0 ? outputTokens : maxTokens);
         root.set("response_format", responseFormat(prompt));
         try {
             return objectMapper.writeValueAsString(root);

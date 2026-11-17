@@ -309,6 +309,69 @@ class FormattedExceptionMessageEvidenceTest {
                 problem -> assertThat(problem).contains("Wrong first", "Wrong second", "plan_id=7"));
     }
 
+    @Test
+    void testCaseStageWarnsReviewerInsteadOfRetryingOnMessageWordingOnly() {
+        var rule = new com.greytest.dto.agent.GenerationContextDtos.BusinessRuleContextDto(
+                1L, 1L, "BR-001", "Over limit throws BusinessException", null, "AI_GENERATED", "APPROVED", false, null);
+        var plan = new com.greytest.dto.agent.GenerationContextDtos.TestPlanContextItemDto(
+                7L, 1L, List.of(1L), "TP-001", "Over limit", "Check exception", "EXCEPTION", "APPROVED", false);
+        var context = new com.greytest.dto.agent.GenerationContextDtos.TestCaseContextDto(
+                new com.greytest.dto.agent.GenerationContextDtos.ProjectContextDto(1L, "demo", "ANALYZED"),
+                null, sourceClasses("void run() { throw new BusinessException(\"Vượt quá \" + INHERITED_LIMIT); }",
+                        "static class BusinessException extends RuntimeException { BusinessException(String message) { super(message); } }"),
+                List.of(rule), List.of(plan), List.of());
+        // Source không cho biết giá trị hằng nên không chứng minh được, cũng không bác bỏ được thông báo này.
+        var response = new com.greytest.dto.agent.GenerationResponseDtos.TestCaseResponseDto(List.of(
+                new com.greytest.dto.agent.GenerationResponseDtos.GeneratedTestCaseDto(7L, "EXCEPTION", "First", "", Map.of(),
+                        "BusinessException message \"Vượt quá 5\"", "HIGH", "")));
+        var contexts = org.mockito.Mockito.mock(GenerationContextBuilder.class);
+        org.mockito.Mockito.when(contexts.buildTestCaseContext(1L)).thenReturn(context);
+        var prompts = org.mockito.Mockito.mock(PromptManager.class);
+        org.mockito.Mockito.when(prompts.renderPrompt(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyMap()))
+                .thenReturn(new PromptManager.RenderedPrompt("prompt", List.of()));
+        var client = org.mockito.Mockito.mock(LlmClient.class);
+        org.mockito.Mockito.when(client.complete(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any())).thenReturn("{}");
+        var parser = org.mockito.Mockito.mock(GenerationResponseParser.class);
+        org.mockito.Mockito.when(parser.parse("{}", com.greytest.dto.agent.GenerationResponseDtos.TestCaseResponseDto.class)).thenReturn(response);
+        var agent = new AIAgentService(contexts, prompts, client, parser, org.mockito.Mockito.mock(AiContextLogService.class));
+        List<String> logs = new java.util.concurrent.CopyOnWriteArrayList<>();
+
+        com.greytest.service.GenerationJobContext.bind(1L, logs::add);
+        try {
+            assertThat(agent.generateTestCases(1L)).isEqualTo(response);
+            org.mockito.Mockito.verify(client, org.mockito.Mockito.times(1)).complete(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any());
+            assertThat(logs).anySatisfy(line -> assertThat(line).startsWith("Cần người duyệt kiểm tra:")
+                    .contains("plan_id=7", "method_id=1", "cannot verify"));
+
+            // Luồng cập nhật source vẫn chặn như cũ vì checkpoint cần kết quả đã kiểm chứng.
+            com.greytest.service.GenerationJobContext.setSourceUpdateId(5L);
+            org.assertj.core.api.Assertions.assertThatThrownBy(() -> agent.generateTestCases(1L))
+                    .isInstanceOf(LlmResponseException.class).hasMessageContaining("cannot verify");
+        } finally {
+            com.greytest.service.GenerationJobContext.clear();
+        }
+    }
+
+    @Test
+    void testCaseStageStillRejectsMessageThatSourceDisproves() {
+        // Lỗi này cũng bị prerequisites chặn trước khi sinh Unit Test nên phải để AI sửa ngay, không hạ thành cảnh báo.
+        var rule = new com.greytest.dto.agent.GenerationContextDtos.BusinessRuleContextDto(
+                1L, 1L, "BR-001", "Missing resource throws ResourceNotFoundException", null, "AI_GENERATED", "APPROVED", false, null);
+        var plan = new com.greytest.dto.agent.GenerationContextDtos.TestPlanContextItemDto(
+                7L, 1L, List.of(1L), "TP-001", "Missing resource", "Check exception", "EXCEPTION", "APPROVED", false);
+        var context = new com.greytest.dto.agent.GenerationContextDtos.TestCaseContextDto(
+                new com.greytest.dto.agent.GenerationContextDtos.ProjectContextDto(1L, "demo", "ANALYZED"),
+                null, resourceSources(), List.of(rule), List.of(plan), List.of());
+        var response = new com.greytest.dto.agent.GenerationResponseDtos.TestCaseResponseDto(List.of(
+                new com.greytest.dto.agent.GenerationResponseDtos.GeneratedTestCaseDto(7L, "EXCEPTION", "First", "", Map.of(),
+                        "ResourceNotFoundException message \"Wrong first\"", "HIGH", "")));
+        List<String> warnings = new java.util.ArrayList<>();
+
+        assertThat(GenerationValidationGate.validateTestCases(context, response, warnings))
+                .hasValueSatisfying(problem -> assertThat(problem).contains("Wrong first"));
+        assertThat(warnings).isEmpty();
+    }
+
     private java.util.Optional<String> validate(List<ClassContextDto> classes, String claim, Map<String, Object> input) {
         return new SourceExceptionMessageEvidence(classes).validate(classes, 1L, claim, input, true);
     }

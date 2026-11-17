@@ -8,11 +8,13 @@ import com.greytest.service.AuthService;
 import com.greytest.service.ProjectService;
 import com.greytest.service.UnitTestService;
 import com.greytest.service.GenerationJobService;
+import com.greytest.service.GenerationProgressService;
+import com.greytest.service.coverage.SandboxTestRunService;
 
 @RestController
 public class UnitTestController {
- private final UnitTestService service; private final AuthService auth; private final ProjectService projects; private final GenerationJobService jobs;
- public UnitTestController(UnitTestService service,AuthService auth,ProjectService projects,GenerationJobService jobs){this.service=service;this.auth=auth;this.projects=projects;this.jobs=jobs;}
+ private final UnitTestService service; private final AuthService auth; private final ProjectService projects; private final GenerationJobService jobs; private final SandboxTestRunService sandbox;
+ public UnitTestController(UnitTestService service,AuthService auth,ProjectService projects,GenerationJobService jobs,SandboxTestRunService sandbox){this.service=service;this.auth=auth;this.projects=projects;this.jobs=jobs;this.sandbox=sandbox;}
  @GetMapping("/api/projects/{projectId}/unit-tests") public List<UnitTestDto> list(@PathVariable Long projectId,@RequestParam(required=false) String servicePath,@RequestHeader("Authorization") String a){access(projectId,a);return service.list(projectId,servicePath);}
  @GetMapping("/api/projects/{projectId}/unit-tests/files") public List<com.greytest.dto.UnitTestFileDto> files(@PathVariable Long projectId,@RequestParam(required=false) String servicePath,@RequestHeader("Authorization") String a){access(projectId,a);return service.listFiles(projectId,servicePath);}
  @GetMapping("/api/projects/{projectId}/unit-tests/download") public org.springframework.http.ResponseEntity<byte[]> download(@PathVariable Long projectId,@RequestParam(required=false) String servicePath,@RequestHeader("Authorization") String a){
@@ -25,5 +27,9 @@ public class UnitTestController {
     .contentType(org.springframework.http.MediaType.parseMediaType("application/zip"))
     .body(archive.content());
  }
-   @PostMapping("/api/projects/{projectId}/unit-tests/generate") public org.springframework.http.ResponseEntity<GenerationJobAcceptedDto> generate(@PathVariable Long projectId,@RequestParam(required=false) String servicePath,@RequestParam(required=false, defaultValue="false") boolean resume,@RequestHeader("Authorization") String a){var actor=access(projectId,a);return org.springframework.http.ResponseEntity.accepted().body(jobs.submit(projectId,actor.getId(),GenerationProgressStage.UNIT_TEST,()->service.generate(projectId,servicePath,resume)));}
+   @PostMapping("/api/projects/{projectId}/unit-tests/generate") public org.springframework.http.ResponseEntity<GenerationJobAcceptedDto> generate(@PathVariable Long projectId,@RequestParam(required=false) String servicePath,@RequestParam(required=false, defaultValue="false") boolean resume,@RequestHeader("Authorization") String a){var actor=access(projectId,a);return org.springframework.http.ResponseEntity.accepted().body(jobs.submit(projectId,actor.getId(),GenerationProgressStage.UNIT_TEST,()->generateVerified(projectId,servicePath,resume)));}
+   private void generateVerified(Long projectId,String servicePath,boolean resume){
+    GenerationProgressService.deferCompletion(()->sandbox.generateAndVerify(projectId,servicePath,
+            ()->!service.generate(projectId,servicePath,resume).isEmpty()));
+   }
    private com.greytest.entity.AuthUser access(Long id,String a){var user=auth.currentUser(a);projects.requireAccess(id,user);return user;}}

@@ -20,6 +20,20 @@ import com.greytest.exception.GenerationInProgressException;
 class GenerationProgressServiceTest {
 
     @Test
+    void defersPartialGenerationUntilVerificationAndPreservesBothResults() {
+        service.start(9L,GenerationProgressStage.UNIT_TEST,2,"Bắt đầu.");
+        GenerationProgressService.deferCompletion(()->{
+            service.partialAfterCommit(9L,GenerationProgressStage.UNIT_TEST,"Hoàn tất một phần: Đã lưu 1 Unit Test.");
+            assertThat(service.get(9L,GenerationProgressStage.UNIT_TEST).status()).isEqualTo(GenerationProgressStatus.RUNNING);
+            GenerationProgressService.verificationFinished("Đã chạy 1 test: 1 đạt, 0 không đạt.");
+        });
+        var result=service.get(9L,GenerationProgressStage.UNIT_TEST);
+        assertThat(result.status()).isEqualTo(GenerationProgressStatus.PARTIAL);
+        assertThat(result.logs().get(result.logs().size()-1).message())
+                .isEqualTo("Hoàn tất một phần: Đã lưu 1 Unit Test. Đã chạy 1 test: 1 đạt, 0 không đạt.");
+    }
+
+    @Test
     void partialPublishesAfterCommitAndRemainsTerminalWithoutClaimingFullSuccess() {
         service.start(9L, GenerationProgressStage.UNIT_TEST, 2, "Bắt đầu.");
         service.advance(9L, GenerationProgressStage.UNIT_TEST, "Đã lưu phần hợp lệ.");
@@ -400,6 +414,22 @@ class GenerationProgressServiceTest {
         GenerationProgressDto progress = service.get(9L, GenerationProgressStage.UNIT_TEST);
         assertThat(progress.steps().get(0).status()).isEqualTo(GenerationProgressStepStatus.FAILED);
         assertThat(progress.steps().get(2).status()).isEqualTo(GenerationProgressStepStatus.FAILED);
+    }
+
+    @Test
+    void returnsOnlyActiveProgressItems() {
+        service.queue(10L, GenerationProgressStage.BUSINESS_RULE, "Chờ chạy.");
+        service.start(11L, GenerationProgressStage.TEST_PLAN, 2, "Đang xử lý.");
+        service.start(12L, GenerationProgressStage.TEST_CASE, 2, "Đã xong.");
+        service.complete(12L, GenerationProgressStage.TEST_CASE, "Hoàn tất.");
+        service.start(13L, GenerationProgressStage.UNIT_TEST, 2, "Bị lỗi.");
+        service.fail(13L, GenerationProgressStage.UNIT_TEST, "Lỗi cú pháp.");
+
+        var activeItems = service.getActiveProgressItems();
+
+        assertThat(activeItems).hasSize(2);
+        assertThat(activeItems).extracting(GenerationProgressService.ActiveProgressItem::projectId)
+                .containsExactlyInAnyOrder(10L, 11L);
     }
 
     private static final class MutableClock extends Clock {
