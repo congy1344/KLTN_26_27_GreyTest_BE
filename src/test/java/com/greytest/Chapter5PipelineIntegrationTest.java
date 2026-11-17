@@ -207,7 +207,8 @@ class Chapter5PipelineIntegrationTest {
                 .andExpect(jsonPath("$.status").value("PAUSED"));
         provider.release.countDown();
         awaitWorkersIdle();
-        assertThat(getJson(id, "generation-progress/TEST_PLAN").path("status").asText()).isEqualTo("PAUSED");
+        // Batch đang chạy là batch cuối nên khi xong thì job chốt hoàn tất, không giữ PAUSED vì không còn gì để tiếp tục.
+        assertThat(getJson(id, "generation-progress/TEST_PLAN").path("status").asText()).isEqualTo("COMPLETED");
     }
 
     private String register() throws Exception {
