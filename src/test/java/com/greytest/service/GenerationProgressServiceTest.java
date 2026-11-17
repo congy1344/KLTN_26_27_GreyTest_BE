@@ -20,6 +20,20 @@ import com.greytest.exception.GenerationInProgressException;
 class GenerationProgressServiceTest {
 
     @Test
+    void defersPartialGenerationUntilVerificationAndPreservesBothResults() {
+        service.start(9L,GenerationProgressStage.UNIT_TEST,2,"Bắt đầu.");
+        GenerationProgressService.deferCompletion(()->{
+            service.partialAfterCommit(9L,GenerationProgressStage.UNIT_TEST,"Hoàn tất một phần: Đã lưu 1 Unit Test.");
+            assertThat(service.get(9L,GenerationProgressStage.UNIT_TEST).status()).isEqualTo(GenerationProgressStatus.RUNNING);
+            GenerationProgressService.verificationFinished("Đã chạy 1 test: 1 đạt, 0 không đạt.");
+        });
+        var result=service.get(9L,GenerationProgressStage.UNIT_TEST);
+        assertThat(result.status()).isEqualTo(GenerationProgressStatus.PARTIAL);
+        assertThat(result.logs().get(result.logs().size()-1).message())
+                .isEqualTo("Hoàn tất một phần: Đã lưu 1 Unit Test. Đã chạy 1 test: 1 đạt, 0 không đạt.");
+    }
+
+    @Test
     void partialPublishesAfterCommitAndRemainsTerminalWithoutClaimingFullSuccess() {
         service.start(9L, GenerationProgressStage.UNIT_TEST, 2, "Bắt đầu.");
         service.advance(9L, GenerationProgressStage.UNIT_TEST, "Đã lưu phần hợp lệ.");

@@ -54,6 +54,9 @@ public class UnitTestService {
     /** Số vòng hệ thống tự "Tiếp tục sinh" khi còn case chưa sinh được; 0 là tắt. */
     @org.springframework.beans.factory.annotation.Value("${greytest.llm-batch.auto-resume-rounds:2}")
     private int autoResumeRounds;
+    /** Bật khi chạy thật: lỗi output AI của một batch không làm dừng cả lượt sinh. Test đơn vị thuần để mặc định false. */
+    @org.springframework.beans.factory.annotation.Value("${greytest.llm-batch.isolate-batch-failures:true}")
+    private boolean isolateBatchFailures;
     public UnitTestService(UnitTestRepository units, TestCaseRepository cases, TestPlanRepository plans, ProjectRepository projects, AIAgentService ai, UnitTestFileService files, PlatformTransactionManager transactionManager, GenerationProgressService generationProgress){this.units=units;this.cases=cases;this.plans=plans;this.projects=projects;this.ai=ai;this.files=files;this.transactions=new TransactionTemplate(transactionManager);this.generationProgress=generationProgress;}
     @org.springframework.beans.factory.annotation.Autowired
     public UnitTestService(UnitTestRepository units,TestCaseRepository cases,TestPlanRepository plans,ProjectRepository projects,AIAgentService ai,UnitTestFileService files,PlatformTransactionManager transactionManager,GenerationProgressService generationProgress,ServiceScopeResolver scopeResolver,ServicePipelineStatusService scopedArtifacts,LlmBatchExecutor batchExecutor){
@@ -259,6 +262,157 @@ public class UnitTestService {
         }
     }
 
+    /**
+     * Một test lỗi biên dịch hoặc không đạt khi chạy thật: tên đầy đủ của lớp test, tên method và chi tiết lỗi.
+     * assertion = true khi test fail ở assertion (nghi lệch nghiệp vụ, không đưa cho AI sửa); false khi là lỗi kỹ thuật.
+     */
+    public record TestFailure(String className,String methodName,String detail,boolean assertion){}
+    // ponytail: trần cứng để một vòng sửa không đốt quota; đưa ra cấu hình khi cần sửa nhiều test hơn.
+    private static final int MAX_RUNTIME_REPAIRS = 30;
+    /** Số case tối đa trong một lượt gọi AI: đủ nhỏ để output không bị cắt, đủ lớn để tiết kiệm quota. */
+    private static final int RUNTIME_REPAIR_GROUP = 5;
+
+    /**
+     * Giai đoạn 2 của sandbox: đưa lỗi chạy thật cho AI để sửa đúng Unit Test đã sinh.
+     * Gom các test không đạt của cùng một lớp test vào chung lượt gọi để đỡ tốn quota.
+     * Chỉ thay bản cũ khi bản sửa qua được các kiểm tra như lúc sinh. Trả về bản cũ của các test đã thay để có thể khôi phục.
+     */
+    public List<UnitTest> repairFailing(Long projectId,List<TestFailure> failures){
+        ensureCanGenerate(ensure(projectId));
+        Map<String,UnitTest> generatedByMethod=new LinkedHashMap<>();
+        for(TestCase testCase:approvedCases(projectId)){
+            UnitTest test=units.findByTestCaseId(testCase.getId());
+            if(test!=null) generatedByMethod.put(test.getPackageName()+"."+test.getTestClassName()+"#"+test.getTestMethodName(),test);
+        }
+        // Mỗi nhóm: các test không đạt của một lớp test, kèm lỗi của từng test.
+        Map<String,List<Map.Entry<UnitTest,String>>> byClass=new LinkedHashMap<>();
+        int accepted=0;
+        for(TestFailure failure:failures){
+            if(failure.assertion()) continue;
+            // Test viết tay hoặc không còn trong CSDL thì không phải việc của bước này.
+            UnitTest old=takeGeneratedTest(generatedByMethod,failure);
+            if(old==null) continue;
+            if(++accepted>MAX_RUNTIME_REPAIRS) break;
+            byClass.computeIfAbsent(failure.className(),ignored->new ArrayList<>()).add(Map.entry(old,failure.detail()));
+        }
+        List<List<Map.Entry<UnitTest,String>>> groups=new ArrayList<>();
+        for(var sameClass:byClass.values()){
+            for(int start=0;start<sameClass.size();start+=RUNTIME_REPAIR_GROUP){
+                groups.add(List.copyOf(sameClass.subList(start,Math.min(start+RUNTIME_REPAIR_GROUP,sameClass.size()))));
+            }
+        }
+        var quotaExceeded=new java.util.concurrent.atomic.AtomicBoolean();
+        // Worker chỉ đọc snapshot riêng; callback lưu tuần tự để không đua khi kiểm tra tên method trùng.
+        var repaired=LlmBatchExecutor.mapOrSequential(batchExecutor,groups,quotaExceeded::get,
+                group->repairGroup(projectId,group,quotaExceeded),
+                (index,result)->{
+                    if(!result.candidates().isEmpty()) transactions.executeWithoutResult(status->persistBatch(projectId,result.candidates()));
+                });
+        List<UnitTest> replaced=new ArrayList<>();
+        for(var result:repaired) replaced.addAll(result.previous());
+        return replaced;
+    }
+
+    private record RepairedGroup(List<GeneratedUnitTestDto> candidates,List<UnitTest> previous){}
+
+    private UnitTest takeGeneratedTest(Map<String,UnitTest> remaining,TestFailure failure){
+        UnitTest exact=remaining.remove(failure.className()+"#"+failure.methodName());
+        if(exact!=null||!failure.detail().startsWith("COMPILATION ERROR:")) return exact;
+        // Export có thể đổi tên lớp fixture nhưng giữ tên method; chỉ nhận lỗi biên dịch đã đối chiếu gói ZIP.
+        var matches=remaining.entrySet().stream().filter(entry->{
+            UnitTest test=entry.getValue();
+            String original=test.getPackageName()+"."+test.getTestClassName();
+            return test.getTestMethodName().equals(failure.methodName())&&failure.className().matches(
+                    java.util.regex.Pattern.quote(original)+"_(?:Fixture\\d+Test|GreyTest_[\\da-f]+(?:_\\d+)?Test)");
+        }).toList();
+        return matches.size()==1 ? remaining.remove(matches.get(0).getKey()) : null;
+    }
+
+    private RepairedGroup repairGroup(Long projectId,List<Map.Entry<UnitTest,String>> group,
+            java.util.concurrent.atomic.AtomicBoolean quotaExceeded){
+        if(quotaExceeded.get()) return new RepairedGroup(List.of(),List.of());
+        StringBuilder note=new StringBuilder("The stored Unit Tests below failed to compile or failed during execution against the unchanged production source.\n"
+                + "Fix only the tests: fixtures, stubs, argument values, verifications or wrong API usage that make them fail before or at the approved scenario. "
+                + "Return one corrected test per case_id listed here. Keep each case_id, package, test class name and the approved inputs and expected result. "
+                + "Never weaken, delete or invert an assertion to make a test pass; if a failure is a genuine mismatch between the approved "
+                + "expected result and production behavior, return that test unchanged.\n");
+        Map<Long,UnitTest> oldByCase=new LinkedHashMap<>();
+        for(var item:group){
+            oldByCase.put(item.getKey().getTestCaseId(),item.getKey());
+            note.append("\n### case_id ").append(item.getKey().getTestCaseId()).append(", method ").append(item.getKey().getTestMethodName())
+                    .append("\nCompilation or runtime failure:\n").append(item.getValue())
+                    .append("\nStored test source:\n").append(item.getKey().getSourceCode()).append('\n');
+        }
+        try{
+            var candidates=ai.repairUnitTests(projectId,Set.copyOf(oldByCase.keySet()),note.toString()).unitTests().stream()
+                    .filter(java.util.Objects::nonNull).filter(test->oldByCase.containsKey(test.caseId()))
+                    // Giữ nguyên lớp test để bản sửa vẫn gộp vào đúng file khi export.
+                    .filter(test->{UnitTest old=oldByCase.get(test.caseId());
+                        return old.getTestClassName().equals(test.testClassName())&&java.util.Objects.equals(old.getPackageName(),test.packageName());})
+                    .filter(test->valid(test,projectId)&&validJavaSource(test))
+                    .collect(java.util.stream.Collectors.groupingBy(GeneratedUnitTestDto::caseId,LinkedHashMap::new,java.util.stream.Collectors.toList()))
+                    .values().stream().filter(sameCase->sameCase.size()==1).map(sameCase->sameCase.get(0)).toList();
+            // AI có thể trả case khác thứ tự; bản cũ luôn theo thứ tự nhóm đầu vào.
+            var repairedIds=candidates.stream().map(GeneratedUnitTestDto::caseId).collect(java.util.stream.Collectors.toSet());
+            List<UnitTest> previous=oldByCase.values().stream().filter(old->repairedIds.contains(old.getTestCaseId())).map(this::copy).toList();
+            return new RepairedGroup(candidates,previous);
+        }catch(LlmResponseException|UsageQuotaExceededException unrepaired){
+            if(isUsageQuotaExceeded(unrepaired) && quotaExceeded.compareAndSet(false,true)){
+                GenerationJobContext.markRepairQuotaExhausted();
+                GenerationJobContext.log("Đã hết quota LLM; dừng AI sửa Unit Test. Các test đã đạt được giữ lại.");
+            }
+            // AI không trả được bản sửa hợp lệ cho nhóm này: giữ bản cũ, sang nhóm kế tiếp.
+        }
+        return new RepairedGroup(List.of(),List.of());
+    }
+
+    /** Trả các Unit Test về bản trước khi AI sửa, dùng khi bản sửa làm hỏng cả lượt build. */
+    public void restore(Long projectId,List<UnitTest> previous){
+        ensure(projectId);
+        transactions.executeWithoutResult(status->{
+            for(UnitTest old:previous){
+                UnitTest current=units.findByTestCaseId(old.getTestCaseId());
+                if(current!=null) units.delete(current);
+            }
+            units.flush();
+            units.saveAll(previous);
+        });
+    }
+
+    public int removeUncompilable(Long projectId,List<TestFailure> failures){
+        ensure(projectId);
+        return transactions.execute(status -> {
+            Map<String,UnitTest> remaining=new LinkedHashMap<>();
+            Map<Long,TestCase> approved=new LinkedHashMap<>();
+            for(TestCase testCase:approvedCases(projectId)){
+                approved.put(testCase.getId(),testCase);
+                UnitTest test=units.findByTestCaseId(testCase.getId());
+                if(test!=null) remaining.put(test.getPackageName()+"."+test.getTestClassName()+"#"+test.getTestMethodName(),test);
+            }
+            int removed=0;
+            for(TestFailure failure:failures){
+                if(failure.assertion()||!failure.detail().startsWith("COMPILATION ERROR:")) continue;
+                UnitTest test=takeGeneratedTest(remaining,failure);
+                if(test==null) continue;
+                units.delete(test);
+                TestCase testCase=approved.get(test.getTestCaseId());
+                GenerationJobContext.log("Đã loại Unit Test của "+testCase.getCaseCode()+" (ID "+testCase.getId()+"): "
+                        +failure.className()+"#"+failure.methodName()+". Lý do: "+failure.detail());
+                removed++;
+            }
+            units.flush();
+            return removed;
+        });
+    }
+
+    private UnitTest copy(UnitTest source){
+        UnitTest copy=new UnitTest();
+        copy.setTestCaseId(source.getTestCaseId());copy.setTestClassName(source.getTestClassName());copy.setTestMethodName(source.getTestMethodName());
+        copy.setPackageName(source.getPackageName());copy.setGenerationType(source.getGenerationType());
+        copy.setExistingTestFilePath(source.getExistingTestFilePath());copy.setSourceCode(source.getSourceCode());copy.setFilePath(source.getFilePath());
+        return copy;
+    }
+
     private boolean isUsageQuotaExceeded(Throwable exception) {
         Throwable current = exception;
         while (current != null) {
@@ -321,7 +475,19 @@ public class UnitTestService {
                         new RecoveryBudget(MAX_UNIT_TEST_RECOVERY_CALLS),false,blockedCases);
             } catch (RuntimeException exception) {
                 generationProgress.failStep(projectId, GenerationProgressStage.UNIT_TEST, batchIdx, exception.getMessage());
-                throw exception;
+                // Lỗi output AI của riêng batch này không được làm dừng cả lượt sinh: đánh dấu các case là chưa sinh được
+                // để lượt tự tiếp tục sinh xử lý. Hết quota, bị hủy hoặc lỗi khác vẫn dừng như cũ.
+                if (!isolateBatchFailures || !(exception instanceof LlmResponseException failure) || isUsageQuotaExceeded(exception)
+                        || Thread.currentThread().isInterrupted()) throw exception;
+                ids.forEach(id -> {
+                    if (blockedCases.containsKey(id)) return;
+                    String code = cases.findById(id).map(TestCase::getCaseCode).orElse(null);
+                    blockedCases.put(id, new BlockedUnitTestDto(id, code, UNFINISHED_CASE + failure.getMessage()));
+                    ai.recordCaseFailure(projectId, id, failure);
+                });
+                generationProgress.log(projectId, GenerationProgressStage.UNIT_TEST, "Batch " + (batchIdx + 1) + "/" + totalBatches
+                        + " chưa sinh được; các batch khác vẫn tiếp tục và batch này sẽ được thử lại: " + failure.getMessage());
+                return List.<GeneratedUnitTestDto>of();
             }
         },
         (completedBatch,valid)-> {
@@ -379,6 +545,30 @@ public class UnitTestService {
             Map<Long,GeneratedUnitTestDto> recovered=new LinkedHashMap<>();
             recoverInGroups(projectId,new ArrayList<>(requestedIds),recovered,batchNumber,totalBatches,recoveryBudget,blockedCases,null);
             return new ArrayList<>(recovered.values());
+        }catch(LlmResponseException declined){
+            Long declinedId=com.greytest.service.agent.GenerationResponseParser.declinedCaseId(declined);
+            if(declinedId==null||!requestedIds.contains(declinedId)) throw declined;
+            // AI báo không dựng được test cho một case: chỉ chặn case đó, không để cả lượt sinh dừng giữa chừng.
+            String declinedCode=cases.findById(declinedId).map(TestCase::getCaseCode).orElse(null);
+            blockedCases.put(declinedId,new BlockedUnitTestDto(declinedId,declinedCode,declined.getMessage()));
+            generationProgress.log(projectId,GenerationProgressStage.UNIT_TEST,
+                    "Test Case " + declinedCode + " (ID " + declinedId + ") bị chặn, các case còn lại vẫn sinh tiếp: " + declined.getMessage());
+            ai.recordCaseFailure(projectId,declinedId,declined);
+            List<Long> rest=requestedIds.stream().filter(id->!id.equals(declinedId)).toList();
+            if(rest.isEmpty()) return List.of();
+            try{
+                return generateBatchWithRecovery(projectId,new LinkedHashSet<>(rest),batchNumber,totalBatches,recoveryBudget,true,blockedCases,null);
+            }catch(LlmResponseException failure){
+                if(Thread.currentThread().isInterrupted()) throw failure;
+                // Phần còn lại vẫn hỏng: đánh dấu chưa sinh được để lượt tự tiếp tục sinh xử lý, không làm hỏng các batch khác.
+                rest.forEach(id->{
+                    if(blockedCases.containsKey(id)) return;
+                    String code=cases.findById(id).map(TestCase::getCaseCode).orElse(null);
+                    blockedCases.put(id,new BlockedUnitTestDto(id,code,UNFINISHED_CASE + failure.getMessage()));
+                    ai.recordCaseFailure(projectId,id,failure);
+                });
+                return List.of();
+            }
         }
         // Metadata blocked chỉ do backend tạo; không đưa các case này vào lượt phục hồi LLM.
         for(BlockedUnitTestDto blocked : response.blockedCases() == null ? List.<BlockedUnitTestDto>of() : response.blockedCases()){
@@ -1017,6 +1207,14 @@ public class UnitTestService {
     @Transactional(readOnly=true) public ExportArchive exportArchive(Long projectId,String servicePath){
         ensure(projectId);
         return buildArchive(projectId,approvedCases(projectId,scopeResolver.resolve(projectId,servicePath)));
+    }
+
+    @Transactional(readOnly=true) public ExportArchive exportSandboxArchive(Long projectId,String servicePath){
+        ensure(projectId);
+        var approved=approvedCases(projectId,scopeResolver.resolve(projectId,servicePath));
+        if(approved.stream().noneMatch(testCase->units.findByTestCaseId(testCase.getId())!=null))
+            return new ExportArchive(files.createEmptySandboxArchive(),List.of());
+        return buildArchive(projectId,approved);
     }
 
     /** Test đã lưu không còn qua validator thì không xuất ra, vì biết trước sẽ fail; bản trong database vẫn giữ để sinh lại. */

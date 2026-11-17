@@ -138,6 +138,31 @@ public class AdminService {
     private ServerTelemetryService telemetryService;
     @Autowired(required = false)
     private DdosProtectionService ddosProtectionService;
+    @Autowired(required = false)
+    private SettingsCipher settingsCipher;
+    @Autowired(required = false)
+    private LlmBatchExecutor llmBatchExecutor;
+    // @Lazy để tránh vòng phụ thuộc khi Spring dựng các service sinh test.
+    @Autowired(required = false) @org.springframework.context.annotation.Lazy
+    private GenerationJobService generationJobService;
+    @Autowired(required = false) @org.springframework.context.annotation.Lazy
+    private BusinessRuleService businessRuleService;
+    @Autowired(required = false) @org.springframework.context.annotation.Lazy
+    private TestPlanService testPlanService;
+    @Autowired(required = false) @org.springframework.context.annotation.Lazy
+    private TestCaseService testCaseService;
+    @Autowired(required = false) @org.springframework.context.annotation.Lazy
+    private UnitTestService unitTestService;
+
+    /** Cấu hình nội bộ lưu bền trong system_setting; không hiện và không sửa được qua form Cài đặt chung. */
+    static final String RUNTIME_PREFIX = "runtime.";
+    static final String KEY_API_KEYS = "runtime.ai.api_keys";
+    static final String KEY_STAGE_LIMITS = "runtime.ai.stage_limits";
+    static final String KEY_WAF = "runtime.waf";
+    private static final Set<String> RETIRED_SETTINGS = Set.of("log.output_dir", "alert.quota_threshold_percent");
+    private static final int MAX_BATCH_CONCURRENCY = 10;
+    private static final com.fasterxml.jackson.databind.ObjectMapper JSON = new com.fasterxml.jackson.databind.ObjectMapper();
+    private static final org.slf4j.Logger LOG = org.slf4j.LoggerFactory.getLogger(AdminService.class);
 
     private final List<String> currentKeys = new java.util.concurrent.CopyOnWriteArrayList<>();
     private final Map<String, TierPackageInternal> tierPackages = new java.util.concurrent.ConcurrentHashMap<>();
@@ -843,6 +868,7 @@ public class AdminService {
     public void setUnderAttackMode(AuthUser admin, boolean enabled) {
         if (ddosProtectionService != null) {
             ddosProtectionService.setUnderAttackMode(enabled);
+            persistWafConfig(admin);
         }
         recordSecurityAudit(admin, Map.of(
                 "action", "TOGGLE_UNDER_ATTACK_MODE",
@@ -895,6 +921,7 @@ public class AdminService {
     public void setRateLimit(AuthUser admin, int limit) {
         if (ddosProtectionService != null) {
             ddosProtectionService.setStandardRateLimit(limit);
+            persistWafConfig(admin);
         }
         recordSecurityAudit(admin, Map.of(
                 "action", "UPDATE_RATE_LIMIT",
@@ -920,6 +947,7 @@ public class AdminService {
             if (request.burstLimitPerSecond() != null && request.burstLimitPerSecond() > 0) {
                 ddosProtectionService.setBurstPerSecondLimit(request.burstLimitPerSecond());
             }
+            persistWafConfig(admin);
         }
         Map<String, Object> auditMeta = new HashMap<>();
         auditMeta.put("action", "UPDATE_RATE_LIMIT_CONFIG");
@@ -1011,6 +1039,11 @@ public class AdminService {
     }
 
     public synchronized AiRuntimeConfigDto updateAiKeys(AuthUser admin, UpdateAiKeysRequest request) {
+        // Không lưu bền được thì không áp dụng, tránh khoá "mất tích" sau lần khởi động lại.
+        if (settingsCipher == null || !settingsCipher.isConfigured()) {
+            throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.CONFLICT,
+                    "Chưa cấu hình GREYTEST_SETTINGS_SECRET nên không thể lưu khoá API bền vững.");
+        }
         if (currentKeys.isEmpty()) {
             initKeys();
         }
@@ -1032,6 +1065,8 @@ public class AdminService {
         if (googleLlmClient != null) {
             googleLlmClient.setApiKeys(activeKeys);
         }
+        persistSetting(KEY_API_KEYS, settingsCipher.encrypt(toJson(new ArrayList<>(currentKeys))),
+                "Khoá API AI (mã hoá AES-GCM)", admin);
         activityService.record(admin.getId(), ActivityAction.ADMIN_STATUS_CHANGE, null,
                 Map.of("action", "UPDATE_AI_KEYS", "configuredCount", activeKeys.size()));
         return getAiRuntimeConfig();
@@ -1040,6 +1075,7 @@ public class AdminService {
     public synchronized AiRuntimeConfigDto updateStageLimits(AuthUser admin, UpdateStageLimitsRequest request) {
         if (stageTokenLimits != null && request != null && request.stageLimits() != null) {
             stageTokenLimits.updateAll(request.stageLimits());
+            persistSetting(KEY_STAGE_LIMITS, toJson(stageTokenLimits.getLimits()), "Giới hạn token theo bước", admin);
             activityService.record(admin.getId(), ActivityAction.ADMIN_STATUS_CHANGE, null,
                     Map.of("action", "UPDATE_STAGE_LIMITS", "limits", request.stageLimits()));
         }
@@ -1068,6 +1104,7 @@ public class AdminService {
             SystemSetting modelSetting = systemSettingRepository.findById("ai.model")
                     .orElse(new SystemSetting("ai.model", this.dynamicModel, "Mô hình suy luận AI mặc định"));
             modelSetting.setSettingValue(this.dynamicModel);
+            if (admin != null) modelSetting.setUpdatedBy(admin.getId());
             systemSettingRepository.save(modelSetting);
         }
         activityService.record(admin.getId(), ActivityAction.ADMIN_STATUS_CHANGE, null,
@@ -1441,29 +1478,166 @@ public class AdminService {
                 Map.of("action", "DELETE_TIER_PACKAGE", "code", key));
     }
 
+    private Runnable retryTask(Long projectId, GenerationProgressStage stage) {
+        return switch (stage) {
+            case BUSINESS_RULE -> () -> businessRuleService.generate(projectId, (String) null, true);
+            case TEST_PLAN -> () -> testPlanService.generate(projectId, null, true);
+            case TEST_CASE -> () -> testCaseService.generate(projectId, null, true);
+            case UNIT_TEST -> () -> unitTestService.generate(projectId, null, true);
+        };
+    }
+
+    /**
+     * Nạp lại cấu hình admin đã lưu trong DB khi backend khởi động (kể cả sau mỗi lần deploy).
+     * Giá trị trong DB được ưu tiên hơn biến môi trường; dòng nào hỏng thì bỏ qua và ghi cảnh báo.
+     */
+    @org.springframework.context.event.EventListener(org.springframework.boot.context.event.ApplicationReadyEvent.class)
+    public synchronized void restoreRuntimeConfig() {
+        if (systemSettingRepository == null) return;
+        restore("ai.model", value -> {
+            this.dynamicModel = value;
+            if (openAiLlmClient != null) openAiLlmClient.setModel(value);
+            if (googleLlmClient != null) googleLlmClient.setModel(value);
+        });
+        restore("ai.batch_concurrency", value -> applyBatchConcurrency(Integer.parseInt(value)));
+        restore(KEY_STAGE_LIMITS, value -> {
+            if (stageTokenLimits != null) stageTokenLimits.updateAll(JSON.readValue(value,
+                    new com.fasterxml.jackson.core.type.TypeReference<Map<String, Integer>>() {}));
+        });
+        restore(KEY_API_KEYS, value -> {
+            if (settingsCipher == null || !settingsCipher.isConfigured()) {
+                throw new IllegalStateException("thiếu GREYTEST_SETTINGS_SECRET để giải mã");
+            }
+            List<String> keys = JSON.readValue(settingsCipher.decrypt(value),
+                    new com.fasterxml.jackson.core.type.TypeReference<List<String>>() {});
+            currentKeys.clear();
+            currentKeys.addAll(keys.stream().map(k -> k == null ? "" : k).toList());
+            List<String> active = currentKeys.stream().filter(k -> !k.isBlank()).toList();
+            if (openAiLlmClient != null) openAiLlmClient.setApiKeys(active);
+            if (googleLlmClient != null) googleLlmClient.setApiKeys(active);
+        });
+        restore(KEY_WAF, value -> {
+            if (ddosProtectionService == null) return;
+            Map<String, Object> waf = JSON.readValue(value,
+                    new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {});
+            ddosProtectionService.setWafActive(Boolean.TRUE.equals(waf.get("active")));
+            ddosProtectionService.setUnderAttackMode(Boolean.TRUE.equals(waf.get("underAttackMode")));
+            ddosProtectionService.setStandardRateLimit(((Number) waf.get("rateLimitPerMinute")).intValue());
+            ddosProtectionService.setUnderAttackRateLimit(((Number) waf.get("underAttackRateLimitPerMinute")).intValue());
+            ddosProtectionService.setBurstPerSecondLimit(((Number) waf.get("burstLimitPerSecond")).intValue());
+        });
+    }
+
+    @FunctionalInterface
+    private interface SettingApplier {
+        void apply(String value) throws Exception;
+    }
+
+    private void restore(String key, SettingApplier applier) {
+        try {
+            systemSettingRepository.findById(key)
+                    // Chỉ nạp giá trị admin thực sự đã sửa; dòng mẫu do migration chèn (không có updated_by)
+                    // không được đè lên biến môi trường. Dòng runtime.* chỉ sinh ra từ thao tác của admin.
+                    .filter(row -> row.getUpdatedBy() != null || key.startsWith(RUNTIME_PREFIX))
+                    .map(SystemSetting::getSettingValue)
+                    .filter(value -> !value.isBlank())
+                    .ifPresent(value -> {
+                        try {
+                            applier.apply(value);
+                        } catch (Exception ex) {
+                            throw new IllegalStateException(ex.getMessage(), ex);
+                        }
+                    });
+        } catch (RuntimeException ex) {
+            LOG.warn("Bỏ qua cấu hình '{}' đã lưu vì không áp dụng được: {}", key, ex.getMessage());
+        }
+    }
+
+    private void persistWafConfig(AuthUser admin) {
+        if (ddosProtectionService == null) return;
+        var waf = ddosProtectionService.getWafStatus();
+        Map<String, Object> snapshot = new LinkedHashMap<>();
+        snapshot.put("active", waf.active());
+        snapshot.put("underAttackMode", waf.underAttackMode());
+        snapshot.put("rateLimitPerMinute", waf.standardRateLimitPerMinute());
+        snapshot.put("underAttackRateLimitPerMinute", waf.underAttackRateLimitPerMinute());
+        snapshot.put("burstLimitPerSecond", waf.burstLimitPerSecond());
+        persistSetting(KEY_WAF, toJson(snapshot), "Cấu hình tường lửa WAF", admin);
+    }
+
+    private void persistSetting(String key, String value, String description, AuthUser admin) {
+        if (systemSettingRepository == null) return;
+        SystemSetting row = systemSettingRepository.findById(key).orElse(new SystemSetting(key, value, description));
+        row.setSettingValue(value);
+        if (admin != null) row.setUpdatedBy(admin.getId());
+        systemSettingRepository.save(row);
+    }
+
+    private void applyBatchConcurrency(int value) {
+        if (value < 1 || value > MAX_BATCH_CONCURRENCY) {
+            throw new IllegalArgumentException("Số batch song song phải từ 1 đến " + MAX_BATCH_CONCURRENCY + ".");
+        }
+        this.batchConcurrency = value;
+        if (llmBatchExecutor != null) llmBatchExecutor.setConcurrency(value);
+    }
+
+    private void validateSettings(Map<String, String> requested) {
+        for (var entry : requested.entrySet()) {
+            String key = entry.getKey() == null ? "" : entry.getKey().trim();
+            if (key.isEmpty() || !isListedSetting(key)) {
+                throw new IllegalArgumentException("Không thể sửa khoá cấu hình '" + key + "' từ trang Cài đặt.");
+            }
+            if ("ai.batch_concurrency".equalsIgnoreCase(key)) {
+                try {
+                    int value = Integer.parseInt(entry.getValue() == null ? "" : entry.getValue().trim());
+                    if (value < 1 || value > MAX_BATCH_CONCURRENCY) throw new NumberFormatException();
+                } catch (NumberFormatException ex) {
+                    throw new IllegalArgumentException("Số batch song song phải từ 1 đến " + MAX_BATCH_CONCURRENCY + ".");
+                }
+            }
+        }
+    }
+
+    private static boolean isListedSetting(String key) {
+        return key != null && !key.startsWith(RUNTIME_PREFIX) && !RETIRED_SETTINGS.contains(key);
+    }
+
+    private static String toJson(Object value) {
+        try {
+            return JSON.writeValueAsString(value);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException ex) {
+            throw new IllegalStateException("Không chuyển được cấu hình sang JSON", ex);
+        }
+    }
+
     public SystemSettingsDto getSystemSettings() {
         Map<String, String> map = new LinkedHashMap<>();
         List<SystemSettingDto> details = new ArrayList<>();
+        // Các khoá AI hiển thị giá trị backend đang thực sự dùng, không phải dòng mẫu trong DB,
+        // để form Cài đặt không vô tình gửi lại một model cũ khi admin bấm Lưu.
+        Map<String, String> effective = Map.of(
+                "ai.provider", dynamicProvider != null ? dynamicProvider : llmProvider,
+                "ai.model", dynamicModel != null ? dynamicModel : llmModel,
+                "ai.batch_concurrency", String.valueOf(batchConcurrency));
         if (systemSettingRepository != null) {
             List<SystemSetting> list = systemSettingRepository.findAll();
             for (SystemSetting s : list) {
-                map.put(s.getSettingKey(), s.getSettingValue());
-                details.add(new SystemSettingDto(s.getSettingKey(), s.getSettingValue(), s.getDescription(), toInstant(s.getUpdatedAt())));
+                if (!isListedSetting(s.getSettingKey())) continue;
+                String value = effective.getOrDefault(s.getSettingKey(), s.getSettingValue());
+                map.put(s.getSettingKey(), value);
+                details.add(new SystemSettingDto(s.getSettingKey(), value, s.getDescription(), toInstant(s.getUpdatedAt())));
             }
         }
-        map.putIfAbsent("ai.provider", dynamicProvider != null ? dynamicProvider : llmProvider);
-        map.putIfAbsent("ai.model", dynamicModel != null ? dynamicModel : llmModel);
-        map.putIfAbsent("ai.batch_concurrency", String.valueOf(batchConcurrency));
+        effective.forEach(map::putIfAbsent);
         map.putIfAbsent("vnpay.tmn_code", "CGXZLS0Z");
         map.putIfAbsent("vnpay.url", "https://sandbox.vnpayment.vn/paymentv2/vpcpay.html");
-        map.putIfAbsent("log.output_dir", "../log/llm-usage");
-        map.putIfAbsent("alert.quota_threshold_percent", "80");
         return new SystemSettingsDto(map, details);
     }
 
     @Transactional
     public SystemSettingsDto updateSystemSettings(AuthUser admin, UpdateSystemSettingsRequest req) {
         if (req != null && req.settings() != null && systemSettingRepository != null) {
+            validateSettings(req.settings());
             for (var entry : req.settings().entrySet()) {
                 String key = entry.getKey();
                 String val = entry.getValue() != null ? entry.getValue().trim() : "";
@@ -1479,10 +1653,7 @@ public class AdminService {
                     if (openAiLlmClient != null) openAiLlmClient.setModel(val);
                     if (googleLlmClient != null) googleLlmClient.setModel(val);
                 } else if ("ai.batch_concurrency".equalsIgnoreCase(key)) {
-                    try {
-                        int c = Integer.parseInt(val);
-                        if (c > 0) this.batchConcurrency = c;
-                    } catch (NumberFormatException ignored) {}
+                    applyBatchConcurrency(Integer.parseInt(val));
                 }
             }
             activityService.record(admin.getId(), ActivityAction.ADMIN_STATUS_CHANGE, null,
@@ -1521,10 +1692,11 @@ public class AdminService {
         }
         var project = projects.findById(projectId)
                 .orElseThrow(() -> new IllegalArgumentException("Không tìm thấy dự án ID: " + projectId));
-        if (progressService != null) {
-            progressService.reset(projectId, stage);
-            progressService.start(projectId, stage, List.of("Khởi tạo tác vụ", "Sinh kiểm thử AI", "Hoàn tất"), "Quản trị viên đã kích hoạt Retry tác vụ.");
+        if (generationJobService == null) {
+            throw new IllegalStateException("Hệ thống chưa sẵn sàng để chạy lại tác vụ.");
         }
+        // Chạy lại thật ở chế độ "tiếp tục" cho toàn dự án; bản submit này tính quota cho chủ dự án.
+        generationJobService.submit(projectId, stage, retryTask(projectId, stage));
         activityService.record(admin.getId(), ActivityAction.ADMIN_STATUS_CHANGE, projectId,
                 Map.of("action", "ADMIN_RETRY_JOB", "stage", stage.name(), "projectName", project.getName()));
     }

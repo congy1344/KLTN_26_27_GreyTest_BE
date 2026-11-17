@@ -317,9 +317,86 @@ class ProjectJavaVersionDetectorTest {
         Files.writeString(root.resolve("other/pom.xml"), "<project><dependencies><dependency><artifactId>logback-classic</artifactId></dependency></dependencies></project>");
         var evidence = detector.snapshotBuildEvidence(root, List.of("auth/src/main/java/demo/Service.java"));
         assertThat(evidence).containsOnlyKeys("pom.xml", "auth/pom.xml");
-        assertThat(evidence.get("auth/pom.xml")).contains("spring-boot-starter-logging", "<exclusions>");
+        assertThat(evidence.get("auth/pom.xml")).contains(":spring-boot-starter-web exclusions=:spring-boot-starter-logging");
         assertThat(detector.snapshotBuildEvidence(root, List.of("../outside/Service.java"))).isEmpty();
         assertThat(detector.snapshotBuildEvidence(root, List.of())).isEmpty();
+    }
+
+    @Test
+    void buildEvidenceSummarizesMavenDescriptorToDependencyFacts(@TempDir Path root) throws Exception {
+        Files.writeString(root.resolve("pom.xml"), """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+                    <modelVersion>4.0.0</modelVersion>
+                    <groupId>demo</groupId><artifactId>app</artifactId><name>demo-name</name>
+                    <description>demo description</description><url>https://demo.example</url>
+                    <parent><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-parent</artifactId>
+                        <version>2.7.5</version><relativePath/></parent>
+                    <modules><module>core</module><module>web</module></modules>
+                    <properties>
+                        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+                        <java.version>1.8</java.version><maven.compiler.release>8</maven.compiler.release>
+                        <jjwt.version>0.9.1</jjwt.version><docker.host>http://10.0.0.1:2375</docker.host>
+                    </properties>
+                    <dependencyManagement><dependencies><dependency><groupId>org.junit</groupId><artifactId>junit-bom</artifactId>
+                        <version>5.9.1</version><type>pom</type><scope>import</scope></dependency></dependencies></dependencyManagement>
+                    <dependencies>
+                        <!-- web -->
+                        <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-web</artifactId>
+                            <exclusions><exclusion><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-logging</artifactId></exclusion>
+                            <exclusion><groupId>ch.qos.logback</groupId><artifactId>logback-classic</artifactId></exclusion></exclusions></dependency>
+                        <dependency><groupId>io.jsonwebtoken</groupId><artifactId>jjwt</artifactId><version>${jjwt.version}</version></dependency>
+                        <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-test</artifactId><scope>test</scope></dependency>
+                    </dependencies>
+                    <build><plugins>
+                        <plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-compiler-plugin</artifactId><version>3.8.1</version>
+                            <configuration><source>1.8</source><target>1.8</target></configuration></plugin>
+                        <plugin><artifactId>maven-surefire-plugin</artifactId><version>2.22.2</version>
+                            <dependencies><dependency><groupId>org.junit.platform</groupId><artifactId>junit-platform-surefire-provider</artifactId><version>1.3.2</version></dependency></dependencies></plugin>
+                        <plugin><groupId>io.fabric8</groupId><artifactId>docker-maven-plugin</artifactId><version>0.40.0</version>
+                            <configuration><dockerHost>${docker.host}</dockerHost><images><image><name>demo/app</name></image></images></configuration></plugin>
+                    </plugins></build>
+                    <repositories><repository><id>aliyunmaven</id><url>https://maven.aliyun.com/repository/public</url></repository></repositories>
+                </project>
+                """);
+
+        String summary = detector.snapshotBuildEvidence(root, List.of("src/main/java/demo/Service.java")).get("pom.xml");
+
+        assertThat(summary).isEqualTo("""
+                parent: org.springframework.boot:spring-boot-starter-parent:2.7.5
+                modules: core, web
+                properties: java.version=1.8, maven.compiler.release=8, jjwt.version=0.9.1
+                dependencyManagement:
+                org.junit:junit-bom:5.9.1 scope=import
+                dependencies:
+                org.springframework.boot:spring-boot-starter-web exclusions=org.springframework.boot:spring-boot-starter-logging,ch.qos.logback:logback-classic
+                io.jsonwebtoken:jjwt:${jjwt.version}
+                org.springframework.boot:spring-boot-starter-test scope=test
+                plugins:
+                org.apache.maven.plugins:maven-compiler-plugin:3.8.1 source=1.8 target=1.8
+                :maven-surefire-plugin:2.22.2 dependencies=org.junit.platform:junit-platform-surefire-provider:1.3.2""");
+    }
+
+    @Test
+    void buildEvidenceKeepsRawMavenTextWhenParsingFailsOrDoctypeIsDeclared(@TempDir Path root) throws Exception {
+        Files.createDirectories(root.resolve("broken")); Files.createDirectories(root.resolve("doctype"));
+        Files.writeString(root.resolve("broken/pom.xml"), "<project><dependencies><dependency></project>");
+        Files.writeString(root.resolve("doctype/pom.xml"), "<!DOCTYPE project [<!ENTITY secret SYSTEM \"file:///etc/passwd\">]>"
+                + "<project><dependencies><dependency><artifactId>&secret;</artifactId></dependency></dependencies></project>");
+
+        assertThat(detector.snapshotBuildEvidence(root, List.of("broken/src/main/java/demo/Service.java")).get("broken/pom.xml"))
+                .isEqualTo("<project><dependencies><dependency></project>");
+        assertThat(detector.snapshotBuildEvidence(root, List.of("doctype/src/main/java/demo/Service.java")).get("doctype/pom.xml"))
+                .startsWith("<!DOCTYPE project").contains("&secret;");
+    }
+
+    @Test
+    void buildEvidenceStripsGradleCommentsAndBlankLinesOnly(@TempDir Path root) throws Exception {
+        Files.writeString(root.resolve("build.gradle"), "plugins { id 'java' }\n\n// comment\n/* block\n comment */\n"
+                + "dependencies {\n    implementation 'org.springframework.boot:spring-boot-starter-web' // trailing\n\n}\n");
+
+        assertThat(detector.snapshotBuildEvidence(root, List.of("src/main/java/demo/Service.java")).get("build.gradle"))
+                .isEqualTo("plugins { id 'java' }\ndependencies {\n    implementation 'org.springframework.boot:spring-boot-starter-web'\n}");
     }
 
     private Project projectAt(Path root) {

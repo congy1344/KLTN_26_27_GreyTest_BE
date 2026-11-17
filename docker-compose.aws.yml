@@ -37,6 +37,7 @@ services:
       SPRING_DATASOURCE_USERNAME: greytest
       SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the external env file}
       GREYTEST_AUTH_TOKEN_SECRET: ${GREYTEST_AUTH_TOKEN_SECRET:?Set a random JWT secret of at least 32 bytes}
+      GREYTEST_SETTINGS_SECRET: ${GREYTEST_SETTINGS_SECRET:-}
       GREYTEST_STORAGE_PATH: /app/storage
       GREYTEST_AI_CONTEXT_LOG_PATH: /app/log
       GREYTEST_AI_CONTEXT_LOG_ENABLED: "false"
@@ -62,15 +63,20 @@ services:
       LLM_MAX_TOKENS_BUSINESS_RULE: ${LLM_MAX_TOKENS_BUSINESS_RULE:-4096}
       LLM_MAX_TOKENS_BUSINESS_RULE_REVIEW: ${LLM_MAX_TOKENS_BUSINESS_RULE_REVIEW:-4096}
       LLM_MAX_TOKENS_TEST_PLAN: ${LLM_MAX_TOKENS_TEST_PLAN:-6144}
-      LLM_MAX_TOKENS_TEST_CASE: ${LLM_MAX_TOKENS_TEST_CASE:-8192}
+      LLM_MAX_TOKENS_TEST_CASE: ${LLM_MAX_TOKENS_TEST_CASE:-12288}
       LLM_MAX_TOKENS_UNIT_TEST: ${LLM_MAX_TOKENS_UNIT_TEST:-12288}
       LLM_MAX_TOKENS_COVERAGE_REFINEMENT: ${LLM_MAX_TOKENS_COVERAGE_REFINEMENT:-6144}
       LLM_USAGE_ENABLED: "false"
       LLM_USAGE_OUTPUT_DIR: /app/log/llm-usage
       JAVA_TOOL_OPTIONS: ${JAVA_TOOL_OPTIONS:--Xms128m -Xmx768m -XX:+ExitOnOutOfMemoryError}
+    # Backend chạy UID 10001 nên phải thuộc group sở hữu docker.sock mới gọi được Docker.
+    group_add:
+      - "${DOCKER_GID:?Set DOCKER_GID to the host docker group id}"
     volumes:
       - backend_storage:/app/storage
       - backend_logs:/app/log
+      # Backend tạo container sandbox chạy Unit Test. Socket này cho backend quyền điều khiển Docker của máy chủ.
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       postgres:
         condition: service_healthy
@@ -80,8 +86,8 @@ services:
       timeout: 6s
       retries: 12
       start_period: 90s
-    # Cấu hình thử cho 2 GiB; phải đo upload/analysis/AI trước khi chốt máy.
-    mem_limit: 1152m
+    # m7i-flex.large (8 GiB); container sandbox chạy riêng với --memory 2g.
+    mem_limit: 2048m
     stop_grace_period: 60s
     logging:
       driver: json-file

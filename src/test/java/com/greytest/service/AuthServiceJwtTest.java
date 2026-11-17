@@ -65,6 +65,19 @@ class AuthServiceJwtTest {
     }
 
     @Test
+    void adminSessionsExpireAfterTwelveHours() throws Exception {
+        AuthUser admin = user();
+        admin.setRole(com.greytest.entity.enums.UserRole.ADMIN);
+        when(repository.findByEmailIgnoreCase(admin.getEmail())).thenReturn(Optional.of(admin));
+
+        String token = service.adminLogin(new LoginRequest(admin.getEmail(), "correct-password")).token();
+
+        var claims = SignedJWT.parse(token).getJWTClaimsSet();
+        assertThat(claims.getExpirationTime().getTime() - claims.getIssueTime().getTime())
+                .isEqualTo(Duration.ofHours(12).toMillis());
+    }
+
+    @Test
     void registrationHashesPasswordAndReturnsJwtWithUserRole() throws Exception {
         when(repository.save(org.mockito.ArgumentMatchers.any(AuthUser.class))).thenAnswer(invocation -> {
             AuthUser saved = invocation.getArgument(0);

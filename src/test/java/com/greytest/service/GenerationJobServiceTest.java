@@ -21,6 +21,29 @@ import com.greytest.entity.enums.ActivityAction;
 class GenerationJobServiceTest {
 
     @Test
+    void allowsOnlyMutationsFromTheActiveJobAndPreservesActorAndLogger() {
+        var progress = new GenerationProgressService();
+        var activity = mock(UserActivityService.class);
+        var jobs = new GenerationJobService(Runnable::run, progress, null, activity, null);
+        jobs.submit(1L, 7L, GenerationProgressStage.UNIT_TEST, () -> {
+            var worker = GenerationJobContext.wrap(() -> jobs.executeAiMutation(1L, 7L,
+                    ActivityAction.GENERATE_UNIT_TEST, () -> {
+                        assertThat(GenerationJobContext.actorUserId()).isEqualTo(7L);
+                        GenerationJobContext.log("repair");
+                        return jobs.executeMutation(1L, () -> "nested");
+                    }));
+            assertThat(java.util.concurrent.CompletableFuture.supplyAsync(worker).join()).isEqualTo("nested");
+            assertThatThrownBy(() -> java.util.concurrent.CompletableFuture.supplyAsync(
+                    () -> jobs.executeMutation(1L, () -> "external")).join())
+                    .hasCauseInstanceOf(GenerationInProgressException.class);
+            assertThat(GenerationJobContext.actorUserId()).isEqualTo(7L);
+        });
+        assertThat(progress.get(1L, GenerationProgressStage.UNIT_TEST).logs())
+                .extracting(item -> item.message()).contains("repair");
+        assertThat(GenerationJobContext.actorUserId()).isNull();
+    }
+
+    @Test
     void attributesGenerationAndWorkerContextToAuthenticatedActor() {
         ManualExecutor executor = new ManualExecutor();
         UserActivityService activity = mock(UserActivityService.class);

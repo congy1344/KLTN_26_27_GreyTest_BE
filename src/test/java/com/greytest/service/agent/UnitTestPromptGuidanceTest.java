@@ -68,18 +68,34 @@ class UnitTestPromptGuidanceTest {
         assertThat(changed.promptPolicyIdentity("test-plan")).isEmpty();
     }
 
-    @Test void inventoriesExactDeclarationsWithoutInventingGettersOrChangingEvidence() {
+    @Test void inventoryOmitsDeclarationsAlreadyInSharedSourceAndKeepsDerivedDependencies() {
         ObjectNode context = context();
-        ((ObjectNode)context.path("classes").get(0)).put("qualifiedName", "sample.Service")
+        var target = (ObjectNode) context.path("classes").get(0);
+        target.put("qualifiedName", "sample.Service")
                 .put("sourceCode", "package sample; class Service { @org.springframework.beans.factory.annotation.Value(\"${expiry}\") "
-                        + "private Long expiry; public String username(){return \"user\";} private void helper(){} }");
+                        + "private Long expiry; @org.springframework.beans.factory.annotation.Autowired private Notifier notifier; "
+                        + "public String username(){return \"user\";} private void helper(){} }");
+        target.putArray("methods").addObject().put("id", 7).put("methodName", "username");
+        context.withArray("classes").addObject().put("qualifiedName", "sample.Notifier")
+                .put("sourceCode", "package sample; class Notifier { public void send(String text){} }").putArray("methods");
         ObjectNode before = context.deepCopy();
         String prompt = manager.render("unit-test", Map.of("context_json", context));
-        assertThat(prompt).contains("# Source-confirmed fixture/API inventory", "declaredFields", "Long expiry", "public String username()", "private void helper()");
         String inventory = prompt.substring(prompt.indexOf("# Source-confirmed fixture/API inventory"));
         inventory = inventory.substring(0, inventory.indexOf("\n\nContext:"));
-        assertThat(inventory).doesNotContain("getUsername()", "getExpiry()");
+        // Khai báo đã có nguyên văn trong Shared source evidence nên inventory chỉ giữ dependency do backend phân giải.
+        assertThat(inventory).contains("[{\"qualifiedName\":\"sample.Service\",\"requiredTestDependencies\":[\"sample.Notifier\"]}]")
+                .doesNotContain("declaredFields", "declaredMethods", "declaredConstructors", "\"qualifiedName\":\"sample.Notifier\"",
+                        "public void send", "getUsername()", "getExpiry()");
+        String shared = prompt.substring(prompt.indexOf("# Shared source evidence"), prompt.indexOf("# Source-confirmed fixture/API inventory"));
+        assertThat(shared).contains("private Long expiry;", "public String username()", "private void helper()", "public void send(String text)");
         assertThat(context).isEqualTo(before);
+    }
+
+    @Test void omitsInventoryWhenEveryClassIsSupportingSource() {
+        ObjectNode context = context();
+        ((ObjectNode) context.path("classes").get(0)).put("qualifiedName", "sample.Service");
+        String prompt = manager.render("unit-test", Map.of("context_json", context));
+        assertThat(prompt).contains("int run()").doesNotContain("# Source-confirmed fixture/API inventory");
     }
 
     @Test void listsEveryDependencyTheValidatorRequiresOnlyForTargetClasses() {

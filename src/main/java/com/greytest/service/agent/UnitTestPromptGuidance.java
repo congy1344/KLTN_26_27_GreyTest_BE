@@ -58,42 +58,35 @@ final class UnitTestPromptGuidance {
                 .collect(java.util.stream.Collectors.joining("\n")) + sourceFacts(context);
     }
 
-    /** Nhấn rõ wiring/API từ AST để AI không phải đoán lại từ tên DTO/helper. Source gốc vẫn giữ đủ. */
+    /**
+     * Nhấn rõ dependency cần mock mà backend phân giải từ AST (import, cùng package, class cha) để AI không phải đoán lại.
+     * Khai báo field/method/constructor đọc nguyên văn từ chính sourceCode này, mà sourceCode luôn nằm trong
+     * Shared source evidence của cùng prompt, nên không lặp lại ở đây; class phụ không có dependency phân giải thì bỏ qua.
+     */
     private static String sourceFacts(JsonNode context) {
         var facts = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.arrayNode();
         var parser = new com.github.javaparser.JavaParser(new com.github.javaparser.ParserConfiguration()
                 .setLanguageLevel(com.github.javaparser.ParserConfiguration.LanguageLevel.JAVA_21));
         for (JsonNode item : context.path("classes")) {
+            if (item.path("methods").isEmpty()) continue;
             var source = parser.parse(item.path("sourceCode").asText("")).getResult();
             if (source.isEmpty()) continue;
             for (var type : source.get().findAll(com.github.javaparser.ast.body.ClassOrInterfaceDeclaration.class)) {
                 if (!type.getFullyQualifiedName().filter(item.path("qualifiedName").asText()::equals).isPresent()) continue;
                 var fact = facts.addObject();
                 fact.put("qualifiedName", item.path("qualifiedName").asText());
-                fact.put("annotations", type.getAnnotations().toString());
-                fact.put("extends", type.getExtendedTypes().toString());
-                fact.put("implements", type.getImplementedTypes().toString());
-                var fields = fact.putArray("declaredFields");
-                type.getFields().forEach(field -> field.getVariables().forEach(variable -> fields.add(
-                        (field.isStatic() ? "static " : "") + (field.isFinal() ? "final " : "")
-                                + variable.getType() + " " + variable.getNameAsString() + " " + field.getAnnotations())));
-                var methods = fact.putArray("declaredMethods");
-                type.getMethods().forEach(method -> methods.add(method.getDeclarationAsString(true, true, true)));
-                var constructors = fact.putArray("declaredConstructors");
-                type.getConstructors().forEach(constructor -> constructors.add(constructor.getDeclarationAsString(true, true, true)));
-                if (!item.path("methods").isEmpty()) {
-                    var required = fact.putArray("requiredTestDependencies");
-                    GeneratedUnitTestSemanticValidator.requiredTestDependencies(type).stream()
-                            .map(reference -> dependencyName(reference, source.get(), context)).distinct().forEach(required::add);
-                    var inherited = new java.util.LinkedHashSet<String>();
-                    collectInherited(type, context, parser, inherited, new java.util.HashSet<>());
-                    if (!inherited.isEmpty()) inherited.forEach(fact.putArray("inheritedTestDependencies")::add);
-                }
+                var required = fact.putArray("requiredTestDependencies");
+                GeneratedUnitTestSemanticValidator.requiredTestDependencies(type).stream()
+                        .map(reference -> dependencyName(reference, source.get(), context)).distinct().forEach(required::add);
+                var inherited = new java.util.LinkedHashSet<String>();
+                collectInherited(type, context, parser, inherited, new java.util.HashSet<>());
+                if (!inherited.isEmpty()) inherited.forEach(fact.putArray("inheritedTestDependencies")::add);
             }
         }
         if (facts.isEmpty()) return "";
         return "\n\n# Source-confirmed fixture/API inventory\n"
-                + "Derived declarations only, not replacement source or a complete inherited/Lombok API. Resolve inheritance and Lombok using the full source/build. "
+                + "Backend-resolved test dependencies of each target class only; its fields, methods, constructors and annotations "
+                + "are in its full source in Shared source evidence, not repeated here. Resolve inheritance and Lombok using the full source/build. "
                 + "Wire every reached dependency on the exact Act instance. A lookup method is not an injectable field. "
                 + "For classes without getter-generating annotations, do not invent accessors absent from declared methods or verified parents. "
                 + "Check that scalar configuration is initialized, a real SUT is not stubbed as a mock, and all helper paths use the configured collaborator. "

@@ -34,6 +34,24 @@ public class GenerationProgressService {
     // Tổng của stage chưa hoàn tất, giữ qua TTL của snapshot để lần "Tiếp tục sinh" sau vẫn cộng dồn; mất khi backend khởi động lại.
     private final ConcurrentMap<ProgressKey, GenerationRunMetricsDto> unfinishedTotals = new ConcurrentHashMap<>();
     private final Clock clock;
+    private static final Object DEFERRED_COMPLETION = new Object();
+    private static final class DeferredCompletion {
+        Runnable completion;
+        String verification = "";
+    }
+
+    /** Giữ stage hoạt động đến khi pha xác minh sau sinh đã kết thúc. */
+    public static void deferCompletion(Runnable task) {
+        DeferredCompletion deferred = new DeferredCompletion();
+        GenerationJobContext.withValue(DEFERRED_COMPLETION, deferred, () -> { task.run(); return null; });
+        if (deferred.completion != null) deferred.completion.run();
+    }
+
+    public static boolean verificationFinished(String message) {
+        DeferredCompletion deferred = GenerationJobContext.scopedValue(DEFERRED_COMPLETION);
+        if (deferred != null) deferred.verification = " " + message;
+        return deferred != null;
+    }
 
     public GenerationProgressService() {
         this(Clock.systemUTC());
@@ -194,6 +212,12 @@ public class GenerationProgressService {
 
     /** Chỉ công bố hoàn tất sau khi transaction ngoài cùng commit thành công. */
     public void completeAfterCommit(Long projectId, GenerationProgressStage stage, String message) {
+        DeferredCompletion deferred = GenerationJobContext.scopedValue(DEFERRED_COMPLETION);
+        if (deferred != null && stage == GenerationProgressStage.UNIT_TEST) {
+            deferred.completion = () -> completeAfterCommit(projectId, stage, message + deferred.verification);
+            log(projectId, stage, "Đã lưu Unit Test; đang chờ xác minh tự động.");
+            return;
+        }
         if (!TransactionSynchronizationManager.isSynchronizationActive()) {
             complete(projectId, stage, message);
             return;
@@ -215,6 +239,12 @@ public class GenerationProgressService {
 
     /** Chỉ công bố kết quả một phần khi dữ liệu hợp lệ đã commit thành công. */
     public void partialAfterCommit(Long projectId, GenerationProgressStage stage, String message) {
+        DeferredCompletion deferred = GenerationJobContext.scopedValue(DEFERRED_COMPLETION);
+        if (deferred != null && stage == GenerationProgressStage.UNIT_TEST) {
+            deferred.completion = () -> partialAfterCommit(projectId, stage, message + deferred.verification);
+            log(projectId, stage, message.replace("Hoàn tất một phần:", "Đã sinh một phần:"));
+            return;
+        }
         if (!TransactionSynchronizationManager.isSynchronizationActive()) {
             partial(projectId, stage, message);
             return;

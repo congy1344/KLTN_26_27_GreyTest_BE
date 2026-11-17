@@ -33,6 +33,7 @@ public class GenerationJobService {
     private final UserActivityService activityService;
     private final UsageQuotaService quotaService;
     private static final Object MANUAL_MUTATION = new Object();
+    private static final Object JOB_LOCK = new Object();
     private record ProjectStageLock(GenerationProgressStage stage, long runId) {}
     private final ConcurrentMap<Long, Object> activeProjects = new ConcurrentHashMap<>();
 
@@ -162,6 +163,9 @@ public class GenerationJobService {
      * Marker được giữ đến khi service hoàn tất để loại bỏ race giữa kiểm tra và ghi dữ liệu.
      */
     public <T> T executeMutation(Long projectId, Supplier<T> mutation) {
+        Object jobLock = GenerationJobContext.scopedValue(JOB_LOCK);
+        // Chỉ worker mang đúng khóa của job mới được sửa lồng nhau trong lúc xác minh.
+        if (jobLock != null && jobLock == activeProjects.get(projectId)) return mutation.get();
         if (activeProjects.putIfAbsent(projectId, MANUAL_MUTATION) != null) {
             throw new GenerationInProgressException(
                     "Một tác vụ sinh AI đang chạy cho project này. Vui lòng chờ hoàn tất trước khi thay đổi dữ liệu.");
@@ -187,11 +191,8 @@ public class GenerationJobService {
             if (activityService != null) {
                 activityService.record(actorUserId, action, projectId, java.util.Map.of());
             }
-            try {
-                GenerationJobContext.bind(actorUserId, message -> {});
-                return mutation.get();
-            } finally {
-                GenerationJobContext.clear();
+            try (var scope = GenerationJobContext.openScope(actorUserId)) {
+                return GenerationJobContext.withActor(actorUserId, mutation);
             }
         });
     }
@@ -207,7 +208,7 @@ public class GenerationJobService {
                 return;
             }
             measurement = progressService.beginMeasurement(projectId, stage, GenerationJobContext.metricsSupplier());
-            task.run();
+            GenerationJobContext.withValue(JOB_LOCK, lock, () -> { task.run(); return null; });
             progressService.completeIfActive(
                     projectId,
                     stage,

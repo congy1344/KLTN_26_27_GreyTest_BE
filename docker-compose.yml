@@ -33,7 +33,7 @@ services:
       LLM_MAX_TOKENS_BUSINESS_RULE: ${LLM_MAX_TOKENS_BUSINESS_RULE:-4096}
       LLM_MAX_TOKENS_BUSINESS_RULE_REVIEW: ${LLM_MAX_TOKENS_BUSINESS_RULE_REVIEW:-4096}
       LLM_MAX_TOKENS_TEST_PLAN: ${LLM_MAX_TOKENS_TEST_PLAN:-6144}
-      LLM_MAX_TOKENS_TEST_CASE: ${LLM_MAX_TOKENS_TEST_CASE:-8192}
+      LLM_MAX_TOKENS_TEST_CASE: ${LLM_MAX_TOKENS_TEST_CASE:-12288}
       LLM_MAX_TOKENS_UNIT_TEST: ${LLM_MAX_TOKENS_UNIT_TEST:-12288}
       GREYTEST_UNIT_TEST_PER_SERVICE: ${GREYTEST_UNIT_TEST_PER_SERVICE:-true}
       GREYTEST_UNIT_TEST_PER_SERVICE_MAX_CASES: ${GREYTEST_UNIT_TEST_PER_SERVICE_MAX_CASES:-15}
@@ -47,6 +47,7 @@ services:
       LLM_USAGE_RUN_ID: ${LLM_USAGE_RUN_ID:-}
       LLM_USAGE_METHOD: ${LLM_USAGE_METHOD:-GREYTEST}
       GREYTEST_AUTH_TOKEN_SECRET: ${GREYTEST_AUTH_TOKEN_SECRET:-}
+      GREYTEST_SETTINGS_SECRET: ${GREYTEST_SETTINGS_SECRET:-greytest-local-dev-settings-secret}
       GREYTEST_DEFAULT_MONTHLY_LLM_QUOTA: ${GREYTEST_DEFAULT_MONTHLY_LLM_QUOTA:-100}
       GREYTEST_PRO_MONTHLY_LLM_QUOTA: ${GREYTEST_PRO_MONTHLY_LLM_QUOTA:-300}
       GREYTEST_STORAGE_PATH: /app/storage
@@ -57,6 +58,8 @@ services:
     volumes:
       - backend_storage:/app/storage
       - ../log:/app/log
+      # Cho backend tạo container sandbox chạy Unit Test. Lưu ý: socket này cho backend quyền điều khiển Docker của máy chủ.
+      - /var/run/docker.sock:/var/run/docker.sock
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:

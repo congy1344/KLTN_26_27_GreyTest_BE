@@ -57,6 +57,7 @@ Output:
     }
   ]
 }
+Each test_data.mocks key is ONE complete JSON string, even when the call has several arguments: write "repo.existsByIdAndStatus(102, ENROLLED)": false, never split a key at a comma. Every case object must contain all eight fields with their values.
 
 Context:
 {{context_json}}

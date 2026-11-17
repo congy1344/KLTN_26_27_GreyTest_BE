@@ -36,6 +36,38 @@ public class UsageQuotaService {
         this.tierPackageRepository = tierPackageRepository;
     }
 
+    @Autowired(required = false)
+    private com.greytest.repository.AuthUserRepository userRepository;
+
+    public void setUserRepository(com.greytest.repository.AuthUserRepository userRepository) {
+        this.userRepository = userRepository;
+    }
+
+    /**
+     * Chu kỳ reset quota lấy từ trường cycle của gói user đang dùng (admin sửa được trong trang Gói).
+     * Khi chưa có dữ liệu gói (unit test dựng tay, DB trống) thì giữ cách suy luận cũ theo hạn mức.
+     */
+    private boolean isWeeklyCycle(UsageQuota quota) {
+        String cycle = configuredCycle(quota.getUserId());
+        if (cycle != null) return "WEEKLY".equals(cycle);
+        return quota.getQuotaLimit() != null
+                && (quota.getQuotaLimit().equals(getPlusLimit()) || quota.getQuotaLimit().equals(getProLimit())
+                        || quota.getQuotaLimit() > defaultLimit);
+    }
+
+    private String configuredCycle(Long userId) {
+        if (userRepository == null || tierPackageRepository == null || userId == null) return null;
+        com.greytest.entity.enums.UserTier tier = userRepository.findById(userId)
+                .map(com.greytest.entity.AuthUser::getTier)
+                .orElse(com.greytest.entity.enums.UserTier.FREE);
+        if (tier == null) tier = com.greytest.entity.enums.UserTier.FREE;
+        return tierPackageRepository.findById(tier.name())
+                .map(com.greytest.entity.TierPackage::getCycle)
+                .filter(cycle -> !cycle.isBlank())
+                .map(cycle -> cycle.trim().toUpperCase())
+                .orElse(null);
+    }
+
     private int resolveTierLimit(String tierCode, int fallback) {
         if (tierPackageRepository != null) {
             return tierPackageRepository.findById(tierCode)
@@ -149,8 +181,7 @@ public class UsageQuotaService {
     public synchronized UsageQuota resetUsage(Long userId) {
         UsageQuota quota = currentForUpdate(userId);
         quota.setQuotaUsed(0);
-        boolean isWeekly = quota.getQuotaLimit() != null
-                && (quota.getQuotaLimit().equals(getPlusLimit()) || quota.getQuotaLimit().equals(getProLimit()) || quota.getQuotaLimit() > defaultLimit);
+        boolean isWeekly = isWeeklyCycle(quota);
         if (!isWeekly) {
             quota.setPeriodStart(LocalDate.now(clock).withDayOfMonth(1));
         }
@@ -261,8 +292,7 @@ public class UsageQuotaService {
         UsageQuota quota = repository.findByUserIdForUpdate(userId)
                 .orElseGet(() -> newQuota(userId, today.withDayOfMonth(1)));
 
-        boolean isWeekly = quota.getQuotaLimit() != null
-                && (quota.getQuotaLimit().equals(getPlusLimit()) || quota.getQuotaLimit().equals(getProLimit()) || quota.getQuotaLimit() > defaultLimit);
+        boolean isWeekly = isWeeklyCycle(quota);
         if (isWeekly) {
             if (quota.getPeriodStart() == null || !today.isBefore(quota.getPeriodStart().plusWeeks(1))) {
                 quota.setPeriodStart(today);

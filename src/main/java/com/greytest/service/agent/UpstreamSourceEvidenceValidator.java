@@ -20,10 +20,16 @@ final class UpstreamSourceEvidenceValidator {
     }
 
     static Optional<String> cases(TestCaseContextDto context, TestCaseResponseDto response) {
-        return cases(context, response, true);
+        return cases(context, response, true, null);
     }
 
-    private static Optional<String> cases(TestCaseContextDto context, TestCaseResponseDto response, boolean requireProof) {
+    /** reviewWarnings khác null: lỗi diễn đạt thông báo exception chỉ được ghi vào đó cho người duyệt, không chặn case. */
+    static Optional<String> cases(TestCaseContextDto context, TestCaseResponseDto response, List<String> reviewWarnings) {
+        return cases(context, response, true, reviewWarnings);
+    }
+
+    private static Optional<String> cases(TestCaseContextDto context, TestCaseResponseDto response, boolean requireProof,
+            List<String> reviewWarnings) {
         var index = new SourceEvidenceIndex(context.classes());
         var messages = new SourceExceptionMessageEvidence(context.classes());
         Set<String> problems = new LinkedHashSet<>();
@@ -38,7 +44,11 @@ final class UpstreamSourceEvidenceValidator {
             for (var source : context.classes()) for (var method : source.methods()) if (ids.contains(method.id())) {
                 Map<String, Object> input = input(item);
                 var problem = messages.validate(context.classes(), method.id(), item.expectedResult(), input, requireProof);
-                problem.ifPresent(p -> problems.add("plan_id=" + item.planId() + ": " + p));
+                // Chỉ hạ thành cảnh báo khi lỗi không còn ở mức requireProof=false: mức đó được prerequisites kiểm tra lại
+                // trước khi sinh Unit Test, nên bỏ qua ở đây sẽ chặn cả bước sau thay vì được AI sửa ngay.
+                boolean warnOnly = reviewWarnings != null && problem.isPresent()
+                        && messages.validate(context.classes(), method.id(), item.expectedResult(), input, false).isEmpty();
+                problem.ifPresent(p -> (warnOnly ? reviewWarnings : problems).add("plan_id=" + item.planId() + ": " + p));
                 // Interaction đã được BR/TP yêu cầu rõ ràng phải được giữ để kiểm chứng source, không tự sửa oracle.
                 String approved = rules.stream().map(BusinessRuleContextDto::description).reduce("", (a, b) -> a + " " + b)
                         + " " + plan.title() + " " + plan.description();
@@ -70,7 +80,7 @@ final class UpstreamSourceEvidenceValidator {
                             + " " + Objects.toString(item.expectedResult(), "") + " " + Objects.toString(item.traceSource(), "")).contains("SOURCE_MISMATCH")) continue;
                 var generated = new GeneratedTestCaseDto(item.testPlanId(), item.testType(), item.description(), item.preconditions(),
                         item.testData(), item.expectedResult(), item.priority(), item.traceSource());
-                var problem = cases(sourceContext, new TestCaseResponseDto(List.of(generated)), false);
+                var problem = cases(sourceContext, new TestCaseResponseDto(List.of(generated)), false, null);
                 if (problem.isPresent()) return Optional.of("Upstream TC " + item.id() + " (" + item.caseCode()
                         + ") requires review before Unit Test generation: " + problem.get() + " Preserve approved requirements; review the originating BR/TC.");
             }

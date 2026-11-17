@@ -131,6 +131,48 @@ class AIAgentSchemaRepairTest {
         verify(client, times(2)).complete(anyString(), any());
     }
 
+    /**
+     * Response thật (project course-registration, 15/11/2026): khoá mock có dấu phẩy làm AI đóng object sớm, phần còn lại
+     * của case thành chuỗi rời trong mảng cases. JSON vẫn đúng cú pháp, nên đây là lỗi schema chứ không phải JSON hỏng.
+     */
+    @Test
+    void keepsValidPlansWhenAMockKeyWithACommaBreaksOneCaseObject() throws Exception {
+        var plans = List.of(plan(1L), plan(2L), plan(3L));
+        var contexts = mock(GenerationContextBuilder.class);
+        when(contexts.buildTestCaseContext(eq(1L), eq(java.util.Set.of(1L, 2L, 3L)))).thenReturn(context(plans));
+        when(contexts.buildTestCaseContext(eq(1L), eq(java.util.Set.of(2L)))).thenReturn(context(List.of(plans.get(1))));
+        var prompts = mock(PromptManager.class);
+        when(prompts.renderPrompt(anyString(), anyMap())).thenAnswer(call -> {
+            Object scope = ((java.util.Map<?, ?>) call.getArgument(1)).get("context_json");
+            return new PromptManager.RenderedPrompt("PLANS=" + ((TestCaseContextDto) scope).approvedTestPlans().size(), List.of());
+        });
+        var keeping = new AIAgentService(contexts, prompts, client, new GenerationResponseParser(json, validators.getValidator()), mock(AiContextLogService.class));
+        String broken = "{\"plan_id\":2,\"test_type\":\"EXCEPTION\",\"description\":\"x\",\"preconditions\":\"ready\","
+                + "\"test_data\":{\"input\":{\"studentId\":102},\"mocks\":{\"enrollmentRepository.existsByStudentIdAndStatus(102, \" : \"ENROLLED)\"}}}"
+                + ",\"expected_result\",\"priority\",\"trace_source\"";
+        when(client.complete(anyString(), any())).thenReturn(
+                "{\"cases\":[" + validCase(1L, "kept-1") + "," + broken + "," + validCase(3L, "kept-3") + "]}",
+                "{\"cases\":[" + validCase(2L, "repaired") + "]}");
+
+        var result = keeping.generateTestCases(1L, java.util.Set.of(1L, 2L, 3L));
+
+        assertThat(result.cases()).extracting(item -> item.description()).containsExactlyInAnyOrder("kept-1", "kept-3", "repaired");
+        var sent = ArgumentCaptor.forClass(String.class);
+        verify(client, times(2)).complete(sent.capture(), any());
+        assertThat(sent.getAllValues().get(1)).contains("PLANS=1", "cases[2]", "must be a JSON object", "test_data.mocks")
+                .doesNotContain("kept-1", "không phải JSON hợp lệ");
+    }
+
+    @Test
+    void reportsATypeMismatchAsSchemaErrorWithItsPathAndKeepsSyntaxErrorsAsInvalidJson() {
+        var parser = new GenerationResponseParser(json, validators.getValidator());
+        assertThatThrownBy(() -> parser.parse("{\"cases\":[" + validCase(1L, "a") + ",\"expected_result\"]}",
+                com.greytest.dto.agent.GenerationResponseDtos.TestCaseResponseDto.class))
+                .hasMessageStartingWith("LLM response không đúng schema:").hasMessageContaining("cases[1]");
+        assertThatThrownBy(() -> parser.parse("{\"cases\":[", com.greytest.dto.agent.GenerationResponseDtos.TestCaseResponseDto.class))
+                .hasMessageContaining("không phải JSON hợp lệ");
+    }
+
     private TestPlanContextItemDto plan(long id) {
         return new TestPlanContextItemDto(id, id, List.of(id), "TP-" + id, "Approved plan", "Approved behavior", "HAPPY_PATH", "APPROVED", false);
     }

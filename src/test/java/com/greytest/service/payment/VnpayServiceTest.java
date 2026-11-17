@@ -37,6 +37,34 @@ class VnpayServiceTest {
     }
 
     @Test
+    void createPaymentUrl_UsesTmnCodeAndUrlSavedByAdmin() {
+        com.greytest.repository.SystemSettingRepository settings =
+                org.mockito.Mockito.mock(com.greytest.repository.SystemSettingRepository.class);
+        org.mockito.Mockito.when(settings.findById("vnpay.tmn_code")).thenReturn(java.util.Optional.of(
+                new com.greytest.entity.SystemSetting("vnpay.tmn_code", "NEWTMN01", "")));
+        org.mockito.Mockito.when(settings.findById("vnpay.url")).thenReturn(java.util.Optional.of(
+                new com.greytest.entity.SystemSetting("vnpay.url", "https://pay.vnpay.vn/vpcpay.html", "")));
+        vnpayService.setSystemSettingRepository(settings);
+
+        String url = vnpayService.createPaymentUrl("ORDER_123", 1000L, "Test Payment", "127.0.0.1");
+
+        assertThat(url).startsWith("https://pay.vnpay.vn/vpcpay.html?").contains("vnp_TmnCode=NEWTMN01");
+    }
+
+    @Test
+    void createPaymentUrl_FallsBackToEnvironmentWhenAdminValueIsBlank() {
+        com.greytest.repository.SystemSettingRepository settings =
+                org.mockito.Mockito.mock(com.greytest.repository.SystemSettingRepository.class);
+        org.mockito.Mockito.when(settings.findById(org.mockito.ArgumentMatchers.any())).thenReturn(java.util.Optional.of(
+                new com.greytest.entity.SystemSetting("vnpay.tmn_code", "  ", "")));
+        vnpayService.setSystemSettingRepository(settings);
+
+        String url = vnpayService.createPaymentUrl("ORDER_123", 1000L, "Test Payment", "127.0.0.1");
+
+        assertThat(url).startsWith("https://sandbox.vnpayment.vn/paymentv2/vpcpay.html?").contains("vnp_TmnCode=CGXZLS0Z");
+    }
+
+    @Test
     void createPaymentUrl_WithCustomReturnUrl_UsesCustomUrl() {
         String url = vnpayService.createPaymentUrl("ORDER_123", 1000L, "Test Payment", "127.0.0.1", "https://my-domain.com/return");
 

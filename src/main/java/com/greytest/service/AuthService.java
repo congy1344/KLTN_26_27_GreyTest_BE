@@ -53,6 +53,8 @@ import com.nimbusds.jwt.SignedJWT;
 public class AuthService {
 
     private static final Duration TOKEN_TTL = Duration.ofDays(7);
+    // Phiên có quyền quản trị ngắn hơn theo khuyến nghị OWASP ASVS cho tài khoản đặc quyền.
+    private static final Duration ADMIN_TOKEN_TTL = Duration.ofHours(12);
     private static final Duration PASSWORD_RESET_TOKEN_TTL = Duration.ofMinutes(15);
     private static final String TOKEN_ISSUER = "greytest";
     private static final String TOKEN_AUDIENCE = "greytest-api";
@@ -345,6 +347,10 @@ public class AuthService {
                 user.getDateOfBirth());
     }
 
+    private static Duration tokenTtl(AuthUser user) {
+        return user.getRole() == UserRole.ADMIN ? ADMIN_TOKEN_TTL : TOKEN_TTL;
+    }
+
     private String issueToken(AuthUser user) {
         Date now = new Date();
         JWTClaimsSet claims = new JWTClaimsSet.Builder()
@@ -352,7 +358,7 @@ public class AuthService {
                 .issuer(TOKEN_ISSUER)
                 .audience(TOKEN_AUDIENCE)
                 .issueTime(now)
-                .expirationTime(new Date(now.getTime() + TOKEN_TTL.toMillis()))
+                .expirationTime(new Date(now.getTime() + tokenTtl(user).toMillis()))
                 .jwtID(UUID.randomUUID().toString())
                 .build();
         SignedJWT jwt = new SignedJWT(new JWSHeader.Builder(JWSAlgorithm.HS256)

@@ -671,6 +671,9 @@ class AdminServiceTest {
         var req = new AdminDtos.UpdateAiKeysRequest(List.of(
                 new AdminDtos.UpdateApiKeySlotRequest(0, "sk-test-new-key-12345"),
                 new AdminDtos.UpdateApiKeySlotRequest(1, "sk-test-backup-key-67890")));
+        // Khoá API giờ được lưu bền dạng mã hoá nên cần secret mã hoá.
+        org.springframework.test.util.ReflectionTestUtils.setField(
+                service, "settingsCipher", new SettingsCipher("test-settings-secret"));
 
         AdminDtos.AiRuntimeConfigDto updated = service.updateAiKeys(actor(), req);
 

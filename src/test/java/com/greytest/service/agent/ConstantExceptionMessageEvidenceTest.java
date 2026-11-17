@@ -21,6 +21,23 @@ class ConstantExceptionMessageEvidenceTest {
     }
 
     @Test
+    void acceptsEnglishFollowedByFragmentsOfAConcatenatedMessage() {
+        // Câu AI thật viết cho course-registration (pilot 16/11); "followed by" tương đương "nối với".
+        var classes = source("String code", "throw new BusinessException(\"Đã đăng ký môn \" + code + \" trong học kỳ này\");");
+        assertThat(validate(classes, "the service throws BusinessException with the message \"Đã đăng ký môn \""
+                + " followed by the requested course code and \" trong học kỳ này\".")).isEmpty();
+        assertThat(validate(source("", "throw new BusinessException(\"Tiết học phải từ 1 đến \" + MAX_PERIOD);"),
+                "throws BusinessException with message \"Tiết học phải từ 1 đến \" followed by MAX_PERIOD.")).isEmpty();
+    }
+
+    @Test
+    void rejectsAWrongFragmentEvenWhenFollowedByARuntimeValue() {
+        var classes = source("String code", "throw new BusinessException(\"Đã đăng ký môn \" + code + \" trong học kỳ này\");");
+        assertThat(validate(classes, "throws BusinessException with message \"Đã hủy môn \" followed by the course code."))
+                .isPresent();
+    }
+
+    @Test
     void acceptsTheMessageRenderedWithTheConstantValue() {
         assertThat(validate(source("", CREDITS_THROW),
                 "service ném BusinessException với thông điệp \"Chưa tích lũy đủ 120 tín chỉ để tốt nghiệp\"."))

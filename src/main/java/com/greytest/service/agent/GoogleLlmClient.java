@@ -64,7 +64,7 @@ public class GoogleLlmClient implements LlmClient {
             @Value("${llm.google-model:${llm.model:gemini-3.5-flash}}") String model,
             @Value("${llm.temperature:0.3}") double temperature,
             @Value("${llm.max-tokens:4096}") int maxTokens,
-            @Value("${llm.timeout-seconds:60}") long timeoutSeconds,
+            @Value("${llm.timeout-seconds:180}") long timeoutSeconds,
             @Value("${llm.google-url:https://generativelanguage.googleapis.com/v1beta/interactions}") String endpoint,
             ObjectProvider<LlmUsageRecorder> usageRecorderProvider) {
         this(

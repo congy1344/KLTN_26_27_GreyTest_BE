@@ -16,7 +16,12 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import org.junit.jupiter.api.Test;
 
+import com.greytest.entity.AuthUser;
+import com.greytest.entity.TierPackage;
 import com.greytest.entity.UsageQuota;
+import com.greytest.entity.enums.UserTier;
+import com.greytest.repository.AuthUserRepository;
+import com.greytest.repository.TierPackageRepository;
 import com.greytest.exception.UsageQuotaExceededException;
 import com.greytest.repository.UsageQuotaRepository;
 import com.greytest.repository.UserActivityLogRepository;
@@ -284,6 +289,56 @@ class UsageQuotaServiceTest {
 
         UsageQuota freeResult = service.downgradeToFree(9L);
         assertThat(freeResult.getQuotaLimit()).isEqualTo(50);
+    }
+
+    @Test
+    void monthlyTierPackageKeepsUsageForTheWholeMonth() {
+        AtomicReference<UsageQuota> stored = new AtomicReference<>(quota(300, 50, LocalDate.of(2026, 8, 1)));
+        UsageQuotaService service = serviceWithTier(stored, UserTier.PRO, "MONTHLY");
+
+        assertThat(service.current(7L).getQuotaUsed()).isEqualTo(50);
+    }
+
+    @Test
+    void weeklyTierPackageResetsUsageAfterSevenDays() {
+        AtomicReference<UsageQuota> stored = new AtomicReference<>(quota(200, 150, LocalDate.of(2026, 8, 10)));
+        UsageQuotaService service = serviceWithTier(stored, UserTier.PLUS, "WEEKLY");
+
+        UsageQuota current = service.current(7L);
+
+        assertThat(current.getQuotaUsed()).isZero();
+        assertThat(current.getPeriodStart()).isEqualTo(LocalDate.of(2026, 8, 21));
+    }
+
+    @Test
+    void adminCanSwitchAFreeTierToAWeeklyCycle() {
+        AtomicReference<UsageQuota> stored = new AtomicReference<>(quota(100, 90, LocalDate.of(2026, 8, 13)));
+        UsageQuotaService service = serviceWithTier(stored, UserTier.FREE, "WEEKLY");
+
+        assertThat(service.current(7L).getQuotaUsed()).isZero();
+    }
+
+    private UsageQuotaService serviceWithTier(AtomicReference<UsageQuota> stored, UserTier tier, String cycle) {
+        UsageQuotaService service = new UsageQuotaService(repository(stored), 100, AUGUST);
+        AuthUser user = new AuthUser();
+        user.setTier(tier);
+        AuthUserRepository users = mock(AuthUserRepository.class);
+        when(users.findById(7L)).thenReturn(Optional.of(user));
+        TierPackageRepository packages = mock(TierPackageRepository.class);
+        when(packages.findById(tier.name())).thenReturn(Optional.of(
+                new TierPackage(tier.name(), tier.name(), 0L, cycle, 300, 2, "", "", true)));
+        service.setUserRepository(users);
+        service.setTierPackageRepository(packages);
+        return service;
+    }
+
+    private static UsageQuota quota(int limit, int used, LocalDate periodStart) {
+        UsageQuota quota = new UsageQuota();
+        quota.setUserId(7L);
+        quota.setQuotaLimit(limit);
+        quota.setQuotaUsed(used);
+        quota.setPeriodStart(periodStart);
+        return quota;
     }
 
     private UsageQuotaRepository repository(AtomicReference<UsageQuota> stored) {

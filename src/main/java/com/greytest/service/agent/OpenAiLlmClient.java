@@ -49,7 +49,7 @@ public class OpenAiLlmClient implements LlmClient {
             @Value("${llm.openai-model:${llm.model:gpt-4o-mini}}") String model,
             @Value("${llm.temperature:0.3}") double temperature,
             @Value("${llm.max-tokens:4096}") int maxTokens,
-            @Value("${llm.timeout-seconds:60}") long timeoutSeconds,
+            @Value("${llm.timeout-seconds:180}") long timeoutSeconds,
             @Value("${llm.openai-url:https://api.openai.com/v1/chat/completions}") String endpoint,
             @Value("${llm.openai-json-mode:true}") boolean jsonMode,
             ObjectProvider<LlmUsageRecorder> usageRecorderProvider) {
@@ -173,6 +173,11 @@ public class OpenAiLlmClient implements LlmClient {
             if (response.statusCode() < 200 || response.statusCode() >= 300) {
                 int status = response.statusCode();
                 String message = "OpenAI API lỗi HTTP " + status + ": " + snippet(response.body());
+                if (status == 429 && isInsufficientQuota(response.body())) {
+                    // Hết credit là lỗi vĩnh viễn: retry chỉ tốn thời gian, vẫn tính là lỗi provider để hoàn lượt gọi.
+                    throw new LlmResponseException("Tài khoản LLM đã hết credit (insufficient_quota). " + message,
+                            null, false, 0, LlmResponseException.ErrorClassification.PROVIDER_UNAVAILABLE);
+                }
                 if (status == 429 || status >= 500) {
                     throw LlmResponseException.provider(message, null, LlmHttpTransport.retryAfterMillis(response));
                 }
@@ -236,6 +241,16 @@ public class OpenAiLlmClient implements LlmClient {
             return objectMapper.writeValueAsString(root);
         } catch (JsonProcessingException exception) {
             throw new LlmResponseException("Không tạo được request OpenAI.", exception);
+        }
+    }
+
+    private boolean isInsufficientQuota(String responseBody) {
+        try {
+            JsonNode error = objectMapper.readTree(responseBody == null ? "" : responseBody).path("error");
+            return "insufficient_quota".equals(error.path("type").asText())
+                    || "insufficient_quota".equals(error.path("code").asText());
+        } catch (JsonProcessingException exception) {
+            return false;
         }
     }
 

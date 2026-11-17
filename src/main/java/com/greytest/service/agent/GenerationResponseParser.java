@@ -45,10 +45,33 @@ public class GenerationResponseParser {
                 throw new LlmResponseException("LLM response không đúng schema: " + firstError, true);
             }
             return parsed;
+        } catch (com.fasterxml.jackson.databind.exc.MismatchedInputException mismatch) {
+            // JSON đúng cú pháp nhưng sai cấu trúc: báo là lỗi schema kèm đường dẫn để giữ được các item hợp lệ
+            // và để lượt sửa biết chính xác chỗ sai, thay vì gộp chung với JSON hỏng.
+            throw new LlmResponseException("LLM response không đúng schema: " + mismatchDescription(mismatch), mismatch, true);
         } catch (JsonProcessingException exception) {
             // Output hỏng do model nondeterminism (cắt cụt, lặp từ...) → cho phép gọi lại lần 2
             throw new LlmResponseException("LLM response không phải JSON hợp lệ.", exception, true);
         }
+    }
+
+    private static String mismatchDescription(com.fasterxml.jackson.databind.exc.MismatchedInputException mismatch) {
+        StringBuilder path = new StringBuilder();
+        for (var reference : mismatch.getPath()) {
+            if (reference.getFieldName() != null) path.append(path.isEmpty() ? "" : ".").append(reference.getFieldName());
+            else if (reference.getIndex() >= 0) path.append('[').append(reference.getIndex()).append(']');
+        }
+        String location = path.isEmpty() ? "root" : path.toString();
+        Class<?> target = mismatch.getTargetType();
+        boolean objectExpected = target != null && !target.isPrimitive() && !target.isEnum() && !CharSequence.class.isAssignableFrom(target)
+                && !Number.class.isAssignableFrom(target) && target != Boolean.class && !java.util.Collection.class.isAssignableFrom(target);
+        if (objectExpected) {
+            return location + " must be a JSON object with all of its fields, not a bare value. A preceding object was probably closed early: "
+                    + "a key inside test_data.mocks or test_data.input containing a comma, quote or parenthesis must stay one complete quoted key "
+                    + "with its value. Keep every field of each item, with its value, inside that item's object.";
+        }
+        String detail = String.valueOf(mismatch.getOriginalMessage()).lines().findFirst().orElse("");
+        return location + " has the wrong JSON type: " + (detail.length() > 200 ? detail.substring(0, 200) + "..." : detail);
     }
 
     /** Case hợp lệ và plan có case sai schema; JSON hỏng thì không có gì để giữ. */
@@ -101,11 +124,19 @@ public class GenerationResponseParser {
         throw new UnitTestGenerationError(caseId.asLong(), reason.asText(), details.asText());
     }
 
-    static final class UnitTestGenerationError extends LlmResponseException {
+    /** Case mà AI báo không dựng được test (tìm trong cả chuỗi cause vì lỗi có thể đã bị bọc lại); null nếu là lỗi khác. */
+    public static Long declinedCaseId(Throwable failure) {
+        for (Throwable current = failure; current != null; current = current.getCause()) {
+            if (current instanceof UnitTestGenerationError declined) return declined.caseId();
+        }
+        return null;
+    }
+
+    public static final class UnitTestGenerationError extends LlmResponseException {
         private final Long caseId;
         private final String reason;
 
-        UnitTestGenerationError(Long caseId, String reason, String details) {
+        public UnitTestGenerationError(Long caseId, String reason, String details) {
             super("Không thể sinh Unit Test cho case_id=" + caseId + " (" + reason + "): " + details);
             this.caseId = caseId;
             this.reason = reason;

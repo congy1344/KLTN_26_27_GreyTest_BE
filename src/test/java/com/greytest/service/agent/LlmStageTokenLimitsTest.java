@@ -14,4 +14,15 @@ class LlmStageTokenLimitsTest {
         assertThat(limits.optionsFor("unit-test").maxTokens()).isEqualTo(500);
         assertThat(limits.optionsFor("unknown").maxTokens()).isEqualTo(900);
     }
+
+    @Test
+    void defaultTimeoutLeavesRoomForLargestStageOutput() {
+        var yaml = new org.springframework.beans.factory.config.YamlPropertiesFactoryBean();
+        yaml.setResources(new org.springframework.core.io.ClassPathResource("application.yml"));
+        var properties = yaml.getObject();
+
+        // ~140 token/giây: 12288 token unit-test cần ~88 giây, nên mặc định phải đủ rộng.
+        assertThat(properties.getProperty("llm.timeout-seconds")).isEqualTo("${LLM_TIMEOUT_SECONDS:180}");
+        assertThat(properties.getProperty("llm.stage-max-tokens.unit-test")).isEqualTo("${LLM_MAX_TOKENS_UNIT_TEST:12288}");
+    }
 }
