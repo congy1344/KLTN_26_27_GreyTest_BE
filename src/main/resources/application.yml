@@ -51,6 +51,8 @@ springdoc:
 
 # Thư mục lưu source code đã upload/clone
 greytest:
+  sandbox:
+    maven-args: ${GREYTEST_SANDBOX_MAVEN_ARGS:}
   frontend-url: ${GREYTEST_FRONTEND_URL:http://localhost:3000}
   storage:
     path: ${GREYTEST_STORAGE_PATH:./storage}
@@ -66,11 +68,13 @@ greytest:
     max-entries: ${GREYTEST_LLM_CACHE_MAX_ENTRIES:500}
   llm-batch:
     # Trần batch mỗi tác vụ; Free/Plus/Pro lần lượt dùng tối đa 2/3/4 batch đồng thời.
-    concurrency: ${GREYTEST_LLM_BATCH_CONCURRENCY:4}
+    concurrency: ${GREYTEST_LLM_BATCH_CONCURRENCY:8}
     retry-attempts: ${GREYTEST_LLM_BATCH_RETRY_ATTEMPTS:2}
     retry-delay-millis: ${GREYTEST_LLM_BATCH_RETRY_DELAY_MILLIS:200}
+    # Batch đầu chạy trước (ms) để prompt cache phần hướng dẫn/policy kịp ghi trước khi các batch khác gửi; 0 là tắt.
+    first-batch-head-start-millis: ${GREYTEST_LLM_BATCH_FIRST_HEAD_START_MILLIS:3000}
     # Số vòng tự "Tiếp tục sinh" khi Test Case/Unit Test còn thiếu sau lượt chính; 0 là tắt.
-    auto-resume-rounds: ${GREYTEST_LLM_BATCH_AUTO_RESUME_ROUNDS:2}
+    auto-resume-rounds: ${GREYTEST_LLM_BATCH_AUTO_RESUME_ROUNDS:0}
     # Thử nghiệm: gọi Unit Test mỗi class được test một request thay vì 4 case một batch.
     unit-test-per-service: ${GREYTEST_UNIT_TEST_PER_SERVICE:false}
     # Service lớn tự chia nhóm để prompt không quá lớn và một lần lỗi chỉ ảnh hưởng một nhóm.

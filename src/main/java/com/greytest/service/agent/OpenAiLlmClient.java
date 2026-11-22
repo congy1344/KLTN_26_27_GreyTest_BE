@@ -196,6 +196,7 @@ public class OpenAiLlmClient implements LlmClient {
             } finally {
                 usageRecorder.record(
                         prompt,
+                        output,
                         "openai",
                         root.path("model").asText(model),
                         LlmTokenUsage.fromOpenAi(root, prompt, output),
@@ -223,6 +224,15 @@ public class OpenAiLlmClient implements LlmClient {
                 text.putObject("prompt_cache_breakpoint").put("mode", "explicit");
             }
             messages.addObject().put("role", "user").put("content", prompt.substring(prefix.length()));
+        } else if (model != null && model.startsWith("claude") && !prefix.isEmpty() && prompt.startsWith(prefix)) {
+            // Claude qua proxy tương thích OpenAI: prefix chỉ gồm phần ổn định giữa các batch (hướng dẫn, policy theo chủ đề;
+            // source cắt theo batch nằm sau prefix) nên đánh dấu cache_control cho từng prefix (≤ 4 breakpoint của Anthropic).
+            var parts = messages.addObject().put("role", "user").putArray("content");
+            for (String part : options.cacheablePrefixes()) {
+                parts.addObject().put("type", "text").put("text", part)
+                        .putObject("cache_control").put("type", "ephemeral");
+            }
+            parts.addObject().put("type", "text").put("text", prompt.substring(prefix.length()));
         } else {
             messages.addObject().put("role", "user").put("content", prompt);
         }
@@ -234,7 +244,11 @@ public class OpenAiLlmClient implements LlmClient {
         } else {
             root.put("max_tokens", options.maxTokens());
         }
-        if (jsonMode) {
+        if (jsonMode && options.responseSchema() != null && model != null && model.startsWith("gpt")) {
+            // Structured Outputs strict của OpenAI: output luôn khớp schema stage, bỏ được lượt sửa do JSON sai schema.
+            var format = root.putObject("response_format").put("type", "json_schema").putObject("json_schema");
+            format.put("name", options.schemaName()).put("strict", true).set("schema", options.responseSchema());
+        } else if (jsonMode) {
             root.putObject("response_format").put("type", "json_object");
         }
         try {

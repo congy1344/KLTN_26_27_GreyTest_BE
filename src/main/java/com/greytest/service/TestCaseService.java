@@ -45,7 +45,7 @@ public class TestCaseService {
     private ArtifactCodeRenumberService codeRenumber;
 
     /** Số vòng hệ thống tự "Tiếp tục sinh" khi còn Test Plan chưa có case; 0 là tắt. */
-    @org.springframework.beans.factory.annotation.Value("${greytest.llm-batch.auto-resume-rounds:2}")
+    @org.springframework.beans.factory.annotation.Value("${greytest.llm-batch.auto-resume-rounds:0}")
     private int autoResumeRounds;
     /** Bật khi chạy thật: lỗi output AI của một batch không làm dừng cả lượt sinh. Test đơn vị thuần để mặc định false. */
     @org.springframework.beans.factory.annotation.Value("${greytest.llm-batch.isolate-batch-failures:true}")
@@ -193,7 +193,7 @@ public class TestCaseService {
                             // các plan của nó được tính là còn thiếu và lượt tự tiếp tục sinh sẽ làm lại. Hết quota hoặc bị hủy vẫn dừng như cũ.
                             if (!isolateBatchFailures || isUsageQuotaExceeded(failure) || Thread.currentThread().isInterrupted()) throw failure;
                             generationProgress.log(projectId, GenerationProgressStage.TEST_CASE, "Batch " + (batchIdx + 1) + "/" + allBatches.size()
-                                    + " chưa sinh được; các batch khác vẫn tiếp tục và batch này sẽ được thử lại: " + failure.getMessage());
+                                    + " chưa sinh được; các batch khác vẫn tiếp tục. Có thể thử lại bằng 'Tiếp tục sinh': " + failure.getMessage());
                             return List.<GeneratedTestCaseDto>of();
                         }
                     },

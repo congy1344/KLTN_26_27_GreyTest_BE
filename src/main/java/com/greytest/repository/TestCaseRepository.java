@@ -13,6 +13,6 @@ public interface TestCaseRepository extends JpaRepository<TestCase, Long> {
 
     List<TestCase> findByTestPlanIdIn(List<Long> testPlanIds);
 
-    @Query("SELECT tc FROM TestCase tc JOIN TestPlan tp ON tc.testPlanId = tp.id WHERE tp.projectId = :projectId")
+    @Query("SELECT tc FROM TestCase tc JOIN TestPlan tp ON tc.testPlanId = tp.id WHERE tp.projectId = :projectId ORDER BY tc.id")
     List<TestCase> findByProjectId(@Param("projectId") Long projectId);
 }

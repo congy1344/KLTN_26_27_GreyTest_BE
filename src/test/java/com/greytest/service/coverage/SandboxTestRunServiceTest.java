@@ -25,11 +25,15 @@ import org.junit.jupiter.api.io.TempDir;
 import org.mockito.ArgumentCaptor;
 
 import com.greytest.entity.Project;
+import com.greytest.dto.GenerationProgressStage;
+import com.greytest.dto.GenerationProgressStatus;
 import com.greytest.entity.UnitTest;
 import com.greytest.entity.enums.ProjectStatus;
 import com.greytest.repository.ProjectRepository;
 import com.greytest.service.CoverageService;
+import com.greytest.service.GenerationJobContext;
 import com.greytest.service.GenerationJobService;
+import com.greytest.service.GenerationProgressService;
 import com.greytest.service.UnitTestService;
 import com.greytest.service.agent.ProjectJavaVersionDetector;
 import com.greytest.service.coverage.SandboxTestRunService.Status;
@@ -102,6 +106,21 @@ class SandboxTestRunServiceTest {
     }
 
     @Test
+    void unusedStubFailuresCarryTheExportedSourceLineMockitoPointsTo() throws Exception {
+        var bytes = new ByteArrayOutputStream();
+        try (var zip = new ZipOutputStream(bytes)) {
+            zip.putNextEntry(new ZipEntry("module/src/test/java/demo/FooTest.java"));
+            zip.write("package demo;\nclass FooTest {\n    when(repo.find(1L)).thenReturn(item);\n}\n".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            zip.closeEntry();
+        }
+        String stack = "org.mockito.exceptions.misusing.UnnecessaryStubbingException: \n"
+                + "  1. -> at demo.FooTest_Fixture2Test.works(FooTest.java:3)\n";
+        assertThat(SandboxTestRunService.unusedStubLines(stack, bytes.toByteArray()))
+                .isEqualTo(SandboxTestRunService.UNUSED_STUB_LINE + "when(repo.find(1L)).thenReturn(item);\n");
+        assertThat(SandboxTestRunService.unusedStubLines("java.lang.NullPointerException", bytes.toByteArray())).isEmpty();
+    }
+
+    @Test
     void quotaExhaustionStopsRepairAndKeepsRuntimeFailures() throws Exception {
         producesReport = true;
         when(jobs.executeAiMutation(eq(1L), eq(7L), any(), any(Supplier.class)))
@@ -112,10 +131,12 @@ class SandboxTestRunServiceTest {
         verify(units, never()).removeUncompilable(any(), any());
     }
 
-    @Test
-    void partialRepairWithExhaustedQuotaRerunsButDoesNotStartAnotherRepairRound() throws Exception {
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {true, false})
+    void partialRepairWithExhaustedQuotaRerunsButDoesNotStartAnotherRepairRound(boolean improved) throws Exception {
         producesReport=true;
-        casesPerRun=List.of(errorCase("first")+errorCase("second"),errorCase("second"));
+        String initial = errorCase("first") + errorCase("second");
+        casesPerRun=List.of(initial, improved ? errorCase("second") : initial);
         when(units.repairFailing(eq(1L),any())).thenAnswer(call->{
             com.greytest.service.GenerationJobContext.markRepairQuotaExhausted();
             return List.of(new UnitTest());
@@ -123,7 +144,7 @@ class SandboxTestRunServiceTest {
         automatic(true);
         assertThat(runs).isEqualTo(2);
         verify(units).repairFailing(eq(1L),any());
-        assertThat(progress.get(progress.size()-1)).contains("hết quota LLM", "Giữ lại 1 test");
+        assertThat(progress.get(progress.size()-1)).contains("hết quota LLM", "Giữ lại " + (improved ? 1 : 2) + " test");
     }
 
     @Test
@@ -138,6 +159,7 @@ class SandboxTestRunServiceTest {
             service.generateAndVerify(1L,null,()->true);
         } finally {com.greytest.service.GenerationJobContext.clear();executor.shutdownNow();}
         assertThat(progress.get(progress.size()-1)).contains("CHƯA được xác minh", "giữ lại");
+        assertThat(service.state(1L).logTail()).contains("COMPILATION ERROR");
     }
 
     @Test
@@ -183,9 +205,14 @@ class SandboxTestRunServiceTest {
     }
 
     private void automatic(boolean hasTests) throws Exception {
+        automatic(hasTests, "");
+    }
+
+    private void automatic(boolean hasTests, String mavenArgs) throws Exception {
         var executor = java.util.concurrent.Executors.newSingleThreadExecutor();
         try {
             service = new SandboxTestRunService(units, projects, coverage, jobs, javaVersions, executor, this::fakeDocker);
+            org.springframework.test.util.ReflectionTestUtils.setField(service, "mavenArgs", mavenArgs);
             var warmed=new java.util.concurrent.CountDownLatch(1);
             com.greytest.service.GenerationJobContext.bind(7L, message->{
                 progress.add(message);
@@ -209,9 +236,24 @@ class SandboxTestRunServiceTest {
         assertThat(runs).isEqualTo(2);
         assertThat(progress).anyMatch(line -> line.contains("Đang chuẩn bị sandbox"))
                 .anyMatch(line -> line.contains("Đang biên dịch và chạy"))
-                .anyMatch(line -> line.contains("AI đang sửa 1") && line.contains("vòng 1/3"));
+                .anyMatch(line -> line.contains("AI đang sửa 1") && line.contains("vòng 1/2"));
         assertThat(progress.get(progress.size() - 1)).isEqualTo("AI đã sửa 1 lượt test qua 1 vòng. Đã chạy 2 test: 2 đạt, 0 không đạt. Coverage đã được cập nhật.");
         verify(jobs).executeAiMutation(eq(1L), eq(7L), any(), any(Supplier.class));
+    }
+
+    @Test
+    void passesConfiguredMavenArgumentsToWarmCompileAndEveryTestAttempt() throws Exception {
+        producesReport = true;
+        casesPerRun = List.of(errorCase("first"), "");
+        String args = "-Dskip.npm=true -Dskip.installnodenpm=true";
+        when(units.repairFailing(eq(1L), any())).thenReturn(List.of(new UnitTest()));
+
+        automatic(true, args);
+
+        assertThat(warms).isEqualTo(1);
+        assertThat(runs).isEqualTo(2);
+        assertThat(commands.stream().filter(command -> command.get(0).equals("exec") && !command.contains("rm")))
+                .allSatisfy(command -> assertThat(command).containsSubsequence("-e", "MAVEN_ARGS=" + args));
     }
 
     @Test
@@ -319,6 +361,48 @@ class SandboxTestRunServiceTest {
                 .isEqualTo(commands.stream().filter(c -> c.get(0).equals("rm")).count());
     }
 
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void unitStageCountsAiWaitFromGenerationAndRepairOnly(boolean needsRepair) {
+        producesReport = true;
+        casesPerRun = needsRepair ? List.of(errorCase("technicalError"), "") : List.of("");
+        var lastAiWait = new java.util.concurrent.atomic.AtomicLong();
+        when(units.repairFailing(eq(1L), any())).thenAnswer(call -> {
+            Runnable finishWait = GenerationJobContext.startLlmWait();
+            try { Thread.sleep(10); }
+            finally { finishWait.run(); }
+            long afterRepair = (long) GenerationJobContext.metrics().get("llmHttpWaitNanos");
+            assertThat(afterRepair).isGreaterThanOrEqualTo(lastAiWait.get() + 10_000_000);
+            lastAiWait.set(afterRepair);
+            return List.of(new UnitTest());
+        });
+        var jobProgress = new GenerationProgressService();
+        var realJobs = new GenerationJobService(Runnable::run, jobProgress, null, null, null);
+        var stage = GenerationProgressStage.UNIT_TEST;
+        var executor = java.util.concurrent.Executors.newSingleThreadExecutor();
+        try {
+            service = new SandboxTestRunService(units, projects, coverage, realJobs, javaVersions,
+                    executor, this::fakeDocker);
+            realJobs.submit(1L, 7L, stage, () -> GenerationProgressService.deferCompletion(() ->
+                    service.generateAndVerify(1L, null, () -> {
+                        jobProgress.start(1L, stage, 1, "Generating");
+                        Runnable finishWait = GenerationJobContext.startLlmWait();
+                        try { Thread.sleep(10); }
+                        catch (InterruptedException failure) { throw new IllegalStateException(failure); }
+                        finally { finishWait.run(); }
+                        lastAiWait.set((long) GenerationJobContext.metrics().get("llmHttpWaitNanos"));
+                        jobProgress.completeAfterCommit(1L, stage, "Generated");
+                        return true;
+                    })));
+            var result = jobProgress.get(1L, stage);
+            assertThat(result.status()).isEqualTo(GenerationProgressStatus.COMPLETED);
+            assertThat(runs).isEqualTo(needsRepair ? 2 : 1);
+            assertThat(result.runMetrics().llmWaitMillis()).isPositive().isEqualTo(lastAiWait.get() / 1_000_000);
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
     @Test
     void removesAnAlreadyWarmedContainerWhenGenerationReturnsNoTests() throws Exception {
         var warmed=new java.util.concurrent.CountDownLatch(1);
@@ -394,7 +478,7 @@ class SandboxTestRunServiceTest {
 
         verify(units).repairFailing(eq(1L), org.mockito.ArgumentMatchers.argThat(failures ->
                 failures.size() == 1 && failures.get(0).methodName().equals("verify") && !failures.get(0).assertion()));
-        assertThat(service.state(1L).message()).contains("ShopTest#value", "AI không sửa");
+        assertThat(service.state(1L).message()).contains("ShopTest#value", "AI không tự sửa");
     }
 
     @org.junit.jupiter.params.ParameterizedTest
@@ -405,7 +489,38 @@ class SandboxTestRunServiceTest {
         service.start(1L,null,7L);
         verify(units,never()).repairFailing(any(),any());
         verify(units,never()).removeUncompilable(any(),any());
-        assertThat(service.state(1L).message()).contains("ShopTest#value", "AI không sửa");
+        assertThat(service.state(1L).message()).contains("ShopTest#value", "AI không tự sửa");
+    }
+
+    @Test
+    void repairsMockitoExceptionWrappedByJUnitButKeepsDomainExceptionsAndOracleFailures() {
+        producesReport = true;
+        String wrapped = "<testcase name=\"fixture\" classname=\"demo.ShopTest\">"
+                + "<failure type=\"org.opentest4j.AssertionFailedError\" message=\"Unexpected exception thrown: org.mockito.exceptions.misusing.PotentialStubbingProblem\">"
+                + "at org.junit.jupiter.api.AssertDoesNotThrow.assertDoesNotThrow(AssertDoesNotThrow.java:51)\n"
+                + "Caused by: org.mockito.exceptions.misusing.PotentialStubbingProblem"
+                + "</failure></testcase>";
+        String domain = wrapped.replace("fixture", "domain")
+                .replace("org.mockito.exceptions.misusing.PotentialStubbingProblem", "demo.DomainConflict");
+        casesPerRun = List.of(wrapped + domain + assertionCase("value"), domain + assertionCase("value"));
+        when(units.repairFailing(eq(1L), any())).thenReturn(List.of(new UnitTest()));
+        service.start(1L, null, 7L);
+        verify(units).repairFailing(eq(1L), org.mockito.ArgumentMatchers.argThat(failures ->
+                failures.size() == 1 && failures.get(0).methodName().equals("fixture") && !failures.get(0).assertion()));
+        assertThat(service.state(1L).message()).contains("ShopTest#value", "ShopTest#domain", "AI không tự sửa");
+    }
+
+    @Test
+    void repairsMockitoWantedButNotInvokedWhenSurefireReportsItsTitleAsType() {
+        producesReport = true;
+        String failure = "<testcase name=\"verify\" classname=\"demo.ShopTest\">"
+                + "<failure type=\"Wanted but not invoked\" message=\"Wanted but not invoked: cache.get(n); "
+                + "However, there was exactly 1 interaction with this mock:\">wanted</failure></testcase>";
+        casesPerRun = List.of(failure + assertionCase("value"), assertionCase("value"));
+        when(units.repairFailing(eq(1L), any())).thenReturn(List.of(new UnitTest()));
+        service.start(1L, null, 7L);
+        verify(units).repairFailing(eq(1L), org.mockito.ArgumentMatchers.argThat(failures ->
+                failures.size() == 1 && failures.get(0).methodName().equals("verify") && !failures.get(0).assertion()));
     }
 
     @BeforeEach
@@ -515,6 +630,60 @@ class SandboxTestRunServiceTest {
         // Không giảm được số test fail thì không gọi AI thêm vòng nữa để khỏi tốn quota.
         verify(units, org.mockito.Mockito.times(1)).repairFailing(eq(1L), any());
         assertThat(service.state(1L).status()).isEqualTo(Status.TESTS_FAILED);
+        assertThat(service.state(1L).message()).contains("Số lỗi kỹ thuật không giảm");
+    }
+
+    @Test
+    void restoresThePreviousTestsWhenARepairAddsTechnicalErrors() {
+        startExit = 3;
+        producesReport = true;
+        // Bản sửa 1 test làm 3 test khác cùng lớp lỗi theo: trả lại bản cũ và chạy lại để kết quả cuối không tệ hơn.
+        casesPerRun = List.of(errorCase("a"), errorCase("a") + errorCase("b") + errorCase("c"), errorCase("a"));
+        List<UnitTest> previous = List.of(new UnitTest());
+        when(units.repairFailing(eq(1L), any())).thenReturn(previous);
+
+        service.start(1L, null, 7L);
+
+        verify(units).restore(1L, previous);
+        verify(units, org.mockito.Mockito.times(1)).repairFailing(eq(1L), any());
+        assertThat(runs).isEqualTo(3);
+        assertThat(service.state(1L).message()).contains("làm tăng lỗi kỹ thuật", "khôi phục").doesNotContain("AI đã sửa");
+    }
+
+    @Test
+    void capsRepairAtTwoRoundsEvenWhenTechnicalErrorsKeepDropping() {
+        startExit = 3;
+        producesReport = true;
+        casesPerRun = List.of(errorCase("a") + errorCase("b") + errorCase("c"),
+                errorCase("a") + errorCase("b"), errorCase("a"), "");
+        when(units.repairFailing(eq(1L), any())).thenReturn(List.of(new UnitTest()));
+
+        service.start(1L, null, 7L);
+
+        verify(units, org.mockito.Mockito.times(2)).repairFailing(eq(1L), any());
+        assertThat(runs).isEqualTo(3);
+        assertThat(service.state(1L).status()).isEqualTo(Status.TESTS_FAILED);
+        assertThat(service.state(1L).message()).contains("Đã đạt giới hạn 2 vòng");
+    }
+
+    @Test
+    void replaysSavedNexusFailuresWithoutCallingAiOrDocker() throws Exception {
+        // Fixture rút từ Surefire của lượt NEXUS chẩn đoán ngày 19/11, chỉ giữ tên và lỗi.
+        String report = Files.readString(Path.of(getClass().getResource("/fixtures/nexus-debug-failures.xml").toURI()));
+        String cases = report.replaceFirst("(?s)^<testsuite[^>]*>", "").replace("</testsuite>", "");
+        startExit = 3;
+        producesReport = true;
+        casesPerRun = List.of(cases);
+        when(units.repairFailing(eq(1L), any())).thenReturn(List.of(new UnitTest()));
+
+        service.start(1L, null, 7L);
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<UnitTestService.TestFailure>> failures = ArgumentCaptor.forClass(List.class);
+        verify(units).repairFailing(eq(1L), failures.capture());
+        assertThat(failures.getValue()).hasSize(11).noneMatch(UnitTestService.TestFailure::assertion);
+        assertThat(runs).isEqualTo(2);
+        assertThat(service.state(1L).message()).contains("Số lỗi kỹ thuật không giảm", "19 test cho kết quả khác mong đợi");
     }
     @Test
     void doesNotCallAiUnlessTheUserAskedForRepair() {
@@ -544,8 +713,8 @@ class SandboxTestRunServiceTest {
         assertThat(failures.getValue()).noneMatch(UnitTestService.TestFailure::assertion);
         var state = service.state(1L);
         assertThat(state.status()).isEqualTo(Status.TESTS_FAILED);
-        assertThat(state.message()).contains("AI đã sửa 2", "1 test fail ở assertion", "ShopTest#chargesFullPrice",
-                "cần người kiểm tra", "AI không sửa");
+        assertThat(state.message()).contains("AI đã sửa 2", "1 test cho kết quả khác mong đợi", "ShopTest#chargesFullPrice",
+                "Hãy kiểm tra lại", "AI không tự sửa");
         assertThat(state.message()).doesNotContain("ShopTest#rejectsEmptyCart", "ShopTest#appliesCoupon");
     }
 
@@ -559,7 +728,7 @@ class SandboxTestRunServiceTest {
 
         verify(units, never()).repairFailing(any(), any());
         String message = service.state(1L).message();
-        assertThat(message).contains("Không có lỗi kỹ thuật nào để AI sửa", "2 test fail ở assertion",
+        assertThat(message).contains("Không có lỗi kỹ thuật nào để AI sửa", "2 test cho kết quả khác mong đợi",
                 "ShopTest#chargesFullPrice", "ShopTest#keepsStock");
         assertThat(message).doesNotContain("AI chưa sửa được");
     }
@@ -603,8 +772,8 @@ class SandboxTestRunServiceTest {
         service.start(1L, null);
 
         String message = service.state(1L).message();
-        assertThat(message).contains("Đã chạy 7 test: 2 đạt, 5 không đạt.", "3 test fail ở assertion",
-                "ShopTest#a1, ShopTest#a2, ShopTest#a3", "lệch nghiệp vụ", "cần người kiểm tra", "AI không sửa");
+        assertThat(message).contains("Đã chạy 7 test: 2 đạt, 5 không đạt.", "3 test cho kết quả khác mong đợi",
+                "ShopTest#a1, ShopTest#a2, ShopTest#a3", "chưa đúng Business Rule", "Hãy kiểm tra lại", "AI không tự sửa");
         assertThat(message).doesNotContain("ShopTest#e1", "AI đã sửa", "AI chưa sửa");
     }
 
@@ -619,7 +788,7 @@ class SandboxTestRunServiceTest {
         service.start(1L, null);
 
         String message = service.state(1L).message();
-        assertThat(message).contains("7 test fail ở assertion", "ShopTest#a5 … và 2 test khác");
+        assertThat(message).contains("7 test cho kết quả khác mong đợi", "ShopTest#a5 … và 2 test khác");
         assertThat(message).doesNotContain("ShopTest#a6", "ShopTest#a7");
     }
 
@@ -678,7 +847,7 @@ class SandboxTestRunServiceTest {
         verify(units).repairFailing(eq(1L), failures.capture());
         assertThat(failures.getValue()).extracting(UnitTestService.TestFailure::methodName).containsExactly("first", "second");
         assertThat(service.state(1L).status()).isEqualTo(Status.FAILED);
-        assertThat(service.state(1L).message()).isEqualTo("AI đã sửa 2 lượt test qua 1 vòng. Còn 2 test không biên dịch được: ShopTest#first, ShopTest#second.");
+        assertThat(service.state(1L).message()).isEqualTo("AI đã sửa 2 lượt test qua 1 vòng. Còn 2 test không biên dịch được: ShopTest#first, ShopTest#second. Số lỗi kỹ thuật không giảm; dừng tự sửa.");
         verify(units, never()).restore(any(), any());
         verify(units, never()).removeUncompilable(any(), any());
     }

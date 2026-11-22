@@ -77,6 +77,7 @@ class TestPlanControllerTest {
                 org.mockito.ArgumentMatchers.eq(1L),
                 org.mockito.ArgumentMatchers.eq(10L),
                 org.mockito.ArgumentMatchers.eq(GenerationProgressStage.TEST_PLAN),
+                org.mockito.ArgumentMatchers.any(Runnable.class),
                 org.mockito.ArgumentMatchers.any(Runnable.class)))
                 .thenReturn(new GenerationJobAcceptedDto(
                         GenerationProgressStage.TEST_PLAN,

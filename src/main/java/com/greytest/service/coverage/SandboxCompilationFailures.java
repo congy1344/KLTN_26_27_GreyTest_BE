@@ -68,6 +68,26 @@ final class SandboxCompilationFailures {
         return sources;
     }
 
+    static java.util.Set<String> exportedFixtureMethods(byte[] archive) throws IOException {
+        var methods = new LinkedHashSet<String>();
+        var parser = new JavaParser(new ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_21));
+        for (String source : sources(archive, "").values()) {
+            var parsed = parser.parse(source);
+            if (!parsed.isSuccessful()) continue;
+            var unit = parsed.getResult().orElseThrow();
+            String prefix = unit.getPackageDeclaration().map(pkg -> pkg.getNameAsString() + ".").orElse("");
+            for (var method : unit.findAll(MethodDeclaration.class)) {
+                if (method.getAnnotations().stream().noneMatch(a -> TEST_ANNOTATIONS.contains(a.getName().getIdentifier()))) continue;
+                var type = method.findAncestor(TypeDeclaration.class).orElse(null);
+                if (type == null || type.getParentNode().orElse(null) != unit) continue;
+                String name = type.getNameAsString();
+                if (name.matches(".*_(?:Fixture\\d+Test|GreyTest_[\\da-f]+(?:_\\d+)?Test)"))
+                    methods.add(prefix + name + "#" + method.getNameAsString());
+            }
+        }
+        return methods;
+    }
+
     private static void attribute(Diagnostic error, CompilationUnit unit, String source, Map<String, LinkedHashSet<String>> details) {
         List<MethodDeclaration> tests = unit.findAll(MethodDeclaration.class).stream()
                 .filter(method -> method.getAnnotations().stream().anyMatch(annotation -> TEST_ANNOTATIONS.contains(annotation.getName().getIdentifier())))

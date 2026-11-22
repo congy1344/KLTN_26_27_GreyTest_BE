@@ -13,7 +13,10 @@ import com.github.javaparser.ast.body.MethodDeclaration;
 import com.github.javaparser.ast.expr.ConditionalExpr;
 
 import com.github.javaparser.ast.expr.Expression;
+import com.github.javaparser.ast.expr.MethodCallExpr;
 import com.github.javaparser.ast.expr.SwitchExpr;
+import com.github.javaparser.ast.stmt.CatchClause;
+import com.github.javaparser.ast.stmt.TryStmt;
 import com.github.javaparser.ast.nodeTypes.SwitchNode;
 import com.github.javaparser.ast.stmt.BlockStmt;
 import com.github.javaparser.ast.stmt.DoStmt;
@@ -80,6 +83,16 @@ public final class MethodBranchAnalyzer {
                 } else if (node instanceof DoStmt statement) {
                     int[] whole = lines(statement, methodLineStart);
                     addBinary(branches, nextPrefix(counters, "DO_WHILE"), "DO_WHILE", statement.getCondition(), whole, whole, "REPEAT", "EXIT");
+                } else if (node instanceof TryStmt statement && !statement.getCatchClauses().isEmpty()) {
+                    addTry(branches, nextPrefix(counters, "TRY"), statement, methodLineStart);
+                } else if (node instanceof MethodCallExpr call && isOptionalTerminal(call)) {
+                    // Optional rỗng/có giá trị là một nhánh thật (JaCoCo cũng đếm), ví dụ findById(...).orElseThrow(...).
+                    int[] whole = lines(call, methodLineStart);
+                    addBinary(branches, nextPrefix(counters, "OPTIONAL"), "OPTIONAL", call.getScope().orElseThrow(),
+                            whole, whole, "PRESENT", "EMPTY");
+                } else if (node instanceof MethodCallExpr call && isGuardCall(call)) {
+                    int[] whole = lines(call, methodLineStart);
+                    addBinary(branches, nextPrefix(counters, "GUARD"), "GUARD", call, whole, whole, "PASS", "FAIL");
                 }
             });
             List<SourceBranchDto> anchors = new ArrayList<>();
@@ -130,6 +143,39 @@ public final class MethodBranchAnalyzer {
                 && switchNode.getEntries().stream().noneMatch(MethodBranchAnalyzer::isDefaultEntry)) {
             addOutcome(branches, prefix + "::NO_MATCH", "SWITCH", "NO_MATCH",
                     normalized(switchNode.getSelector()), lines(node, methodLineStart));
+        }
+    }
+
+    private static final java.util.Set<String> OPTIONAL_TERMINALS =
+            java.util.Set.of("orElseThrow", "orElse", "orElseGet", "ifPresent", "ifPresentOrElse");
+
+    /** Lời gọi kết thúc chuỗi Optional, chọn hành vi theo có/không có giá trị. */
+    private static boolean isOptionalTerminal(MethodCallExpr call) {
+        return call.getScope().isPresent() && OPTIONAL_TERMINALS.contains(call.getNameAsString());
+    }
+
+    /** Lời gọi kiểm tra điều kiện đầu vào và ném lỗi khi sai (Objects/Assert/Preconditions/Validate). */
+    private static boolean isGuardCall(MethodCallExpr call) {
+        String scope = call.getScope().map(Expression::toString).orElse("");
+        String owner = scope.substring(scope.lastIndexOf('.') + 1);
+        String name = call.getNameAsString();
+        return switch (owner) {
+            case "Objects" -> name.startsWith("requireNonNull");
+            case "Preconditions" -> name.startsWith("check");
+            case "Assert", "Validate" -> true;
+            default -> false;
+        };
+    }
+
+    private static void addTry(List<SourceBranchDto> branches, String prefix, TryStmt statement, Integer methodLineStart) {
+        String condition = statement.getCatchClauses().stream()
+                .map(clause -> normalized(clause.getParameter().getType()))
+                .collect(Collectors.joining(" | "));
+        addOutcome(branches, prefix + "::SUCCESS", "TRY", "SUCCESS", condition, lines(statement.getTryBlock(), methodLineStart));
+        int catchNumber = 0;
+        for (CatchClause clause : statement.getCatchClauses()) {
+            addOutcome(branches, prefix + "::CATCH-" + (++catchNumber), "TRY", normalized(clause.getParameter().getType()),
+                    condition, lines(clause, methodLineStart));
         }
     }
 
@@ -187,6 +233,12 @@ public final class MethodBranchAnalyzer {
             List<SourceBranchDto> branches,
             int[] counter,
             Integer methodLineStart) {
+        if (statement instanceof TryStmt tryStmt) {
+            // Thân try và finally vẫn chạy trên nhánh thành công nên giữ anchor; catch đã là outcome của TRY.
+            collectStatementAnchors(tryStmt.getTryBlock(), branches, counter, methodLineStart);
+            tryStmt.getFinallyBlock().ifPresent(block -> collectStatementAnchors(block, branches, counter, methodLineStart));
+            return;
+        }
         if (isDecisionStatement(statement)) return;
         if (statement instanceof BlockStmt block) {
             block.getStatements().forEach(child -> collectStatementAnchors(child, branches, counter, methodLineStart));
@@ -204,7 +256,8 @@ public final class MethodBranchAnalyzer {
                 || statement instanceof WhileStmt
                 || statement instanceof DoStmt
                 || statement.findFirst(ConditionalExpr.class).isPresent()
-                || statement.findFirst(SwitchExpr.class).isPresent();
+                || statement.findFirst(SwitchExpr.class).isPresent()
+                || statement.findFirst(MethodCallExpr.class, call -> isOptionalTerminal(call) || isGuardCall(call)).isPresent();
     }
 
     private static String nextPrefix(Map<String, Integer> counters, String kind) {

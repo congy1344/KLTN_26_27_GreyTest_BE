@@ -757,6 +757,138 @@ public class SourceUpdateService {
         return measureUpdate("apply", projectId, user, () -> applyVerifiedUpdate(projectId, updateId, user));
     }
 
+    /**
+     * Luồng cập nhật source rút gọn: áp dụng source mới ngay sau khi phân tích, không qua bản nháp sinh tăng dần.
+     * Chỉ xóa BR/Test Plan/Test Case/Unit Test của method bị sửa hoặc xóa; phần không đổi giữ nguyên.
+     * Người dùng sinh lại phần còn thiếu bằng "Tiếp tục sinh" ở từng bước như luồng thường.
+     */
+    @Transactional
+    public SourceUpdateDto applySourceChanges(Long projectId, Long updateId, AuthUser user) {
+        return measureUpdate("apply-source", projectId, user, () -> applySourceChangesVerified(projectId, updateId, user));
+    }
+
+    private SourceUpdateDto applySourceChangesVerified(Long projectId, Long updateId, AuthUser user) {
+        Project project = getProjectAndCheckAccess(projectId, user);
+        guardMutation(projectId, updateId);
+        SourceUpdate update = sourceUpdateRepository.findByIdAndProjectId(updateId, projectId)
+                .orElseThrow(() -> new IllegalArgumentException("Không tìm thấy bản cập nhật " + updateId));
+        List<SourceUpdateItem> items = sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId);
+        if (update.getStatus() == SourceUpdateStatus.APPLIED) return sourceUpdateMapper.toUpdateDto(update, items);
+        if (update.getStatus() != SourceUpdateStatus.ANALYZED) {
+            throw new IllegalArgumentException("Chỉ có thể áp dụng source mới ngay sau khi phân tích xong: " + update.getStatus());
+        }
+        SourceRevision candidate = sourceRevisionRepository.findById(update.getCandidateRevisionId())
+                .orElseThrow(() -> new IllegalArgumentException("Không tìm thấy revision ứng viên"));
+        lockArtifactRows(items);
+
+        // Mọi thay đổi method đều được nhận; quyết định nghiệp vụ nằm ở bước duyệt BR/Plan/Case sinh lại.
+        List<SourceUpdateItem> methodItems = items.stream()
+                .filter(i -> i.getTargetType() == SourceUpdateTargetType.METHOD && i.getAction() != SourceUpdateAction.KEEP).toList();
+        methodItems.forEach(i -> i.setReviewStatus(SourceUpdateReviewStatus.ACCEPTED));
+        var scanned = validateReviewedMethodSources(projectId, candidate, methodItems);
+
+        // Xóa artifact bị ảnh hưởng từ dưới lên: Unit Test -> Test Case -> Test Plan -> BR.
+        Set<Long> ruleIds = targetIds(items, SourceUpdateTargetType.BUSINESS_RULE);
+        Set<Long> changedMethodIds = targetIds(methodItems, SourceUpdateTargetType.METHOD);
+        businessRuleRepository.findByProjectId(projectId).stream()
+                .filter(rule -> changedMethodIds.contains(rule.getMethodId())).forEach(rule -> ruleIds.add(rule.getId()));
+        Set<Long> planIds = targetIds(items, SourceUpdateTargetType.TEST_PLAN);
+        for (Long ruleId : ruleIds) {
+            testPlanRepository.findByBusinessRuleId(ruleId).forEach(plan -> planIds.add(plan.getId()));
+            testPlanCoveredRuleRepository.findByBusinessRuleId(ruleId).forEach(link -> planIds.add(link.getTestPlanId()));
+        }
+        // Method bị sửa mất BR thì cần sinh lại BR; method bị xóa mất BR thì không cần sinh gì thêm.
+        Set<Long> deletedMethodIds = methodItems.stream()
+                .filter(i -> i.getAction() == SourceUpdateAction.REMOVE && i.getTargetId() != null)
+                .map(SourceUpdateItem::getTargetId).collect(Collectors.toSet());
+        boolean rulesNeedRegeneration = methodItems.stream().anyMatch(i -> i.getAction() == SourceUpdateAction.CREATE)
+                || businessRuleRepository.findAllById(ruleIds).stream()
+                        .anyMatch(rule -> rule.getMethodId() != null && !deletedMethodIds.contains(rule.getMethodId()));
+        // Test Plan bị xóa nhưng còn phủ BR không đổi thì BR đó cần Test Plan mới.
+        Set<Long> survivingRulesLosingPlan = new HashSet<>();
+        for (Long planId : planIds) {
+            testPlanRepository.findById(planId).map(TestPlan::getBusinessRuleId).ifPresent(survivingRulesLosingPlan::add);
+            testPlanCoveredRuleRepository.findByTestPlanId(planId).forEach(link -> survivingRulesLosingPlan.add(link.getBusinessRuleId()));
+        }
+        survivingRulesLosingPlan.removeAll(ruleIds);
+        Set<Long> caseIds = targetIds(items, SourceUpdateTargetType.TEST_CASE);
+        testCaseRepository.findByTestPlanIdIn(List.copyOf(planIds)).forEach(tc -> caseIds.add(tc.getId()));
+        Set<Long> unitTestIds = targetIds(items, SourceUpdateTargetType.UNIT_TEST);
+        unitTestRepository.findByTestCaseIdIn(List.copyOf(caseIds)).forEach(ut -> unitTestIds.add(ut.getId()));
+        // Ghi lại nội dung trước khi xóa để các tab hiển thị phần "đã xóa" kèm mã và mô tả.
+        List<SourceUpdateItem> removedItems = new java.util.ArrayList<>();
+        businessRuleRepository.findAllById(ruleIds).forEach(rule -> removedItems.add(recordRemoval(updateId, items,
+                SourceUpdateTargetType.BUSINESS_RULE, rule.getId(), Map.of("ruleCode", text(rule.getRuleCode()), "description", text(rule.getDescription())))));
+        testPlanRepository.findAllById(planIds).forEach(plan -> removedItems.add(recordRemoval(updateId, items,
+                SourceUpdateTargetType.TEST_PLAN, plan.getId(), Map.of("planCode", text(plan.getPlanCode()), "title", text(plan.getTitle())))));
+        testCaseRepository.findAllById(caseIds).forEach(testCase -> removedItems.add(recordRemoval(updateId, items,
+                SourceUpdateTargetType.TEST_CASE, testCase.getId(), Map.of("caseCode", text(testCase.getCaseCode()), "description", text(testCase.getDescription())))));
+        unitTestRepository.findAllById(unitTestIds).forEach(test -> removedItems.add(recordRemoval(updateId, items,
+                SourceUpdateTargetType.UNIT_TEST, test.getId(), Map.of("testClassName", text(test.getTestClassName()), "testMethodName", text(test.getTestMethodName())))));
+        removedItems.stream().filter(item -> !items.contains(item)).forEach(items::add);
+        unitTestRepository.deleteAllById(unitTestIds);
+        testCaseRepository.deleteAllById(caseIds);
+        testPlanRepository.deleteAllById(planIds);
+        businessRuleRepository.deleteAllById(ruleIds);
+        businessRuleRepository.flush();
+
+        methodItems.stream().filter(i -> i.getAction() == SourceUpdateAction.REMOVE).forEach(i -> applyMethodUpdate(projectId, i));
+        methodItems.stream().filter(i -> i.getAction() != SourceUpdateAction.REMOVE).forEach(i -> applyMethodUpdate(projectId, i));
+        synchronizeChangedSource(projectId, methodItems, scanned);
+
+        project.setStoragePath(candidate.getStoragePath());
+        project.setActiveSourceRevisionId(candidate.getId());
+        project.setActiveSourceUpdateId(null);
+        // Lùi về bước sớm nhất còn phải sinh bù; chỉ xóa method thì giữ nguyên bước hiện tại.
+        ProjectStatus resumeFrom = rulesNeedRegeneration ? ProjectStatus.BR_PENDING_REVIEW
+                : !survivingRulesLosingPlan.isEmpty() ? ProjectStatus.BR_APPROVED : null;
+        if (resumeFrom != null && project.getStatus() != ProjectStatus.FAILED
+                && project.getStatus().compareTo(resumeFrom) > 0) {
+            project.setStatus(resumeFrom);
+        }
+        projectRepository.save(project);
+
+        items.stream().filter(i -> i.getTargetType() != SourceUpdateTargetType.METHOD)
+                .forEach(i -> i.setReviewStatus(SourceUpdateReviewStatus.ACCEPTED));
+        sourceUpdateItemRepository.saveAll(items);
+        update.setStatus(SourceUpdateStatus.APPLIED);
+        update = sourceUpdateRepository.save(update);
+        log.info("Đã áp dụng source mới cho project {} (update {}): xóa {} BR, {} Plan, {} Case, {} Unit Test để sinh lại",
+                projectId, updateId, ruleIds.size(), planIds.size(), caseIds.size(), unitTestIds.size());
+        return sourceUpdateMapper.toUpdateDto(update, items);
+    }
+
+    /** Đánh dấu artifact bị xóa: dùng lại mục phân tích nếu có, nếu không thì tạo mục mới cho artifact phát hiện thêm. */
+    private SourceUpdateItem recordRemoval(Long updateId, List<SourceUpdateItem> items, SourceUpdateTargetType type,
+            Long targetId, Map<String, String> snapshot) {
+        SourceUpdateItem item = items.stream().filter(i -> i.getTargetType() == type && Objects.equals(i.getTargetId(), targetId))
+                .findFirst().orElseGet(() -> {
+                    SourceUpdateItem created = new SourceUpdateItem();
+                    created.setSourceUpdateId(updateId);
+                    created.setTargetType(type);
+                    created.setTargetId(targetId);
+                    created.setReason("Thuộc method bị thay đổi hoặc bị xóa");
+                    return created;
+                });
+        item.setAction(SourceUpdateAction.REMOVE);
+        item.setReviewStatus(SourceUpdateReviewStatus.ACCEPTED);
+        try {
+            item.setBeforeData(objectMapper.writeValueAsString(snapshot));
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Không ghi được nội dung artifact trước khi xóa", e);
+        }
+        return item;
+    }
+
+    private static String text(String value) {
+        return value == null ? "" : value;
+    }
+
+    private static Set<Long> targetIds(List<SourceUpdateItem> items, SourceUpdateTargetType type) {
+        return items.stream().filter(i -> i.getTargetType() == type && i.getTargetId() != null)
+                .map(SourceUpdateItem::getTargetId).collect(Collectors.toCollection(HashSet::new));
+    }
+
     private SourceUpdateDto applyVerifiedUpdate(Long projectId, Long updateId, AuthUser user) {
         Project project = getProjectAndCheckAccess(projectId, user);
         guardMutation(projectId, updateId);

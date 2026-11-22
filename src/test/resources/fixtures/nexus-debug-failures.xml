@@ -1,0 +1,92 @@
+<testsuite>
+  <testcase name="testGenerateCareerRoadmap_ReturnsTextForNonArrayJsonField" classname="com.nexus.backend.service.impl.CareerRoadmapAIServiceImplTest">
+    <error type="com.google.genai.errors.ClientException" message="400 . API key not valid. Please pass a valid API key.&#10;Details: {&quot;@type&quot;:&quot;type.googleapis.com/google.rpc.ErrorInfo&quot;,&quot;reason&quot;:&quot;API_KEY_INVALID&quot;,&quot;domain&quot;:&quot;googleapis.com&quot;,&quot;metadata&quot;:{&quot;service&quot;:&quot;generativelanguage.googleapis.com&quot;}}&#10;{&quot;@type&quot;:&quot;type.googleapis.com/google.rpc.LocalizedMessage&quot;,&quot;locale&quot;:&quot;en-US&quot;,&quot;message&quot;:&quot;API key not valid. Please pass a valid API key.&quot;}" />
+  </testcase>
+  <testcase name="sendRequest_rejectsForwardPendingDuplicate" classname="com.nexus.backend.service.impl.CollaborationRequestServiceImplTest">
+    <failure type="org.opentest4j.AssertionFailedError" message="expected: &lt;A collaboration request is already pending.&gt; but was: &lt;Only the project owner can invite students to this project.&gt;" />
+  </testcase>
+  <testcase name="sendRequest_rejectsReversePendingDuplicate" classname="com.nexus.backend.service.impl.CollaborationRequestServiceImplTest_Fixture3Test">
+    <failure type="org.opentest4j.AssertionFailedError" message="expected: &lt;A collaboration request is already pending.&gt; but was: &lt;Only the project owner can invite students to this project.&gt;" />
+  </testcase>
+  <testcase name="testGetDashboard_SumsOwnedAndJoinedProjects" classname="com.nexus.backend.service.impl.DashboardServiceImplTest">
+    <failure type="org.opentest4j.AssertionFailedError" message="expected: &lt;0&gt; but was: &lt;25&gt;" />
+  </testcase>
+  <testcase name="testSendSupportTicketEmail_MailExceptionHandled" classname="com.nexus.backend.service.impl.EmailServiceImplTest">
+    <failure type="org.opentest4j.AssertionFailedError" message="expected: [Ljava.lang.String;@4515dfae&lt;[support@example.com]&gt; but was: [Ljava.lang.String;@fca54c5&lt;[support@example.com]&gt;" />
+  </testcase>
+  <testcase name="testSendOtpEmail_SuccessfulDelivery" classname="com.nexus.backend.service.impl.EmailServiceImplTest">
+    <failure type="org.opentest4j.AssertionFailedError" message="expected: [Ljava.lang.String;@6896ef29&lt;[student@example.com]&gt; but was: [Ljava.lang.String;@4b9fd79&lt;[student@example.com]&gt;" />
+  </testcase>
+  <testcase name="testSendOtpEmail_MailExceptionTranslated" classname="com.nexus.backend.service.impl.EmailServiceImplTest">
+    <failure type="org.opentest4j.AssertionFailedError" message="expected: [Ljava.lang.String;@7682b160&lt;[student@example.com]&gt; but was: [Ljava.lang.String;@4e2783ee&lt;[student@example.com]&gt;" />
+  </testcase>
+  <testcase name="testSendSupportTicketEmail_SuccessfulDelivery" classname="com.nexus.backend.service.impl.EmailServiceImplTest">
+    <failure type="org.opentest4j.AssertionFailedError" message="expected: [Ljava.lang.String;@bfd7235&lt;[support@example.com]&gt; but was: [Ljava.lang.String;@7b74883&lt;[support@example.com]&gt;" />
+  </testcase>
+  <testcase name="generateRecommendation_joinsArrayFields" classname="com.nexus.backend.service.impl.GeminiServiceImplTest">
+    <failure type="org.opentest4j.AssertionFailedError" message="expected: &lt;Kotlin, Docker&gt; but was: &lt;AI analysis is currently unavailable.&gt;" />
+  </testcase>
+  <testcase name="generateRecommendation_returnsScalarFields" classname="com.nexus.backend.service.impl.GeminiServiceImplTest">
+    <failure type="org.opentest4j.AssertionFailedError" message="expected: &lt;Kotlin and Docker&gt; but was: &lt;AI analysis is currently unavailable.&gt;" />
+  </testcase>
+  <testcase name="getMatchHistoryById_MapsNullStudentAndProject" classname="com.nexus.backend.service.impl.MatchHistoryServiceImplTest">
+    <failure type="org.opentest4j.AssertionFailedError" message="expected: &lt;null&gt; but was: &lt;10&gt;" />
+  </testcase>
+  <testcase name="updateMatchHistory_SavesRequestedFields" classname="com.nexus.backend.service.impl.MatchHistoryServiceImplTest">
+    <failure type="org.opentest4j.AssertionFailedError" message="expected: &lt;Current Student&gt; but was: &lt;null null&gt;" />
+  </testcase>
+  <testcase name="testGetProjectMatches_NonemptyProjectSkills" classname="com.nexus.backend.service.impl.MatchingServiceImplTest">
+    <failure type="org.opentest4j.AssertionFailedError" message="expected: &lt;com.nexus.backend.entity.MatchHistory@5ecd22e7&gt; but was: &lt;com.nexus.backend.entity.MatchHistory@4b2be6f8&gt;" />
+  </testcase>
+  <testcase name="addSkill_mapsStudentSkillResponseFields" classname="com.nexus.backend.service.impl.SkillServiceImplTest">
+    <failure type="org.opentest4j.AssertionFailedError" message="expected: &lt;30&gt; but was: &lt;null&gt;" />
+  </testcase>
+  <testcase name="testGetMyTickets_MapsTicketsInRepositoryOrder" classname="com.nexus.backend.service.impl.SupportTicketServiceImplTest">
+    <error type="com.nexus.backend.exception.ResourceNotFoundException" message="Authentication required." />
+  </testcase>
+  <testcase name="testGetAllTicketsForAdmin_MapsTicketsInDescendingOrder" classname="com.nexus.backend.service.impl.SupportTicketServiceImplTest">
+    <error type="com.nexus.backend.exception.ResourceNotFoundException" message="Authentication required." />
+  </testcase>
+  <testcase name="testGetTicketById_AdminCanViewAnotherStudentsTicket" classname="com.nexus.backend.service.impl.SupportTicketServiceImplTest">
+    <error type="com.nexus.backend.exception.ResourceNotFoundException" message="Authentication required." />
+  </testcase>
+  <testcase name="testGetMyTickets_ThrowsWhenStudentRecordIsMissing" classname="com.nexus.backend.service.impl.SupportTicketServiceImplTest">
+    <failure type="org.opentest4j.AssertionFailedError" message="expected: &lt;Student not found.&gt; but was: &lt;Authentication required.&gt;" />
+  </testcase>
+  <testcase name="testGetTicketById_ReturnsOwnedTicket" classname="com.nexus.backend.service.impl.SupportTicketServiceImplTest">
+    <error type="com.nexus.backend.exception.ResourceNotFoundException" message="Authentication required." />
+  </testcase>
+  <testcase name="testGetTicketById_ThrowsWhenTicketIsMissing" classname="com.nexus.backend.service.impl.SupportTicketServiceImplTest">
+    <failure type="org.opentest4j.AssertionFailedError" message="expected: &lt;Support ticket not found.&gt; but was: &lt;Authentication required.&gt;" />
+  </testcase>
+  <testcase name="testGetMyTickets_RejectsUnsupportedPrincipal" classname="com.nexus.backend.service.impl.SupportTicketServiceImplTest">
+    <failure type="org.opentest4j.AssertionFailedError" message="expected: &lt;Authenticated student not found.&gt; but was: &lt;Authentication required.&gt;" />
+  </testcase>
+  <testcase name="testGetMyTickets_ReturnsEmptyListForFoundStudent" classname="com.nexus.backend.service.impl.SupportTicketServiceImplTest">
+    <error type="com.nexus.backend.exception.ResourceNotFoundException" message="Authentication required." />
+  </testcase>
+  <testcase name="testGetTicketById_RejectsTicketOwnedByAnotherStudent" classname="com.nexus.backend.service.impl.SupportTicketServiceImplTest">
+    <failure type="org.opentest4j.AssertionFailedError" message="Unexpected exception type thrown, expected: &lt;com.nexus.backend.exception.UnauthorizedException&gt; but was: &lt;com.nexus.backend.exception.ResourceNotFoundException&gt;" />
+  </testcase>
+  <testcase name="testUpdateTicketStatus_AdminCanUpdateTicket" classname="com.nexus.backend.service.impl.SupportTicketServiceImplTest">
+    <error type="com.nexus.backend.exception.ResourceNotFoundException" message="Authentication required." />
+  </testcase>
+  <testcase name="testCreateTicket_SavesNotifiesAndReturnsMappedTicket" classname="com.nexus.backend.service.impl.SupportTicketServiceImplTest">
+    <error type="com.nexus.backend.exception.ResourceNotFoundException" message="Authentication required." />
+  </testcase>
+  <testcase name="testUpdateTicketStatus_UpdatesAndSavesTicket" classname="com.nexus.backend.service.impl.SupportTicketServiceImplTest">
+    <error type="com.nexus.backend.exception.ResourceNotFoundException" message="Authentication required." />
+  </testcase>
+  <testcase name="testUpdateTicketStatus_ThrowsWhenTicketIsMissing" classname="com.nexus.backend.service.impl.SupportTicketServiceImplTest">
+    <failure type="org.opentest4j.AssertionFailedError" message="expected: &lt;Support ticket not found.&gt; but was: &lt;Authentication required.&gt;" />
+  </testcase>
+  <testcase name="testUpdateTicketStatus_RejectsNonAdmin" classname="com.nexus.backend.service.impl.SupportTicketServiceImplTest">
+    <failure type="org.opentest4j.AssertionFailedError" message="Unexpected exception type thrown, expected: &lt;com.nexus.backend.exception.UnauthorizedException&gt; but was: &lt;com.nexus.backend.exception.ResourceNotFoundException&gt;" />
+  </testcase>
+  <testcase name="testGetAllTicketsForAdmin_MapsTicketAndStudentDetails" classname="com.nexus.backend.service.impl.SupportTicketServiceImplTest_Fixture2Test">
+    <error type="com.nexus.backend.exception.ResourceNotFoundException" message="Authentication required." />
+  </testcase>
+  <testcase name="testGetTicketById_MapsOwnedTicketFields" classname="com.nexus.backend.service.impl.SupportTicketServiceImplTest_Fixture2Test">
+    <error type="com.nexus.backend.exception.ResourceNotFoundException" message="Authentication required." />
+  </testcase>
+</testsuite>

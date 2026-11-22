@@ -64,6 +64,21 @@ class LlmBatchExecutorTest {
     }
 
     @Test
+    void otherBatchesStartAfterTheFirstBatchHeadStartSoThePromptCacheIsWritten() {
+        executor = new LlmBatchExecutor(3);
+        executor.setFirstBatchHeadStartMillis(300);
+        var starts = new java.util.concurrent.ConcurrentHashMap<Integer, Long>();
+        executor.map(List.of(1, 2, 3), input -> {
+            starts.put(input, System.nanoTime());
+            try { Thread.sleep(400); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            return input;
+        });
+        long first = starts.values().stream().min(Long::compare).orElseThrow();
+        // Đúng một batch chạy ngay; các batch khác bắt đầu sau khoảng chờ để đọc được cache prefix vừa ghi.
+        assertThat(starts.values().stream().filter(t -> t - first < TimeUnit.MILLISECONDS.toNanos(250)).count()).isEqualTo(1);
+    }
+
+    @Test
     void reportsFailedBatchAndWaitsForOtherStartedBatches() {
         executor = new LlmBatchExecutor(2);
         AtomicInteger finished = new AtomicInteger();

@@ -67,7 +67,8 @@ public class TestPlanController {
                 projectId,
                 actor.getId(),
                 GenerationProgressStage.TEST_PLAN,
-                () -> testPlanService.generate(projectId, servicePath, resume)));
+                () -> testPlanService.generate(projectId, servicePath, resume),
+                () -> testPlanService.generate(projectId, servicePath, true)));
     }
 
     @PostMapping("/api/projects/{projectId}/test-plans")

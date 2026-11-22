@@ -706,7 +706,7 @@ class BusinessRuleServiceTest {
         JavaMethod branchlessMethod = method(11L, "getAppointmentById");
         branchlessMethod.setSourceCode("""
                 public Appointment getAppointmentById(Long id) {
-                    return repository.findById(id).orElseThrow();
+                    return repository.getReferenceById(id);
                 }
                 """);
         mockServiceMethods(branchlessMethod);
@@ -724,6 +724,29 @@ class BusinessRuleServiceTest {
     @Test
     void generateAllowsIndependentRulesForTheSameStatementAnchor() {
         mockProject();
+        JavaMethod method = method(11L, "saveUser");
+        method.setSourceCode("""
+                public UserDto saveUser(User user) {
+                    return mapper.toDto(repository.save(user));
+                }
+                """);
+        mockServiceMethods(method);
+        when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of());
+        when(aiAgentService.generateBusinessRules(1L, Set.of(11L))).thenReturn(
+                new BusinessRuleResponseDto(List.of(
+                        new GeneratedBusinessRuleDto(11L,
+                                "Service lưu user vào repository.", "SIDE_EFFECT", "STMT-1"),
+                        new GeneratedBusinessRuleDto(11L,
+                                "Service trả về DTO được ánh xạ từ user đã lưu.", "BUSINESS_LOGIC", "STMT-1"))));
+        mockBusinessRuleSave();
+
+        assertThat(service().generate(1L)).extracting(BusinessRuleDto::sourceBranchId)
+                .containsExactly("STMT-1", "STMT-1");
+    }
+
+    @Test
+    void generateAnchorsOptionalNotFoundBehaviourToItsOwnDecision() {
+        mockProject();
         JavaMethod method = method(11L, "findUser");
         method.setSourceCode("""
                 public User findUser(Long id) {
@@ -737,14 +760,12 @@ class BusinessRuleServiceTest {
         when(aiAgentService.generateBusinessRules(1L, Set.of(11L))).thenReturn(
                 new BusinessRuleResponseDto(List.of(
                         new GeneratedBusinessRuleDto(11L,
-                                "Khi tìm thấy user, service enrich dữ liệu user.", "INTEGRATION", "STMT-1"),
-                        new GeneratedBusinessRuleDto(11L,
-                                "Khi không tìm thấy user, service ném UserNotFoundException với thông báo User not found.",
-                                "VALIDATION", "STMT-1"))));
+                                "Khi tìm thấy user, service enrich dữ liệu; khi không tìm thấy, ném UserNotFoundException với thông báo User not found.",
+                                "VALIDATION", "OPTIONAL-1"))));
         mockBusinessRuleSave();
 
         assertThat(service().generate(1L)).extracting(BusinessRuleDto::sourceBranchId)
-                .containsExactly("STMT-1", "STMT-1");
+                .containsExactly("OPTIONAL-1");
     }
 
     @Test
@@ -1420,19 +1441,17 @@ class BusinessRuleServiceTest {
         project.setId(1L);
         project.setStatus(ProjectStatus.BR_PENDING_REVIEW);
         when(projectRepository.findById(1L)).thenReturn(Optional.of(project));
-        JavaMethod method = method(11L, "findUser");
+        JavaMethod method = method(11L, "saveUser");
         method.setSourceCode("""
-                public User findUser(Long id) {
-                    return repository.findById(id)
-                            .map(this::enrich)
-                            .orElseThrow(() -> new UserNotFoundException("User not found"));
+                public UserDto saveUser(User user) {
+                    return mapper.toDto(repository.save(user));
                 }
                 """);
         mockServiceMethods(method);
-        BusinessRule enrichRule = rule(7L, 11L, "Khi tìm thấy user, service enrich dữ liệu user.");
+        BusinessRule enrichRule = rule(7L, 11L, "Service lưu user vào repository.");
         enrichRule.setReviewNote("SOURCE_BRANCH:STMT-1\nDa review.");
         BusinessRule missingRule = rule(8L, 11L,
-                "Khi không tìm thấy user, service ném UserNotFoundException.");
+                "Service trả về DTO được ánh xạ từ user đã lưu.");
         missingRule.setReviewNote("SOURCE_BRANCH:STMT-1\nDa review.");
         when(businessRuleRepository.findByProjectId(1L)).thenReturn(List.of(enrichRule, missingRule));
         mockProjectSave();

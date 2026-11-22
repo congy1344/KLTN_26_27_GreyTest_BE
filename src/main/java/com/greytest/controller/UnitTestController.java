@@ -27,7 +27,7 @@ public class UnitTestController {
     .contentType(org.springframework.http.MediaType.parseMediaType("application/zip"))
     .body(archive.content());
  }
-   @PostMapping("/api/projects/{projectId}/unit-tests/generate") public org.springframework.http.ResponseEntity<GenerationJobAcceptedDto> generate(@PathVariable Long projectId,@RequestParam(required=false) String servicePath,@RequestParam(required=false, defaultValue="false") boolean resume,@RequestHeader("Authorization") String a){var actor=access(projectId,a);return org.springframework.http.ResponseEntity.accepted().body(jobs.submit(projectId,actor.getId(),GenerationProgressStage.UNIT_TEST,()->generateVerified(projectId,servicePath,resume)));}
+   @PostMapping("/api/projects/{projectId}/unit-tests/generate") public org.springframework.http.ResponseEntity<GenerationJobAcceptedDto> generate(@PathVariable Long projectId,@RequestParam(required=false) String servicePath,@RequestParam(required=false, defaultValue="false") boolean resume,@RequestHeader("Authorization") String a){var actor=access(projectId,a);return org.springframework.http.ResponseEntity.accepted().body(jobs.submit(projectId,actor.getId(),GenerationProgressStage.UNIT_TEST,()->generateVerified(projectId,servicePath,resume),()->generateVerified(projectId,servicePath,true)));}
    private void generateVerified(Long projectId,String servicePath,boolean resume){
     GenerationProgressService.deferCompletion(()->sandbox.generateAndVerify(projectId,servicePath,
             ()->!service.generate(projectId,servicePath,resume).isEmpty()));

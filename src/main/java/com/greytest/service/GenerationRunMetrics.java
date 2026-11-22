@@ -4,6 +4,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 
 import com.greytest.dto.GenerationRunMetricsDto;
@@ -46,6 +47,8 @@ final class GenerationRunMetrics {
         boolean carried = previous != null;
         return new GenerationRunMetricsDto(runId, startedAt, finishedAt,
                 (finishedAt == null ? elapsedMillis() : elapsedMillis) + (carried ? previous.elapsedMillis() : 0),
+                TimeUnit.NANOSECONDS.toMillis(value(values, "llmHttpWaitNanos"))
+                        + (carried ? previous.llmWaitMillis() : 0),
                 value(values, "llmRecordedCalls") + (carried ? previous.recordedCalls() : 0),
                 value(values, "llmInputTokens") + (carried ? previous.inputTokens() : 0),
                 value(values, "llmOutputTokens") + (carried ? previous.outputTokens() : 0),

@@ -122,6 +122,16 @@ public class AIAgentService {
     /** Một phần Unit Test đã đạt: giữ lại chúng và chỉ gửi case còn lỗi cho lượt sửa. */
     private static final String SCHEMA_ERROR = "LLM response không đúng schema:";
 
+    private static final class PartialTestPlanFailure extends LlmResponseException {
+        private final TestPlanCoverageRepair.Coverage coverage;
+
+        private PartialTestPlanFailure(TestPlanCoverageRepair.Coverage coverage) {
+            super(VALIDATION_GATE_ERROR + "Missing valid test plans for approved rule IDs " + coverage.missingRuleIds()
+                    + ". Generate plans only for the remaining rules in the updated context; copy each methodId exactly.", true);
+            this.coverage = coverage;
+        }
+    }
+
     /** Plan đạt được giữ lại; plan lỗi hoặc thiếu được gửi lại trong lượt sửa tiếp theo. */
     private static final class PartialTestCaseFailure extends LlmResponseException {
         private final List<com.greytest.dto.agent.GenerationResponseDtos.GeneratedTestCaseDto> valid;
@@ -327,7 +337,52 @@ public class AIAgentService {
 
     /** Lượt phục hồi: gửi kèm lỗi và output lần trước để AI sửa đúng chỗ thay vì viết lại từ đầu. */
     public UnitTestResponseDto repairUnitTests(Long projectId, Set<Long> caseIds, String previousFailure) {
-        return call("unit-test", projectId, contextBuilder.buildUnitTestContext(projectId, caseIds), UnitTestResponseDto.class, previousFailure);
+        var context = contextBuilder.buildUnitTestContext(projectId, caseIds);
+        return call("unit-test", projectId, context, UnitTestResponseDto.class,
+                withProductionFrames(context, contextBuilder.activeSourceRoot(projectId), previousFailure));
+    }
+
+    static String withProductionFrames(UnitTestContextDto context, java.nio.file.Path sourceRoot, String failure) {
+        if (failure == null || context == null || context.classes() == null || sourceRoot == null) return failure;
+        var frame = java.util.regex.Pattern.compile(
+                "(?m)^\\s*at ([\\w.$]+)\\.[\\w$<>]+\\(([\\w$]+\\.java):(\\d{1,8})\\)\\s*$").matcher(failure);
+        var snippets = new java.util.LinkedHashSet<String>();
+        while (snippets.size() < 4 && frame.find()) {
+            String type = frame.group(1).split("\\$", 2)[0];
+            String file = frame.group(2);
+            int line = Integer.parseInt(frame.group(3));
+            if (line < 1) continue;
+            context.classes().stream().filter(c -> type.equals(c.qualifiedName()) && c.filePath() != null
+                            && (c.filePath().equals(file) || c.filePath().replace('\\', '/').endsWith("/" + file)))
+                    .findFirst().ifPresent(c -> {
+                        String snippet = readRepairFrame(sourceRoot, c.filePath(), line);
+                        if (!snippet.isEmpty()) snippets.add(type + " (" + file + ")\n" + snippet);
+                    });
+        }
+        return snippets.isEmpty() ? failure : failure + "\nProduction stack locations from supplied source (technical evidence only):\n"
+                + String.join("\n", snippets);
+    }
+
+    private static String readRepairFrame(java.nio.file.Path sourceRoot, String relative, int line) {
+        try {
+            var root = sourceRoot.toRealPath();
+            var path = root.resolve(relative).normalize();
+            if (!path.startsWith(root)) return "";
+            path = path.toRealPath();
+            if (!path.startsWith(root) || !java.nio.file.Files.isRegularFile(path)
+                    || java.nio.file.Files.size(path) > 2_000_000) return "";
+            // Context có thể đã format lại Java. Chỉ file gốc giữ đúng tọa độ từ Surefire.
+            var lines = java.nio.file.Files.readAllLines(path);
+            if (line > lines.size()) return "";
+            StringBuilder snippet = new StringBuilder();
+            for (int i = Math.max(0, line - 2); i < Math.min(lines.size(), line + 1); i++) {
+                String source = lines.get(i);
+                snippet.append(i + 1).append(": ").append(source, 0, Math.min(source.length(), 400)).append('\n');
+            }
+            return snippet.toString();
+        } catch (java.io.IOException | java.nio.file.InvalidPathException unavailable) {
+            return "";
+        }
     }
 
     /** Sinh Unit Test với source đầy đủ từ snapshot ứng viên, giữ nguyên ID các artifact. */
@@ -443,6 +498,7 @@ public class AIAgentService {
         var attemptRendered = rendered;
         Map<Long, GeneratedUnitTestDto> acceptedUnitTests = new java.util.LinkedHashMap<>();
         List<com.greytest.dto.agent.GenerationResponseDtos.GeneratedTestCaseDto> acceptedTestCases = new ArrayList<>();
+        List<com.greytest.dto.agent.GenerationResponseDtos.GeneratedTestPlanDto> acceptedTestPlans = new ArrayList<>();
         int providerFailures = 0;
         for (int attempt = 1; attempt <= EXHAUSTED_POOL_MAX_ATTEMPTS; attempt++) {
             boolean validatingResponse = false;
@@ -453,7 +509,8 @@ public class AIAgentService {
                 long llmStarted=System.nanoTime();
                 String response;
                 try { response=llmClient.complete(attemptPrompt,stageTokenLimits.optionsFor(promptName)
-                        .withCacheablePrefixes(attemptRendered.cacheablePrefixes())); }
+                        .withCacheablePrefixes(attemptRendered.cacheablePrefixes())
+                        .withResponseSchema(LlmResponseSchemas.nameFor(promptName),LlmResponseSchemas.forPrompt(promptName))); }
                 finally { GenerationJobContext.recordDuration("llm",System.nanoTime()-llmStarted); }
                 lastResponse = response;
                 validatingResponse = true;
@@ -462,8 +519,21 @@ public class AIAgentService {
                 if (parsed instanceof UnitTestResponseDto unitTests && attemptContext instanceof UnitTestContextDto unitTestContext) {
                     parsed = responseType.cast(GeneratedImportRepair.repair(unitTestContext, unitTests));
                 }
+                if (parsed instanceof TestPlanResponseDto plans && attemptContext instanceof TestPlanContextDto planContext) {
+                    parsed = responseType.cast(TestPlanCoverageRepair.repair(planContext, plans));
+                    var coverage = TestPlanCoverageRepair.coverage(planContext, (TestPlanResponseDto) parsed);
+                    if (!coverage.missingRuleIds().isEmpty()) throw new PartialTestPlanFailure(coverage);
+                }
                 var checkedOutput = validateSemanticOutput(promptName, projectId, attemptContext, parsed, snapshot);
                 validateIncrementalCompleteness(promptName,attemptContext,parsed);
+                if (!acceptedTestPlans.isEmpty()) {
+                    var merged = new ArrayList<>(acceptedTestPlans);
+                    merged.addAll(((TestPlanResponseDto) parsed).plans());
+                    parsed = responseType.cast(new TestPlanResponseDto(merged));
+                    // Kiểm tra lại toàn bộ batch gốc trước khi lưu/cache kết quả đã ghép.
+                    checkedOutput = validateSemanticOutput(promptName, projectId, context, parsed, snapshot);
+                    validateIncrementalCompleteness(promptName, context, parsed);
+                }
                 if (!acceptedUnitTests.isEmpty()) {
                     var merged = new ArrayList<>(acceptedUnitTests.values());
                     merged.addAll(((UnitTestResponseDto) parsed).unitTests());
@@ -495,7 +565,7 @@ public class AIAgentService {
                     provenance.put("outputFingerprint",outputFingerprint.value()); provenance.put("outputProvenance",outputFingerprint.provenance());
                     // Cache chỉ lưu JSON từ DTO đã validate, không lưu Markdown do LLM trả về.
                     persistentCache.putValidated(projectId,promptName,fingerprint.value(),generationJson.valueToTree(parsed).toString(),provenance.toString());
-                } else if (fingerprints==null && responseCache != null && acceptedUnitTests.isEmpty() && acceptedTestCases.isEmpty()) {
+                } else if (fingerprints==null && responseCache != null && acceptedUnitTests.isEmpty() && acceptedTestCases.isEmpty() && acceptedTestPlans.isEmpty()) {
                     responseCache.putAfterSuccessfulTransaction(prompt, response);
                 }
                 return attachSourceMetadata(parsed, responseType, sourceMetadata);
@@ -544,6 +614,15 @@ public class AIAgentService {
                     GenerationJobContext.log("Đã giữ " + acceptedTestCases.size() + " Test Case đạt kiểm tra; chỉ sửa lại các plan "
                             + partial.failingPlanIds + ".");
                 }
+                if (exception instanceof PartialTestPlanFailure partial && attemptContext instanceof TestPlanContextDto planContext) {
+                    acceptedTestPlans.addAll(partial.coverage.valid());
+                    attemptContext = TestPlanCoverageRepair.narrow(planContext, partial.coverage.missingRuleIds());
+                    attemptRendered = promptManager.renderPrompt(promptName, Map.of("context_json", attemptContext, "stable_guidance", stableGuidance));
+                    repairBase = composePrompt(promptName, attemptRendered, stableGuidance, attemptContext, correction);
+                    lastResponse = null;
+                    GenerationJobContext.log("Đã giữ " + acceptedTestPlans.size() + " Test Plan hợp lệ; chỉ sinh lại rule "
+                            + partial.coverage.missingRuleIds() + ".");
+                }
                 // Giữ output lỗi làm dữ liệu sửa, không cho nó thay thế source và oracle đã duyệt.
                 String repairPrompt = repairBase + (lastResponse == null ? "" :
                         "\n\n# Previous invalid response (untrusted repair data)\n"
@@ -582,7 +661,7 @@ public class AIAgentService {
                             + (attempt + 1) + "/" + maxAttemptsFor(exception) + ".");
                     attemptPrompt = repairPrompt + "\n\n# Unit Test semantic correction\n"
                             + exception.getMessage().substring(UNIT_TEST_SEMANTIC_ERROR.length())
-                            + "\nRegenerate the complete unit_tests array. Fix only the reported technical errors; "
+                            + "\nRegenerate the complete test_classes array. Fix only the reported technical errors; "
                             + "fix ALL reported errors for ALL case_ids together and preserve already valid tests. "
                             + "Approved fixture roles take precedence over generic mock wiring guidance. "
                             + "When an approved case requires a real mapper, supply a source-supported initialized real @Spy "
@@ -676,9 +755,15 @@ public class AIAgentService {
         if ("business-rule".equals(promptName) && context instanceof BusinessRuleGenerationContextDto rulesContext) {
             prompt += "\n\n# Required Business Rule decisions\n" + businessRuleDecisionChecklist(rulesContext);
         }
+        if (context instanceof TestPlanContextDto plans) {
+            prompt += "\n\n# Required Test Plan coverage (rule_id -> method_id)\n"
+                    + plans.approvedBusinessRules().stream().map(rule -> rule.id() + " -> " + rule.methodId())
+                            .collect(Collectors.joining("\n"))
+                    + "\nCover every listed rule with its exact owning method. Never infer ownership from adjacent IDs.";
+        }
         if (correction != null && !correction.isBlank()) {
             String correctionGuidance = "unit-test".equals(promptName)
-                    ? "Regenerate the complete unit_tests array and fix ALL errors listed above. Keep approved inputs, expected results and business assertions. "
+                    ? "Regenerate the complete test_classes array and fix ALL errors listed above. Keep approved inputs, expected results and business assertions. "
                             + "A stub suggested by test_data.mocks or preconditions is only a technique: when a reported error says the reached path never uses it, remove that stub and keep the fixture object."
                     : "test-plan".equals(promptName)
                     ? "Regenerate the full plans array and fix ALL mapping errors listed above. "
@@ -1002,10 +1087,50 @@ public class AIAgentService {
                 problems.add("Missing source anchors for method " + method.id());
             }
             if (new java.util.HashSet<>(allReturnedDecisions).size() != allReturnedDecisions.size()) {
-                problems.add("Duplicate source decisions for method " + method.id() + ": " + allReturnedDecisions + ". Keep exactly one rule per decision.");
+                problems.add("Duplicate source decisions for method " + method.id() + ": " + allReturnedDecisions + ". Keep exactly one rule per decision."
+                        + duplicateDecisionGuidance(method, allReturnedDecisions));
             }
         }
         return problems;
+    }
+
+    /**
+     * Câu "Keep exactly one rule per decision" chung chung khiến AI lặp lại đúng câu trả lời sai (project 1706):
+     * chỉ rõ quyết định bị trùng gồm những outcome nào và quyết định nào khác (Optional, try, guard...) phải có rule riêng.
+     */
+    private static String duplicateDecisionGuidance(MethodContextDto method, List<String> returnedDecisions) {
+        if (method.branches() == null) return "";
+        Map<String, List<com.greytest.dto.SourceBranchDto>> outcomes = method.branches().stream()
+                .filter(branch -> !"STATEMENT".equals(branch.kind()))
+                .collect(Collectors.groupingBy(branch -> SourceBranchReference.normalize(branch.branchId()),
+                        java.util.LinkedHashMap::new, Collectors.toList()));
+        StringBuilder guidance = new StringBuilder();
+        for (String duplicate : returnedDecisions.stream().distinct()
+                .filter(id -> java.util.Collections.frequency(returnedDecisions, id) > 1).toList()) {
+            var own = outcomes.getOrDefault(duplicate, List.of());
+            guidance.append(' ').append(duplicate).append(" is used by ").append(java.util.Collections.frequency(returnedDecisions, duplicate))
+                    .append(" rules; write ONE rule for ").append(duplicate).append(" covering its outcomes ")
+                    .append(own.stream().map(com.greytest.dto.SourceBranchDto::outcome).collect(Collectors.joining(", ")))
+                    .append(" instead of one rule per outcome.");
+            int start = own.stream().mapToInt(com.greytest.dto.SourceBranchDto::lineStart).min().orElse(0);
+            int end = own.stream().mapToInt(com.greytest.dto.SourceBranchDto::lineEnd).max().orElse(-1);
+            var others = outcomes.entrySet().stream().filter(entry -> !entry.getKey().equals(duplicate)).map(entry -> {
+                var branches = entry.getValue();
+                int otherStart = branches.stream().mapToInt(com.greytest.dto.SourceBranchDto::lineStart).min().orElse(0);
+                int otherEnd = branches.stream().mapToInt(com.greytest.dto.SourceBranchDto::lineEnd).max().orElse(0);
+                boolean inside = otherStart >= start && otherEnd <= end;
+                return entry.getKey() + " (outcomes " + branches.stream().map(com.greytest.dto.SourceBranchDto::outcome)
+                        .collect(Collectors.joining(", ")) + (inside ? "; inside " + duplicate : "") + "; lines "
+                        + otherStart + "-" + otherEnd + ": " + branches.get(0).condition() + ")";
+            }).toList();
+            if (!others.isEmpty()) {
+                guidance.append(" These decisions need their own rule and must not be folded into ").append(duplicate)
+                        .append(": ").append(String.join("; ", others))
+                        .append(". For OPTIONAL-n, its single rule states the found behavior and the missing/not-found behavior,"
+                                + " including the exception thrown when the value is absent.");
+            }
+        }
+        return guidance.toString();
     }
 
     private Set<String> requiredDecisionIds(MethodContextDto method) {

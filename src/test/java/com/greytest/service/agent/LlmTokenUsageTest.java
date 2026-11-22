@@ -36,6 +36,31 @@ class LlmTokenUsageTest {
     }
 
     @Test
+    void skipsZeroResponsesFieldsWhenProxyAlsoSendsChatCompletionsFields() throws Exception {
+        // vietapi trả cả input_tokens/output_tokens = 0 lẫn prompt_tokens/completion_tokens thật.
+        JsonNode response = objectMapper.readTree("""
+                {
+                  "usage": {
+                    "prompt_tokens": 2459,
+                    "completion_tokens": 80,
+                    "total_tokens": 2539,
+                    "prompt_tokens_details": {"cached_tokens": 582},
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "input_tokens_details": null
+                  }
+                }
+                """);
+
+        LlmTokenUsage usage = LlmTokenUsage.fromOpenAi(response, "prompt", "output");
+
+        assertThat(usage.inputTokens()).isEqualTo(2459);
+        assertThat(usage.outputTokens()).isEqualTo(80);
+        assertThat(usage.cachedInputTokens()).isEqualTo(582);
+        assertThat(usage.totalTokens()).isEqualTo(2539);
+    }
+
+    @Test
     void readsChatCompletionsUsageDetails() throws Exception {
         JsonNode response = objectMapper.readTree("""
                 {

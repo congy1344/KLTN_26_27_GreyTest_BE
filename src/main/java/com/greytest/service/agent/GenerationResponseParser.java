@@ -31,7 +31,13 @@ public class GenerationResponseParser {
         }
         try {
             String payload = normalizeJsonNumericSuffixes(jsonPayload(response));
-            if (responseType == UnitTestResponseDto.class) rejectUnitTestGenerationError(payload);
+            if (responseType == UnitTestResponseDto.class) {
+                rejectUnitTestGenerationError(payload);
+                // Dạng gộp test_classes được tách local thành unit_tests mỗi case một class như trước.
+                payload = UnitTestClassSplitter.expand(payload, objectMapper);
+                // Sửa máy móc (static import, @Spy cho Clock) trước validator để không tốn lượt AI sinh lại.
+                payload = UnitTestAutoFixer.fixPayload(payload, objectMapper);
+            }
             T parsed = objectMapper.readValue(payload, responseType);
             if (parsed == null) {
                 throw new LlmResponseException("LLM response không đúng schema: payload null", true);
@@ -105,10 +111,11 @@ public class GenerationResponseParser {
 
     private void rejectUnitTestGenerationError(String payload) throws JsonProcessingException {
         JsonNode root = objectMapper.readTree(payload);
-        if (root == null || !root.has("generation_error")) return;
+        // Structured Outputs strict luôn có đủ key: generation_error = null nghĩa là không có lỗi.
+        if (root == null || !root.hasNonNull("generation_error")) return;
         // Thiếu source hoặc lệch Test Case phải dừng rõ lý do; retry cùng dữ kiện dễ ép AI bịa test.
         JsonNode error = root.get("generation_error");
-        if (root.has("unit_tests")) {
+        if (root.hasNonNull("unit_tests") || root.path("test_classes").isArray() && !root.path("test_classes").isEmpty()) {
             throw new LlmResponseException("LLM response không đúng schema: generation_error cannot accompany unit_tests.");
         }
         JsonNode caseId = error.path("case_id");

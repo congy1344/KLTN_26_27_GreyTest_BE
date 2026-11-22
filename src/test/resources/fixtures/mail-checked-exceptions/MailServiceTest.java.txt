@@ -1,0 +1,280 @@
+package io.github.jhipster.sample.service;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+import jakarta.mail.Session;
+import jakarta.mail.internet.MimeMessage;
+import java.util.Properties;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.context.MessageSource;
+import org.springframework.mail.javamail.JavaMailSender;
+import org.thymeleaf.spring6.SpringTemplateEngine;
+import tech.jhipster.config.JHipsterProperties;
+import static org.mockito.ArgumentMatchers.any;
+import io.github.jhipster.sample.domain.User;
+import java.util.Locale;
+import org.mockito.ArgumentCaptor;
+import org.thymeleaf.context.Context;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.mockito.Mockito.doThrow;
+import org.springframework.mail.MailException;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
+
+@ExtendWith(MockitoExtension.class)
+class MailServiceTest {
+
+    @Mock
+    private JHipsterProperties jHipsterProperties;
+
+    @Mock
+    private JavaMailSender javaMailSender;
+
+    @Mock
+    private MessageSource messageSource;
+
+    @Mock
+    private SpringTemplateEngine springTemplateEngine;
+
+    @InjectMocks
+    private MailService service;
+
+    @Test
+    void testSendEmail_DeliversSuppliedEmailDetails() {
+        // GreyTest trace: sendEmail | STMT-1 | BR-010 -> TP-010 -> TC-013
+        String to = "recipient@example.com";
+        String subject = "Account notice";
+        String content = "Your account is ready.";
+        boolean isMultipart = false;
+        boolean isHtml = true;
+        JHipsterProperties.Mail mail = new JHipsterProperties.Mail();
+        mail.setFrom("noreply@example.com");
+        when(jHipsterProperties.getMail()).thenReturn(mail);
+        MimeMessage mimeMessage = new MimeMessage(Session.getInstance(new Properties()));
+        when(javaMailSender.createMimeMessage()).thenReturn(mimeMessage);
+        service.sendEmail(to, subject, content, isMultipart, isHtml);
+        verify(javaMailSender).send(mimeMessage);
+        assertEquals(to, mimeMessage.getAllRecipients()[0].toString());
+        assertEquals(subject, mimeMessage.getSubject());
+        assertEquals(content, mimeMessage.getContent().toString());
+    }
+
+    @Test
+    void testSendActivationEmail_UsesActivationTemplate() {
+        // GreyTest trace: sendActivationEmail | STMT-2 | BR-017 -> TP-015 -> TC-020
+        User user = new User();
+        user.setEmail("activation@example.com");
+        user.setLogin("activation-user");
+        user.setLangKey("en");
+        String templateName = "mail/activationEmail";
+        String titleKey = "email.activation.title";
+        String renderedContent = "activation email content";
+        String resolvedSubject = "Activation";
+        JHipsterProperties.Mail mail = new JHipsterProperties.Mail();
+        mail.setBaseUrl("https://example.com");
+        mail.setFrom("noreply@example.com");
+        when(jHipsterProperties.getMail()).thenReturn(mail);
+        when(springTemplateEngine.process(org.mockito.ArgumentMatchers.eq(templateName), any(Context.class))).thenReturn(renderedContent);
+        when(messageSource.getMessage(titleKey, null, Locale.ENGLISH)).thenReturn(resolvedSubject);
+        MimeMessage mimeMessage = new MimeMessage(Session.getInstance(new Properties()));
+        when(javaMailSender.createMimeMessage()).thenReturn(mimeMessage);
+        service.sendActivationEmail(user);
+        ArgumentCaptor<Context> contextCaptor = ArgumentCaptor.forClass(Context.class);
+        verify(springTemplateEngine).process(org.mockito.ArgumentMatchers.eq(templateName), contextCaptor.capture());
+        assertEquals(user, contextCaptor.getValue().getVariable("user"));
+        verify(messageSource).getMessage(titleKey, null, Locale.ENGLISH);
+        verify(javaMailSender).send(mimeMessage);
+        assertEquals("activation@example.com", mimeMessage.getAllRecipients()[0].toString());
+        assertEquals(resolvedSubject, mimeMessage.getSubject());
+        assertEquals(renderedContent, mimeMessage.getContent().toString());
+    }
+
+    @Test
+    void testSendCreationEmail_UsesCreationTemplate() {
+        // GreyTest trace: sendCreationEmail | STMT-2 | BR-018 -> TP-016 -> TC-021
+        User user = new User();
+        user.setEmail("creation@example.com");
+        user.setLogin("creation-user");
+        user.setLangKey("en");
+        String templateName = "mail/creationEmail";
+        String titleKey = "email.activation.title";
+        String renderedContent = "creation email content";
+        String resolvedSubject = "Activation";
+        JHipsterProperties.Mail mail = new JHipsterProperties.Mail();
+        mail.setBaseUrl("https://example.com");
+        mail.setFrom("noreply@example.com");
+        when(jHipsterProperties.getMail()).thenReturn(mail);
+        when(springTemplateEngine.process(org.mockito.ArgumentMatchers.eq(templateName), any(Context.class))).thenReturn(renderedContent);
+        when(messageSource.getMessage(titleKey, null, Locale.ENGLISH)).thenReturn(resolvedSubject);
+        MimeMessage mimeMessage = new MimeMessage(Session.getInstance(new Properties()));
+        when(javaMailSender.createMimeMessage()).thenReturn(mimeMessage);
+        service.sendCreationEmail(user);
+        ArgumentCaptor<Context> contextCaptor = ArgumentCaptor.forClass(Context.class);
+        verify(springTemplateEngine).process(org.mockito.ArgumentMatchers.eq(templateName), contextCaptor.capture());
+        assertEquals(user, contextCaptor.getValue().getVariable("user"));
+        verify(messageSource).getMessage(titleKey, null, Locale.ENGLISH);
+        verify(javaMailSender).send(mimeMessage);
+        assertEquals("creation@example.com", mimeMessage.getAllRecipients()[0].toString());
+        assertEquals(resolvedSubject, mimeMessage.getSubject());
+        assertEquals(renderedContent, mimeMessage.getContent().toString());
+    }
+
+    @Test
+    void testSendPasswordResetMail_UsesResetTemplate() {
+        // GreyTest trace: sendPasswordResetMail | STMT-2 | BR-019 -> TP-017 -> TC-022
+        User user = new User();
+        user.setEmail("reset@example.com");
+        user.setLogin("reset-user");
+        user.setLangKey("en");
+        String templateName = "mail/passwordResetEmail";
+        String titleKey = "email.reset.title";
+        String renderedContent = "password reset email content";
+        String resolvedSubject = "Reset password";
+        JHipsterProperties.Mail mail = new JHipsterProperties.Mail();
+        mail.setBaseUrl("https://example.com");
+        mail.setFrom("noreply@example.com");
+        when(jHipsterProperties.getMail()).thenReturn(mail);
+        when(springTemplateEngine.process(org.mockito.ArgumentMatchers.eq(templateName), any(Context.class))).thenReturn(renderedContent);
+        when(messageSource.getMessage(titleKey, null, Locale.ENGLISH)).thenReturn(resolvedSubject);
+        MimeMessage mimeMessage = new MimeMessage(Session.getInstance(new Properties()));
+        when(javaMailSender.createMimeMessage()).thenReturn(mimeMessage);
+        service.sendPasswordResetMail(user);
+        ArgumentCaptor<Context> contextCaptor = ArgumentCaptor.forClass(Context.class);
+        verify(springTemplateEngine).process(org.mockito.ArgumentMatchers.eq(templateName), contextCaptor.capture());
+        assertEquals(user, contextCaptor.getValue().getVariable("user"));
+        verify(messageSource).getMessage(titleKey, null, Locale.ENGLISH);
+        verify(javaMailSender).send(mimeMessage);
+        assertEquals("reset@example.com", mimeMessage.getAllRecipients()[0].toString());
+        assertEquals(resolvedSubject, mimeMessage.getSubject());
+        assertEquals(renderedContent, mimeMessage.getContent().toString());
+    }
+
+    @Test
+    void testSendEmail_SendsConfiguredHtmlMessage() {
+        // GreyTest trace: sendEmail | TRY-1::SUCCESS | BR-011 -> TP-011 -> TC-014
+        String to = "recipient@example.com";
+        String subject = "Account update";
+        String content = "<p>Updated</p>";
+        JHipsterProperties.Mail mail = new JHipsterProperties.Mail();
+        mail.setFrom("sender@example.com");
+        when(jHipsterProperties.getMail()).thenReturn(mail);
+        MimeMessage mimeMessage = new MimeMessage(Session.getInstance(new Properties()));
+        when(javaMailSender.createMimeMessage()).thenReturn(mimeMessage);
+        service.sendEmail(to, subject, content, false, true);
+        verify(javaMailSender).send(mimeMessage);
+        assertEquals(to, mimeMessage.getAllRecipients()[0].toString());
+        assertEquals("sender@example.com", mimeMessage.getFrom()[0].toString());
+        assertEquals(subject, mimeMessage.getSubject());
+        assertEquals(content, mimeMessage.getContent().toString());
+    }
+
+    @Test
+    void testSendEmail_SwallowsMailException() {
+        // GreyTest trace: sendEmail | TRY-1::CATCH-1 | BR-011 -> TP-011 -> TC-015
+        JHipsterProperties.Mail mail = new JHipsterProperties.Mail();
+        mail.setFrom("sender@example.com");
+        when(jHipsterProperties.getMail()).thenReturn(mail);
+        MimeMessage mimeMessage = new MimeMessage(Session.getInstance(new Properties()));
+        when(javaMailSender.createMimeMessage()).thenReturn(mimeMessage);
+        doThrow(new MailException("approved send failure") {
+        }).when(javaMailSender).send(mimeMessage);
+        assertDoesNotThrow(() -> service.sendEmail("recipient@example.com", "Account update", "<p>Updated</p>", false, true));
+        verify(javaMailSender).send(mimeMessage);
+    }
+
+    @Test
+    void testSendEmailFromTemplate_ProcessesAndSendsRequestedTemplate() {
+        // GreyTest trace: sendEmailFromTemplate | STMT-1 | BR-012 -> TP-012 -> TC-016
+        User user = new User();
+        user.setEmail("recipient@example.com");
+        user.setLangKey("en");
+        String templateName = "mail/notice";
+        String titleKey = "email.notice.title";
+        JHipsterProperties.Mail mail = new JHipsterProperties.Mail();
+        mail.setBaseUrl("https://example.com");
+        mail.setFrom("sender@example.com");
+        when(jHipsterProperties.getMail()).thenReturn(mail);
+        when(springTemplateEngine.process(org.mockito.ArgumentMatchers.eq(templateName), any(Context.class))).thenReturn("<p>Notice</p>");
+        when(messageSource.getMessage(titleKey, null, Locale.forLanguageTag("en"))).thenReturn("Notice");
+        MimeMessage mimeMessage = new MimeMessage(Session.getInstance(new Properties()));
+        when(javaMailSender.createMimeMessage()).thenReturn(mimeMessage);
+        service.sendEmailFromTemplate(user, templateName, titleKey);
+        ArgumentCaptor<Context> contextCaptor = ArgumentCaptor.forClass(Context.class);
+        verify(springTemplateEngine).process(org.mockito.ArgumentMatchers.eq(templateName), contextCaptor.capture());
+        assertEquals(user, contextCaptor.getValue().getVariable("user"));
+        assertEquals("https://example.com", contextCaptor.getValue().getVariable("baseUrl"));
+        verify(messageSource).getMessage(titleKey, null, Locale.forLanguageTag("en"));
+        verify(javaMailSender).send(mimeMessage);
+        assertEquals("recipient@example.com", mimeMessage.getAllRecipients()[0].toString());
+        assertEquals("Notice", mimeMessage.getSubject());
+        assertEquals("<p>Notice</p>", mimeMessage.getContent().toString());
+    }
+
+    @Test
+    void testSendEmailFromTemplate_SkipsWhenEmailIsNull() {
+        // GreyTest trace: sendEmailFromTemplate | IF-1-TRUE | BR-013 -> TP-013 -> TC-017
+        User user = new User();
+        user.setEmail(null);
+        user.setLangKey("en");
+        service.sendEmailFromTemplate(user, "mail/notice", "email.notice.title");
+        verifyNoMoreInteractions(jHipsterProperties, javaMailSender, messageSource, springTemplateEngine);
+    }
+
+    @Test
+    void testSendEmailFromTemplate_SendsWhenEmailIsPresent() {
+        // GreyTest trace: sendEmailFromTemplate | IF-1-FALSE | BR-013 -> TP-013 -> TC-018
+        User user = new User();
+        user.setEmail("recipient@example.com");
+        user.setLangKey("en");
+        JHipsterProperties.Mail mail = new JHipsterProperties.Mail();
+        mail.setBaseUrl("https://example.com");
+        mail.setFrom("sender@example.com");
+        when(jHipsterProperties.getMail()).thenReturn(mail);
+        when(springTemplateEngine.process(org.mockito.ArgumentMatchers.eq("mail/notice"), any(Context.class))).thenReturn("<p>Notice</p>");
+        when(messageSource.getMessage("email.notice.title", null, Locale.forLanguageTag("en"))).thenReturn("Notice");
+        MimeMessage mimeMessage = new MimeMessage(Session.getInstance(new Properties()));
+        when(javaMailSender.createMimeMessage()).thenReturn(mimeMessage);
+        service.sendEmailFromTemplate(user, "mail/notice", "email.notice.title");
+        verify(springTemplateEngine).process(org.mockito.ArgumentMatchers.eq("mail/notice"), any(Context.class));
+        verify(messageSource).getMessage("email.notice.title", null, Locale.forLanguageTag("en"));
+        verify(javaMailSender).send(mimeMessage);
+        assertEquals("recipient@example.com", mimeMessage.getAllRecipients()[0].toString());
+        assertEquals("Notice", mimeMessage.getSubject());
+        assertEquals("<p>Notice</p>", mimeMessage.getContent().toString());
+    }
+
+    @Test
+    void testSendEmailFromTemplate_UsesContextLocaleAndSendsHtml() {
+        // GreyTest trace: sendEmailFromTemplate | STMT-5, STMT-6, STMT-7 | BR-014, BR-015, BR-016 -> TP-014 -> TC-019
+        User user = new User();
+        user.setEmail("recipient@example.com");
+        user.setLangKey("en");
+        String templateName = "mail/notice";
+        String titleKey = "email.notice.title";
+        String renderedContent = "<p>Notice</p>";
+        String resolvedSubject = "Notice";
+        String baseUrl = "https://example.com";
+        JHipsterProperties.Mail mail = new JHipsterProperties.Mail();
+        mail.setBaseUrl(baseUrl);
+        mail.setFrom("sender@example.com");
+        when(jHipsterProperties.getMail()).thenReturn(mail);
+        when(springTemplateEngine.process(org.mockito.ArgumentMatchers.eq(templateName), any(Context.class))).thenReturn(renderedContent);
+        when(messageSource.getMessage(titleKey, null, Locale.forLanguageTag("en"))).thenReturn(resolvedSubject);
+        MimeMessage mimeMessage = new MimeMessage(Session.getInstance(new Properties()));
+        when(javaMailSender.createMimeMessage()).thenReturn(mimeMessage);
+        service.sendEmailFromTemplate(user, templateName, titleKey);
+        ArgumentCaptor<Context> contextCaptor = ArgumentCaptor.forClass(Context.class);
+        verify(springTemplateEngine).process(org.mockito.ArgumentMatchers.eq(templateName), contextCaptor.capture());
+        assertEquals(user, contextCaptor.getValue().getVariable("user"));
+        assertEquals(baseUrl, contextCaptor.getValue().getVariable("baseUrl"));
+        verify(messageSource).getMessage(titleKey, null, Locale.forLanguageTag("en"));
+        verify(javaMailSender).send(mimeMessage);
+        assertEquals("recipient@example.com", mimeMessage.getAllRecipients()[0].toString());
+        assertEquals(resolvedSubject, mimeMessage.getSubject());
+        assertEquals(renderedContent, mimeMessage.getContent().toString());
+    }
+}

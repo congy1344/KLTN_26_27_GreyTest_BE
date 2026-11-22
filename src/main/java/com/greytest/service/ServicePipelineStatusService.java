@@ -8,15 +8,21 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import com.greytest.entity.BusinessRule;
+import com.greytest.entity.JavaClass;
+import com.greytest.entity.JavaMethod;
 import com.greytest.entity.Project;
 import com.greytest.entity.TestCase;
 import com.greytest.entity.TestPlan;
 import com.greytest.entity.TestPlanCoveredRule;
 import com.greytest.entity.UnitTest;
+import com.greytest.entity.enums.ClassType;
 import com.greytest.entity.enums.ProjectStatus;
 import com.greytest.entity.enums.ReviewStatus;
+import com.greytest.entity.enums.Visibility;
 import com.greytest.repository.BusinessRuleRepository;
 import com.greytest.repository.CoverageReportRepository;
+import com.greytest.repository.JavaClassRepository;
+import com.greytest.repository.JavaMethodRepository;
 import com.greytest.repository.ProjectRepository;
 import com.greytest.repository.TestCaseRepository;
 import com.greytest.repository.TestPlanCoveredRuleRepository;
@@ -38,6 +44,8 @@ public class ServicePipelineStatusService {
     private final CoverageReportRepository reports;
     private final ProjectRepository projects;
     private final ServiceScopeResolver scopes;
+    private final JavaClassRepository javaClasses;
+    private final JavaMethodRepository javaMethods;
 
     public ServicePipelineStatusService(
             BusinessRuleRepository rules,
@@ -47,7 +55,9 @@ public class ServicePipelineStatusService {
             UnitTestRepository unitTests,
             CoverageReportRepository reports,
             ProjectRepository projects,
-            ServiceScopeResolver scopes) {
+            ServiceScopeResolver scopes,
+            JavaClassRepository javaClasses,
+            JavaMethodRepository javaMethods) {
         this.rules = rules;
         this.plans = plans;
         this.coveredRules = coveredRules;
@@ -56,12 +66,16 @@ public class ServicePipelineStatusService {
         this.reports = reports;
         this.projects = projects;
         this.scopes = scopes;
+        this.javaClasses = javaClasses;
+        this.javaMethods = javaMethods;
     }
 
     @Transactional(readOnly = true)
     public ProjectStatus status(Long projectId, ServiceScope scope) {
         List<BusinessRule> scopedRules = rules(projectId, scope);
         if (scopedRules.isEmpty()) return ProjectStatus.ANALYZED;
+        // Cập nhật source xóa BR của method bị sửa hoặc thêm method mới: bước BR chưa xong dù BR còn lại đã duyệt.
+        if (hasServiceMethodWithoutRule(scope, scopedRules)) return ProjectStatus.BR_PENDING_REVIEW;
         if (scopedRules.stream().anyMatch(rule -> rule.getStatus() != ReviewStatus.APPROVED)) {
             return ProjectStatus.BR_PENDING_REVIEW;
         }
@@ -118,6 +132,20 @@ public class ServicePipelineStatusService {
     public boolean onlyUnitTestsMissing(Long projectId, ServiceScope scope, ProjectStatus reachedAtLeast) {
         return status(projectId, scope) == ProjectStatus.CASE_APPROVED
                 && reachedStatus(projectId, scope).compareTo(reachedAtLeast) >= 0;
+    }
+
+    /** Method private là helper nên được phép không có BR riêng. */
+    private boolean hasServiceMethodWithoutRule(ServiceScope scope, List<BusinessRule> scopedRules) {
+        List<Long> serviceClassIds = javaClasses.findAllById(scope.classIds()).stream()
+                .filter(type -> type.getClassType() == ClassType.SERVICE)
+                .map(JavaClass::getId)
+                .toList();
+        if (serviceClassIds.isEmpty()) return false;
+        Set<Long> ruleMethodIds = scopedRules.stream().map(BusinessRule::getMethodId).collect(Collectors.toSet());
+        return javaMethods.findByClassIdIn(serviceClassIds).stream()
+                .filter(method -> method.getVisibility() != Visibility.PRIVATE)
+                .map(JavaMethod::getId)
+                .anyMatch(id -> !ruleMethodIds.contains(id));
     }
 
     private boolean hasRuleWithoutPlan(List<BusinessRule> scopedRules, List<TestPlan> scopedPlans) {

@@ -61,8 +61,11 @@ public record LlmTokenUsage(
     }
 
     private static long firstLong(JsonNode node, String... fields) {
+        // Proxy tương thích OpenAI (VD vietapi) có thể gửi cả field kiểu Responses = 0 lẫn field Chat Completions thật;
+        // lấy giá trị khác 0 đầu tiên thay vì dừng ở field có mặt đầu tiên.
         for (String field : fields) {
-            if (node.has(field)) return node.path(field).asLong(0);
+            long value = node.path(field).asLong(0);
+            if (value != 0) return value;
         }
         return 0;
     }

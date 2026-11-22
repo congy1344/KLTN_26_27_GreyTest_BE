@@ -3,7 +3,9 @@ package com.greytest.service;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -66,6 +68,49 @@ class GenerationJobContextTest {
         } finally {
             executor.shutdown();
         }
+    }
+
+    @Test
+    void countsOverlappingAiWaitOnceAndExcludesIdleGaps() {
+        AtomicLong now = new AtomicLong();
+        GenerationJobContext.bind(42L, ignored -> { }, now::get);
+        var snapshot = GenerationJobContext.metricsSupplier();
+        Runnable finishFirst = GenerationJobContext.startLlmWait();
+
+        now.set(3);
+        Runnable finishSecond = CompletableFuture.supplyAsync(
+                GenerationJobContext.wrap(GenerationJobContext::startLlmWait)).join();
+        now.set(8);
+        finishFirst.run();
+        assertThat(snapshot.get()).containsEntry("llmHttpWaitNanos", 8L);
+        now.set(12);
+        finishSecond.run();
+
+        now.set(20);
+        assertThat(snapshot.get()).containsEntry("llmHttpWaitNanos", 12L);
+        Runnable finishRepair = GenerationJobContext.startLlmWait();
+        now.set(25);
+        finishRepair.run();
+        now.set(100);
+        assertThat(snapshot.get()).containsEntry("llmHttpWaitNanos", 17L);
+
+        GenerationJobContext.bind(42L, ignored -> { }, now::get);
+        assertThat(GenerationJobContext.metrics()).isEmpty();
+    }
+
+    @Test
+    void excludesFailedProviderRequestsFromAiWait() {
+        // Lỗi tạm thời của API (timeout, 5xx) không phải thời gian AI sinh output; chỉ đếm số lượt lỗi.
+        AtomicLong now = new AtomicLong();
+        GenerationJobContext.bind(42L, ignored -> { }, now::get);
+        var failed = GenerationJobContext.startLlmWait();
+        now.set(50);
+        failed.fail();
+        var ok = GenerationJobContext.startLlmWait();
+        now.set(60);
+        ok.run();
+        assertThat(GenerationJobContext.metrics()).containsEntry("llmHttpWaitNanos", 10L).containsEntry("llmFailedRequests", 1L);
+        GenerationJobContext.bind(42L, ignored -> { }, now::get);
     }
 
     @Test

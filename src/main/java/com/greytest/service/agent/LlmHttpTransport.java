@@ -10,6 +10,8 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
+import com.greytest.service.GenerationJobContext;
+
 /** Giới hạn thời gian nhận toàn bộ phản hồi HTTP cho các nhà cung cấp LLM. */
 final class LlmHttpTransport {
     private LlmHttpTransport() { }
@@ -31,6 +33,21 @@ final class LlmHttpTransport {
     }
 
     static HttpResponse<String> send(HttpClient client, HttpRequest request, Duration timeout)
+            throws IOException, InterruptedException {
+        var wait = GenerationJobContext.startLlmWait();
+        boolean success = false;
+        try {
+            var response = awaitResponse(client, request, timeout);
+            success = response.statusCode() / 100 == 2;
+            return response;
+        } finally {
+            // Lỗi tạm thời của provider (timeout, 429/5xx...) không tính vào thời gian chờ AI.
+            if (success) wait.run();
+            else wait.fail();
+        }
+    }
+
+    private static HttpResponse<String> awaitResponse(HttpClient client, HttpRequest request, Duration timeout)
             throws IOException, InterruptedException {
         var response = client.sendAsync(request, HttpResponse.BodyHandlers.ofString());
         try {

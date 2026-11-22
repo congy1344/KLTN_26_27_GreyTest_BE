@@ -40,12 +40,12 @@ Rules:
 - Context -> classes[] -> methods contains up to three selected methods from the same Service class. Other source declarations provide type evidence only.
 - The method includes deterministic source anchors extracted from its source: control-flow outcomes plus executable top-level statements outside decisions.
 - Only entries whose `kind` is not `STATEMENT` are control-flow outcomes for the decision checklist. `STATEMENT` entries are source anchors, not decisions.
-- branches[].branchId is an outcome id. Legacy IF outcomes use `IF-n-TRUE/FALSE`; all other outcomes use `DECISION-ID::OUTCOME`, for example `SWITCH-1::CASE-1` or `FOR-1::ENTER`.
+- branches[].branchId is an outcome id. Legacy IF outcomes use `IF-n-TRUE/FALSE`; all other outcomes use `DECISION-ID::OUTCOME`, for example `SWITCH-1::CASE-1` or `FOR-1::ENTER`. `OPTIONAL-n` is an Optional terminal call (`orElseThrow`, `orElse`, `orElseGet`, `ifPresent`, `ifPresentOrElse`) with outcomes `PRESENT/EMPTY`; its rule states what happens when the value is found and when it is missing (for example the exact exception thrown). `TRY-n` is a try/catch with outcomes `SUCCESS` and `CATCH-k`; `GUARD-n` is a precondition call (`Objects.requireNonNull`, `Assert.*`, `Preconditions.check*`, `Validate.*`) with outcomes `PASS/FAIL`. When such a decision sits inside an IF or another decision, the outer rule describes only how the condition routes the flow; the found/not-found behavior, the caught error or the failed precondition and its exception go in the inner decision's own rule, never in the outer rule.
 - Derive the decision id by removing the final `-TRUE/-FALSE` from legacy IF ids or everything from `::` onward from modern outcome ids.
 - If branches is not empty, return exactly one rule for every unique control-flow decision id, not one rule per outcome.
 - You may also return method-level rules for independently testable behavior that always executes outside every control-flow decision; use its `STMT-*` source anchor.
 - Do not use a `STMT-*` anchor for behavior that belongs to a decision, and do not use method-level rules to replace any required decision rule.
-- For each decision rule, set branch_id to the decision id such as `IF-1`, `SWITCH-1`, `TERNARY-1`, or `FOR-1`; never copy an outcome suffix into branch_id.
+- For each decision rule, set branch_id to the decision id such as `IF-1`, `SWITCH-1`, `TERNARY-1`, `FOR-1`, `OPTIONAL-1`, `TRY-1`, or `GUARD-1`; never copy an outcome suffix into branch_id.
 - One rule must express the complete source-proven business constraint or processing decision and summarize all observable outcomes of that decision.
 - For SWITCH, include every supported case mapping and default behavior in the same rule when source proves them.
 - For a normal Java enum/string SWITCH, never describe null as reaching the default branch. A null selector throws `NullPointerException` before case matching unless source explicitly handles null first.
@@ -62,6 +62,7 @@ Rules:
 - If a method without branches has no observable business behavior, return no rule for it instead of fabricating one.
 - Before returning JSON, build a checklist of every unique non-`STATEMENT` decision id in branches, then verify that rules contains each checklist id exactly once in branch_id.
 - If the checklist contains `IF-1`, the response is invalid unless exactly one rule has `"branch_id":"IF-1"`; apply the same check to every other decision id.
+- A call evaluated inside a decision condition (for example `if (service.total(id) > 0)`) belongs to that decision's rule: describe the call in that rule and never add a separate INTEGRATION/SIDE_EFFECT rule that reuses the same decision branch_id.
 - Silently verify that no observable behavior is missing and remove redundant rules.
 - Do not create duplicate or overlapping rules in the same response.
 - Before returning, compare rules within each method by normalized meaning. Remove exact duplicates and near-duplicates. Merge facets only when they are inseparable parts of the same control-flow decision; never merge independent enrichment, exception, persistence, or integration behavior into one rule.

@@ -145,6 +145,7 @@ public final class GeneratedUnitTestSemanticValidator {
         validateAssertionImports(test, framework, problems);
         validateMockitoVerifyNoInteractions(test, problems);
         validateApprovedNegativeInteractions(context, test, parsedSource.getResult().orElseThrow(), problems);
+        validateUnapprovedEmptyExceptionMessage(context, test, parsedSource.getResult().orElseThrow(), problems);
         validateMockitoMatcherConsistency(test, problems);
         validateRepositorySaveMatcherType(test, problems);
         validateMockitoSettingsSyntax(test, problems);
@@ -1800,6 +1801,49 @@ public final class GeneratedUnitTestSemanticValidator {
     }
 
     /** Giữ yêu cầu không gọi collaborator của TC; không suy diễn từ hành vi implementation. */
+    static void validateUnapprovedEmptyExceptionMessage(UnitTestContextDto context, GeneratedUnitTestDto test,
+            CompilationUnit source, List<String> problems) {
+        if (context.approvedTestCases() == null) return;
+        var approved = context.approvedTestCases().stream().filter(c -> java.util.Objects.equals(c.id(), test.caseId()))
+                .findFirst().orElse(null);
+        if (approved == null || approved.expectedResult() == null || approved.expectedResult().isBlank()) return;
+        String oracle = (approved.expectedResult() + " " + approved.description() + " " + approved.preconditions()
+                + " " + approved.testData()).toLowerCase(java.util.Locale.ROOT);
+        if (List.of("message", "thông điệp", "thông báo", "nội dung lỗi", "getmessage", "\"\"")
+                .stream().anyMatch(oracle::contains)) return;
+        for (var method : source.findAll(MethodDeclaration.class)) {
+            if (!method.getNameAsString().equals(test.testMethodName())) continue;
+            Set<String> exceptions = method.findAll(VariableDeclarator.class).stream()
+                    .filter(v -> v.getInitializer().filter(Expression::isMethodCallExpr).map(Expression::asMethodCallExpr)
+                            .filter(call -> call.getNameAsString().equals("assertThrows") && isJUnitAssertion(call, source)).isPresent())
+                    .map(VariableDeclarator::getNameAsString).collect(java.util.stream.Collectors.toSet());
+            boolean inventedMessage = method.findAll(MethodCallExpr.class).stream()
+                    .filter(call -> call.getNameAsString().equals("assertEquals") && call.getArguments().size() == 2
+                            && isJUnitAssertion(call, source))
+                    .anyMatch(call -> call.getArguments().stream().anyMatch(a -> a.isStringLiteralExpr()
+                            && a.asStringLiteralExpr().asString().isEmpty()) && call.getArguments().stream()
+                            .filter(Expression::isMethodCallExpr).map(Expression::asMethodCallExpr)
+                            .anyMatch(read -> read.getNameAsString().equals("getMessage") && read.getArguments().isEmpty()
+                                    && read.getScope().filter(Expression::isNameExpr)
+                                            .map(s -> exceptions.contains(s.asNameExpr().getNameAsString())).orElse(false)));
+            if (inventedMessage) problems.add("Case " + test.caseId()
+                    + " invents an empty exception message. Preserve assertThrows and all approved verifications; "
+                    + "assert a message only when the approved case specifies one.");
+        }
+    }
+
+    private static boolean isJUnitAssertion(MethodCallExpr call, CompilationUnit source) {
+        Set<String> types = Set.of("org.junit.jupiter.api.Assertions", "org.junit.Assert");
+        if (call.getScope().isPresent()) {
+            String qualifier = call.getScope().orElseThrow().toString();
+            return types.contains(qualifier) || source.getImports().stream().anyMatch(i -> !i.isStatic()
+                    && i.getName().getIdentifier().equals(qualifier) && types.contains(i.getNameAsString()));
+        }
+        return source.findAll(MethodDeclaration.class).stream().noneMatch(m -> m.getName().equals(call.getName()))
+                && source.getImports().stream().anyMatch(i -> i.isStatic() && types.stream().anyMatch(type ->
+                        i.isAsterisk() ? i.getNameAsString().equals(type) : i.getNameAsString().equals(type + "." + call.getNameAsString())));
+    }
+
     private static void validateApprovedNegativeInteractions(UnitTestContextDto context, GeneratedUnitTestDto test,
             CompilationUnit source, List<String> problems) {
         String expected = context.approvedTestCases().stream().filter(c -> java.util.Objects.equals(c.id(), test.caseId()))

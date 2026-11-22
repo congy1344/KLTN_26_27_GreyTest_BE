@@ -19,6 +19,32 @@ import com.greytest.service.agent.ProjectJavaVersionDetector.MockitoVersionInfo;
 
 class GeneratedUnitTestSemanticValidatorTest {
 
+    @Test
+    void checksOnlyUnapprovedEmptyMessagesInTheActualJUnitTest() {
+        String code = """
+                import static org.junit.jupiter.api.Assertions.*;
+                class SampleTest {
+                    void check() {
+                        var problem = assertThrows(NullPointerException.class, () -> service.delete());
+                        assertEquals("", problem.getMessage());
+                    }
+                }
+                """;
+        var source = com.github.javaparser.StaticJavaParser.parse(code);
+        var generated = new GeneratedUnitTestDto(1L, "SampleTest", "check", "sample", "NEW_TEST", code);
+        var failures = new java.util.ArrayList<String>();
+        for (String oracle : List.of("Throw NullPointerException and clear login cache", "Throw NullPointerException with an empty message")) {
+            var approved = new TestCaseContextItemDto(1L, 1L, "TC-01", "EXCEPTION", "Missing cache",
+                    null, null, oracle, null, null, "APPROVED", false);
+            var context = new UnitTestContextDto(null, null, List.of(), List.of(), List.of(), List.of(approved),
+                    List.of(), List.of(), List.of());
+            failures.clear();
+            GeneratedUnitTestSemanticValidator.validateUnapprovedEmptyExceptionMessage(context, generated, source, failures);
+            if (oracle.contains("message")) assertThat(failures).isEmpty();
+            else assertThat(failures).singleElement().asString().contains("invents an empty exception message");
+        }
+    }
+
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(strings = {
             "org.mockito.Mockito.verify(repository, org.mockito.Mockito.never()).findByName(null);",

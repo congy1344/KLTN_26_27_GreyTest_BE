@@ -35,6 +35,33 @@ public class GenerationProgressService {
     private final ConcurrentMap<ProgressKey, GenerationRunMetricsDto> unfinishedTotals = new ConcurrentHashMap<>();
     private final Clock clock;
     private static final Object DEFERRED_COMPLETION = new Object();
+    private static final Object MEASUREMENT_OWNER = new Object();
+    private record MeasurementOwner(ProgressKey key, GenerationRunMetrics measurement) { }
+
+    /** Vòng bổ sung nội bộ dùng cùng phép đo; request khác vẫn không được khởi động stage đang chạy. */
+    static void withMeasurementOwner(Long projectId, GenerationProgressStage stage,
+            GenerationRunMetrics measurement, Runnable task) {
+        GenerationJobContext.withValue(MEASUREMENT_OWNER,
+                new MeasurementOwner(new ProgressKey(projectId, stage), measurement), () -> { task.run(); return null; });
+    }
+
+    private boolean ownsMeasurement(ProgressKey key, ProgressState state) {
+        MeasurementOwner owner = GenerationJobContext.scopedValue(MEASUREMENT_OWNER);
+        return owner != null && owner.key().equals(key) && owner.measurement() != null
+                && owner.measurement() == state.activeMeasurement();
+    }
+
+    private void requireCurrentMeasurement(ProgressKey key) {
+        MeasurementOwner owner = GenerationJobContext.scopedValue(MEASUREMENT_OWNER);
+        ProgressState state = states.get(key);
+        if (owner != null && owner.key().equals(key) && (state == null || !ownsMeasurement(key, state))) {
+            throw new GenerationInProgressException("Tác vụ đã dừng hoặc phép đo đã thay đổi; worker cũ không được tiếp tục.");
+        }
+    }
+
+    synchronized void assertCurrentMeasurement(Long projectId, GenerationProgressStage stage) {
+        requireCurrentMeasurement(new ProgressKey(projectId, stage));
+    }
     private static final class DeferredCompletion {
         Runnable completion;
         String verification = "";
@@ -76,10 +103,12 @@ public class GenerationProgressService {
     public synchronized void start(Long projectId, GenerationProgressStage stage, List<String> stepLabels, String message) {
         cleanupExpired();
         ProgressKey requestedKey = new ProgressKey(projectId, stage);
+        requireCurrentMeasurement(requestedKey);
         boolean projectHasRunningGeneration = states.entrySet().stream()
                 .anyMatch(entry -> entry.getKey().projectId().equals(projectId)
                         && entry.getValue().isActive()
-                        && (!entry.getKey().equals(requestedKey) || entry.getValue().isRunning()));
+                        && (!entry.getKey().equals(requestedKey)
+                            || (entry.getValue().isRunning() && !ownsMeasurement(requestedKey, entry.getValue()))));
         if (projectHasRunningGeneration) {
             throw new GenerationInProgressException(
                     "Một tác vụ sinh AI đang chạy cho project này. Vui lòng chờ hoàn tất.");
@@ -99,10 +128,12 @@ public class GenerationProgressService {
             String message) {
         cleanupExpired();
         ProgressKey requestedKey = new ProgressKey(projectId, stage);
+        requireCurrentMeasurement(requestedKey);
         boolean projectHasRunningGeneration = states.entrySet().stream()
                 .anyMatch(entry -> entry.getKey().projectId().equals(projectId)
                         && entry.getValue().isActive()
-                        && (!entry.getKey().equals(requestedKey) || entry.getValue().isRunning()));
+                        && (!entry.getKey().equals(requestedKey)
+                            || (entry.getValue().isRunning() && !ownsMeasurement(requestedKey, entry.getValue()))));
         if (projectHasRunningGeneration) {
             throw new GenerationInProgressException(
                     "Một tác vụ sinh AI đang chạy cho project này. Vui lòng chờ hoàn tất.");
@@ -162,7 +193,7 @@ public class GenerationProgressService {
         GenerationRunMetricsDto carried = unfinishedTotals.remove(key);
         // Tiếp tục từ trạng thái tạm dừng: giữ nguyên state (kèm số liệu đo đang dở) để không mất tiến độ.
         if (current != null && current.status == GenerationProgressStatus.PAUSED) {
-            current.toQueued(message, clock.instant());
+            current.toQueued(message, clock);
             return;
         }
         if (current != null) carried = current.unfinishedTotals();
@@ -200,7 +231,8 @@ public class GenerationProgressService {
         if (state != null) state.advance(message, clock.instant());
     }
 
-    public void complete(Long projectId, GenerationProgressStage stage, String message) {
+    public synchronized void complete(Long projectId, GenerationProgressStage stage, String message) {
+        requireCurrentMeasurement(new ProgressKey(projectId, stage));
         ProgressState state = states.get(new ProgressKey(projectId, stage));
         if (state != null) state.complete(message, clock.instant());
     }
@@ -212,6 +244,7 @@ public class GenerationProgressService {
 
     /** Chỉ công bố hoàn tất sau khi transaction ngoài cùng commit thành công. */
     public void completeAfterCommit(Long projectId, GenerationProgressStage stage, String message) {
+        assertCurrentMeasurement(projectId, stage);
         DeferredCompletion deferred = GenerationJobContext.scopedValue(DEFERRED_COMPLETION);
         if (deferred != null && stage == GenerationProgressStage.UNIT_TEST) {
             deferred.completion = () -> completeAfterCommit(projectId, stage, message + deferred.verification);
@@ -239,6 +272,7 @@ public class GenerationProgressService {
 
     /** Chỉ công bố kết quả một phần khi dữ liệu hợp lệ đã commit thành công. */
     public void partialAfterCommit(Long projectId, GenerationProgressStage stage, String message) {
+        assertCurrentMeasurement(projectId, stage);
         DeferredCompletion deferred = GenerationJobContext.scopedValue(DEFERRED_COMPLETION);
         if (deferred != null && stage == GenerationProgressStage.UNIT_TEST) {
             deferred.completion = () -> partialAfterCommit(projectId, stage, message + deferred.verification);
@@ -264,7 +298,8 @@ public class GenerationProgressService {
         });
     }
 
-    private void partial(Long projectId, GenerationProgressStage stage, String message) {
+    private synchronized void partial(Long projectId, GenerationProgressStage stage, String message) {
+        requireCurrentMeasurement(new ProgressKey(projectId, stage));
         ProgressState state = states.get(new ProgressKey(projectId, stage));
         if (state != null) state.partial(message, clock.instant());
     }
@@ -293,6 +328,12 @@ public class GenerationProgressService {
     public boolean isPaused(Long projectId, GenerationProgressStage stage) {
         ProgressState state = states.get(new ProgressKey(projectId, stage));
         return state != null && state.isPaused();
+    }
+
+    /** Ghi log cho tác vụ đang tạm dừng, ví dụ khi đã nhận yêu cầu tiếp tục nhưng worker cũ chưa nhả khóa. */
+    public void logWhilePaused(Long projectId, GenerationProgressStage stage, String message) {
+        ProgressState state = states.get(new ProgressKey(projectId, stage));
+        if (state != null) state.noteWhilePaused(message, clock.instant());
     }
 
     public void log(Long projectId, GenerationProgressStage stage, String message) {
@@ -408,7 +449,9 @@ public class GenerationProgressService {
             addLog(message, now);
         }
 
-        private synchronized void toQueued(String message, Instant now) {
+        private synchronized void toQueued(String message, Clock clock) {
+            Instant now = clock.instant();
+            this.measurement = new GenerationRunMetrics(clock, java.util.Map::of, unfinishedTotals());
             this.status = GenerationProgressStatus.QUEUED;
             this.workerFinished = false;
             this.updatedAt = now;
@@ -544,6 +587,12 @@ public class GenerationProgressService {
 
         private synchronized void note(String message, Instant now) {
             if (!isActive()) return;
+            updatedAt = now;
+            addLog(message, now);
+        }
+
+        private synchronized void noteWhilePaused(String message, Instant now) {
+            if (status != GenerationProgressStatus.PAUSED) return;
             updatedAt = now;
             addLog(message, now);
         }

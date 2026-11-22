@@ -132,7 +132,8 @@ final class SourceExceptionMessageEvidence {
                 if (call.findAncestor(CallableDeclaration.class).orElse(null) != method
                         || call.findAncestor(TypeDeclaration.class).isPresent()
                         || call.findAncestor(LambdaExpr.class).isPresent()) continue;
-                Text text = helperMessage(call, owner, method, arguments, associated, 0);
+                Text text = springAssertMessage(call, owner, arguments, associated);
+                if (text == null) text = helperMessage(call, owner, method, arguments, associated, 0);
                 if (text == null && call.getScope().isEmpty()) readHelperThrows(call, owner, arguments, associated, helperThrows, new HashSet<>());
                 if (text == null || text.fixed() == 0) continue;
                 if (text.format() != null) formats.add(text.format());
@@ -178,6 +179,10 @@ final class SourceExceptionMessageEvidence {
                         : fragmentClaim ? entry.getValue().stream().allMatch(text -> text.segments().stream().allMatch(Objects::nonNull) && !text.containsLiteral(claimed))
                         : entry.getValue().stream().noneMatch(text -> text.matches(claimed));
                 // Chưa đọc được hết nơi ném lỗi thì không đủ bằng chứng để kết luận phát biểu là sai.
+                if (contradicted && !helperThrows.unread && entry.getValue().stream().allMatch(text -> text == NO_MESSAGE))
+                    return Optional.of("method_id=" + methodId + ": " + entry.getKey() + " is created with no message"
+                            + " (its constructor calls super() without a message, so getMessage() returns null). Do not quote \""
+                            + claimed + "\" or any other message; name the exception type and the values passed to its constructor instead.");
                 if (contradicted && !helperThrows.unread)
                     return Optional.of("method_id=" + methodId + ": source exception message for " + entry.getKey()
                             + " does not support quoted message \"" + claimed + "\". Source message(s): "
@@ -198,6 +203,26 @@ final class SourceExceptionMessageEvidence {
                     + "Do not reduce an approved message requirement to exception type alone.");
         }
         return Optional.empty();
+    }
+
+    private static final Set<String> SPRING_ASSERT_ARGUMENT = Set.of("isTrue", "isNull", "notNull", "hasLength", "hasText",
+            "notEmpty", "noNullElements");
+
+    /**
+     * Spring Assert(condition, String message) ném IllegalArgumentException (state: IllegalStateException)
+     * với đúng message truyền vào; overload không message hoặc dùng Supplier thì không lấy làm bằng chứng.
+     */
+    private Text springAssertMessage(MethodCallExpr call, SourceEvidenceIndex.SourceType owner, Map<String, Text> env, String exception) {
+        if (call.getArguments().size() != 2 || call.getScope().filter(Expression::isNameExpr).isEmpty()) return null;
+        String scope = call.getScope().get().asNameExpr().getNameAsString();
+        // Biến/tham số trùng tên "Assert" không phải lời gọi static của Spring.
+        if (env.containsKey(scope) || !"org.springframework.util.Assert".equals(index.resolve(scope, owner.unit()))) return null;
+        String name = call.getNameAsString();
+        String thrown = name.equals("state") ? "IllegalStateException"
+                : SPRING_ASSERT_ARGUMENT.contains(name) ? "IllegalArgumentException" : null;
+        if (!exception.equals(thrown)) return null;
+        Text message = fragment(call.getArgument(1), owner.unit(), env, 0);
+        return message != null && message.string() ? message : null;
     }
 
     private static final class HelperThrows {
@@ -222,10 +247,12 @@ final class SourceExceptionMessageEvidence {
             Map<String, Text> locals = new HashMap<>();
             helper.findAll(NameExpr.class).forEach(name -> locals.put(name.getNameAsString(), Text.hole(name.getNameAsString(), false)));
             for (var creation : helper.findAll(ObjectCreationExpr.class)) {
+                // Helper có thể ném bằng throw hoặc qua supplier của Optional.orElseThrow (VD findById(id).orElseThrow(...)).
                 if (!creation.getType().getNameAsString().equals(exception)
-                        || creation.getParentNode().filter(ThrowStmt.class::isInstance).isEmpty()) continue;
+                        || creation.getParentNode().filter(ThrowStmt.class::isInstance).isEmpty()
+                        && !optionalSupplier(creation, owner)) continue;
                 Text text = creation.getAnonymousClassBody().isPresent() ? null : constructor(index.resolve(creation.getType(), owner.unit()),
-                        creation.getArguments().stream().map(e -> fragment(e, owner.unit(), locals, 0)).toList(), 0);
+                        creation.getArguments().stream().map(e -> fragment(e, owner.unit(), locals, 0)).toList(), 0, false);
                 if (text == null || text.fixed() == 0) found.unread = true;
                 else found.messages.add(text);
             }
@@ -316,26 +343,46 @@ final class SourceExceptionMessageEvidence {
         return index.propertyType(owner, name);
     }
 
+    /** Exception tạo bằng super() không truyền message: getMessage() trả null, không có chuỗi nào để trích. */
+    static final Text NO_MESSAGE = new Text(List.of("null"), "<no message: getMessage() returns null>", false, 4);
+
+    /**
+     * Exception của JDK và Spring Security giữ nguyên message truyền vào constructor (String) hoặc (String, Throwable).
+     * Chỉ dùng khi project không tự khai báo kiểu cùng tên đầy đủ.
+     */
+    private boolean keepsStringMessage(String qualified) {
+        if (STANDARD.contains(qualified)) return true;
+        if (index.declares(qualified)) return false;
+        return (qualified.startsWith("java.") && (qualified.endsWith("Exception") || qualified.endsWith("Error")))
+                || Set.of("org.springframework.security.core.AuthenticationException",
+                        "org.springframework.security.core.userdetails.UsernameNotFoundException",
+                        "org.springframework.security.authentication.BadCredentialsException",
+                        "org.springframework.security.authentication.DisabledException",
+                        "org.springframework.security.authentication.LockedException",
+                        "org.springframework.security.access.AccessDeniedException").contains(qualified);
+    }
+
     private Text constructor(String qualified, List<Text> args, int depth) {
+        return constructor(qualified, args, depth, true);
+    }
+
+    /** argumentTypesKnown=false khi đối số là biến chưa rõ kiểu (helper), không dùng kiểu để chọn overload. */
+    private Text constructor(String qualified, List<Text> args, int depth, boolean argumentTypesKnown) {
         if (qualified == null || depth > 5 || args.stream().anyMatch(Objects::isNull)) return null;
-        if (STANDARD.contains(qualified)) return args.size() == 1 && args.get(0).string() ? args.get(0) : null;
-        // Chỉ dùng hợp đồng framework đã biết khi project không khai báo đè hoặc làm mơ hồ kiểu đó.
-        if ("org.springframework.security.core.userdetails.UsernameNotFoundException".equals(qualified)
-                && !index.declares(qualified)) {
-            return args.size() == 1 && args.get(0).string() ? args.get(0) : null;
+        if (keepsStringMessage(qualified)) {
+            if (args.isEmpty()) return NO_MESSAGE;
+            return args.get(0).string() && args.size() <= 2 ? args.get(0) : null;
         }
         var source = index.type(qualified);
         if (source == null || !source.node().isClassOrInterfaceDeclaration()) return null;
         var declaration = source.node().asClassOrInterfaceDeclaration();
-        if (!declaration.getMethodsByName("getMessage").isEmpty()) return null;
         var candidates = declaration.getConstructors().stream().filter(c -> c.getParameters().size() == args.size()).toList();
         // String cụ thể hơn Throwable/Object; không chọn overload chỉ theo số đối số.
         if (candidates.size() > 1 && args.stream().allMatch(Text::string)) candidates = candidates.stream()
                 .filter(c -> c.getParameters().stream().allMatch(p -> "java.lang.String".equals(index.resolve(p.getType(), source.unit())))).toList();
+        if (candidates.size() > 1 && argumentTypesKnown) candidates = candidates.stream().filter(c -> parametersAccept(c, args, source)).toList();
         if (candidates.size() != 1) return null;
         var constructor = candidates.get(0);
-        if (constructor.getBody().getStatements().size() != 1 || !constructor.getBody().getStatement(0).isExplicitConstructorInvocationStmt()) return null;
-        var invocation = constructor.getBody().getStatement(0).asExplicitConstructorInvocationStmt();
         Map<String, Text> env = new HashMap<>();
         for (int i = 0; i < args.size(); i++) {
             var parameter = constructor.getParameter(i);
@@ -343,11 +390,53 @@ final class SourceExceptionMessageEvidence {
             env.put(parameter.getNameAsString(), new Text(value.segments(), value.display(),
                     "java.lang.String".equals(index.resolve(parameter.getType(), source.unit())), value.fixed(), value.format(), value.sourceArgument()));
         }
+        var statements = constructor.getBody().getStatements();
+        boolean explicit = !statements.isEmpty() && statements.get(0).isExplicitConstructorInvocationStmt();
+        // Sau lời gọi super/this chỉ chấp nhận gán field; lệnh khác có thể đổi message nên không suy luận.
+        Map<String, Expression> assigned = new HashMap<>();
+        for (var statement : statements.subList(explicit ? 1 : 0, statements.size())) {
+            if (!statement.isExpressionStmt() || !statement.asExpressionStmt().getExpression().isAssignExpr()) return null;
+            var assign = statement.asExpressionStmt().getExpression().asAssignExpr();
+            String field = fieldName(assign.getTarget());
+            if (field == null || assign.getOperator() != AssignExpr.Operator.ASSIGN) return null;
+            assigned.put(field, assign.getValue());
+        }
+        var overridden = declaration.getMethodsByName("getMessage").stream().filter(m -> m.getParameters().isEmpty()).toList();
+        if (!overridden.isEmpty()) {
+            // getMessage() ghi đè trả field: message là giá trị constructor đã gán cho field đó (không gán thì null).
+            if (overridden.size() != 1 || overridden.get(0).getBody().isEmpty()
+                    || overridden.get(0).getBody().get().getStatements().size() != 1
+                    || !overridden.get(0).getBody().get().getStatement(0).isReturnStmt()) return null;
+            String field = overridden.get(0).getBody().get().getStatement(0).asReturnStmt().getExpression()
+                    .map(SourceExceptionMessageEvidence::fieldName).orElse(null);
+            if (field == null || explicit && statements.get(0).asExplicitConstructorInvocationStmt().isThis()) return null;
+            var variable = declaration.getFieldByName(field).flatMap(f -> f.getVariables().stream()
+                    .filter(v -> v.getNameAsString().equals(field)).findFirst()).orElse(null);
+            if (variable == null) return null;
+            // Exception chỉ được xét khi bị ném ngay sau khi tạo, nên setter của nó không kịp đổi message.
+            Expression value = assigned.containsKey(field) ? assigned.get(field) : variable.getInitializer().orElse(null);
+            if (value == null) return NO_MESSAGE;
+            Text text = fragment(value, source.unit(), env, depth + 1);
+            return text != null && text.string() ? text : null;
+        }
+        if (!explicit) return constructor(declaration.getExtendedTypes().size() == 1
+                ? index.resolve(declaration.getExtendedTypes().get(0), source.unit()) : null, List.of(), depth + 1, argumentTypesKnown);
+        var invocation = statements.get(0).asExplicitConstructorInvocationStmt();
         var delegated = invocation.getArguments().stream().map(e -> fragment(e, source.unit(), env, depth + 1)).toList();
         String parent = invocation.isThis() ? qualified : declaration.getExtendedTypes().size() == 1
                 ? index.resolve(declaration.getExtendedTypes().get(0), source.unit()) : null;
-        return constructor(parent, delegated, depth + 1);
+        return constructor(parent, delegated, depth + 1, argumentTypesKnown);
     }
+
+    /** Overload trùng số tham số: chỉ giữ overload mà mỗi đối số String đi vào tham số String. */
+    private boolean parametersAccept(ConstructorDeclaration constructor, List<Text> args, SourceEvidenceIndex.SourceType source) {
+        for (int i = 0; i < args.size(); i++) {
+            boolean stringParameter = "java.lang.String".equals(index.resolve(constructor.getParameter(i).getType(), source.unit()));
+            if (args.get(i).string() != stringParameter) return false;
+        }
+        return true;
+    }
+
 
     /** Chỉ lần theo helper một lệnh, có đích gọi và overload xác định từ source. */
     private Text helperMessage(MethodCallExpr call, SourceEvidenceIndex.SourceType owner,

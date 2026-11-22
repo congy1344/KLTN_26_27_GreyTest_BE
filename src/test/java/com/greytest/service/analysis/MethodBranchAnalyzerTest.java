@@ -77,12 +77,13 @@ class MethodBranchAnalyzerTest {
                 }
                 """, 100);
 
+        // findById(...).orElseThrow(...) là quyết định Optional; câu return còn lại là anchor câu lệnh.
         assertThat(branches).extracting(SourceBranchDto::branchId)
-                .containsExactly("STMT-1", "STMT-2");
+                .containsExactly("OPTIONAL-1::PRESENT", "OPTIONAL-1::EMPTY", "STMT-1");
         assertThat(branches.get(0).lineStart()).isEqualTo(101);
         assertThat(branches.get(0).lineEnd()).isEqualTo(102);
-        assertThat(branches.get(1).lineStart()).isEqualTo(103);
-        assertThat(branches.get(1).lineEnd()).isEqualTo(103);
+        assertThat(branches.get(2).lineStart()).isEqualTo(103);
+        assertThat(branches.get(2).lineEnd()).isEqualTo(103);
     }
 
     @Test
@@ -233,6 +234,97 @@ class MethodBranchAnalyzerTest {
         var withElse = branches.stream().filter(branch -> branch.branchId().equals("IF-2-FALSE")).findFirst().orElseThrow();
         assertThat(withElse.lineStart()).isEqualTo(53);
         assertThat(withElse.lineEnd()).isEqualTo(55);
+    }
+
+    @Test
+    void optionalTerminalsAreDecisionsSoEachNotFoundPathHasItsOwnId() {
+        // Giống DomainUserDetailsService.loadUserByUsername của jhipster-sample-app (project 1706).
+        var branches = MethodBranchAnalyzer.analyze("""
+                public UserDetails load(String login) {
+                    if (isEmail(login)) {
+                        return repository.findByEmail(login)
+                            .map(user -> create(login, user))
+                            .orElseThrow(() -> new UsernameNotFoundException("email " + login));
+                    }
+                    String lower = login.toLowerCase();
+                    return repository.findByLogin(lower)
+                        .map(user -> create(lower, user))
+                        .orElseThrow(() -> new UsernameNotFoundException("User " + lower));
+                }
+                """, 1);
+
+        assertThat(decisionBranches(branches)).extracting(SourceBranchDto::branchId).containsExactly(
+                "IF-1-TRUE", "IF-1-FALSE", "OPTIONAL-1::PRESENT", "OPTIONAL-1::EMPTY",
+                "OPTIONAL-2::PRESENT", "OPTIONAL-2::EMPTY");
+        assertThat(decisionBranches(branches)).filteredOn(b -> b.branchId().equals("OPTIONAL-2::EMPTY"))
+                .singleElement().satisfies(branch -> {
+                    assertThat(branch.kind()).isEqualTo("OPTIONAL");
+                    assertThat(branch.condition()).startsWith("repository.findByLogin(lower)");
+                    assertThat(branch.lineStart()).isEqualTo(8);
+                    assertThat(branch.lineEnd()).isEqualTo(10);
+                });
+        // Câu return chứa quyết định Optional không còn là STMT anchor riêng.
+        assertThat(branches).filteredOn(b -> "STATEMENT".equals(b.kind())).extracting(SourceBranchDto::condition)
+                .containsExactly("String lower = login.toLowerCase();");
+    }
+
+    @Test
+    void recognisesEveryOptionalFallbackTerminal() {
+        var branches = MethodBranchAnalyzer.analyze("""
+                public void sync(Long id) {
+                    Item a = repo.findById(id).orElse(null);
+                    Item b = repo.findById(id).orElseGet(Item::new);
+                    repo.findById(id).ifPresent(item -> item.touch());
+                    repo.findById(id).ifPresentOrElse(item -> item.touch(), () -> log.warn("missing"));
+                    Item c = repo.findById(id).orElseThrow();
+                }
+                """, 1);
+
+        assertThat(decisionBranches(branches)).extracting(SourceBranchDto::branchId).containsExactly(
+                "OPTIONAL-1::PRESENT", "OPTIONAL-1::EMPTY", "OPTIONAL-2::PRESENT", "OPTIONAL-2::EMPTY",
+                "OPTIONAL-3::PRESENT", "OPTIONAL-3::EMPTY", "OPTIONAL-4::PRESENT", "OPTIONAL-4::EMPTY",
+                "OPTIONAL-5::PRESENT", "OPTIONAL-5::EMPTY");
+    }
+
+    @Test
+    void tryCatchIsADecisionWithOneOutcomePerCatchAndTryBodyStatementsStayAnchors() {
+        var branches = MethodBranchAnalyzer.analyze("""
+                public void send(Mail mail) {
+                    try {
+                        client.send(mail);
+                    } catch (IOException exception) {
+                        throw new MailException("io", exception);
+                    } catch (RuntimeException exception) {
+                        log.warn("failed");
+                    } finally {
+                        audit.record(mail);
+                    }
+                }
+                """, 1);
+
+        assertThat(decisionBranches(branches)).extracting(SourceBranchDto::branchId)
+                .containsExactly("TRY-1::SUCCESS", "TRY-1::CATCH-1", "TRY-1::CATCH-2");
+        assertThat(decisionBranches(branches)).extracting(SourceBranchDto::outcome)
+                .containsExactly("SUCCESS", "IOException", "RuntimeException");
+        assertThat(branches).filteredOn(b -> "STATEMENT".equals(b.kind())).extracting(SourceBranchDto::condition)
+                .containsExactly("client.send(mail);", "audit.record(mail);");
+    }
+
+    @Test
+    void preconditionCallsAreGuardDecisions() {
+        var branches = MethodBranchAnalyzer.analyze("""
+                public void update(Order order) {
+                    Objects.requireNonNull(order, "order");
+                    Assert.isTrue(order.getTotal() > 0, "total");
+                    Preconditions.checkState(order.isOpen());
+                    repository.save(order);
+                }
+                """, 1);
+
+        assertThat(decisionBranches(branches)).extracting(SourceBranchDto::branchId).containsExactly(
+                "GUARD-1::PASS", "GUARD-1::FAIL", "GUARD-2::PASS", "GUARD-2::FAIL", "GUARD-3::PASS", "GUARD-3::FAIL");
+        assertThat(branches).filteredOn(b -> "STATEMENT".equals(b.kind())).extracting(SourceBranchDto::condition)
+                .containsExactly("repository.save(order);");
     }
 
     @Test

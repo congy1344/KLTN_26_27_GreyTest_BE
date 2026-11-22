@@ -57,11 +57,7 @@ class GenerationRunMetricsTest {
             target.start(1L, stage, 1, "Start");
             recorder.record("test-case", "test", "test",
                     new LlmTokenUsage(tokens, 0, 1, 0, tokens + 1, LlmTokenUsage.UsageSource.PROVIDER), 1);
-            try {
-                Thread.sleep(20);
-            } catch (InterruptedException exception) {
-                Thread.currentThread().interrupt();
-            }
+            simulateAiWait();
             if (!succeed) throw new IllegalStateException("Dừng ở batch");
             target.complete(1L, stage, "Done");
         });
@@ -78,6 +74,7 @@ class GenerationRunMetricsTest {
         assertThat(total.outputTokens()).isEqualTo(2);
         assertThat(total.totalTokens()).isEqualTo(32);
         assertThat(total.recordedCalls()).isEqualTo(2);
+        assertThat(total.llmWaitMillis()).isGreaterThanOrEqualTo(first.llmWaitMillis() + 20);
         assertThat(total.elapsedMillis()).isGreaterThanOrEqualTo(first.elapsedMillis() + 20);
         assertThat(total.startedAt()).isEqualTo(first.startedAt());
         assertThat(total.runId()).isNotEqualTo(first.runId());
@@ -88,6 +85,22 @@ class GenerationRunMetricsTest {
         runWithTokens(jobs, progress, 10, true);
         runWithTokens(jobs, progress, 20, true);
         assertThat(progress.get(1L, GenerationProgressStage.TEST_CASE).runMetrics().totalTokens()).isEqualTo(21);
+    }
+
+    @Test
+    void keepsAiWaitWhenAPausedStageIsRequeued() {
+        var stage = GenerationProgressStage.TEST_CASE;
+        jobs.submit(1L, stage, () -> {
+            progress.start(1L, stage, 1, "Start");
+            simulateAiWait();
+            progress.pause(1L, stage, "Paused");
+        });
+        var paused = progress.get(1L, stage).runMetrics();
+        runWithTokens(jobs, progress, 20, true);
+        var resumed = progress.get(1L, stage).runMetrics();
+        assertThat(resumed.runId()).isNotEqualTo(paused.runId());
+        assertThat(paused.llmWaitMillis()).isGreaterThanOrEqualTo(20);
+        assertThat(resumed.llmWaitMillis()).isGreaterThanOrEqualTo(paused.llmWaitMillis() + 20);
     }
 
     @Test
@@ -177,5 +190,17 @@ class GenerationRunMetricsTest {
     private void record(LlmTokenUsage.UsageSource source) {
         recorder.record("# Prompt: test-plan", "test", "test",
                 new LlmTokenUsage(20, 0, 10, 0, 30, source), 10);
+    }
+
+    private void simulateAiWait() {
+        Runnable finishWait = GenerationJobContext.startLlmWait();
+        try {
+            Thread.sleep(20);
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(exception);
+        } finally {
+            finishWait.run();
+        }
     }
 }

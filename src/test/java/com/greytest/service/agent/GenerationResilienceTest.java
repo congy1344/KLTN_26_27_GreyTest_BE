@@ -364,7 +364,7 @@ class GenerationResilienceTest {
 
         var sent = ArgumentCaptor.forClass(String.class);
         verify(client).complete(sent.capture(), any());
-        assertThat(sent.getValue()).contains("stub user.getId() is never used", "unit_tests").doesNotContain("decision id");
+        assertThat(sent.getValue()).contains("stub user.getId() is never used", "test_classes").doesNotContain("decision id");
     }
 
     @Test
@@ -532,8 +532,45 @@ class GenerationResilienceTest {
     }
 
     @Test
+    void cachesStablePoliciesAheadOfPerBatchSource() {
+        ObjectNode context = promptContext("class Svc { void run(int x) { switch (x) { default: } } }");
+        var rendered = manager.renderPrompt("business-rule", Map.of("context_json", context));
+        // Policy theo chủ đề giống nhau giữa các batch → prefix cache thứ hai; source dùng chung đã cắt theo batch thì không.
+        assertThat(rendered.cacheablePrefixes()).hasSize(2);
+        assertThat(rendered.cacheablePrefixes().get(1)).contains("# Relevant policy").doesNotContain("# Shared source evidence");
+        assertThat(rendered.text()).startsWith(String.join("", rendered.cacheablePrefixes()));
+        assertThat(rendered.text().indexOf("# Relevant policy")).isLessThan(rendered.text().indexOf("# Shared source evidence"));
+    }
+
+    @Test
+    void unitTestKeepsPerBatchDependencyInventoryAfterSharedSource() {
+        ObjectNode context = unitContext("package p; class Svc { private final Repo repo; Svc(Repo repo) { this.repo = repo; } void run(int x) { switch (x) { default: repo.toString(); } } }");
+        context.withArray("classes").addObject().put("qualifiedName", "p.Repo").put("sourceCode", "package p; interface Repo { }").putArray("methods");
+        var rendered = manager.renderPrompt("unit-test", Map.of("context_json", context));
+        String prefixes = String.join("", rendered.cacheablePrefixes());
+        assertThat(prefixes).doesNotContain("# Source-confirmed fixture/API inventory", "# Shared source evidence");
+        assertThat(rendered.text().indexOf("# Source-confirmed fixture/API inventory")).isGreaterThan(rendered.text().indexOf("# Shared source evidence"));
+    }
+
+    @Test
+    void dropsClassMetadataAlreadyCarriedBySource() {
+        ObjectNode context = unitContext("package p; class Svc { Helper helper = new Helper(); void run() { } }");
+        ((ObjectNode) context.at("/classes/0")).put("id", 77).put("packageName", "p").put("className", "Svc")
+                .put("filePath", "src/main/java/p/Svc.java").putArray("annotations").add("Service");
+        ((ObjectNode) context.at("/classes/0/methods/0")).put("classQualifiedName", "p.Svc").putArray("throwsList");
+        context.withArray("classes").addObject().put("id", 78).put("qualifiedName", "p.Helper").put("className", "Helper")
+                .put("packageName", "p").put("filePath", "src/main/java/p/Helper.java").put("sourceCode", "package p; class Helper { }")
+                .putArray("methods");
+        String prompt = manager.render("unit-test", Map.of("context_json", context));
+        String json = prompt.substring(prompt.indexOf("Context:"), prompt.indexOf("\n", prompt.indexOf("Context:") + 10));
+        assertThat(json).contains("\"qualifiedName\":\"p.Svc\"", "\"filePath\":\"src/main/java/p/Svc.java\"", "\"qualifiedName\":\"p.Helper\"", "\"id\":1")
+                .doesNotContain("\"packageName\"", "\"id\":77", "\"id\":78", "Helper.java", "\"classQualifiedName\"", "\"throwsList\"", "\"annotations\"");
+    }
+
+    @Test
     void businessRulePromptSendsSignaturesForSupportingClassesOnly() {
-        ObjectNode context = promptContext("class Svc { void run() { int targetBodyMarker = 1; } }");
+        // Class đích tự tạo Helper và ném MissingException trong method đích nên cả hai thuộc phần method chạy qua.
+        ObjectNode context = promptContext("class Svc { Helper helper = new Helper(); void run() { int targetBodyMarker = 1; throw new MissingException(\"x\"); } }");
         var classes = context.withArray("classes");
         classes.addObject().put("qualifiedName", "p.Helper").put("sourceCode",
                 "/** comment-marker */ class Helper { private int count; Helper() { int ctorMarker = 1; } int size() { int helperBodyMarker = 2; return 0; } }")

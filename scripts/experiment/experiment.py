@@ -211,8 +211,10 @@ def post_with_retry(url, body, headers, timeout, opener=urllib.request.urlopen, 
                 raw = response.read()
             finally:
                 getattr(response, "close", lambda: None)()
-            log.append({"attempt": attempt, "error": None, "seconds": round(time.monotonic() - started, 3)})
-            return json.loads(raw), log
+            seconds = round(time.monotonic() - started, 3)
+            payload = json.loads(raw)
+            log.append({"attempt": attempt, "error": None, "seconds": seconds})
+            return payload, log
         except Exception as error:  # noqa: BLE001 - phân loại ngay bên dưới
             detail = f"{type(error).__name__}: {error}"
             # Body của 401/403 có thể chứa mảnh API key đã che: không ghi ra đĩa.
@@ -247,12 +249,13 @@ def generate_llm_only(project: Path, run_dir: Path, env: dict, max_output: int, 
     try:
         response, log = post_with_retry(env["LLM_OPENAI_URL"], body, headers, timeout)
     except RuntimeError as error:
-        result["generation_seconds"] = round(time.monotonic() - started, 3)
-        write_json(run_dir / "attempts.json", json.loads(str(error)))
-        result["retries"] = len(json.loads(str(error))) - 1
-        return result
+        response, log = None, json.loads(str(error))
     result["generation_seconds"] = round(time.monotonic() - started, 3)
+    result["ai_wait_seconds"] = round(sum(attempt["seconds"] for attempt in log), 3)
+    result["retries"] = len(log) - 1
     write_json(run_dir / "attempts.json", log)
+    if response is None:
+        return result
     write_json(run_dir / "response.json", response)
     choice = (response.get("choices") or [{}])[0]
     usage = response.get("usage") or {}
@@ -264,7 +267,6 @@ def generate_llm_only(project: Path, run_dir: Path, env: dict, max_output: int, 
     write_json(run_dir / "extract-errors.json", errors)
     result.update(
         status="TRUNCATED" if choice.get("finish_reason") == "length" else "OK",
-        retries=len(log) - 1,
         input_tokens=usage.get("prompt_tokens"), output_tokens=usage.get("completion_tokens"),
         total_tokens=usage.get("total_tokens"),
         cached_tokens=(usage.get("prompt_tokens_details") or {}).get("cached_tokens"),
@@ -293,11 +295,11 @@ def source_zip(sources: list) -> bytes:
 
 
 def should_resume(item_counts: list, status: str, resumes_used: int, max_resume: int) -> bool:
-    """Mô phỏng người bấm "Tiếp tục sinh": dừng khi xong, hết lượt, hoặc 2 lần liên tiếp không có thêm item."""
+    """Chỉ resume khi được bật, còn lượt và lần trước có thêm item."""
     if status == "COMPLETED" or resumes_used >= max_resume:
         return False
     c = item_counts
-    return not (len(c) >= 3 and c[-1] <= c[-2] <= c[-3])
+    return not (len(c) >= 2 and c[-1] <= c[-2])
 
 
 def extract_zip_tests(data: bytes, dest: Path) -> list:
@@ -354,12 +356,15 @@ def _expect(status, payload, ok, what):
 def pipeline_totals(stages: dict) -> dict:
     """runMetrics của lượt resume đã cộng dồn lượt trước, nên mỗi stage chỉ lấy attempt cuối rồi cộng các stage."""
     totals = {"requests": 0, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "stage_elapsed_millis": 0}
+    waits = []
     for attempts in stages.values():
         last = attempts[-1] if attempts else {}
+        waits.append(last.get("llmWaitMillis"))
         for key, field in (("requests", "recordedCalls"), ("input_tokens", "inputTokens"),
                            ("output_tokens", "outputTokens"), ("total_tokens", "totalTokens"),
                            ("stage_elapsed_millis", "elapsedMillis")):
             totals[key] += last.get(field) or 0
+    totals["ai_wait_seconds"] = sum(waits) / 1000 if waits and None not in waits else None
     return totals
 
 
@@ -385,7 +390,12 @@ def _poll(api, pid, stage, previous_run_id):
             continue
         run_id = (progress.get("runMetrics") or {}).get("runId")
         stale = run_id is not None and run_id == previous_run_id and time.monotonic() < stale_deadline
-        if progress.get("status") not in ACTIVE and not stale:
+        if progress.get("status") not in ACTIVE and not progress.get("busy") and not stale:
+            # Backend tự "Tiếp tục sinh" khi stage xong một phần/lỗi AI: chờ một nhịp xem có lượt mới được xếp hàng không.
+            time.sleep(POLL_SECONDS)
+            status, again = api.call("GET", f"/api/projects/{pid}/generation-progress/{stage}")
+            if status == 200 and isinstance(again, dict) and (again.get("status") in ACTIVE or again.get("busy")):
+                continue
             return progress
 
 
@@ -441,11 +451,14 @@ def _run_pipeline(api, pid, run_dir, sources, max_resume, result, stage_metrics)
         counts, run_id, status = [], None, None
         while True:
             _expect(*retry_conflict(lambda: api.call(
-                "POST", f"/api/projects/{pid}/{path}/generate?servicePath=.&resume=true")),
+                "POST", f"/api/projects/{pid}/{path}/generate?servicePath=.&resume={'true' if counts else 'false'}")),
                     {200, 202}, f"{stage} generate")
+            attempts = stage_metrics.setdefault(stage, [])
+            # Giữ token đã biết khi polling lỗi, đồng thời đánh dấu số đo AI chưa đầy đủ.
+            attempts.append({**(attempts[-1] if attempts else {}), "llmWaitMillis": None})
             progress = _poll(api, pid, stage, run_id)
             metrics = progress.get("runMetrics") or {}
-            stage_metrics.setdefault(stage, []).append(metrics)
+            attempts[-1] = metrics
             run_id, status = metrics.get("runId"), progress.get("status")
             items = api.call("GET", f"/api/projects/{pid}/{path}?servicePath=.")[1]
             counts.append(len(items) if isinstance(items, list) else 0)
@@ -453,6 +466,7 @@ def _run_pipeline(api, pid, run_dir, sources, max_resume, result, stage_metrics)
             # runMetrics ở đây là số cộng dồn từ attempt đầu của stage (backend tự cộng khi resume).
             result["stages"].append({"stage": stage, "attempt": len(counts), "status": status, "items": counts[-1],
                                      "cumulativeElapsedMillis": metrics.get("elapsedMillis"), "runId": run_id,
+                                     "cumulativeLlmWaitMillis": metrics.get("llmWaitMillis"),
                                      "cumulativeRecordedCalls": metrics.get("recordedCalls"),
                                      "cumulativeTotalTokens": metrics.get("totalTokens"),
                                      "errors": [s["errorMessage"][:500] for s in progress.get("steps") or []
@@ -637,6 +651,7 @@ TEST_METHOD = re.compile(
     re.DOTALL)
 RUN_COLUMNS = ["project", "method", "run", "status", "measure_status", "requests", "retries", "resumes",
                "input_tokens", "output_tokens", "total_tokens", "cached_tokens", "generation_seconds",
+               "ai_wait_seconds",
                "test_files", "files_compiled", "files_excluded", "tests", "passed", "failures", "errors",
                "pass_pct", "line_pct", "branch_pct", "project_line_pct", "project_branch_pct",
                "tested_services", "scope_size", "req_cov_pct"]
@@ -741,7 +756,8 @@ def wilcoxon_exact(a: list, b: list):
 
 
 COMPARE_METRICS = ["line_pct", "branch_pct", "pass_pct", "tests", "passed", "project_line_pct",
-                   "project_branch_pct", "tested_services", "total_tokens", "requests", "generation_seconds"]
+                   "project_branch_pct", "tested_services", "total_tokens", "requests", "generation_seconds",
+                   "ai_wait_seconds"]
 
 
 def compare_rows(rows: list) -> list:
@@ -859,7 +875,7 @@ def cmd_generate(args) -> int:
     result.update(method=args.method, project=project.name)
     write_json(run_dir / "generation.json", result)
     print(json.dumps({k: result.get(k) for k in ("method", "status", "requests", "total_tokens",
-                                                   "generation_seconds", "test_files", "test_methods")}))
+                                                   "ai_wait_seconds", "generation_seconds", "test_files", "test_methods")}))
     return 0 if result["status"] != "FAILED" else 1
 
 
@@ -929,7 +945,8 @@ def main(argv=None) -> int:
     gen.add_argument("--max-output", type=int, default=64000)
     gen.add_argument("--timeout", type=int, default=900)
     gen.add_argument("--base-url", default="http://localhost:8080")
-    gen.add_argument("--max-resume", type=int, default=3)
+    gen.add_argument("--max-resume", type=int, default=0,
+                     help="Số lượt resume mỗi stage; mặc định 0 để đo một lượt pipeline")
     meas = sub.add_parser("measure")
     meas.add_argument("--project", required=True)
     meas.add_argument("--run", required=True)

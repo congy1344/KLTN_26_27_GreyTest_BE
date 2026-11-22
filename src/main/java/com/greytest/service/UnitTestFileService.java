@@ -533,7 +533,12 @@ public class UnitTestFileService {
                 if "!GT_SRC_DIR:~-1!"=="\\" set "GT_SRC_DIR=!GT_SRC_DIR:~0,-1!"
                 if not defined GT_ORIGINAL_DIR set "GT_ORIGINAL_DIR=!GT_SRC_DIR!"
 
-                if not defined GREYTEST_JVM_ARGS set "GREYTEST_JVM_ARGS=-Djdk.attach.allowAttachSelf=true -XX:+EnableDynamicAgentLoading"
+                if not defined GREYTEST_JVM_ARGS (
+                  set "GREYTEST_JVM_ARGS=-Djdk.attach.allowAttachSelf=true"
+                  rem Cờ chỉ có từ Java 21; Java 8-20 không khởi động được JVM chạy test nếu gặp cờ lạ.
+                  java -XX:+EnableDynamicAgentLoading -version >nul 2>&1
+                  if not errorlevel 1 set "GREYTEST_JVM_ARGS=!GREYTEST_JVM_ARGS! -XX:+EnableDynamicAgentLoading"
+                )
 
                 if not "!GREYTEST_JUNCTION_RUN!"=="1" (
                   powershell -NoProfile -ExecutionPolicy Bypass -Command "$gradle = (Test-Path -LiteralPath 'build.gradle') -or (Test-Path -LiteralPath 'build.gradle.kts'); $nested = $false; if ($gradle -and -not ((Test-Path -LiteralPath 'settings.gradle') -or (Test-Path -LiteralPath 'settings.gradle.kts'))) { for ($p = [IO.Directory]::GetParent($env:GT_SRC_DIR); $null -ne $p; $p = $p.Parent) { if ((Test-Path -LiteralPath (Join-Path $p.FullName 'settings.gradle')) -or (Test-Path -LiteralPath (Join-Path $p.FullName 'settings.gradle.kts'))) { $nested = $true; break } } }; if ($env:GT_SRC_DIR -match '[^\\x00-\\x7F]' -or ($gradle -and -not $nested -and $env:GT_SRC_DIR.Length -gt 120)) { exit 1 } else { exit 0 }" >nul 2>&1
@@ -639,7 +644,7 @@ public class UnitTestFileService {
                   -DskipTests=false ^
                   -Dmaven.test.skip=false ^
                   -Dmaven.test.failure.ignore=true ^
-                  -DforkCount=1 -DreuseForks=false ^
+                  -DforkCount=1 -DreuseForks=true ^
                   -DfailIfNoTests=true ^
                   org.jacoco:jacoco-maven-plugin:%3$s:prepare-agent ^
                   org.apache.maven.plugins:maven-surefire-plugin:test ^
@@ -827,7 +832,14 @@ public class UnitTestFileService {
                   exit 1
                 fi
 
-                export GREYTEST_JVM_ARGS="${GREYTEST_JVM_ARGS:--Djdk.attach.allowAttachSelf=true -XX:+EnableDynamicAgentLoading}"
+                if [ -z "${GREYTEST_JVM_ARGS:-}" ]; then
+                  GREYTEST_JVM_ARGS="-Djdk.attach.allowAttachSelf=true"
+                  # Cờ chỉ có từ Java 21; Java 8-20 không khởi động được JVM chạy test nếu gặp cờ lạ.
+                  if java -XX:+EnableDynamicAgentLoading -version >/dev/null 2>&1; then
+                    GREYTEST_JVM_ARGS="$GREYTEST_JVM_ARGS -XX:+EnableDynamicAgentLoading"
+                  fi
+                fi
+                export GREYTEST_JVM_ARGS
 
                 build_kind=""
                 if [ -f "pom.xml" ]; then
@@ -915,7 +927,7 @@ public class UnitTestFileService {
                   -DskipTests=false \
                   -Dmaven.test.skip=false \
                   -Dmaven.test.failure.ignore=true \
-                  -DforkCount=1 -DreuseForks=false \
+                  -DforkCount=1 -DreuseForks=true \
                   -DfailIfNoTests=true $empty_test_args \
                   org.jacoco:jacoco-maven-plugin:%3$s:prepare-agent \
                   org.apache.maven.plugins:maven-surefire-plugin:test \

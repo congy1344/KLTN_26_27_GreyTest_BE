@@ -133,6 +133,19 @@ class LlmOnlyTest(Base):
             response, log = post_with_retry("http://x", {}, {}, 5, opener=flaky)
         self.assertEqual((response, len(log)), ({"ok": 1}, 3))
 
+    def test_llm_only_exports_request_wait_without_retry_delay(self):
+        run = self.root / "run"
+        run.mkdir()
+        env = {"LLM_PROVIDER": "openai", "LLM_MODEL": "m", "LLM_API_KEY": "test-key",
+               "LLM_OPENAI_URL": "http://unused"}
+        attempts = [{"seconds": 0.5, "error": "timeout"}, {"seconds": 1.25, "error": None}]
+        with mock.patch.object(experiment, "post_with_retry", return_value=({"choices": []}, attempts)), \
+                mock.patch.object(experiment.time, "monotonic", side_effect=[10, 20]):
+            result = experiment.generate_llm_only(self.project, run, env, 1000, 30)
+        self.assertEqual(result["ai_wait_seconds"], 1.75)
+        self.assertEqual(result["generation_seconds"], 10)
+        self.assertEqual(result["retries"], 1)
+
     def test_extract_rejects_traversal_in_llm_path_header(self):
         files, _ = extract_test_files("```java\n// src/test/java/../../../x/EvilTest.java\npackage a;\nclass EvilTest {}\n```\n")
         self.assertEqual(list(files), ["src/test/java/a/EvilTest.java"])
@@ -159,11 +172,46 @@ class LlmOnlyTest(Base):
 
 
 class GreyTestDriverTest(Base):
+    def test_generate_defaults_to_no_stage_resumes(self):
+        with mock.patch.object(experiment, "cmd_generate") as generate:
+            experiment.main(["generate", "--project", "p", "--method", "greytest", "--out", "r"])
+        self.assertEqual(generate.call_args.args[0].max_resume, 0)
+
+    def test_matrix_inherits_single_pass_default(self):
+        with mock.patch.object(experiment, "cmd_matrix") as matrix:
+            experiment.main(["matrix", "--projects", "p", "--root", "r"])
+        self.assertEqual(matrix.call_args.args[0].max_resume, 0)
+
+    def test_partial_unit_stage_is_not_restarted_in_single_pass(self):
+        api = mock.Mock()
+        def call(method, path, **kwargs):
+            if path.endswith("/analyze"):
+                return 200, {"classes": []}
+            if "/generate?" in path:
+                return 202, {}
+            return 200, ([{"id": 1}] if method == "GET" else {})
+        api.call.side_effect = call
+        progress = [{"status": "COMPLETED", "runMetrics": {"runId": str(i), "llmWaitMillis": 10}}
+                    for i in range(3)]
+        progress.append({"status": "PARTIAL", "runMetrics": {"runId": "ut", "llmWaitMillis": 20}})
+        result = {"stages": [], "resumes": 0}
+        with mock.patch.object(experiment, "_poll", side_effect=progress):
+            experiment._run_pipeline(api, 1, self.root, [], 0, result, {})
+        requests = [c.args[1] for c in api.call.call_args_list if "/generate?" in c.args[1]]
+        self.assertEqual(len(requests), 4)
+        self.assertTrue(all(p.endswith("resume=false") for p in requests))
+        self.assertEqual(result["resumes"], 0)
+        self.assertEqual(result["status"], "PARTIAL")
+        self.assertTrue((self.root / "UNIT_TEST-attempt-1.json").exists())
+        self.assertFalse((self.root / "UNIT_TEST-attempt-2.json").exists())
+
     def test_should_resume_rules(self):
         self.assertFalse(should_resume([5], "COMPLETED", 0, 3))
         self.assertTrue(should_resume([5], "PARTIAL", 0, 3))
         self.assertFalse(should_resume([5, 8], "PARTIAL", 3, 3))
         self.assertFalse(should_resume([5, 5, 5], "PARTIAL", 2, 3))
+        self.assertFalse(should_resume([5, 5], "PARTIAL", 1, 3))
+        self.assertFalse(should_resume([5, 4], "PARTIAL", 1, 3))
         self.assertTrue(should_resume([5, 5, 6], "PARTIAL", 2, 5))
 
     def test_extract_zip_tests_keeps_only_java_under_test_root(self):
@@ -187,13 +235,37 @@ class GreyTestDriverTest(Base):
     def test_pipeline_totals_uses_last_attempt_per_stage(self):
         # Backend cộng dồn runMetrics của lượt trước vào lượt resume, nên chỉ lấy attempt cuối mỗi stage.
         stages = {"BUSINESS_RULE": [{"recordedCalls": 2, "totalTokens": 100, "inputTokens": 80, "outputTokens": 20,
-                                     "elapsedMillis": 1000},
+                                     "elapsedMillis": 1000, "llmWaitMillis": 600},
                                     {"recordedCalls": 5, "totalTokens": 260, "inputTokens": 200, "outputTokens": 60,
-                                     "elapsedMillis": 2500}],
+                                     "elapsedMillis": 2500, "llmWaitMillis": 1100}],
                   "TEST_PLAN": [{"recordedCalls": 1, "totalTokens": 40, "inputTokens": 30, "outputTokens": 10,
-                                 "elapsedMillis": 400}]}
+                                 "elapsedMillis": 400, "llmWaitMillis": 200}],
+                  "UNIT_TEST": [{"elapsedMillis": 9000, "llmWaitMillis": 1250}]}
         self.assertEqual(pipeline_totals(stages), {"requests": 6, "input_tokens": 230, "output_tokens": 70,
-                                                   "total_tokens": 300, "stage_elapsed_millis": 2900})
+                                                   "total_tokens": 300, "stage_elapsed_millis": 11900,
+                                                   "ai_wait_seconds": 2.55})
+
+    def test_pipeline_totals_does_not_infer_ai_wait_from_old_backend(self):
+        stages = {"BUSINESS_RULE": [{"llmWaitMillis": 0}], "UNIT_TEST": [{"elapsedMillis": 9000}]}
+        self.assertIsNone(pipeline_totals(stages)["ai_wait_seconds"])
+        del stages["UNIT_TEST"]
+        self.assertEqual(pipeline_totals(stages)["ai_wait_seconds"], 0)
+
+    def test_poll_waits_for_paused_workers_to_finish_ai_requests(self):
+        final = {"status": "PAUSED", "busy": False, "runMetrics": {"llmWaitMillis": 1200}}
+        api = mock.Mock()
+        api.call.side_effect = [(200, {"status": "PAUSED", "busy": True,
+                                       "runMetrics": {"llmWaitMillis": 800}}), (200, final), (200, final)]
+        with mock.patch.object(experiment.time, "sleep"):
+            self.assertEqual(experiment._poll(api, 1, "UNIT_TEST", None), final)
+
+    def test_poll_follows_the_backend_auto_resume_after_a_partial_round(self):
+        partial = {"status": "PARTIAL", "busy": False, "runMetrics": {"runId": "r"}}
+        final = {"status": "COMPLETED", "busy": False, "runMetrics": {"runId": "r"}}
+        api = mock.Mock()
+        api.call.side_effect = [(200, partial), (200, {"status": "QUEUED", "busy": True}), (200, final), (200, final)]
+        with mock.patch.object(experiment.time, "sleep"):
+            self.assertEqual(experiment._poll(api, 1, "TEST_CASE", None), final)
 
     def test_retry_conflict_repeats_409(self):
         answers = iter([(409, "busy"), (409, "busy"), (200, {"ok": 1})])
@@ -367,7 +439,8 @@ class StatsTest(Base):
         for method, line in (("llm-only", 50.0), ("greytest", 90.0)):
             run = self.root / "runs" / method / "run-01"
             write(run / "generation.json", experiment.json.dumps(
-                {"method": method, "project": "p", "status": "OK", "total_tokens": 10, "test_files": 1}))
+                {"method": method, "project": "p", "status": "OK", "total_tokens": 10, "test_files": 1,
+                 "ai_wait_seconds": 2.5 if method == "greytest" else 1.2}))
             write(run / "measure.json", experiment.json.dumps(
                 {"status": "OK", "tests": 4, "passed": 3, "line_pct": line, "scope_size": 2}))
             write(run / "tests/src/test/java/a/STest.java", "class STest { @Test void x() {} }")
@@ -381,6 +454,7 @@ class StatsTest(Base):
         compare = (out / "compare.csv").read_text(encoding="utf-8").splitlines()
         self.assertTrue(compare[0].startswith("project,metric,n_greytest,mean_greytest,n_llm_only,mean_llm_only"))
         self.assertIn("p,line_pct,1,90.0,1,50.0,40.0", "\n".join(compare))
+        self.assertIn("p,ai_wait_seconds,1,2.5,1,1.2,1.3", "\n".join(compare))
         self.assertTrue(any(row.startswith("ALL (macro),line_pct") for row in compare))
 
 

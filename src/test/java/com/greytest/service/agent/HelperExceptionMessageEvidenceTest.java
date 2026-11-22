@@ -59,6 +59,25 @@ class HelperExceptionMessageEvidenceTest {
         assertThat(validate(classes, "ApiException message \"Invented\" ")).isPresent();
     }
 
+    @Test void readsOrElseThrowSupplierMessageOfAProjectRepositoryLookup() {
+        // Tái hiện LoanService.borrow của library-management: copyRepository.findByBarcode(...).orElseThrow(...).
+        var classes = sources("void run(String barcode) { repo.findByBarcode(barcode.trim())"
+                + ".orElseThrow(() -> new ApiException(\"No copy with code \" + barcode)); }",
+                API + "interface Repo { java.util.Optional<String> findByBarcode(String barcode); } private Repo repo; ");
+        assertThat(validate(classes, "ApiException message \"No copy with code UNKNOWN-1\" ")).isEmpty();
+        assertThat(validate(classes, "ApiException message \"Invented\" ")).isPresent();
+    }
+
+    @Test void readsOrElseThrowSupplierMessageInsideAHelper() {
+        // Tái hiện FineService.waive -> get(id): findById(id).orElseThrow(() -> new BusinessException("Không tìm thấy khoản phạt")).
+        var classes = sources("void run(Long id) { if (id == null) throw new ApiException(\"Missing id\"); load(id); }",
+                API + "interface Repo { java.util.Optional<String> findOne(Long id); } private Repo repo; "
+                + "private String load(Long id) { return repo.findOne(id).orElseThrow(() -> new ApiException(\"Fine not found\")); }");
+        assertThat(validate(classes, "ApiException message \"Fine not found\" ")).isEmpty();
+        assertThat(validate(classes, "ApiException message \"Missing id\" ")).isEmpty();
+        assertThat(validate(classes, "ApiException message \"Invented\" ")).isPresent();
+    }
+
     @Test void followsNestedPrivateHelpers() {
         var classes = sources("void run() { first(); }", API
                 + "private void first() { second(); } private void second() { if (true) throw new ApiException(\"Deep\"); }");

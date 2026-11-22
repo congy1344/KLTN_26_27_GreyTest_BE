@@ -32,7 +32,7 @@ class BusinessRuleGenerationControllerTest {
         AuthUser actor = new AuthUser();
         actor.setId(42L);
         when(auth.currentUser("Bearer token")).thenReturn(actor);
-        when(jobs.submit(eq(1L), eq(42L), eq(GenerationProgressStage.BUSINESS_RULE), any(Runnable.class)))
+        when(jobs.submit(eq(1L), eq(42L), eq(GenerationProgressStage.BUSINESS_RULE), any(Runnable.class), any(Runnable.class)))
                 .thenAnswer(invocation -> {
                     invocation.<Runnable>getArgument(3).run();
                     return new GenerationJobAcceptedDto(GenerationProgressStage.BUSINESS_RULE,

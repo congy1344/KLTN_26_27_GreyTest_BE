@@ -73,6 +73,7 @@ final class GeneratedTestApiValidator {
         test.findAll(MethodCallExpr.class).forEach(call -> {
             validator.validateCall(call, test, problems);
             validator.validateReflectiveFixtureField(call, test, problems);
+            validator.validateVoidMockitoWhen(call, test, problems);
             validator.validateBooleanStubReturn(call, test, problems);
             validator.validateNullAssertion(call, test, problems);
             validator.validateBigDecimalAssertion(call, test, caseId, problems);
@@ -96,10 +97,24 @@ final class GeneratedTestApiValidator {
         if (target == null || !target.isClassOrInterfaceType()) return;
         // Reflection tìm theo lớp runtime, không phải kiểu cha/interface của biến.
         var variables = test.findAll(VariableDeclarator.class).stream().filter(v -> v.getType() == target).toList();
-        if (variables.size() != 1 || variables.get(0).getInitializer().filter(Expression::isObjectCreationExpr).isEmpty()) return;
-        var variable = variables.get(0);
         if (test.findAll(com.github.javaparser.ast.expr.AssignExpr.class).stream()
                 .anyMatch(a -> expressionType(a.getTarget(), test) == target)) return;
+        if (variables.size() == 1 && variables.get(0).getParentNode()
+                .filter(com.github.javaparser.ast.body.FieldDeclaration.class::isInstance)
+                .map(com.github.javaparser.ast.body.FieldDeclaration.class::cast)
+                .filter(field -> field.getAnnotations().stream().filter(a -> a.isMarkerAnnotationExpr())
+                        .anyMatch(a -> a.getNameAsString().equals("org.mockito.Mock")
+                        || a.getNameAsString().equals("Mock") && test.getImports().stream().anyMatch(i -> !i.isStatic()
+                                && (i.getNameAsString().equals("org.mockito.Mock")
+                                        || i.isAsterisk() && i.getNameAsString().equals("org.mockito")))))
+                .isPresent() && test.findAll(MethodCallExpr.class).stream().noneMatch(m ->
+                        Set.of("thenCallRealMethod", "doCallRealMethod").contains(m.getNameAsString()))) {
+            problems.add("Fixture wiring: ReflectionTestUtils.setField on a Mockito mock does not stub the getter. "
+                    + "Stub the reached getter with a real configured value or construct and inject a real fixture.");
+            return;
+        }
+        if (variables.size() != 1 || variables.get(0).getInitializer().filter(Expression::isObjectCreationExpr).isEmpty()) return;
+        var variable = variables.get(0);
         var creation = variable.getInitializer().orElseThrow().asObjectCreationExpr();
         if (creation.getAnonymousClassBody().isPresent()) return;
         var owner = declarations.get(qualifiedType(creation.getType(), test));
@@ -119,6 +134,23 @@ final class GeneratedTestApiValidator {
         }
         problems.add("Fixture wiring: field '" + name + "' does not exist in the supplied source hierarchy of "
                 + owner.getNameAsString() + ". Wire a declared injectable field or use the source-defined lookup/helper; do not invent a field from a mock's name.");
+    }
+
+    private void validateVoidMockitoWhen(MethodCallExpr call, CompilationUnit test, List<String> problems) {
+        if (!GeneratedFixtureMutationValidator.isMockitoCall(call, "when", test) || call.getArguments().size() != 1
+                || !call.getArgument(0).isMethodCallExpr()) return;
+        var invocation = call.getArgument(0).asMethodCallExpr();
+        Type receiver = invocation.getScope().map(s -> expressionType(s, test)).orElse(null);
+        if (receiver == null || !receiver.isClassOrInterfaceType()) return;
+        var owner = declarations.get(qualifiedType(receiver.asClassOrInterfaceType(), test));
+        if (owner == null || !owner.getExtendedTypes().isEmpty() || !owner.getImplementedTypes().isEmpty()) return;
+        var methods = owner.getMethodsByName(invocation.getNameAsString());
+        if (methods.isEmpty() || methods.stream().anyMatch(m -> m.getParameters().stream().anyMatch(Parameter::isVarArgs))) return;
+        var matching = methods.stream().filter(m -> m.getParameters().size() == invocation.getArguments().size()).toList();
+        if (!matching.isEmpty() && matching.stream().allMatch(m -> m.getType().isVoidType())) {
+            problems.add("Mockito.when cannot wrap void method " + invocation.getNameAsString()
+                    + ". Use doThrow(...).when(mock).method(...) for an approved exception, or just verify the invocation.");
+        }
     }
 
     /** Boolean literal không thể làm giá trị stub cho method source đã xác định trả int/Integer. */

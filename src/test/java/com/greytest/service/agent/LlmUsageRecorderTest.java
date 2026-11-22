@@ -37,6 +37,19 @@ class LlmUsageRecorderTest {
     }
 
     @Test
+    void recordsPromptAndOutputLengthSoTokenCountsCanBeAudited() throws Exception {
+        LlmUsageRecorder recorder = new LlmUsageRecorder(objectMapper, true, tempDirectory, "audit", "GREYTEST");
+        LlmTokenUsage usage = new LlmTokenUsage(10, 0, 5, 0, 15, LlmTokenUsage.UsageSource.PROVIDER);
+
+        recorder.record("# Prompt: unit-test\nxin chào", "{\"ok\":true}", "openai", "claude-sonnet-5.5", usage, 10);
+
+        JsonNode call = objectMapper.readTree(Files.readString(tempDirectory.resolve("audit").resolve("calls.jsonl")));
+        assertThat(call.path("promptChars").asInt()).isEqualTo("# Prompt: unit-test\nxin chào".length());
+        assertThat(call.path("outputChars").asInt()).isEqualTo("{\"ok\":true}".length());
+        assertThat(call.path("stage").asText()).isEqualTo("UNIT_TEST");
+    }
+
+    @Test
     void doesNotCreateFilesWhenDisabled() {
         LlmUsageRecorder recorder = new LlmUsageRecorder(
                 objectMapper, false, tempDirectory, "disabled-run", "GREYTEST");

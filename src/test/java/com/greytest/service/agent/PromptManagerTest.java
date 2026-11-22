@@ -37,6 +37,9 @@ class PromptManagerTest {
         assertThat(actual.at("/approvedTestCases/0/testData/input/text").asText()).isEqualTo(input.get("text"));
         ((com.fasterxml.jackson.databind.node.ObjectNode) actual.at("/classes/0")).remove("sourceCodeRef");
         ((com.fasterxml.jackson.databind.node.ObjectNode) actual.at("/classes/0")).put("sourceCode", source);
+        // Class không có method đích không cần đường dẫn file trong prompt (package đã có trong source).
+        assertThat(actual.at("/classes/0").has("filePath")).isFalse();
+        ((com.fasterxml.jackson.databind.node.ObjectNode) actual.at("/classes/0")).put("filePath", "src/main/java/demo/Service.java");
         assertThat(actual).isEqualTo(mapper.valueToTree(context));
         assertThat(json.getBytes(java.nio.charset.StandardCharsets.UTF_8).length)
                 .isLessThan(mapper.writerWithDefaultPrettyPrinter().writeValueAsBytes(context).length);
@@ -56,7 +59,11 @@ class PromptManagerTest {
         var first = manager.renderPrompt(stage, Map.of("context_json", one));
         var second = manager.renderPrompt(stage, Map.of("context_json", two));
 
-        assertThat(first.cacheablePrefixes()).hasSize(2).isEqualTo(second.cacheablePrefixes());
+        // Prefix cache chỉ gồm phần ổn định (hướng dẫn, policy); source dùng chung cắt theo method đích của từng batch
+        // nên nằm sau prefix và khác nhau giữa hai batch.
+        assertThat(first.cacheablePrefixes()).isEqualTo(second.cacheablePrefixes()).isNotEmpty();
+        assertThat(String.join("", first.cacheablePrefixes())).doesNotContain("# Shared source evidence");
+        assertThat(first.text()).contains("return 1;").doesNotContain("return 2;");
         assertThat(first.text()).startsWith(String.join("", first.cacheablePrefixes()));
         assertThat(first.text()).isNotEqualTo(second.text());
         assertThat(mapper.<com.fasterxml.jackson.databind.JsonNode>valueToTree(one)).isEqualTo(original);
@@ -109,6 +116,26 @@ class PromptManagerTest {
                 List.of(), List.of(), "VALIDATION_ONLY_SECRET");
         assertThat(manager.render("unit-test", Map.of("context_json", Map.of("classes", List.of(owner)))))
                 .contains("class Service {}").doesNotContain("VALIDATION_ONLY_SECRET");
+    }
+
+    @Test
+    void slicesSourceContextToTargetMethodsForEverySourceStage() {
+        var mapper = new ObjectMapper();
+        String service = "package demo;\nclass Service {\n  Repo repo;\n  Item run() { return repo.load(); }\n"
+                + "  void other() { new Unused().secretBody(); }\n}\n";
+        var context = Map.of("classes", List.of(
+                Map.of("className", "Service", "sourceCode", service, "methods", List.of(Map.of("methodName", "run"))),
+                Map.of("className", "Item", "sourceCode", "package demo; class Item { int itemBody() { return 7; } }", "methods", List.of()),
+                Map.of("className", "Repo", "sourceCode", "package demo; interface Repo { Item load(); }", "methods", List.of()),
+                Map.of("className", "Unused", "sourceCode", "package demo; class Unused { void secretBody() { } }", "methods", List.of())));
+        var manager = new PromptManager(mapper);
+        for (String stage : List.of("business-rule", "test-plan", "test-case", "unit-test")) {
+            String prompt = manager.render(stage, Map.of("context_json", context));
+            assertThat(prompt).as(stage).contains("repo.load()").doesNotContain("class Unused", "new Unused()");
+        }
+        // Unit Test cần dựng fixture nên giữ đủ thân class phụ; Business Rule/Test Plan chỉ cần khai báo.
+        assertThat(manager.render("unit-test", Map.of("context_json", context))).contains("return 7;");
+        assertThat(manager.render("test-plan", Map.of("context_json", context))).doesNotContain("return 7;");
     }
 
     @Test

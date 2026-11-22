@@ -120,6 +120,16 @@ public class SourceUpdateController {
         return sourceUpdateService.applyUpdate(projectId, updateId, user);
     }
 
+    /** Áp dụng source mới ngay sau phân tích; artifact bị ảnh hưởng được xóa để sinh lại ở từng bước. */
+    @PostMapping("/{updateId}/apply-source")
+    public SourceUpdateDto applySource(
+            @PathVariable Long projectId,
+            @PathVariable Long updateId,
+            @RequestHeader("Authorization") String authorization) {
+        var user = authService.currentUser(authorization);
+        return sourceUpdateService.applySourceChanges(projectId, updateId, user);
+    }
+
     @PostMapping("/{updateId}/generate-all")
     public SourceUpdateDto generateAll(@PathVariable Long projectId, @PathVariable Long updateId,
             @RequestHeader("Authorization") String authorization) {

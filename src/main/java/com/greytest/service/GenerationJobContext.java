@@ -1,6 +1,7 @@
 package com.greytest.service;
 
 import java.util.function.Consumer;
+import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -16,7 +17,7 @@ public final class GenerationJobContext {
     private static final ThreadLocal<Map<Object, Object>> JOB_INPUTS = new ThreadLocal<>();
     private static final ThreadLocal<Integer> LLM_CALLS_REMAINING = new ThreadLocal<>();
     private static final ThreadLocal<Long> SOURCE_UPDATE_ID = new ThreadLocal<>();
-    private static final ThreadLocal<Map<String, LongAdder>> METRICS = new ThreadLocal<>();
+    private static final ThreadLocal<JobMetrics> METRICS = new ThreadLocal<>();
     private static final Object REPAIR_QUOTA_EXHAUSTED = new Object();
 
     public static void markRepairQuotaExhausted() {
@@ -31,8 +32,12 @@ public final class GenerationJobContext {
     private GenerationJobContext() {}
 
     public static void bind(Long actorUserId, Consumer<String> logConsumer) {
+        bind(actorUserId, logConsumer, System::nanoTime);
+    }
+
+    static void bind(Long actorUserId, Consumer<String> logConsumer, LongSupplier nanoTime) {
         bind(actorUserId, logConsumer, new ConcurrentHashMap<>());
-        METRICS.set(new ConcurrentHashMap<>());
+        METRICS.set(new JobMetrics(nanoTime));
         SOURCE_UPDATE_ID.remove();
     }
 
@@ -95,8 +100,23 @@ public final class GenerationJobContext {
     }
 
     private static void addMetric(String name, long value) {
-        Map<String, LongAdder> metrics = METRICS.get();
-        if (metrics != null) metrics.computeIfAbsent(name, ignored -> new LongAdder()).add(value);
+        JobMetrics metrics = METRICS.get();
+        if (metrics != null) metrics.counters.computeIfAbsent(name, ignored -> new LongAdder()).add(value);
+    }
+
+    /** Một lượt chờ phản hồi AI: run() khi provider trả kết quả, fail() khi request lỗi (timeout, HTTP lỗi). */
+    public interface LlmWait extends Runnable {
+        void fail();
+    }
+
+    /** Bắt đầu chờ phản hồi AI. Caller phải gọi run() hoặc fail() trong finally. */
+    public static LlmWait startLlmWait() {
+        JobMetrics metrics = METRICS.get();
+        if (metrics == null) return new LlmWait() {
+            public void run() { }
+            public void fail() { }
+        };
+        return metrics.startLlmWait();
     }
 
     public static Map<String, Object> metrics() {
@@ -105,7 +125,7 @@ public final class GenerationJobContext {
 
     /** Giữ đúng bộ đếm của job khi frontend đọc tiến độ từ thread khác. */
     public static Supplier<Map<String, Object>> metricsSupplier() {
-        Map<String, LongAdder> metrics = METRICS.get();
+        JobMetrics metrics = METRICS.get();
         return () -> snapshotMetrics(metrics);
     }
 
@@ -117,10 +137,59 @@ public final class GenerationJobContext {
         if (usage.source() == LlmTokenUsage.UsageSource.ESTIMATED) increment("llmEstimatedCalls");
     }
 
-    private static Map<String, Object> snapshotMetrics(Map<String, LongAdder> metrics) {
-        Map<String, Object> result = new java.util.TreeMap<>();
-        if (metrics != null) metrics.forEach((name, value) -> result.put(name, value.sum()));
-        return Map.copyOf(result);
+    private static Map<String, Object> snapshotMetrics(JobMetrics metrics) {
+        return metrics == null ? Map.of() : metrics.snapshot();
+    }
+
+    private static final class JobMetrics {
+        private final Map<String, LongAdder> counters = new ConcurrentHashMap<>();
+        private final LongSupplier nanoTime;
+        // Khoảng [bắt đầu, kết thúc] của request thành công; request lỗi không phải thời gian AI sinh output.
+        private final java.util.List<long[]> succeeded = new java.util.ArrayList<>();
+        private final java.util.Set<long[]> pending = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+
+        private JobMetrics(LongSupplier nanoTime) {
+            this.nanoTime = nanoTime;
+        }
+
+        private synchronized LlmWait startLlmWait() {
+            long[] open = {nanoTime.getAsLong()};
+            pending.add(open);
+            return new LlmWait() {
+                public void run() { finish(open, true); }
+                public void fail() { finish(open, false); }
+            };
+        }
+
+        private synchronized void finish(long[] open, boolean success) {
+            if (!pending.remove(open)) return;
+            if (success) succeeded.add(new long[] {open[0], nanoTime.getAsLong()});
+            else counters.computeIfAbsent("llmFailedRequests", ignored -> new LongAdder()).increment();
+        }
+
+        /** Hợp các khoảng (request song song chỉ tính một lần, bỏ khoảng trống không chờ AI). */
+        private long unionNanos(long now) {
+            var intervals = new java.util.ArrayList<>(succeeded);
+            pending.forEach(open -> intervals.add(new long[] {open[0], now}));
+            intervals.sort(java.util.Comparator.comparingLong(interval -> interval[0]));
+            long total = 0, start = 0, end = Long.MIN_VALUE;
+            for (long[] interval : intervals) {
+                if (interval[0] > end) {
+                    if (end != Long.MIN_VALUE) total += end - start;
+                    start = interval[0];
+                    end = interval[1];
+                } else end = Math.max(end, interval[1]);
+            }
+            return end == Long.MIN_VALUE ? 0 : total + end - start;
+        }
+
+        private synchronized Map<String, Object> snapshot() {
+            Map<String, Object> result = new java.util.TreeMap<>();
+            counters.forEach((name, value) -> result.put(name, value.sum()));
+            long waitNanos = unionNanos(nanoTime.getAsLong());
+            if (waitNanos > 0) result.put("llmHttpWaitNanos", waitNanos);
+            return Map.copyOf(result);
+        }
     }
 
     /** Khôi phục cả budget của caller khi worker chạy ngay trên cùng thread. */
@@ -130,7 +199,7 @@ public final class GenerationJobContext {
         private final Map<Object, Object> inputs = JOB_INPUTS.get();
         private final Integer budget = LLM_CALLS_REMAINING.get();
         private final Long updateId = SOURCE_UPDATE_ID.get();
-        private final Map<String, LongAdder> metrics = METRICS.get();
+        private final JobMetrics metrics = METRICS.get();
         private boolean closed;
 
         @Override public void close() {
@@ -232,7 +301,7 @@ public final class GenerationJobContext {
         Long actorUserId = ACTOR_USER_ID.get();
         Consumer<String> logConsumer = LOG_CONSUMER.get();
         Map<Object, Object> inputs = JOB_INPUTS.get();
-        Map<String, LongAdder> metrics = METRICS.get();
+        JobMetrics metrics = METRICS.get();
         Long updateId = SOURCE_UPDATE_ID.get();
         return () -> {
             Scope previous = new Scope();

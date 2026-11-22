@@ -53,9 +53,10 @@ final class UnitTestPromptGuidance {
         return TOPICS.stream().filter(topic -> topic.trigger().matcher(evidence).find()).map(Topic::name).toList();
     }
 
+    /** Policy theo chủ đề: giống nhau giữa các batch cùng tập chủ đề nên đặt trong prefix được cache. */
     static String render(JsonNode context, Function<String, String> load) {
         return selectedTopics(context).stream().map(topic -> load.apply("unit-test-" + topic))
-                .collect(java.util.stream.Collectors.joining("\n")) + sourceFacts(context);
+                .collect(java.util.stream.Collectors.joining("\n"));
     }
 
     /**
@@ -63,7 +64,7 @@ final class UnitTestPromptGuidance {
      * Khai báo field/method/constructor đọc nguyên văn từ chính sourceCode này, mà sourceCode luôn nằm trong
      * Shared source evidence của cùng prompt, nên không lặp lại ở đây; class phụ không có dependency phân giải thì bỏ qua.
      */
-    private static String sourceFacts(JsonNode context) {
+    static String sourceFacts(JsonNode context) {
         var facts = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.arrayNode();
         var parser = new com.github.javaparser.JavaParser(new com.github.javaparser.ParserConfiguration()
                 .setLanguageLevel(com.github.javaparser.ParserConfiguration.LanguageLevel.JAVA_21));

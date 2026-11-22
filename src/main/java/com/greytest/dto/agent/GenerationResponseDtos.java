@@ -46,13 +46,13 @@ public final class GenerationResponseDtos {
     }
 
     public record TestPlanResponseDto(
-            @NotEmpty @Valid List<GeneratedTestPlanDto> plans) {
+            @NotEmpty @Valid List<@NotNull GeneratedTestPlanDto> plans) {
     }
 
     public record GeneratedTestPlanDto(
             @JsonProperty("method_id") @NotNull Long methodId,
             @JsonProperty("rule_id") @NotNull Long ruleId,
-            @JsonProperty("covered_rule_ids") @NotEmpty List<Long> coveredRuleIds,
+            @JsonProperty("covered_rule_ids") @NotEmpty List<@NotNull Long> coveredRuleIds,
             @NotBlank String title,
             @NotBlank String description,
             @JsonProperty("test_type")

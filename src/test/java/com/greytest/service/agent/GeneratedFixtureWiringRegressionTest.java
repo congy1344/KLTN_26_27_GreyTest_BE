@@ -48,6 +48,34 @@ class GeneratedFixtureWiringRegressionTest {
         assertThat(problems(stub("true"), "class Store { boolean rows(){return true;} }")).isEmpty();
     }
 
+    @Test void rejectsReflectionOnMockitoMockEvenWhenTheCollaboratorSourceIsExternal() {
+        String test = "package sample; import org.mockito.Mock; import org.springframework.test.util.ReflectionTestUtils; "
+                + "class Check { @Mock Store store; void test(){ReflectionTestUtils.setField(store,\"settings\",null);} }";
+        assertThat(problems(test)).anyMatch(s -> s.contains("does not stub the getter"));
+    }
+
+    @Test void rejectsWhenForUnambiguousVoidMethodsAndKeepsThrowStubbing() {
+        assertThat(problems(stub("true"), "class Store { void rows(){} }")).anyMatch(s -> s.contains("cannot wrap void"));
+        assertThat(problems("package sample; import static org.mockito.Mockito.*; class Check { Store store; "
+                + "void test(){doThrow(new RuntimeException()).when(store).rows();} }", "class Store { void rows(){} }")).isEmpty();
+    }
+
+    @Test void repairShowsExactProductionStackLinesOnlyForClassesInTheContext(
+            @org.junit.jupiter.api.io.TempDir java.nio.file.Path root) throws Exception {
+        var path = root.resolve("src/main/java/sample/Store.java");
+        java.nio.file.Files.createDirectories(path.getParent());
+        java.nio.file.Files.writeString(path, "package sample;\nclass Store {\nObject read() { return cache.get(); }\n}\n");
+        var service = new ClassContextDto(1L, "sample", "Store", "sample.Store", "SERVICE",
+                "src/main/java/sample/Store.java", "package sample;\n\nclass Store {\n    Object read() { return cache.get(); }\n}\n",
+                List.of(), List.of());
+        var context = new UnitTestContextDto(null, null, List.of(service), List.of(), List.of(), List.of(), List.of(), List.of(), List.of());
+        String failure = "java.lang.NullPointerException\n\tat sample.Store.read(Store.java:3)"
+                + "\n\tat other.Store.read(Store.java:3)";
+        String evidence = AIAgentService.withProductionFrames(context, root, failure).substring(failure.length());
+        assertThat(evidence).contains("sample.Store (Store.java)", "3: Object read() { return cache.get(); }")
+                .doesNotContain("other.Store");
+    }
+
     @Test void doesNotGuessOverloadsExternalApisOrCustomWhen() {
         assertThat(problems(stub("true"), "class Store { int rows(){return 1;} int rows(int n){return n;} }")).isEmpty();
         assertThat(problems(stub("true"), "class Store extends ExternalBase {}" )).isEmpty();

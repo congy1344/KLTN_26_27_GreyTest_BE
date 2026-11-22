@@ -95,7 +95,7 @@ public class ProjectController {
             @RequestHeader("Authorization") String authorization) {
         var user = authService.currentUser(authorization);
         projectService.requireAccess(id, user);
-        generationJobService.executeMutation(id, () -> projectService.delete(id, user));
+        generationJobService.executeProjectDeletion(id, () -> { projectService.delete(id, user); return null; });
         return ResponseEntity.noContent().build();
     }
 }

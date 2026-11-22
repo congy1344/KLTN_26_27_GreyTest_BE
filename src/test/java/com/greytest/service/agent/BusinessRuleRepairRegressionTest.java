@@ -83,6 +83,23 @@ class BusinessRuleRepairRegressionTest {
     }
 
     @Test
+    void duplicateDecisionFeedbackExplainsWhichOutcomesAndNestedDecisionsBelongWhere(@TempDir Path logs) throws Exception {
+        // Phản hồi AI thật của jhipster-sample-app (project 1706): 2 rule cùng IF-1, phần "không tìm thấy" đặt nhầm vào IF-1.
+        var context = mapper.readValue(fixture("jhipster-user-details-context.json"), BusinessRuleGenerationContextDto.class);
+        var response = parser.parse(fixture("jhipster-user-details-duplicate.json"), BusinessRuleResponseDto.class);
+
+        assertThatThrownBy(() -> agent(mock(GenerationContextBuilder.class), mock(LlmClient.class), logs)
+                .validateSnapshotOutput(GenerationProgressStage.BUSINESS_RULE, 1706L, context, response, null))
+                .isInstanceOf(LlmResponseException.class)
+                .hasMessageContaining("Duplicate source decisions for method 108310")
+                .hasMessageContaining("IF-1 is used by 2 rules")
+                .hasMessageContaining("ONE rule for IF-1 covering its outcomes TRUE, FALSE")
+                .hasMessageContaining("OPTIONAL-1 (outcomes PRESENT, EMPTY; inside IF-1")
+                .hasMessageContaining("OPTIONAL-2 (outcomes PRESENT, EMPTY")
+                .hasMessageContaining("missing/not-found behavior");
+    }
+
+    @Test
     void stillRejectsMissingDecisionsAfterBoundedCorrection(@TempDir Path logs) throws Exception {
         var contexts = mock(GenerationContextBuilder.class);
         when(contexts.buildBusinessRuleGenerationContext(377L, Set.of(95432L, 95433L, 95434L))).thenReturn(context());

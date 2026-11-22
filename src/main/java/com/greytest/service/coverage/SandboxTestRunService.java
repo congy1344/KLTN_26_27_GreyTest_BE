@@ -9,6 +9,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -63,7 +64,7 @@ public class SandboxTestRunService {
     private static final long TIMEOUT_MINUTES = 20;
     private static final int LOG_TAIL_LINES = 60;
     private static final int MAX_FAILURE_DETAIL = 3000;
-    private static final int MAX_REPAIR_ROUNDS = 3;
+    private static final int MAX_REPAIR_ROUNDS = 2;
     private static final int MAX_LISTED_ASSERTIONS = 5;
     private static final Pattern SUITE = Pattern.compile("<testsuite\\b[^>]*>");
 
@@ -74,6 +75,8 @@ public class SandboxTestRunService {
     private final ProjectJavaVersionDetector javaVersions;
     private final Executor executor;
     private final Docker docker;
+    @org.springframework.beans.factory.annotation.Value("${greytest.sandbox.maven-args:}")
+    private String mavenArgs = "";
     private final Map<Long, RunState> states = new ConcurrentHashMap<>();
     private final Map<Long, Path> liveLogs = new ConcurrentHashMap<>();
 
@@ -182,7 +185,8 @@ public class SandboxTestRunService {
                 createContainer(sandbox, sandbox.root(), sandbox.work().resolve("docker.log"));
                 boolean compiled;
                 try {
-                    compiled = docker.run(List.of("exec", sandbox.container(), "sh", "-c", warmCompile()),
+                    compiled = docker.run(List.of("exec", "-e", "MAVEN_CONFIG=", "-e", "MAVEN_ARGS=" + mavenArgs,
+                                    sandbox.container(), "sh", "-c", warmCompile()),
                             sandbox.work().resolve("docker.log")).exitCode() == 0;
                 } catch (IOException | RuntimeException unavailable) {
                     compiled = false;
@@ -244,7 +248,9 @@ public class SandboxTestRunService {
         String reason = failure.getMessage() == null ? failure.getClass().getSimpleName() : failure.getMessage().split("\\R", 2)[0];
         if (reason.length() > 220) reason = reason.substring(0, 217) + "...";
         String message = "Cảnh báo: Unit Test CHƯA được xác minh: " + reason + " Các Unit Test đã lưu được giữ lại.";
-        states.put(projectId, new RunState(Status.FAILED, message, 0, 0, ""));
+        Path log = liveLogs.get(projectId);
+        // Giữ chẩn đoán build trước khi sandbox bị dọn, để lỗi cấu hình không che mất lỗi compiler.
+        states.put(projectId, new RunState(Status.FAILED, message, 0, 0, log == null ? "" : tail(log)));
         if (!GenerationProgressService.verificationFinished(message)) GenerationJobContext.log(message);
     }
 
@@ -321,19 +327,34 @@ public class SandboxTestRunService {
                     note = " Đã hết quota LLM; dừng AI sửa Unit Test. Các test đã đạt được giữ lại.";
                 if (previous.isEmpty()) break;
                 Outcome next = attempt(sandbox, true);
-                if (automatic) requireVerified(next);
                 if (next.state().status() == Status.FAILED && next.failures().isEmpty()) {
                     // Bản sửa làm hỏng cả lượt build: trả lại bản cũ để project không tệ hơn trước vòng này.
                     jobs.executeMutation(projectId, () -> units.restore(projectId, previous));
+                    if (automatic) requireVerified(next);
                     note = " Bản AI sửa ở vòng " + (rounds + 1) + " không chạy được nên đã khôi phục bản trước đó.";
+                    break;
+                }
+                if (technicalErrors(next.failures()).size() > failing.size()) {
+                    // Bản sửa làm test khác hỏng theo (thường do đổi setup dùng chung khi gộp lớp): trả lại bản cũ và chạy lại.
+                    jobs.executeMutation(projectId, () -> units.restore(projectId, previous));
+                    Outcome restored = attempt(sandbox, true);
+                    if (automatic) requireVerified(restored);
+                    current = restored;
+                    note += " Bản AI sửa ở vòng " + (rounds + 1) + " làm tăng lỗi kỹ thuật nên đã khôi phục bản trước đó.";
                     break;
                 }
                 rounds++;
                 repaired += previous.size();
                 boolean improved = technicalErrors(next.failures()).size() < failing.size();
                 current = next;
-                if (!improved || GenerationJobContext.repairQuotaExhausted()) break;
+                if (!improved) {
+                    note += " Số lỗi kỹ thuật không giảm; dừng tự sửa.";
+                    break;
+                }
+                if (GenerationJobContext.repairQuotaExhausted()) break;
             }
+            if (rounds == MAX_REPAIR_ROUNDS && !technicalErrors(current.failures()).isEmpty())
+                note += " Đã đạt giới hạn " + MAX_REPAIR_ROUNDS + " vòng sửa lỗi kỹ thuật.";
         } catch (RuntimeException failure) {
             if (automatic && !(failure instanceof com.greytest.exception.UsageQuotaExceededException)) throw failure;
             note = " Không tự sửa tiếp được: " + failure.getMessage();
@@ -355,10 +376,12 @@ public class SandboxTestRunService {
         List<String> names = outcome.failures().stream().filter(UnitTestService.TestFailure::assertion)
                 .map(failure -> failure.className().substring(failure.className().lastIndexOf('.') + 1) + "#" + failure.methodName())
                 .toList();
-        String assertions = names.isEmpty() ? "" : " Có " + names.size() + " test fail ở assertion: "
+        // Test fail ở assertion = code chạy ra kết quả khác Test Case đã duyệt, có thể là lệch nghiệp vụ cần người xem
+        String assertions = names.isEmpty() ? "" : " Phát hiện " + names.size() + " test cho kết quả khác mong đợi: "
                 + String.join(", ", names.subList(0, Math.min(names.size(), MAX_LISTED_ASSERTIONS)))
                 + (names.size() > MAX_LISTED_ASSERTIONS ? " … và " + (names.size() - MAX_LISTED_ASSERTIONS) + " test khác" : "")
-                + ". Nghi lệch nghiệp vụ giữa kết quả mong đợi đã duyệt và code production, cần người kiểm tra lại; AI không sửa các test này.";
+                + ". Code production đang trả kết quả khác với Test Case đã duyệt, có thể code chưa đúng Business Rule."
+                + " Hãy kiểm tra lại code hoặc Business Rule/Test Case tương ứng; AI không tự sửa các test này để không che mất lỗi nghiệp vụ.";
         List<String> compileNames = outcome.failures().stream().filter(failure -> failure.detail().startsWith("COMPILATION ERROR:"))
                 .map(failure -> failure.className().substring(failure.className().lastIndexOf('.') + 1) + "#" + failure.methodName()).toList();
         String message = compileNames.isEmpty() ? state.message() : "Còn " + compileNames.size() + " test không biên dịch được: "
@@ -434,7 +457,7 @@ public class SandboxTestRunService {
             int passed = counts[0] - counts[1];
             return new Outcome(new RunState(counts[1] > 0 ? Status.TESTS_FAILED : Status.SUCCEEDED,
                     "Đã chạy " + counts[0] + " test: " + passed + " đạt, " + counts[1] + " không đạt. " + coverageNote,
-                    counts[0], counts[1], tail(log)), surefireFailures(surefire));
+                    counts[0], counts[1], tail(log)), surefireFailures(surefire, archive));
         } catch (Exception failure) {
             return failed(failure);
         }
@@ -495,7 +518,9 @@ public class SandboxTestRunService {
 
     private void execute(Sandbox sandbox, boolean fast, boolean offline, Path log) throws IOException {
         Files.writeString(log, "");
-        List<String> command = new ArrayList<>(List.of("exec"));
+        // Image maven:* đặt MAVEN_CONFIG=/root/.m2; mvnw của project chèn biến này vào làm tham số → "Unknown lifecycle phase /root/.m2".
+        // Truyền cùng cờ build cho compile sớm và chạy test; không nội suy vào lệnh shell.
+        List<String> command = new ArrayList<>(List.of("exec", "-e", "MAVEN_CONFIG=", "-e", "MAVEN_ARGS=" + mavenArgs));
         if (fast) command.addAll(List.of("-e", "GREYTEST_FAST_RERUN=1"));
         command.addAll(List.of(sandbox.container(), "sh", "./run-greytest-coverage.sh", "-B", "-ntp"));
         if (offline) command.add("-o");
@@ -530,9 +555,10 @@ public class SandboxTestRunService {
     }
 
     /** Từng test không đạt kèm lỗi Surefire ghi lại, để AI sửa đúng chỗ. */
-    private static List<UnitTestService.TestFailure> surefireFailures(Path dir) throws IOException {
+    static List<UnitTestService.TestFailure> surefireFailures(Path dir, byte[] archive) throws IOException {
         List<UnitTestService.TestFailure> failures = new ArrayList<>();
         if (!Files.isDirectory(dir)) return failures;
+        var exportedFixtures = SandboxCompilationFailures.exportedFixtureMethods(archive);
         try (var files = Files.list(dir)) {
             // Báo cáo đến từ sandbox nên là dữ liệu không tin cậy: cấm DOCTYPE để chặn XXE.
             var factory = javax.xml.parsers.DocumentBuilderFactory.newInstance();
@@ -547,18 +573,64 @@ public class SandboxTestRunService {
                     var problem = error != null ? error : testCase.getElementsByTagName("failure").item(0);
                     if (problem == null) continue;
                     var element = (org.w3c.dom.Element) problem;
-                    String detail = element.getAttribute("type") + ": " + element.getAttribute("message") + "\n" + element.getTextContent();
+                    String type = element.getAttribute("type");
+                    String message = element.getAttribute("message");
+                    String stack = element.getTextContent();
+                    // Mockito có thể ghi tiêu đề làm type thay vì tên class trong báo cáo Surefire.
+                    boolean mockitoVerification = type.startsWith("org.mockito.exceptions.")
+                            || type.equals("Wanted but not invoked") && message.stripLeading().startsWith("Wanted but not invoked:")
+                                    && message.contains("interaction") && message.contains("with this mock");
+                    // Chỉ phân loại lại wrapper JUnit khi stack xác nhận lỗi Mockito, không đoán lỗi nghiệp vụ.
+                    boolean unexpectedException = type.equals("org.opentest4j.AssertionFailedError")
+                            && message.startsWith("Unexpected exception thrown:")
+                            && stack.contains("org.junit.jupiter.api.AssertDoesNotThrow.")
+                            && stack.contains("Caused by: org.mockito.exceptions.");
+                    String className = testCase.getAttribute("classname");
                     // Test tham số hoá có hậu tố "(args)[1]"; chỉ lấy tên method.
-                    failures.add(new UnitTestService.TestFailure(testCase.getAttribute("classname"),
-                            testCase.getAttribute("name").replaceAll("[(\\[].*", ""),
+                    String methodName = testCase.getAttribute("name").replaceAll("[(\\[].*", "");
+                    String detail = (exportedFixtures.contains(className + "#" + methodName) ? "EXPORTED TEST: " : "")
+                            + type + ": " + message + "\n" + unusedStubLines(stack, archive) + stack;
+                    failures.add(new UnitTestService.TestFailure(className, methodName,
                             detail.substring(0, Math.min(detail.length(), MAX_FAILURE_DETAIL)),
-                            error == null && !element.getAttribute("type").startsWith("org.mockito.exceptions.verification.")));
+                            error == null && !unexpectedException && !mockitoVerification));
                 }
             }
         } catch (javax.xml.parsers.ParserConfigurationException | org.xml.sax.SAXException unreadable) {
             // Báo cáo hỏng thì coi như không có chi tiết lỗi; số đếm vẫn lấy được từ surefireCounts.
         }
         return failures;
+    }
+
+    public static final String UNUSED_STUB_LINE = "Unused stub source line: ";
+    private static final Pattern UNUSED_STUB_AT = Pattern.compile("->\\s*at ([\\w.$]+)\\.[\\w$<>]+\\(([\\w$]+\\.java):(\\d+)\\)");
+
+    /** Dòng code của từng stub Mockito báo thừa, đọc từ chính file đã export, để sửa ở local mà không cần đoán số dòng. */
+    static String unusedStubLines(String stack, byte[] archive) {
+        if (archive == null || !stack.contains("UnnecessaryStubbingException")) return "";
+        Set<String> wanted = new LinkedHashSet<>();
+        Matcher at = UNUSED_STUB_AT.matcher(stack);
+        while (at.find()) {
+            String owner = at.group(1);
+            String pkg = owner.contains(".") ? owner.substring(0, owner.lastIndexOf('.')) : "";
+            wanted.add((pkg.isEmpty() ? "" : pkg.replace('.', '/') + "/") + at.group(2) + ":" + at.group(3));
+        }
+        if (wanted.isEmpty()) return "";
+        StringBuilder lines = new StringBuilder();
+        try (var zip = new ZipInputStream(new ByteArrayInputStream(archive))) {
+            for (var entry = zip.getNextEntry(); entry != null; entry = zip.getNextEntry()) {
+                String name = entry.getName();
+                var hits = wanted.stream().filter(w -> name.endsWith("/" + w.substring(0, w.lastIndexOf(':')))).toList();
+                if (hits.isEmpty()) continue;
+                List<String> content = new String(zip.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8).lines().toList();
+                for (String hit : hits) {
+                    int line = Integer.parseInt(hit.substring(hit.lastIndexOf(':') + 1));
+                    if (line >= 1 && line <= content.size()) lines.append(UNUSED_STUB_LINE).append(content.get(line - 1).strip()).append('\n');
+                }
+            }
+        } catch (IOException | RuntimeException unreadable) {
+            return "";
+        }
+        return lines.toString();
     }
 
     private static int attribute(String tag, String name) {

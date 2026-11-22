@@ -289,6 +289,12 @@ public class UsageQuotaService {
 
     private UsageQuota currentForUpdate(Long userId) {
         LocalDate today = LocalDate.now(clock);
+        // `synchronized` không đủ: transaction commit sau khi rời method, nên hai luồng có thể cùng thấy "chưa có dòng"
+        // và cùng insert. Upsert ở DB rồi mới khoá dòng.
+        // Transaction read-only (màn hình chỉ đọc) không được chạy INSERT, kể cả ON CONFLICT DO NOTHING.
+        if (!org.springframework.transaction.support.TransactionSynchronizationManager.isCurrentTransactionReadOnly()) {
+            repository.insertIfMissing(userId, resolveTierLimit("FREE", defaultLimit), today.withDayOfMonth(1));
+        }
         UsageQuota quota = repository.findByUserIdForUpdate(userId)
                 .orElseGet(() -> newQuota(userId, today.withDayOfMonth(1)));
 

@@ -51,6 +51,7 @@ Output:
   ]
 }
 Each test_data.mocks key is ONE complete JSON string, even when the call has several arguments: write "repo.existsByIdAndStatus(102, ENROLLED)": false, never split a key at a comma. Every case object must contain all eight fields with their values.
+Keep outputs short: description at most 120 characters, preconditions and expected_result at most 200 characters each; put concrete values only in test_data and do not repeat the same text across fields.
 
 Context:
 {{context_json}}

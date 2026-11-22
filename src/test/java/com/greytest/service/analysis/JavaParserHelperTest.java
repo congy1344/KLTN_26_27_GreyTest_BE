@@ -282,7 +282,7 @@ class JavaParserHelperTest {
 
         assertThat(method(methods, "findById").lineStart()).isEqualTo(52);
         assertThat(method(methods, "findById").lineEnd()).isEqualTo(68);
-        assertRange(method(methods, "findById"), "STMT-2", 55, 67);
+        assertRange(method(methods, "findById"), "OPTIONAL-1::EMPTY", 55, 67);
 
         assertThat(method(methods, "save").lineStart()).isEqualTo(70);
         assertThat(method(methods, "save").lineEnd()).isEqualTo(74);

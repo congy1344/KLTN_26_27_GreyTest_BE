@@ -8,6 +8,7 @@ public record GenerationRunMetricsDto(
         Instant startedAt,
         Instant finishedAt,
         long elapsedMillis,
+        long llmWaitMillis,
         long recordedCalls,
         long inputTokens,
         long outputTokens,

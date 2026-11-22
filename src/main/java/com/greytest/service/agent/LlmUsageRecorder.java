@@ -73,6 +73,17 @@ public class LlmUsageRecorder {
             String model,
             LlmTokenUsage usage,
             long latencyMillis) {
+        record(prompt, null, provider, model, usage, latencyMillis);
+    }
+
+    /** Kèm độ dài prompt/output thật để đối chiếu token provider báo (VD phát hiện lượt bị đếm lệch). */
+    public synchronized void record(
+            String prompt,
+            String output,
+            String provider,
+            String model,
+            LlmTokenUsage usage,
+            long latencyMillis) {
         com.greytest.service.GenerationJobContext.recordLlmUsage(usage);
         if (!enabled) return;
 
@@ -81,7 +92,7 @@ public class LlmUsageRecorder {
         byStage.computeIfAbsent(stage, ignored -> new UsageAggregate()).add(usage, latencyMillis);
         try {
             Files.createDirectories(runDirectory);
-            appendCall(stage, provider, model, usage, latencyMillis);
+            appendCall(stage, provider, model, usage, latencyMillis, prompt, output);
             writeSummary();
             log.info(
                     "LLM usage [{}] {} {}: input={}, output={}, reasoning={}, total={}, cumulative={}",
@@ -98,7 +109,9 @@ public class LlmUsageRecorder {
             String provider,
             String model,
             LlmTokenUsage usage,
-            long latencyMillis) throws IOException {
+            long latencyMillis,
+            String prompt,
+            String output) throws IOException {
         ObjectNode call = objectMapper.createObjectNode();
         call.put("timestamp", Instant.now().toString());
         call.put("runId", runId);
@@ -108,6 +121,8 @@ public class LlmUsageRecorder {
         call.put("provider", provider);
         call.put("model", model);
         addUsage(call, usage, latencyMillis);
+        call.put("promptChars", prompt == null ? 0 : prompt.length());
+        call.put("outputChars", output == null ? 0 : output.length());
         Files.writeString(
                 runDirectory.resolve("calls.jsonl"),
                 objectMapper.writeValueAsString(call) + System.lineSeparator(),

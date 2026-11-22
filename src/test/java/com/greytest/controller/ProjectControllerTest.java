@@ -119,20 +119,18 @@ class ProjectControllerTest {
     void deleteReturnsNoContent() throws Exception {
         AuthUser user = user();
         when(authService.currentUser("Bearer token")).thenReturn(user);
-        doAnswer(invocation -> {
-            invocation.<Runnable>getArgument(1).run();
-            return null;
-        }).when(generationJobService).executeMutation(
-                org.mockito.ArgumentMatchers.eq(1L),
-                org.mockito.ArgumentMatchers.any(Runnable.class));
+        doAnswer(invocation -> invocation.<java.util.function.Supplier<?>>getArgument(1).get())
+                .when(generationJobService).executeProjectDeletion(
+                        org.mockito.ArgumentMatchers.eq(1L),
+                        org.mockito.ArgumentMatchers.any());
 
         mockMvc.perform(delete("/api/projects/1").header("Authorization", "Bearer token"))
                 .andExpect(status().isNoContent());
 
         verify(projectService).requireAccess(1L, user);
-        verify(generationJobService).executeMutation(
+        verify(generationJobService).executeProjectDeletion(
                 org.mockito.ArgumentMatchers.eq(1L),
-                org.mockito.ArgumentMatchers.any(Runnable.class));
+                org.mockito.ArgumentMatchers.any());
         verify(projectService).delete(1L, user);
     }
 }

@@ -46,6 +46,50 @@ class UsageQuotaTransactionIntegrationTest {
     }
 
     @Test
+    void concurrentFirstCallsOfANewUserShareOneQuotaRow() throws Exception {
+        // Các batch đầu của một lượt sinh cùng trừ quota khi user chưa có dòng usage_quota: không được đụng unique user_id.
+        int callers = 6;
+        var start = new java.util.concurrent.CountDownLatch(1);
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(callers);
+        try {
+            var futures = new java.util.ArrayList<java.util.concurrent.Future<?>>();
+            for (int i = 0; i < callers; i++) {
+                futures.add(pool.submit(() -> { start.await(); return service.consumeLlmCall(user.getId(), null, 1, Map.of()); }));
+            }
+            start.countDown();
+            for (var future : futures) future.get(30, java.util.concurrent.TimeUnit.SECONDS);
+        } finally {
+            pool.shutdownNow();
+        }
+        assertThat(quotas.findByUserId(user.getId())).get().extracting("quotaUsed").isEqualTo(callers);
+    }
+
+    @Test
+    void aCallWhileAnotherTransactionCreatesTheRowDoesNotHitTheUniqueUserId() throws Exception {
+        // Transaction ngoài (đọc quota ở màn hình) tạo dòng nhưng chưa commit trong lúc batch AI trừ quota bằng REQUIRES_NEW.
+        var created = new java.util.concurrent.CountDownLatch(1);
+        var release = new java.util.concurrent.CountDownLatch(1);
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(2);
+        try {
+            var holder = pool.submit(() -> new org.springframework.transaction.support.TransactionTemplate(transactionManager).execute(status -> {
+                service.current(user.getId());
+                created.countDown();
+                try { release.await(10, java.util.concurrent.TimeUnit.SECONDS); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                return null;
+            }));
+            created.await(10, java.util.concurrent.TimeUnit.SECONDS);
+            var consumer = pool.submit(() -> service.consumeLlmCall(user.getId(), null, 1, Map.of()));
+            Thread.sleep(500);
+            release.countDown();
+            holder.get(30, java.util.concurrent.TimeUnit.SECONDS);
+            consumer.get(30, java.util.concurrent.TimeUnit.SECONDS);
+        } finally {
+            pool.shutdownNow();
+        }
+        assertThat(quotas.findByUserId(user.getId())).get().extracting("quotaUsed").isEqualTo(1);
+    }
+
+    @Test
     void cancellationPersistsFreeTierQuotaAndAuditTogether() {
         user.setTier(UserTier.PLUS);
         users.save(user);

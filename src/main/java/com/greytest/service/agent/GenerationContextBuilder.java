@@ -583,7 +583,7 @@ public class GenerationContextBuilder {
                 .orElse(analysis);
     }
 
-    private java.nio.file.Path activeSourceRoot(Long projectId) {
+    java.nio.file.Path activeSourceRoot(Long projectId) {
         return projectRepository.findById(projectId).map(Project::getStoragePath)
                 .filter(path -> !path.isBlank()).map(java.nio.file.Path::of).orElse(null);
     }

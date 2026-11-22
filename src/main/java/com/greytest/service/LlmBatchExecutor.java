@@ -90,6 +90,17 @@ public class LlmBatchExecutor {
         });
     }
 
+    /**
+     * Batch đầu chạy trước khoảng này rồi các batch khác mới bắt đầu, để prompt cache (hướng dẫn/policy dùng chung)
+     * kịp được ghi và các request sau đọc lại thay vì cùng ghi; 0 là tắt.
+     */
+    @Value("${greytest.llm-batch.first-batch-head-start-millis:0}")
+    private long firstBatchHeadStartMillis;
+
+    public void setFirstBatchHeadStartMillis(long millis) {
+        this.firstBatchHeadStartMillis = Math.max(0, millis);
+    }
+
     public <I, O> List<O> map(List<I> inputs, Function<I, O> worker) {
         return map(inputs, null, worker, (batchNumber, output) -> { });
     }
@@ -122,10 +133,20 @@ public class LlmBatchExecutor {
         java.util.concurrent.atomic.AtomicReference<RuntimeException> fatalError = new java.util.concurrent.atomic.AtomicReference<>();
 
         List<CompletableFuture<Void>> workers = new ArrayList<>(workerCount);
+        long headStart = firstBatchHeadStartMillis;
         for (int w = 0; w < workerCount; w++) {
+            boolean delayed = w > 0 && headStart > 0;
             CompletableFuture<Void> workerFuture = CompletableFuture.supplyAsync(GenerationJobContext.wrap(() -> {
                 LocaleContextHolder.setLocale(locale);
                 try {
+                    if (delayed) {
+                        try {
+                            Thread.sleep(headStart);
+                        } catch (InterruptedException ie) {
+                            Thread.currentThread().interrupt();
+                            return null;
+                        }
+                    }
                     while (remainingTasks.get() > 0) {
                         if (shouldStop != null && shouldStop.getAsBoolean()) {
                             break;

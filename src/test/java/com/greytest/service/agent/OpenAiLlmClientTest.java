@@ -69,6 +69,78 @@ class OpenAiLlmClientTest {
     }
 
     @Test
+    void claudeModelMarksStablePrefixesWithEphemeralCacheControl() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
+        var bodies = new java.util.concurrent.CopyOnWriteArrayList<JsonNode>();
+        server.createContext("/", exchange -> {
+            bodies.add(objectMapper.readTree(exchange.getRequestBody()));
+            byte[] response = "{\"choices\":[{\"message\":{\"content\":\"{}\"}}]}".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        server.start();
+        try {
+            var endpoint = URI.create("http://127.0.0.1:" + server.getAddress().getPort());
+            var client = new OpenAiLlmClient(objectMapper, HttpClient.newHttpClient(), "test-key",
+                    "claude-sonnet-5.5", 0.3, 16000, Duration.ofSeconds(5), endpoint);
+            var options = new LlmRequestOptions(4096).withCacheablePrefixes(java.util.List.of("instructions\n", "source\n"));
+            client.complete("instructions\nsource\nbatch 1", options);
+            var body = bodies.get(0);
+            assertThat(body.path("messages")).hasSize(1);
+            var parts = body.at("/messages/0/content");
+            assertThat(parts).hasSize(3);
+            assertThat(parts.get(0).path("text").asText()).isEqualTo("instructions\n");
+            assertThat(parts.get(0).at("/cache_control/type").asText()).isEqualTo("ephemeral");
+            // Mọi prefix đều là phần ổn định giữa các batch (hướng dẫn, policy) nên đều được đánh dấu cache.
+            assertThat(parts.get(1).path("text").asText()).isEqualTo("source\n");
+            assertThat(parts.get(1).at("/cache_control/type").asText()).isEqualTo("ephemeral");
+            assertThat(parts.get(2).path("text").asText()).isEqualTo("batch 1");
+            assertThat(parts.get(2).has("cache_control")).isFalse();
+            assertThat(body.has("prompt_cache_options")).isFalse();
+            assertThat(body.path("max_tokens").asInt()).isEqualTo(4096);
+            client.complete("prefix no longer matches", options);
+            assertThat(bodies.get(1).at("/messages/0/content").asText()).isEqualTo("prefix no longer matches");
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void openAiModelSendsStrictJsonSchemaWhenTheStageHasOne() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
+        var bodies = new java.util.concurrent.CopyOnWriteArrayList<JsonNode>();
+        server.createContext("/", exchange -> {
+            bodies.add(objectMapper.readTree(exchange.getRequestBody()));
+            byte[] response = "{\"choices\":[{\"message\":{\"content\":\"{}\"}}]}".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        server.start();
+        try {
+            var endpoint = URI.create("http://127.0.0.1:" + server.getAddress().getPort());
+            var schema = objectMapper.readTree("{\"type\":\"object\",\"properties\":{\"rules\":{\"type\":\"array\"}},\"required\":[\"rules\"],\"additionalProperties\":false}");
+            var options = new LlmRequestOptions(512).withResponseSchema("business_rule", schema);
+            new OpenAiLlmClient(objectMapper, HttpClient.newHttpClient(), "k", "gpt-6-luna", 0.3, 1000, Duration.ofSeconds(5), endpoint)
+                    .complete("prompt", options);
+            new OpenAiLlmClient(objectMapper, HttpClient.newHttpClient(), "k", "claude-sonnet-5.5", 0.3, 1000, Duration.ofSeconds(5), endpoint)
+                    .complete("prompt", options);
+            new OpenAiLlmClient(objectMapper, HttpClient.newHttpClient(), "k", "gpt-6-luna", 0.3, 1000, Duration.ofSeconds(5), endpoint)
+                    .complete("prompt", new LlmRequestOptions(512));
+            assertThat(bodies.get(0).at("/response_format/type").asText()).isEqualTo("json_schema");
+            assertThat(bodies.get(0).at("/response_format/json_schema/name").asText()).isEqualTo("business_rule");
+            assertThat(bodies.get(0).at("/response_format/json_schema/strict").asBoolean()).isTrue();
+            assertThat(bodies.get(0).at("/response_format/json_schema/schema")).isEqualTo(schema);
+            // Proxy Claude và stage không có schema vẫn dùng json_object.
+            assertThat(bodies.get(1).at("/response_format/type").asText()).isEqualTo("json_object");
+            assertThat(bodies.get(2).at("/response_format/type").asText()).isEqualTo("json_object");
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
     void timesOutWhenHeadersArriveButTheResponseBodyStalls() throws Exception {
         var releaseBody = new java.util.concurrent.CountDownLatch(1);
         var headersSent = new java.util.concurrent.CountDownLatch(1);

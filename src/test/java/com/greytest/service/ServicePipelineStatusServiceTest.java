@@ -39,7 +39,34 @@ class ServicePipelineStatusServiceTest {
     @Mock private CoverageReportRepository reports;
     @Mock private ProjectRepository projects;
     @Mock private ServiceScopeResolver scopes;
+    @Mock private com.greytest.repository.JavaClassRepository javaClasses;
+    @Mock private com.greytest.repository.JavaMethodRepository javaMethods;
     @InjectMocks private ServicePipelineStatusService statuses;
+
+    @Test
+    void aPublicServiceMethodWithoutRuleKeepsBusinessRuleAsTheCurrentStep() {
+        BusinessRule approved = rule(1L, 11L, ReviewStatus.APPROVED);
+        when(rules.findByProjectId(7L)).thenReturn(List.of(approved));
+        com.greytest.entity.JavaClass service = new com.greytest.entity.JavaClass();
+        service.setId(101L);
+        service.setClassType(com.greytest.entity.enums.ClassType.SERVICE);
+        when(javaClasses.findAllById(Set.of(101L))).thenReturn(List.of(service));
+        when(javaMethods.findByClassIdIn(List.of(101L))).thenReturn(List.of(
+                method(11L, com.greytest.entity.enums.Visibility.PUBLIC),
+                method(12L, com.greytest.entity.enums.Visibility.PRIVATE),
+                method(13L, com.greytest.entity.enums.Visibility.PUBLIC)));
+        var scope = new ServiceScopeResolver.ServiceScope("svc", Set.of(101L), Set.of(11L, 12L, 13L));
+
+        // Method 13 vừa được thêm (hoặc mất BR khi cập nhật source); method private 12 không cần BR.
+        assertThat(statuses.status(7L, scope)).isEqualTo(ProjectStatus.BR_PENDING_REVIEW);
+    }
+
+    private com.greytest.entity.JavaMethod method(Long id, com.greytest.entity.enums.Visibility visibility) {
+        com.greytest.entity.JavaMethod method = new com.greytest.entity.JavaMethod();
+        method.setId(id);
+        method.setVisibility(visibility);
+        return method;
+    }
 
     @Test
     void reachedStatusKeepsLaterStepsOpenWhileAnEditedRuleWaitsForApproval() {

@@ -74,10 +74,12 @@ class UnitTestServiceTest {
         var bad = new UnitTest(); bad.setTestCaseId(2L); bad.setSourceCode("old invalid fixture");
         Map<Long, UnitTest> stored = new java.util.HashMap<>(); stored.put(1L, good); stored.put(2L, bad);
         when(projects.findById(1L)).thenReturn(Optional.of(project)); when(projects.findByIdForUpdate(1L)).thenReturn(Optional.of(project));
-        when(cases.findAll()).thenReturn(List.of(first, second)); when(plans.findById(20L)).thenReturn(Optional.of(plan));
+        when(cases.findByProjectId(org.mockito.ArgumentMatchers.any())).thenReturn(List.of(first, second)); when(plans.findById(20L)).thenReturn(Optional.of(plan));
         if (!blocked && !failed) when(cases.findById(2L)).thenReturn(Optional.of(second));
         when(units.findByTestCaseId(org.mockito.ArgumentMatchers.anyLong())).thenAnswer(call -> stored.get(call.<Long>getArgument(0)));
+        var upstreamReads = new java.util.concurrent.atomic.AtomicInteger();
         org.mockito.Mockito.doAnswer(call -> {
+            com.greytest.service.agent.GenerationContextBuilder.inputSnapshot("approved-upstream", upstreamReads::incrementAndGet);
             if (call.getArgument(1) == bad) throw new LlmResponseException("Missing collection stub");
             return null;
         }).when(ai).validateExistingUnitTest(org.mockito.ArgumentMatchers.eq(1L), org.mockito.ArgumentMatchers.any(UnitTest.class), org.mockito.ArgumentMatchers.isNull());
@@ -92,6 +94,7 @@ class UnitTestServiceTest {
         else service.generate(1L, (String) null, true);
         if (failed) verify(generationProgress).failStep(1L, com.greytest.dto.GenerationProgressStage.UNIT_TEST, 0, "provider failed");
         verify(ai).validateExistingUnitTest(1L, good, null);
+        assertThat(upstreamReads.get()).isEqualTo(1);
         verify(ai).generateUnitTests(1L, Set.of(2L));
         verify(ai, never()).generateUnitTests(1L, Set.of(1L, 2L));
         assertThat(stored.get(1L)).isSameAs(good);
@@ -116,7 +119,7 @@ class UnitTestServiceTest {
         List<TestCase> approved = List.of(approvedCase(1L, 20L), approvedCase(2L, 20L), approvedCase(3L, 20L));
         when(projects.findById(1L)).thenReturn(Optional.of(project));
         when(projects.findByIdForUpdate(1L)).thenReturn(Optional.of(project));
-        when(cases.findAll()).thenReturn(approved);
+        when(cases.findByProjectId(org.mockito.ArgumentMatchers.any())).thenReturn(approved);
         when(plans.findById(20L)).thenReturn(Optional.of(plan));
         when(cases.findById(1L)).thenReturn(Optional.of(approved.get(0)));
         when(cases.findById(3L)).thenReturn(Optional.of(approved.get(2)));
@@ -180,7 +183,7 @@ class UnitTestServiceTest {
         List<TestCase> approved = LongStream.rangeClosed(1, 5).mapToObj(id -> approvedCase(id, 20L)).toList();
         when(projects.findById(1L)).thenReturn(Optional.of(project));
         when(projects.findByIdForUpdate(1L)).thenReturn(Optional.of(project));
-        when(cases.findAll()).thenReturn(approved);
+        when(cases.findByProjectId(org.mockito.ArgumentMatchers.any())).thenReturn(approved);
         when(plans.findById(20L)).thenReturn(Optional.of(plan));
         when(cases.findById(5L)).thenReturn(Optional.of(approved.get(4)));
         when(ai.generateUnitTests(org.mockito.ArgumentMatchers.eq(1L), org.mockito.ArgumentMatchers.anySet()))
@@ -253,7 +256,7 @@ class UnitTestServiceTest {
         pending.setStatus(ReviewStatus.PENDING_REVIEW);
         when(projects.findById(1L)).thenReturn(Optional.of(project));
         when(plans.findById(20L)).thenReturn(Optional.of(plan));
-        when(cases.findAll()).thenReturn(List.of(pending));
+        when(cases.findByProjectId(org.mockito.ArgumentMatchers.any())).thenReturn(List.of(pending));
 
         assertThatThrownBy(() -> service.generate(1L)).isInstanceOf(LlmResponseException.class)
                 .hasMessageContaining("approve");
@@ -323,7 +326,7 @@ class UnitTestServiceTest {
         when(projects.findByIdForUpdate(1L)).thenReturn(Optional.of(project));
         TestCase pendingSibling = approvedCase(32L, 20L);
         pendingSibling.setStatus(ReviewStatus.PENDING_REVIEW);
-        when(cases.findAll()).thenReturn(List.of(testCase, pendingSibling));
+        when(cases.findByProjectId(org.mockito.ArgumentMatchers.any())).thenReturn(List.of(testCase, pendingSibling));
         when(cases.findById(31L)).thenReturn(Optional.of(testCase));
         when(plans.findById(20L)).thenReturn(Optional.of(plan));
         when(ai.generateUnitTests(1L, Set.of(31L)))
@@ -360,7 +363,7 @@ class UnitTestServiceTest {
         }).toList();
         when(projects.findById(1L)).thenReturn(Optional.of(project));
         when(projects.findByIdForUpdate(1L)).thenReturn(Optional.of(project));
-        when(cases.findAll()).thenReturn(approved);
+        when(cases.findByProjectId(org.mockito.ArgumentMatchers.any())).thenReturn(approved);
         when(plans.findById(20L)).thenReturn(Optional.of(plan));
         when(ai.generateUnitTests(org.mockito.ArgumentMatchers.eq(1L), org.mockito.ArgumentMatchers.<Set<Long>>any()))
                 .thenAnswer(invocation -> {
@@ -404,7 +407,7 @@ class UnitTestServiceTest {
         }).toList();
         when(projects.findById(1L)).thenReturn(Optional.of(project));
         when(projects.findByIdForUpdate(1L)).thenReturn(Optional.of(project));
-        when(cases.findAll()).thenReturn(approved);
+        when(cases.findByProjectId(org.mockito.ArgumentMatchers.any())).thenReturn(approved);
         when(plans.findById(20L)).thenReturn(Optional.of(plan));
         when(ai.generateUnitTests(org.mockito.ArgumentMatchers.eq(1L), org.mockito.ArgumentMatchers.<Set<Long>>any()))
                 .thenAnswer(invocation -> {
@@ -576,7 +579,7 @@ class UnitTestServiceTest {
         }).toList();
         when(projects.findById(1L)).thenReturn(Optional.of(project));
         when(projects.findByIdForUpdate(1L)).thenReturn(Optional.of(project));
-        when(cases.findAll()).thenReturn(approved);
+        when(cases.findByProjectId(org.mockito.ArgumentMatchers.any())).thenReturn(approved);
         when(plans.findById(20L)).thenReturn(Optional.of(plan));
         when(ai.generateUnitTests(org.mockito.ArgumentMatchers.eq(1L), org.mockito.ArgumentMatchers.<Set<Long>>any()))
                 .thenAnswer(invocation -> {
@@ -603,15 +606,16 @@ class UnitTestServiceTest {
         assertThat(project.getStatus()).isEqualTo(ProjectStatus.CASE_APPROVED);
     }
 
-    @org.junit.jupiter.api.Test
-    void unfinishedCasesAreResumedAutomaticallyInsteadOfWaitingForTheUser() {
-        org.springframework.test.util.ReflectionTestUtils.setField(service, "autoResumeRounds", 1);
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(ints = {0, 1})
+    void unfinishedCasesAreResumedOnlyWhenExplicitlyEnabled(int rounds) {
+        org.springframework.test.util.ReflectionTestUtils.setField(service, "autoResumeRounds", rounds);
         Project project = new Project(); project.setId(1L); project.setStatus(ProjectStatus.CASE_APPROVED);
         TestPlan plan = new TestPlan(); plan.setId(20L); plan.setProjectId(1L); plan.setStatus(ReviewStatus.APPROVED);
         List<TestCase> approved = List.of(approvedCase(1L, 20L), approvedCase(2L, 20L));
         when(projects.findById(1L)).thenReturn(Optional.of(project));
         when(projects.findByIdForUpdate(1L)).thenReturn(Optional.of(project));
-        when(cases.findAll()).thenReturn(approved);
+        when(cases.findByProjectId(org.mockito.ArgumentMatchers.any())).thenReturn(approved);
         when(plans.findById(20L)).thenReturn(Optional.of(plan));
         when(cases.findById(1L)).thenReturn(Optional.of(approved.get(0)));
         when(cases.findById(2L)).thenReturn(Optional.of(approved.get(1)));
@@ -626,21 +630,28 @@ class UnitTestServiceTest {
             List<UnitTest> saved = call.getArgument(0); saved.forEach(unit -> stored.put(unit.getTestCaseId(), unit)); return saved;
         });
 
-        assertThat(service.generate(1L)).extracting("testCaseId").containsExactlyInAnyOrder(1L, 2L);
+        assertThat(service.generate(1L)).extracting("testCaseId")
+                .containsExactlyInAnyOrder(rounds == 0 ? new Long[]{1L} : new Long[]{1L, 2L});
 
-        assertThat(project.getStatus()).isEqualTo(ProjectStatus.TEST_GENERATED);
+        assertThat(project.getStatus()).isEqualTo(rounds == 0 ? ProjectStatus.CASE_APPROVED : ProjectStatus.TEST_GENERATED);
         verify(ai, org.mockito.Mockito.times(1)).generateUnitTests(1L, Set.of(1L, 2L));
-        verify(generationProgress, never()).partialAfterCommit(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
+        verify(ai, org.mockito.Mockito.times(rounds == 0 ? 1 : 2)).generateUnitTests(1L, Set.of(2L));
+        verify(generationProgress, org.mockito.Mockito.times(rounds == 0 ? 1 : 0))
+                .partialAfterCommit(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
     }
 
 
-    @org.junit.jupiter.api.Test
-    void aTestThatFailsWhenReallyRunIsRepairedByAiUsingTheRealFailure() {
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {
+            "java.lang.NullPointerException at Service.java:105",
+            "COMPILATION ERROR: unreported exception jakarta.mail.MessagingException; must be caught or declared to be thrown",
+            "COMPILATION ERROR: unreported exception java.io.IOException; must be caught or declared to be thrown"})
+    void aTestThatFailsWhenReallyRunIsRepairedByAiUsingTheRealFailure(String diagnostic) {
         Project project = new Project(); project.setId(1L); project.setStatus(ProjectStatus.TEST_GENERATED);
         TestPlan plan = new TestPlan(); plan.setId(20L); plan.setProjectId(1L); plan.setStatus(ReviewStatus.APPROVED);
         TestCase approved = approvedCase(1L, 20L);
         when(projects.findById(1L)).thenReturn(Optional.of(project));
-        when(cases.findAll()).thenReturn(List.of(approved));
+        when(cases.findByProjectId(org.mockito.ArgumentMatchers.any())).thenReturn(List.of(approved));
         when(cases.findById(1L)).thenReturn(Optional.of(approved));
         when(plans.findById(20L)).thenReturn(Optional.of(plan));
         UnitTest old = new UnitTest(); old.setTestCaseId(1L); old.setPackageName("demo"); old.setTestClassName("ServiceTest");
@@ -651,11 +662,12 @@ class UnitTestServiceTest {
             List<UnitTest> saved = call.getArgument(0); saved.forEach(unit -> stored.put(unit.getTestCaseId(), unit)); return saved;
         });
         when(ai.repairUnitTests(org.mockito.ArgumentMatchers.eq(1L), org.mockito.ArgumentMatchers.eq(Set.of(1L)),
-                org.mockito.ArgumentMatchers.contains("NullPointerException")))
-                .thenReturn(new UnitTestResponseDto(List.of(generated(1L, validSource("ServiceTest", "case1") + " // fixed"))));
+                org.mockito.ArgumentMatchers.contains(diagnostic)))
+                .thenReturn(new UnitTestResponseDto(List.of(generated(1L,
+                        validSource("ServiceTest", "case1").replace("case1()", "case1() throws Exception") + " // fixed"))));
 
         List<UnitTest> replaced = service.repairFailing(1L, List.of(
-                new UnitTestService.TestFailure("demo.ServiceTest", "case1", "java.lang.NullPointerException at Service.java:105", false),
+                new UnitTestService.TestFailure("demo.ServiceTest", "case1", diagnostic, false),
                 // Test không do GreyTest sinh (không khớp Unit Test nào) thì bỏ qua, không gọi AI.
                 new UnitTestService.TestFailure("demo.HandWrittenTest", "other", "boom", false)));
 
@@ -663,8 +675,47 @@ class UnitTestServiceTest {
             assertThat(previous.getTestCaseId()).isEqualTo(1L);
             assertThat(previous.getSourceCode()).doesNotContain("// fixed");
         });
-        assertThat(stored.get(1L).getSourceCode()).contains("// fixed");
+        assertThat(stored.get(1L).getSourceCode()).contains("throws Exception", "// fixed");
         verify(ai, org.mockito.Mockito.times(1)).repairUnitTests(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
+    }
+
+    @org.junit.jupiter.api.Test
+    void unusedMockitoStubsReportedByTheRealRunAreRemovedLocallyWithoutCallingAi() {
+        Project project = new Project(); project.setId(1L); project.setStatus(ProjectStatus.TEST_GENERATED);
+        TestPlan plan = new TestPlan(); plan.setId(20L); plan.setProjectId(1L); plan.setStatus(ReviewStatus.APPROVED);
+        TestCase approved = approvedCase(1L, 20L);
+        when(projects.findById(1L)).thenReturn(Optional.of(project));
+        when(cases.findByProjectId(org.mockito.ArgumentMatchers.any())).thenReturn(List.of(approved));
+        when(cases.findById(1L)).thenReturn(Optional.of(approved));
+        when(plans.findById(20L)).thenReturn(Optional.of(plan));
+        UnitTest old = new UnitTest(); old.setTestCaseId(1L); old.setPackageName("demo"); old.setTestClassName("ServiceTest");
+        old.setTestMethodName("case1"); old.setGenerationType("NEW_TEST");
+        old.setSourceCode("package demo; class ServiceTest { java.util.List<String> repo;\n"
+                + "  @org.junit.jupiter.api.Test void case1(){\n    org.mockito.Mockito.when(repo.get(0)).thenReturn(\"x\");\n"
+                + "    org.junit.jupiter.api.Assertions.assertTrue(true);\n  }\n}");
+        Map<Long, UnitTest> stored = new java.util.HashMap<>(Map.of(1L, old));
+        when(units.findByTestCaseId(org.mockito.ArgumentMatchers.anyLong())).thenAnswer(call -> stored.get(call.<Long>getArgument(0)));
+        when(units.saveAll(org.mockito.ArgumentMatchers.anyList())).thenAnswer(call -> {
+            List<UnitTest> saved = call.getArgument(0); saved.forEach(unit -> stored.put(unit.getTestCaseId(), unit)); return saved;
+        });
+        String detail = "org.mockito.exceptions.misusing.UnnecessaryStubbingException: \n"
+                + com.greytest.service.coverage.SandboxTestRunService.UNUSED_STUB_LINE + "org.mockito.Mockito.when(repo.get(0)).thenReturn(\"x\");\n";
+
+        List<UnitTest> replaced = service.repairFailing(1L, List.of(new UnitTestService.TestFailure("demo.ServiceTest", "case1", detail, false)));
+
+        assertThat(replaced).singleElement().satisfies(previous -> assertThat(previous.getSourceCode()).contains("thenReturn"));
+        assertThat(stored.get(1L).getSourceCode()).doesNotContain("thenReturn").contains("assertTrue(true)");
+        verify(ai, never()).repairUnitTests(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
+
+        // Bản bỏ stub không qua kiểm tra ngữ nghĩa thì vẫn nhờ AI sửa, không lưu bản local.
+        stored.put(1L, old);
+        org.mockito.Mockito.doThrow(new LlmResponseException("needs the stub")).when(ai)
+                .validateExistingUnitTest(org.mockito.ArgumentMatchers.eq(1L), org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
+        when(ai.repairUnitTests(org.mockito.ArgumentMatchers.eq(1L), org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any()))
+                .thenReturn(new UnitTestResponseDto(List.of()));
+        assertThat(service.repairFailing(1L, List.of(new UnitTestService.TestFailure("demo.ServiceTest", "case1", detail, false)))).isEmpty();
+        assertThat(stored.get(1L).getSourceCode()).contains("thenReturn");
+        verify(ai).repairUnitTests(org.mockito.ArgumentMatchers.eq(1L), org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
     }
 
     @org.junit.jupiter.api.Test
@@ -674,7 +725,7 @@ class UnitTestServiceTest {
         List<TestCase> approved = List.of(approvedCase(1L, 20L), approvedCase(2L, 20L));
         when(projects.findById(1L)).thenReturn(Optional.of(project));
         when(projects.findByIdForUpdate(1L)).thenReturn(Optional.of(project));
-        when(cases.findAll()).thenReturn(approved);
+        when(cases.findByProjectId(org.mockito.ArgumentMatchers.any())).thenReturn(approved);
         when(plans.findById(20L)).thenReturn(Optional.of(plan));
         when(cases.findById(1L)).thenReturn(Optional.of(approved.get(0)));
         when(cases.findById(2L)).thenReturn(Optional.of(approved.get(1)));
@@ -695,6 +746,64 @@ class UnitTestServiceTest {
         verify(generationProgress, never()).fail(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
     }
 
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {true, false})
+    void remembersOnlyTerminalDeclinesAndOnlyForTheCurrentJob(boolean terminal) {
+        org.springframework.test.util.ReflectionTestUtils.setField(service, "isolateBatchFailures", true);
+        Project project = new Project(); project.setId(1L); project.setStatus(ProjectStatus.CASE_APPROVED);
+        TestPlan plan = new TestPlan(); plan.setId(20L); plan.setProjectId(1L); plan.setStatus(ReviewStatus.APPROVED);
+        var approved = approvedCase(1L, 20L);
+        when(projects.findById(1L)).thenReturn(Optional.of(project));
+        when(projects.findByIdForUpdate(1L)).thenReturn(Optional.of(project));
+        when(cases.findByProjectId(org.mockito.ArgumentMatchers.any())).thenReturn(List.of(approved));
+        when(plans.findById(20L)).thenReturn(Optional.of(plan));
+        when(cases.findById(1L)).thenReturn(Optional.of(approved));
+        LlmResponseException failure = terminal
+                ? new com.greytest.service.agent.GenerationResponseParser.UnitTestGenerationError(
+                        1L, "UNSUPPORTED_BEHAVIOR", "Client is created internally; no injectable seam")
+                : new LlmResponseException("Provider temporarily unavailable");
+        when(ai.generateUnitTests(1L, Set.of(1L))).thenThrow(failure);
+        GenerationJobContext.bind(7L, ignored -> {});
+        try {
+            service.generate(1L);
+            service.generate(1L, (String) null, true);
+            verify(ai, org.mockito.Mockito.times(terminal ? 1 : 2)).generateUnitTests(1L, Set.of(1L));
+        } finally { GenerationJobContext.clear(); }
+        GenerationJobContext.bind(7L, ignored -> {});
+        try { service.generate(1L, (String) null, true); }
+        finally { GenerationJobContext.clear(); }
+        verify(ai, org.mockito.Mockito.times(terminal ? 2 : 3)).generateUnitTests(1L, Set.of(1L));
+    }
+
+    @org.junit.jupiter.api.Test
+    void resumeStopsRegeneratingACaseThatFailedWithTheSameOutputErrorTwice() {
+        org.springframework.test.util.ReflectionTestUtils.setField(service, "isolateBatchFailures", true);
+        Project project = new Project(); project.setId(1L); project.setStatus(ProjectStatus.CASE_APPROVED);
+        TestPlan plan = new TestPlan(); plan.setId(20L); plan.setProjectId(1L); plan.setStatus(ReviewStatus.APPROVED);
+        var approved = approvedCase(1L, 20L);
+        when(projects.findById(1L)).thenReturn(Optional.of(project));
+        when(projects.findByIdForUpdate(1L)).thenReturn(Optional.of(project));
+        when(cases.findByProjectId(org.mockito.ArgumentMatchers.any())).thenReturn(List.of(approved));
+        when(plans.findById(20L)).thenReturn(Optional.of(plan));
+        when(cases.findById(1L)).thenReturn(Optional.of(approved));
+        var calls = new java.util.concurrent.atomic.AtomicInteger();
+        when(ai.generateUnitTests(1L, Set.of(1L))).thenAnswer(call -> {
+            calls.incrementAndGet();
+            throw new LlmResponseException("Unit Test semantic validation failed: same deterministic rejection",
+                    LlmResponseException.ErrorClassification.LLM_OUTPUT_INVALID);
+        });
+
+        service.generate(1L);
+        service.generate(1L, (String) null, true);
+        int afterTwoIdenticalFailures = calls.get();
+        service.generate(1L, (String) null, true);
+
+        // Lượt thứ ba không gọi AI cho case đã hỏng y hệt hai lần; báo là bị chặn để người dùng xem lại.
+        assertThat(calls.get()).isEqualTo(afterTwoIdenticalFailures);
+        verify(generationProgress, org.mockito.Mockito.atLeastOnce()).partialAfterCommit(org.mockito.ArgumentMatchers.eq(1L),
+                org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.contains("Test Case bị chặn"));
+    }
+
     @org.junit.jupiter.api.Test
     void aBatchWhoseAiOutputStaysInvalidDoesNotStopTheWholeGeneration() {
         org.springframework.test.util.ReflectionTestUtils.setField(service, "isolateBatchFailures", true);
@@ -703,7 +812,7 @@ class UnitTestServiceTest {
         List<TestCase> approved = List.of(approvedCase(1L, 20L), approvedCase(2L, 20L));
         when(projects.findById(1L)).thenReturn(Optional.of(project));
         when(projects.findByIdForUpdate(1L)).thenReturn(Optional.of(project));
-        when(cases.findAll()).thenReturn(approved);
+        when(cases.findByProjectId(org.mockito.ArgumentMatchers.any())).thenReturn(approved);
         when(plans.findById(20L)).thenReturn(Optional.of(plan));
         when(cases.findById(1L)).thenReturn(Optional.of(approved.get(0)));
         when(cases.findById(2L)).thenReturn(Optional.of(approved.get(1)));
@@ -723,7 +832,7 @@ class UnitTestServiceTest {
         List<TestCase> approved = List.of(approvedCase(1L, 20L), approvedCase(2L, 20L));
         when(projects.findById(1L)).thenReturn(Optional.of(project));
         when(projects.findByIdForUpdate(1L)).thenReturn(Optional.of(project));
-        when(cases.findAll()).thenReturn(approved);
+        when(cases.findByProjectId(org.mockito.ArgumentMatchers.any())).thenReturn(approved);
         when(plans.findById(20L)).thenReturn(Optional.of(plan));
         when(cases.findById(1L)).thenReturn(Optional.of(approved.get(0)));
         when(cases.findById(2L)).thenReturn(Optional.of(approved.get(1)));
@@ -748,7 +857,7 @@ class UnitTestServiceTest {
         TestPlan plan = new TestPlan(); plan.setId(20L); plan.setProjectId(1L); plan.setStatus(ReviewStatus.APPROVED);
         TestCase testCase = approvedCase(1L, 20L);
         when(projects.findById(1L)).thenReturn(Optional.of(project));
-        when(cases.findAll()).thenReturn(List.of(testCase));
+        when(cases.findByProjectId(org.mockito.ArgumentMatchers.any())).thenReturn(List.of(testCase));
         when(plans.findById(20L)).thenReturn(Optional.of(plan));
         when(ai.generateUnitTests(1L, Set.of(1L))).thenThrow(new LlmResponseException("provider failed"));
 
@@ -766,7 +875,7 @@ class UnitTestServiceTest {
         List<TestCase> approved = List.of(approvedCase(1L, 20L), approvedCase(2L, 20L));
         when(projects.findById(1L)).thenReturn(Optional.of(project));
         when(projects.findByIdForUpdate(1L)).thenReturn(Optional.of(project));
-        when(cases.findAll()).thenReturn(approved);
+        when(cases.findByProjectId(org.mockito.ArgumentMatchers.any())).thenReturn(approved);
         when(plans.findById(20L)).thenReturn(Optional.of(plan));
         when(cases.findById(1L)).thenReturn(Optional.of(approved.get(0)));
         when(cases.findById(2L)).thenReturn(Optional.of(approved.get(1)));
@@ -788,7 +897,7 @@ class UnitTestServiceTest {
         List<TestCase> approved = List.of(approvedCase(1L, 20L), approvedCase(2L, 20L));
         when(projects.findById(1L)).thenReturn(Optional.of(project));
         when(projects.findByIdForUpdate(1L)).thenReturn(Optional.of(project));
-        when(cases.findAll()).thenReturn(approved);
+        when(cases.findByProjectId(org.mockito.ArgumentMatchers.any())).thenReturn(approved);
         when(plans.findById(20L)).thenReturn(Optional.of(plan));
         when(cases.findById(1L)).thenReturn(Optional.of(approved.get(0)));
         when(cases.findById(2L)).thenReturn(Optional.of(approved.get(1)));
@@ -809,7 +918,7 @@ class UnitTestServiceTest {
         TestCase good = approvedCase(1L, 20L); good.setCaseCode("TC-001");
         TestCase stale = approvedCase(2L, 20L); stale.setCaseCode("TC-002");
         when(projects.findById(1L)).thenReturn(Optional.of(project));
-        when(cases.findAll()).thenReturn(List.of(good, stale));
+        when(cases.findByProjectId(org.mockito.ArgumentMatchers.any())).thenReturn(List.of(good, stale));
         when(plans.findById(20L)).thenReturn(Optional.of(plan));
         UnitTest kept = new UnitTest(); kept.setTestCaseId(1L); kept.setTestClassName("KeptTest"); kept.setTestMethodName("case1"); kept.setPackageName("demo");
         kept.setFilePath("src/test/java/demo/KeptTest.java"); kept.setSourceCode("package demo; class KeptTest { @org.junit.jupiter.api.Test void case1() { } }");
@@ -835,7 +944,7 @@ class UnitTestServiceTest {
         TestPlan plan = new TestPlan(); plan.setId(20L); plan.setProjectId(1L); plan.setStatus(ReviewStatus.APPROVED);
         TestCase approved = approvedCase(1L, 20L); approved.setCaseCode("TC-001");
         when(projects.findById(1L)).thenReturn(Optional.of(project));
-        when(cases.findAll()).thenReturn(List.of(approved));
+        when(cases.findByProjectId(org.mockito.ArgumentMatchers.any())).thenReturn(List.of(approved));
         when(plans.findById(20L)).thenReturn(Optional.of(plan));
         UnitTest stored = new UnitTest(); stored.setTestCaseId(1L); stored.setTestClassName("KeptTest"); stored.setTestMethodName("run"); stored.setPackageName("demo");
         String marked = "// GREYTEST_SOURCE_V1 " + "a".repeat(64) + " c3JjL21haW4vamF2YS9BLmphdmE=\npackage demo; class KeptTest { }";
@@ -864,7 +973,7 @@ class UnitTestServiceTest {
             return testCase;
         }).toList();
         when(projects.findById(1L)).thenReturn(Optional.of(project));
-        when(cases.findAll()).thenReturn(approved);
+        when(cases.findByProjectId(org.mockito.ArgumentMatchers.any())).thenReturn(approved);
         when(plans.findById(20L)).thenReturn(Optional.of(plan));
         when(ai.generateUnitTests(org.mockito.ArgumentMatchers.eq(1L), org.mockito.ArgumentMatchers.<Set<Long>>any()))
                 .thenAnswer(invocation -> {
@@ -900,7 +1009,7 @@ class UnitTestServiceTest {
         }).toList();
         when(projects.findById(1L)).thenReturn(Optional.of(project));
         when(projects.findByIdForUpdate(1L)).thenReturn(Optional.of(project));
-        when(cases.findAll()).thenReturn(approved);
+        when(cases.findByProjectId(org.mockito.ArgumentMatchers.any())).thenReturn(approved);
         when(plans.findById(20L)).thenReturn(Optional.of(plan));
         when(ai.generateUnitTests(org.mockito.ArgumentMatchers.eq(1L), org.mockito.ArgumentMatchers.<Set<Long>>any()))
                 .thenAnswer(invocation -> {
@@ -948,7 +1057,7 @@ class UnitTestServiceTest {
         when(projects.findById(1L)).thenReturn(Optional.of(project));
         when(projects.findByIdForUpdate(1L)).thenReturn(Optional.of(project));
         when(cases.findById(31L)).thenReturn(Optional.of(newCase));
-        when(cases.findAll()).thenReturn(List.of(oldCase, newCase));
+        when(cases.findByProjectId(org.mockito.ArgumentMatchers.any())).thenReturn(List.of(oldCase, newCase));
         when(plans.findById(20L)).thenReturn(Optional.of(plan));
         when(units.findByTestCaseId(30L)).thenReturn(oldUnit);
         when(ai.generateUnitTests(1L, Set.of(31L))).thenReturn(new UnitTestResponseDto(List.of(
@@ -1017,7 +1126,7 @@ class UnitTestServiceTest {
 
         when(projects.findById(1L)).thenReturn(Optional.of(project));
         when(projects.findByIdForUpdate(1L)).thenReturn(Optional.of(project));
-        when(cases.findAll()).thenReturn(List.of(case1, case2));
+        when(cases.findByProjectId(org.mockito.ArgumentMatchers.any())).thenReturn(List.of(case1, case2));
         when(cases.findById(2L)).thenReturn(Optional.of(case2));
         when(plans.findById(20L)).thenReturn(Optional.of(plan));
         when(units.findByTestCaseId(1L)).thenReturn(existingUnit1);
@@ -1054,12 +1163,12 @@ class UnitTestServiceTest {
         org.springframework.test.util.ReflectionTestUtils.setField(service, "exportProvenance", provenance);
         org.springframework.test.util.ReflectionTestUtils.setField(service, "rules", rules);
         when(projects.findById(1L)).thenReturn(Optional.of(project));
-        when(cases.findAll()).thenReturn(List.of(approvedCase(1L, 20L)));
+        when(cases.findByProjectId(org.mockito.ArgumentMatchers.any())).thenReturn(List.of(approvedCase(1L, 20L)));
         when(plans.findById(20L)).thenReturn(Optional.of(plan));
         when(plans.findByProjectId(1L)).thenReturn(List.of(plan));
         when(rules.findByProjectId(1L)).thenReturn(List.of());
         when(units.findByTestCaseId(1L)).thenReturn(stored);
-        when(provenance.prepare(org.mockito.ArgumentMatchers.eq(1L), org.mockito.ArgumentMatchers.anyList(), org.mockito.ArgumentMatchers.any()))
+        org.mockito.Mockito.lenient().when(provenance.prepare(org.mockito.ArgumentMatchers.eq(1L), org.mockito.ArgumentMatchers.anyList(), org.mockito.ArgumentMatchers.any()))
                 .thenAnswer(call -> call.getArgument(1));
         return provenance;
     }
@@ -1075,6 +1184,64 @@ class UnitTestServiceTest {
         units.findByTestCaseId(1L).setSourceCode("class ServiceTest { void changed() { } }");
         service.listFiles(1L);
         verify(provenance, org.mockito.Mockito.times(2)).prepare(org.mockito.ArgumentMatchers.eq(1L), org.mockito.ArgumentMatchers.anyList(), org.mockito.ArgumentMatchers.any());
+    }
+
+    @Test
+    void exportRevalidatesOnlyTestsChangedSinceTheirLastValidation() {
+        // Sandbox gọi export trước mỗi lần chạy; sau vòng AI sửa chỉ vài test đổi, không kiểm tra lại cả ~200 test.
+        exportFixture();
+        org.springframework.test.util.ReflectionTestUtils.setField(service, "exportProvenance", null);
+        service.exportArchive(1L);
+        service.exportArchive(1L);
+        verify(ai, org.mockito.Mockito.times(1)).validateExistingUnitTest(org.mockito.ArgumentMatchers.eq(1L),
+                org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
+        units.findByTestCaseId(1L).setSourceCode("class ServiceTest { void changed() { } }");
+        service.exportArchive(1L);
+        verify(ai, org.mockito.Mockito.times(2)).validateExistingUnitTest(org.mockito.ArgumentMatchers.eq(1L),
+                org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
+    }
+
+    @Test
+    void exportValidatesManyTestsInParallelAndStillSkipsOnlyTheInvalidOneInOrder() {
+        var provenance = exportFixture();
+        List<TestCase> approved = new java.util.ArrayList<>(List.of(approvedCase(1L, 20L)));
+        Map<Long, UnitTest> stored = new java.util.HashMap<>(Map.of(1L, units.findByTestCaseId(1L)));
+        for (long id = 2; id <= 24; id++) {
+            approved.add(approvedCase(id, 20L));
+            UnitTest test = new UnitTest(); test.setTestCaseId(id); test.setSourceCode("class T" + id + " { }"); test.setFilePath("T" + id + ".java");
+            stored.put(id, test);
+        }
+        when(cases.findByProjectId(org.mockito.ArgumentMatchers.any())).thenReturn(approved);
+        when(units.findByTestCaseId(org.mockito.ArgumentMatchers.anyLong())).thenAnswer(call -> stored.get(call.<Long>getArgument(0)));
+        when(provenance.inExportScope(org.mockito.ArgumentMatchers.any())).thenAnswer(call -> call.<java.util.function.Supplier<?>>getArgument(0).get());
+        when(provenance.prepareValidated(org.mockito.ArgumentMatchers.eq(1L), org.mockito.ArgumentMatchers.anyList(), org.mockito.ArgumentMatchers.any()))
+                .thenAnswer(call -> call.getArgument(1));
+        Set<String> threads = java.util.concurrent.ConcurrentHashMap.newKeySet();
+        org.mockito.Mockito.doAnswer(call -> {
+            threads.add(Thread.currentThread().getName());
+            if (call.<UnitTest>getArgument(1).getTestCaseId() == 7L) throw new LlmResponseException("invalid");
+            return null;
+        }).when(ai).validateExistingUnitTest(org.mockito.ArgumentMatchers.eq(1L), org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
+
+        var archive = service.exportArchive(1L);
+
+        assertThat(archive.skippedCaseCodes()).containsExactly(approved.get(6).getCaseCode());
+        assertThat(threads).hasSizeGreaterThan(1).allMatch(name -> name.startsWith("greytest-export-validate"));
+        verify(ai, org.mockito.Mockito.times(24)).validateExistingUnitTest(org.mockito.ArgumentMatchers.eq(1L),
+                org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
+    }
+
+    @Test
+    void secondResumeDoesNotRevalidateUnchangedStoredTests() {
+        exportFixture();
+        org.springframework.test.util.ReflectionTestUtils.setField(service, "exportProvenance", null);
+        Project project = projects.findById(1L).orElseThrow();
+        project.setStatus(ProjectStatus.TEST_GENERATED);
+        when(projects.findByIdForUpdate(1L)).thenReturn(Optional.of(project));
+        service.generate(1L, (String) null, true);
+        service.generate(1L, (String) null, true);
+        verify(ai, org.mockito.Mockito.times(1)).validateExistingUnitTest(org.mockito.ArgumentMatchers.eq(1L),
+                org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.isNull());
     }
 
     @Test
@@ -1097,13 +1264,31 @@ class UnitTestServiceTest {
         assertFirstPerServiceRequest(3, Set.of(1L, 2L, 3L));
     }
 
+    @Test
+    void perServiceModeSplitsAServiceIntoEvenBatches() {
+        // 5 case, giới hạn 4: chia 3 + 2 thay vì 4 + 1 để batch chậm nhất không kéo dài cả bước.
+        assertFirstPerServiceRequest(4, Set.of(1L, 2L, 3L));
+    }
+
+    @Test
+    void perServiceModeStartsTheLargestBatchFirst() {
+        // Case của service nhỏ đứng trước vẫn để batch lớn (lâu nhất) chạy đầu tiên.
+        assertFirstPerServiceRequest(5, Set.of(1L, 2L, 3L, 4L, 5L), true);
+    }
+
     private void assertFirstPerServiceRequest(int maxCases, Set<Long> expected) {
+        assertFirstPerServiceRequest(maxCases, expected, false);
+    }
+
+    private void assertFirstPerServiceRequest(int maxCases, Set<Long> expected, boolean smallServiceFirst) {
         Project project = new Project();
         project.setId(1L);
         project.setStatus(ProjectStatus.CASE_APPROVED);
         // 5 case của class 100 (nhiều hơn batch thường) và 1 case của class 200.
-        List<TestCase> approved = List.of(approvedCase(1L, 20L), approvedCase(2L, 20L), approvedCase(3L, 20L),
-                approvedCase(4L, 20L), approvedCase(5L, 20L), approvedCase(6L, 21L));
+        List<TestCase> large = List.of(approvedCase(1L, 20L), approvedCase(2L, 20L), approvedCase(3L, 20L),
+                approvedCase(4L, 20L), approvedCase(5L, 20L));
+        List<TestCase> approved = new java.util.ArrayList<>(large);
+        approved.add(approvedCase(smallServiceFirst ? 0L : 6L, 21L));
         var rules = org.mockito.Mockito.mock(com.greytest.repository.BusinessRuleRepository.class);
         var methods = org.mockito.Mockito.mock(com.greytest.repository.JavaMethodRepository.class);
         org.springframework.test.util.ReflectionTestUtils.setField(service, "rules", rules);
@@ -1125,12 +1310,14 @@ class UnitTestServiceTest {
             when(methods.findById(row[2])).thenReturn(Optional.of(method));
         }
         when(projects.findById(1L)).thenReturn(Optional.of(project));
-        when(cases.findAll()).thenReturn(approved);
+        when(cases.findByProjectId(org.mockito.ArgumentMatchers.any())).thenReturn(approved);
         when(ai.generateUnitTests(1L, expected)).thenThrow(new LlmResponseException("stop after grouping"));
 
         assertThatThrownBy(() -> service.generate(1L, (String) null, false)).isInstanceOf(LlmResponseException.class);
 
         verify(ai).generateUnitTests(1L, expected);
+        // Batch lớn chạy trước và dừng lượt sinh tuần tự, nên batch nhỏ của class 200 chưa được gọi.
+        if (smallServiceFirst) verify(ai, never()).generateUnitTests(1L, Set.of(0L));
         verify(ai, never()).generateUnitTests(1L, Set.of(1L, 2L, 3L, 4L));
     }
 
@@ -1148,7 +1335,7 @@ class UnitTestServiceTest {
         plan.setId(20L);
         plan.setProjectId(1L);
         when(projects.findById(1L)).thenReturn(Optional.of(project));
-        when(cases.findAll()).thenReturn(approved);
+        when(cases.findByProjectId(org.mockito.ArgumentMatchers.any())).thenReturn(approved);
         when(plans.findById(20L)).thenReturn(Optional.of(plan));
         for (long id = 1; id <= batchSize; id++) {
             UnitTest existing = new UnitTest();
@@ -1191,7 +1378,7 @@ class UnitTestServiceTest {
         partialUnit.setTestCaseId(1L);
 
         when(projects.findById(1L)).thenReturn(Optional.of(project));
-        when(cases.findAll()).thenReturn(approved);
+        when(cases.findByProjectId(org.mockito.ArgumentMatchers.any())).thenReturn(approved);
         when(plans.findById(20L)).thenReturn(Optional.of(plan));
         when(units.findByTestCaseId(1L)).thenReturn(partialUnit);
         when(units.findByTestCaseId(org.mockito.ArgumentMatchers.longThat(id -> id > 1L))).thenReturn(null);
@@ -1235,6 +1422,24 @@ class UnitTestServiceTest {
             var previous = GenerationJobContext.withActor(7L, () -> service.repairFailing(1L, failures));
             assertThat(previous).extracting(UnitTest::getTestCaseId).containsExactly(1L, 2L);
             verify(transactionManager, org.mockito.Mockito.times(2)).commit(org.mockito.ArgumentMatchers.any());
+        }
+    }
+
+    @Test
+    void repairSpreadsFewFailuresOfOneClassAcrossParallelRequests() {
+        // 4 test lỗi cùng một lớp, 4 luồng: mỗi test một request để sửa song song thay vì một request 4 test.
+        var failures = repairFixture(4, true);
+        var sizes = new java.util.concurrent.CopyOnWriteArrayList<Integer>();
+        when(ai.repairUnitTests(org.mockito.ArgumentMatchers.eq(1L), org.mockito.ArgumentMatchers.anySet(),
+                org.mockito.ArgumentMatchers.anyString())).thenAnswer(call -> {
+            Set<Long> ids = call.getArgument(1);
+            sizes.add(ids.size());
+            return repairResponse(ids, true);
+        });
+        try (var executor = new RepairExecutor(4)) {
+            org.springframework.test.util.ReflectionTestUtils.setField(service, "batchExecutor", executor.executor);
+            assertThat(service.repairFailing(1L, failures)).extracting(UnitTest::getTestCaseId).containsExactly(1L, 2L, 3L, 4L);
+            assertThat(sizes).hasSize(4).containsOnly(1);
         }
     }
 
@@ -1313,13 +1518,23 @@ class UnitTestServiceTest {
         verify(ai, never()).repairUnitTests(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
     }
 
+    @Test
+    void repairsRuntimeFixtureAliasWhenTheMethodWasMatchedToTheExport() {
+        repairFixture(1, false);
+        when(ai.repairUnitTests(org.mockito.ArgumentMatchers.eq(1L), org.mockito.ArgumentMatchers.eq(Set.of(1L)),
+                org.mockito.ArgumentMatchers.anyString())).thenReturn(repairResponse(Set.of(1L), false));
+        assertThat(service.repairFailing(1L, List.of(new UnitTestService.TestFailure(
+                "demo.Service1Test_Fixture2Test", "case1", "EXPORTED TEST: Mockito verification failure", false))))
+                .extracting(UnitTest::getTestCaseId).containsExactly(1L);
+    }
+
     private List<UnitTestService.TestFailure> repairFixture(int count, boolean sameClass) {
         Project project = new Project(); project.setId(1L); project.setStatus(ProjectStatus.TEST_GENERATED);
         TestPlan plan = new TestPlan(); plan.setId(20L); plan.setProjectId(1L); plan.setStatus(ReviewStatus.APPROVED);
         when(projects.findById(1L)).thenReturn(Optional.of(project));
         when(plans.findById(20L)).thenReturn(Optional.of(plan));
         var approved = LongStream.rangeClosed(1, count).mapToObj(id -> approvedCase(id, 20L)).toList();
-        when(cases.findAll()).thenReturn(approved);
+        when(cases.findByProjectId(org.mockito.ArgumentMatchers.any())).thenReturn(approved);
         org.mockito.Mockito.lenient().when(cases.findById(org.mockito.ArgumentMatchers.anyLong()))
                 .thenAnswer(call -> Optional.of(approved.get(call.<Long>getArgument(0).intValue() - 1)));
         Map<Long, UnitTest> stored = new java.util.concurrent.ConcurrentHashMap<>();

@@ -82,7 +82,8 @@ public class BusinessRuleController {
                 projectId,
                 actor.getId(),
                 GenerationProgressStage.BUSINESS_RULE,
-                () -> businessRuleService.generate(projectId, servicePath, resume)));
+                () -> businessRuleService.generate(projectId, servicePath, resume),
+                () -> businessRuleService.generate(projectId, servicePath, true)));
     }
 
     @PostMapping("/api/projects/{projectId}/business-rules/review")

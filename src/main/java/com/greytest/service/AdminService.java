@@ -119,7 +119,7 @@ public class AdminService {
     @org.springframework.beans.factory.annotation.Value("${llm.openai-url:https://api.openai.com/v1/chat/completions}")
     private String llmEndpoint = "https://api.openai.com/v1/chat/completions";
     @org.springframework.beans.factory.annotation.Value("${greytest.llm-batch.concurrency:4}")
-    private int batchConcurrency = 4;
+    private int batchConcurrency = 8;
     @Autowired(required = false)
     private com.greytest.service.agent.LlmStageTokenLimits stageTokenLimits;
     @Autowired(required = false)
@@ -1121,11 +1121,11 @@ public class AdminService {
                 new TierPackage("FREE", "Gói Miễn Phí (FREE)", 0L, "MONTHLY", 100, 2,
                         "Trích xuất Quy tắc Nghiệp vụ (AST)\nSinh Test Plan & Test Case\nSinh Unit Test JUnit 5 cơ bản",
                         "Dành cho sinh viên và dự án thử nghiệm cơ bản", true),
-                new TierPackage("PLUS", "Gói Tiêu Chuẩn (PLUS)", 10000L, "WEEKLY", 200, 3,
-                        "Toàn bộ tính năng gói FREE\n200 lượt gọi AI hồi lại hàng tuần\nSinh tối đa 3 batch song song\nƯu tiên xử lý hàng đợi tác vụ",
+                new TierPackage("PLUS", "Gói Tiêu Chuẩn (PLUS)", 10000L, "WEEKLY", 200, 4,
+                        "Toàn bộ tính năng gói FREE\n200 lượt gọi AI hồi lại hàng tuần\nSinh tối đa 4 batch song song\nƯu tiên xử lý hàng đợi tác vụ",
                         "Dành cho nhóm phát triển mở rộng / dự án sprint nước rút", true),
-                new TierPackage("PRO", "Gói Chuyên Nghiệp (PRO)", 20000L, "MONTHLY", 300, 4,
-                        "Toàn bộ tính năng gói PLUS\nPhân tích cú pháp AST & Call Graph sâu\nSinh Unit Test JUnit 5 song song 4 luồng\nVòng lặp JaCoCo Refinement tự cải thiện độ bao phủ",
+                new TierPackage("PRO", "Gói Chuyên Nghiệp (PRO)", 20000L, "MONTHLY", 300, 8,
+                        "Toàn bộ tính năng gói PLUS\nPhân tích cú pháp AST & Call Graph sâu\nSinh song song tối đa 8 batch\nVòng lặp JaCoCo Refinement tự cải thiện độ bao phủ",
                         "Toàn bộ tính năng phân tích sâu & JaCoCo Refinement", true)
         );
         for (TierPackage p : defaults) {
@@ -1153,9 +1153,9 @@ public class AdminService {
                 10_000L,
                 "WEEKLY",
                 200,
-                3,
+                4,
                 List.of("Toàn bộ tính năng gói FREE", "200 lượt gọi AI hồi lại hàng tuần",
-                        "Sinh tối đa 3 batch song song", "Ưu tiên xử lý hàng đợi tác vụ"),
+                        "Sinh tối đa 4 batch song song", "Ưu tiên xử lý hàng đợi tác vụ"),
                 "Dành cho nhóm phát triển mở rộng / dự án sprint nước rút",
                 true));
         tierPackages.put("PRO", new TierPackageInternal(
@@ -1164,9 +1164,9 @@ public class AdminService {
                 20_000L,
                 "MONTHLY",
                 300,
-                4,
+                8,
                 List.of("Toàn bộ tính năng gói PLUS", "Phân tích cú pháp AST & Call Graph sâu",
-                        "Sinh Unit Test JUnit 5 song song 4 luồng",
+                        "Sinh song song tối đa 8 batch",
                         "Vòng lặp JaCoCo Refinement tự cải thiện độ bao phủ"),
                 "Toàn bộ tính năng phân tích sâu & JaCoCo Refinement",
                 true));
@@ -1618,7 +1618,7 @@ public class AdminService {
         Map<String, String> effective = Map.of(
                 "ai.provider", dynamicProvider != null ? dynamicProvider : llmProvider,
                 "ai.model", dynamicModel != null ? dynamicModel : llmModel,
-                "ai.batch_concurrency", String.valueOf(batchConcurrency));
+                "ai.batch_concurrency", String.valueOf(llmBatchExecutor != null ? llmBatchExecutor.getConcurrency() : batchConcurrency));
         if (systemSettingRepository != null) {
             List<SystemSetting> list = systemSettingRepository.findAll();
             for (SystemSetting s : list) {

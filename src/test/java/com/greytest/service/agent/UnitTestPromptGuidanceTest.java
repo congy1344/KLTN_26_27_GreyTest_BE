@@ -52,7 +52,10 @@ class UnitTestPromptGuidanceTest {
         ((ObjectNode) second.path("approvedTestCases").get(0)).put("expectedResult", "Use StreamObserver");
         var one = manager.renderPrompt("unit-test", Map.of("context_json", first));
         var two = manager.renderPrompt("unit-test", Map.of("context_json", second));
-        assertThat(one.cacheablePrefixes()).hasSize(2).isEqualTo(two.cacheablePrefixes());
+        // Hướng dẫn (prefix 0) dùng chung; policy theo chủ đề là prefix cache thứ hai, chỉ trùng giữa các batch cùng tập chủ đề.
+        assertThat(one.cacheablePrefixes().get(0)).isEqualTo(two.cacheablePrefixes().get(0));
+        assertThat(String.join("", one.cacheablePrefixes())).doesNotContain("# Relevant policy: grpc");
+        assertThat(two.cacheablePrefixes().get(two.cacheablePrefixes().size() - 1)).contains("# Relevant policy: grpc");
         assertThat(one.text()).doesNotContain("# Relevant policy: grpc");
         assertThat(two.text()).contains("# Relevant policy: grpc");
         assertThat(one.text().length()).isLessThan(manager.load("unit-test-full").length() / 2);
