@@ -16,6 +16,8 @@ import com.greytest.entity.enums.UserRole;
 public interface AuthUserRepository extends JpaRepository<AuthUser, Long>, JpaSpecificationExecutor<AuthUser> {
     Optional<AuthUser> findByEmailIgnoreCase(String email);
 
+    Optional<AuthUser> findByGithubUserId(String githubUserId);
+
     long countByCreatedAtAfter(java.time.LocalDateTime createdAt);
 
     long countByRoleAndEnabledTrue(UserRole role);

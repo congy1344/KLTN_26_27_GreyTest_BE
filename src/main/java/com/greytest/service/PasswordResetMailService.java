@@ -57,22 +57,65 @@ public class PasswordResetMailService {
                     recipientEmail, resetUrl);
             return false;
         }
+        return sendHtmlEmail(
+                recipientEmail,
+                "[GreyTest] Yêu cầu đặt lại mật khẩu tài khoản",
+                buildHtmlContent(fullName, resetUrl));
+    }
 
+    /**
+     * Gửi mã OTP 6 chữ số về địa chỉ Gmail đã đăng ký để người dùng xác thực đặt lại mật khẩu.
+     *
+     * @return {@code true} nếu đã gửi thành công qua SMTP; {@code false} nếu chưa cấu hình SMTP hoặc gặp lỗi mạng.
+     */
+    public boolean sendPasswordResetOtpEmail(String recipientEmail, String fullName, String otpCode) {
+        if (!isSmtpConfigured()) {
+            log.info("[DEV-MAIL] Chưa cấu hình SPRING_MAIL_USERNAME/SPRING_MAIL_PASSWORD. Mã OTP đặt lại mật khẩu cho {}: {}",
+                    recipientEmail, otpCode);
+            return false;
+        }
+        return sendHtmlEmail(
+                recipientEmail,
+                "[GreyTest] Mã OTP đặt lại mật khẩu tài khoản",
+                buildOtpHtmlContent(fullName, otpCode));
+    }
+
+    private boolean sendHtmlEmail(String recipientEmail, String subject, String htmlContent) {
         try {
             MimeMessage message = mailSender.createMimeMessage();
             MimeMessageHelper helper = new MimeMessageHelper(message, false, StandardCharsets.UTF_8.name());
             helper.setFrom(mailUsername, "GreyTest AI QA System");
             helper.setTo(recipientEmail);
-            helper.setSubject("[GreyTest] Yêu cầu đặt lại mật khẩu tài khoản");
-            helper.setText(buildHtmlContent(fullName, resetUrl), true);
+            helper.setSubject(subject);
+            helper.setText(htmlContent, true);
             mailSender.send(message);
-            log.info("Đã gửi email đặt lại mật khẩu tới {}", recipientEmail);
+            log.info("Đã gửi email '{}' tới {}", subject, recipientEmail);
             return true;
         } catch (Exception ex) {
-            log.warn("Không thể gửi email qua SMTP tới {}: {}. Đường dẫn dự phòng: {}",
-                    recipientEmail, ex.getMessage(), resetUrl);
+            log.warn("Không thể gửi email qua SMTP tới {}: {}", recipientEmail, ex.getMessage());
             return false;
         }
+    }
+
+    private String buildOtpHtmlContent(String fullName, String otpCode) {
+        String displayName = (fullName != null && !fullName.isBlank()) ? fullName.trim() : "Bạn";
+        return """
+                <div style="font-family:Inter,Segoe UI,Arial,sans-serif;max-width:560px;margin:0 auto;padding:24px;border:1px solid #e2e8f0;border-radius:12px;background:#ffffff;color:#0f172a;">
+                  <h2 style="margin:0 0 12px;font-size:20px;color:#0f172a;">GreyTest — Mã xác thực OTP</h2>
+                  <p style="font-size:14px;line-height:1.6;margin:0 0 16px;">Xin chào <strong>%s</strong>,</p>
+                  <p style="font-size:14px;line-height:1.6;margin:0 0 16px;">
+                    Hệ thống nhận được yêu cầu đặt lại mật khẩu cho tài khoản GreyTest của bạn.
+                    Vui lòng nhập mã OTP 6 chữ số bên dưới (hiệu lực trong <strong>5 phút</strong>, tối đa 5 lần nhập sai):
+                  </p>
+                  <div style="margin:24px 0;padding:16px;background:#f8fafc;border:1px dashed #94a3b8;border-radius:10px;text-align:center;">
+                    <span style="font-family:monospace;font-size:32px;font-weight:700;letter-spacing:8px;color:#2563eb;">%s</span>
+                  </div>
+                  <hr style="border:none;border-top:1px solid #e2e8f0;margin:20px 0;" />
+                  <p style="font-size:12px;color:#64748b;margin:0;">
+                    Tuyệt đối không chia sẻ mã OTP này cho bất kỳ ai. Nếu bạn không thực hiện yêu cầu này, vui lòng bỏ qua email.
+                  </p>
+                </div>
+                """.formatted(escapeHtml(displayName), escapeHtml(otpCode));
     }
 
     private String buildHtmlContent(String fullName, String resetUrl) {

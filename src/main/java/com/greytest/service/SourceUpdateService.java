@@ -33,6 +33,7 @@ import com.greytest.entity.enums.SourceType;
 import com.greytest.entity.enums.SourceUpdateStatus;
 import com.greytest.entity.enums.UserRole;
 import com.greytest.exception.AuthException;
+import com.greytest.exception.StorageException;
 import com.greytest.exception.ProjectNotFoundException;
 import com.greytest.exception.GenerationInProgressException;
 import com.greytest.mapper.SourceUpdateMapper;
@@ -90,7 +91,8 @@ import com.greytest.service.generation.IncrementalCheckpointCoordinator;
 import lombok.extern.slf4j.Slf4j;
 
 /**
- * Service quản lý luồng cập nhật source code tăng dần (Source Update Draft) cho GreyTest.
+ * Service quản lý luồng cập nhật source code tăng dần (Source Update Draft) cho
+ * GreyTest.
  */
 @Slf4j
 @Service
@@ -98,8 +100,7 @@ public class SourceUpdateService {
 
     private static final List<SourceUpdateStatus> TERMINAL_STATUSES = List.of(
             SourceUpdateStatus.APPLIED,
-            SourceUpdateStatus.CANCELLED
-    );
+            SourceUpdateStatus.CANCELLED);
 
     private final ProjectRepository projectRepository;
     private final SourceRevisionRepository sourceRevisionRepository;
@@ -116,9 +117,25 @@ public class SourceUpdateService {
     private final UnitTestRepository unitTestRepository;
     private final JavaClassRepository javaClassRepository;
     private final JavaMethodRepository javaMethodRepository;
-    private final ObjectMapper objectMapper;
+    private ObjectMapper objectMapper;
     private JdbcTemplate generationJdbc;
     private IncrementalCheckpointCoordinator generationCoordinator;
+    @Autowired(required = false)
+    private BreakGlassAccessService breakGlassAccessService;
+    @Autowired(required = false)
+    private com.greytest.service.storage.encryption.StorageEncryptionService storageEncryptionService;
+    @Autowired(required = false)
+    private com.greytest.service.storage.workspace.StorageWorkspaceService storageWorkspaceService;
+
+    public void setStorageEncryptionService(
+            com.greytest.service.storage.encryption.StorageEncryptionService storageEncryptionService) {
+        this.storageEncryptionService = storageEncryptionService;
+    }
+
+    public void setStorageWorkspaceService(
+            com.greytest.service.storage.workspace.StorageWorkspaceService storageWorkspaceService) {
+        this.storageWorkspaceService = storageWorkspaceService;
+    }
 
     public SourceUpdateService(
             ProjectRepository projectRepository,
@@ -155,16 +172,23 @@ public class SourceUpdateService {
     }
 
     @Autowired
-    public SourceUpdateService(ProjectRepository projects, SourceRevisionRepository revisions, SourceUpdateRepository updates,
+    public SourceUpdateService(ProjectRepository projects, SourceRevisionRepository revisions,
+            SourceUpdateRepository updates,
             SourceUpdateItemRepository items, SourceRevisionStorageService storage, SourceUpdateMapper mapper,
             SourceDiffService diffs, ImpactAnalysisService impacts, BusinessRuleRepository rules,
             TestPlanRepository plans, TestCaseRepository cases, UnitTestRepository tests,
             JavaClassRepository classes, JavaMethodRepository methods, ObjectMapper json,
-            TestPlanCoveredRuleRepository coverage, JdbcTemplate jdbc, IncrementalCheckpointCoordinator coordinator) {
+            TestPlanCoveredRuleRepository coverage, JdbcTemplate jdbc, IncrementalCheckpointCoordinator coordinator,
+            @Autowired(required = false) BreakGlassAccessService breakGlassAccessService) {
         this(projects, revisions, updates, items, storage, mapper, diffs, impacts, rules, plans, cases, tests,
                 classes, methods, json, coverage);
         this.generationJdbc = jdbc;
         this.generationCoordinator = coordinator;
+        this.breakGlassAccessService = breakGlassAccessService;
+    }
+
+    public void setBreakGlassAccessService(BreakGlassAccessService breakGlassAccessService) {
+        this.breakGlassAccessService = breakGlassAccessService;
     }
 
     /**
@@ -250,7 +274,8 @@ public class SourceUpdateService {
         project.setActiveSourceUpdateId(update.getId());
         projectRepository.save(project);
 
-        log.info("Đã tạo bản nháp cập nhật GitHub branch={} (updateId={}) cho project {}", branch, update.getId(), projectId);
+        log.info("Đã tạo bản nháp cập nhật GitHub branch={} (updateId={}) cho project {}", branch, update.getId(),
+                projectId);
         return sourceUpdateMapper.toUpdateDto(update, List.of());
     }
 
@@ -260,7 +285,8 @@ public class SourceUpdateService {
     }
 
     /**
-     * Thực hiện phân tích AST diff và tầm ảnh hưởng (Impact Analysis) cho bản nháp cập nhật.
+     * Thực hiện phân tích AST diff và tầm ảnh hưởng (Impact Analysis) cho bản nháp
+     * cập nhật.
      * Nếu có servicePath, chỉ phân tích và đề xuất cho riêng service đó.
      */
     @Transactional
@@ -271,7 +297,8 @@ public class SourceUpdateService {
                         () -> com.greytest.service.generation.SourceSnapshotSession.withSession(
                                 () -> analyzeUpdateWithMetrics(projectId, updateId, servicePath, user)));
             } finally {
-                log.info("Source update analysis update={} metrics={}", updateId, com.greytest.service.GenerationJobContext.metrics());
+                log.info("Source update analysis update={} metrics={}", updateId,
+                        com.greytest.service.GenerationJobContext.metrics());
             }
         }
     }
@@ -286,9 +313,11 @@ public class SourceUpdateService {
             throw new IllegalArgumentException("Không thể phân tích bản cập nhật đã kết thúc: " + update.getStatus());
         }
 
-        List<SourceUpdateItem> existing = sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId);
+        List<SourceUpdateItem> existing = sourceUpdateItemRepository
+                .findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId);
         if (update.getImpactSummary() != null && !existing.isEmpty()) {
-            // Snapshot của một draft là bất biến; phân tích lại không được xóa review hoặc output đã sinh.
+            // Snapshot của một draft là bất biến; phân tích lại không được xóa review hoặc
+            // output đã sinh.
             if (!sameAnalysisScope(updateId, servicePath)) {
                 throw new ResponseStatusException(HttpStatus.CONFLICT,
                         "Bản nháp đã phân tích; hãy tạo bản nháp mới để đổi phạm vi service");
@@ -304,6 +333,9 @@ public class SourceUpdateService {
         update.setStatus(SourceUpdateStatus.ANALYZING);
         sourceUpdateRepository.save(update);
 
+        Project project = projectRepository.findById(projectId)
+                .orElseThrow(() -> new ProjectNotFoundException(projectId));
+
         SourceRevision baseRev = update.getBaseRevisionId() != null
                 ? sourceRevisionRepository.findById(update.getBaseRevisionId()).orElse(null)
                 : null;
@@ -313,10 +345,28 @@ public class SourceUpdateService {
         Path basePath = baseRev != null && baseRev.getStoragePath() != null ? Path.of(baseRev.getStoragePath()) : null;
         Path candPath = Path.of(candRev.getStoragePath());
 
-        // 1. So sánh AST các method
-        List<MethodDiffItem> diffItems = sourceDiffService.compareSnapshots(basePath, candPath);
+        // 1. So sánh AST các method (giải mã vào ephemeral workspace nếu revision đã mã
+        // hóa)
+        boolean baseEncrypted = baseRev != null && Boolean.TRUE.equals(baseRev.getStorageEncrypted());
+        boolean candEncrypted = Boolean.TRUE.equals(candRev.getStorageEncrypted());
 
-        // 2. Phân tích ảnh hưởng lên các artifact trong hệ thống (lọc theo servicePath nếu có)
+        List<MethodDiffItem> diffItems;
+        if (storageWorkspaceService != null && (baseEncrypted || candEncrypted)) {
+            try (com.greytest.service.storage.workspace.StorageWorkspace baseWs = basePath != null
+                    ? storageWorkspaceService.acquireDirectoryWorkspace(project, basePath, baseEncrypted)
+                    : null;
+                    com.greytest.service.storage.workspace.StorageWorkspace candWs = storageWorkspaceService
+                            .acquireDirectoryWorkspace(project, candPath, candEncrypted)) {
+                Path effectiveBasePath = baseWs != null ? baseWs.getPath() : null;
+                Path effectiveCandPath = candWs.getPath();
+                diffItems = sourceDiffService.compareSnapshots(effectiveBasePath, effectiveCandPath);
+            }
+        } else {
+            diffItems = sourceDiffService.compareSnapshots(basePath, candPath);
+        }
+
+        // 2. Phân tích ảnh hưởng lên các artifact trong hệ thống (lọc theo servicePath
+        // nếu có)
         ImpactSummaryDto impact = servicePath != null
                 ? impactAnalysisService.analyzeImpact(projectId, diffItems, servicePath)
                 : impactAnalysisService.analyzeImpact(projectId, diffItems);
@@ -366,7 +416,8 @@ public class SourceUpdateService {
             item.setTargetType(SourceUpdateTargetType.BUSINESS_RULE);
             item.setTargetId(ruleId);
             item.setAction(isDeleted ? SourceUpdateAction.REMOVE : SourceUpdateAction.UPDATE);
-            item.setReason(isDeleted ? "Quy tắc nghiệp vụ thuộc method đã bị xóa khỏi source code" : "Quy tắc nghiệp vụ thuộc method bị thay đổi");
+            item.setReason(isDeleted ? "Quy tắc nghiệp vụ thuộc method đã bị xóa khỏi source code"
+                    : "Quy tắc nghiệp vụ thuộc method bị thay đổi");
             item.setReviewStatus(SourceUpdateReviewStatus.PENDING);
             sourceUpdateItemRepository.save(item);
         }
@@ -374,7 +425,8 @@ public class SourceUpdateService {
         Set<Long> deletedPlanIds = new HashSet<>();
         for (Long planId : impact.affectedTestPlanIds()) {
             TestPlan tp = testPlanRepository.findById(planId).orElse(null);
-            boolean isDeleted = tp != null && tp.getBusinessRuleId() != null && deletedRuleIds.contains(tp.getBusinessRuleId());
+            boolean isDeleted = tp != null && tp.getBusinessRuleId() != null
+                    && deletedRuleIds.contains(tp.getBusinessRuleId());
             if (isDeleted) {
                 deletedPlanIds.add(planId);
             }
@@ -383,7 +435,8 @@ public class SourceUpdateService {
             item.setTargetType(SourceUpdateTargetType.TEST_PLAN);
             item.setTargetId(planId);
             item.setAction(isDeleted ? SourceUpdateAction.REMOVE : SourceUpdateAction.UPDATE);
-            item.setReason(isDeleted ? "Test Plan thuộc Business Rule đã bị xóa" : "Test Plan thuộc Business Rule bị thay đổi");
+            item.setReason(isDeleted ? "Test Plan thuộc Business Rule đã bị xóa"
+                    : "Test Plan thuộc Business Rule bị thay đổi");
             item.setReviewStatus(SourceUpdateReviewStatus.PENDING);
             sourceUpdateItemRepository.save(item);
         }
@@ -425,7 +478,8 @@ public class SourceUpdateService {
         log.info("Đã hoàn tất phân tích AST diff & impact cho bản cập nhật {} của project {}: {} changed methods",
                 updateId, projectId, impact.totalChangedMethods());
 
-        List<SourceUpdateItem> items = sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId);
+        List<SourceUpdateItem> items = sourceUpdateItemRepository
+                .findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId);
         captureActiveBaselines(items);
         sourceUpdateItemRepository.flush();
         return sourceUpdateMapper.toUpdateDto(update, items);
@@ -443,23 +497,31 @@ public class SourceUpdateService {
     private SourceUpdateDto measureUpdate(String operation, Long projectId, AuthUser user,
             java.util.function.Supplier<SourceUpdateDto> task) {
         try (var scope = com.greytest.service.GenerationJobContext.openScope(user == null ? null : user.getId())) {
-            try { return com.greytest.service.GenerationJobContext.measure("source.update." + operation, task); }
-            finally { log.info("Source update operation={} project={} metrics={}", operation, projectId,
-                    com.greytest.service.GenerationJobContext.metrics()); }
+            try {
+                return com.greytest.service.GenerationJobContext.measure("source.update." + operation, task);
+            } finally {
+                log.info("Source update operation={} project={} metrics={}", operation, projectId,
+                        com.greytest.service.GenerationJobContext.metrics());
+            }
         }
     }
 
     private Long resolveChangedMethodId(Long projectId, MethodDiffItem changed) {
         List<Long> matches = new java.util.ArrayList<>();
         for (JavaClass owner : javaClassRepository.findByProjectId(projectId)) {
-            if (!Objects.equals(owner.getQualifiedName(), changed.qualifiedClassName())) continue;
+            if (!Objects.equals(owner.getQualifiedName(), changed.qualifiedClassName()))
+                continue;
             if (changed.servicePath() != null && !Objects.equals(ServiceScopeResolver.modulePath(owner.getFilePath()),
-                    ServiceScopeResolver.normalizeServicePath(changed.servicePath()))) continue;
+                    ServiceScopeResolver.normalizeServicePath(changed.servicePath())))
+                continue;
             for (JavaMethod method : javaMethodRepository.findByClassId(owner.getId())) {
-                if (Objects.equals(methodSignature(method), changed.signature()) && method.getId() != null) matches.add(method.getId());
+                if (Objects.equals(methodSignature(method), changed.signature()) && method.getId() != null)
+                    matches.add(method.getId());
             }
         }
-        if (matches.size() > 1) throw new ResponseStatusException(HttpStatus.CONFLICT, "Method trùng identity giữa các module; cần phân tích theo servicePath");
+        if (matches.size() > 1)
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "Method trùng identity giữa các module; cần phân tích theo servicePath");
         return matches.isEmpty() ? null : matches.get(0);
     }
 
@@ -492,7 +554,8 @@ public class SourceUpdateService {
         SourceUpdate update = sourceUpdateRepository.findByIdAndProjectId(updateId, projectId)
                 .orElseThrow(() -> new IllegalArgumentException("Không tìm thấy bản cập nhật " + updateId));
 
-        List<SourceUpdateItem> items = sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId);
+        List<SourceUpdateItem> items = sourceUpdateItemRepository
+                .findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId);
         return sourceUpdateMapper.toUpdateDto(update, items);
     }
 
@@ -505,17 +568,20 @@ public class SourceUpdateService {
         return sourceUpdateRepository.findByProjectIdOrderByCreatedAtDesc(projectId)
                 .stream()
                 .map(u -> {
-                    List<SourceUpdateItem> items = sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(u.getId());
+                    List<SourceUpdateItem> items = sourceUpdateItemRepository
+                            .findBySourceUpdateIdOrderByTargetTypeAscIdAsc(u.getId());
                     return sourceUpdateMapper.toUpdateDto(u, items);
                 })
                 .toList();
     }
 
     /**
-     * Người dùng cập nhật quyết định duyệt hoặc chỉnh sửa cho 1 item đề xuất trong bản nháp.
+     * Người dùng cập nhật quyết định duyệt hoặc chỉnh sửa cho 1 item đề xuất trong
+     * bản nháp.
      */
     @Transactional
-    public SourceUpdateItemDto patchItem(Long projectId, Long updateId, Long itemId, SourceUpdateItemPatchRequest request, AuthUser user) {
+    public SourceUpdateItemDto patchItem(Long projectId, Long updateId, Long itemId,
+            SourceUpdateItemPatchRequest request, AuthUser user) {
         getProjectAndCheckAccess(projectId, user);
         guardMutation(projectId, updateId);
         SourceUpdate update = sourceUpdateRepository.findByIdAndProjectId(updateId, projectId)
@@ -532,13 +598,16 @@ public class SourceUpdateService {
 
         if (request.action() == null && request.reviewStatus() == null && request.modifiedAfterData() == null
                 && request.reason() == null && request.resolution() == null) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Cần cung cấp quyết định review hoặc nội dung chỉnh sửa");
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Cần cung cấp quyết định review hoặc nội dung chỉnh sửa");
         }
         if (hasUserDecision(item) && request.expectedVersion() == null) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT, "Đề xuất đã có quyết định người dùng; cần version hiện tại");
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "Đề xuất đã có quyết định người dùng; cần version hiện tại");
         }
         if ((request.expectedVersion() != null && !Objects.equals(request.expectedVersion(), item.getVersion()))
-                || (request.expectedUserRevision() != null && !Objects.equals(request.expectedUserRevision(), item.getUserRevision()))) {
+                || (request.expectedUserRevision() != null
+                        && !Objects.equals(request.expectedUserRevision(), item.getUserRevision()))) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Đề xuất đã thay đổi; hãy tải lại trước khi review");
         }
         boolean originallyCreated = item.getAction() == SourceUpdateAction.CREATE;
@@ -565,7 +634,8 @@ public class SourceUpdateService {
             if (item.getAction() == SourceUpdateAction.KEEP || item.getAction() == SourceUpdateAction.REMOVE) {
                 item.setReviewStatus(SourceUpdateReviewStatus.REJECTED);
             }
-            // KEEP cho một artifact mới nghĩa là bỏ đề xuất; vẫn giữ CREATE để chứng minh quyền sở hữu bản ghi tạm.
+            // KEEP cho một artifact mới nghĩa là bỏ đề xuất; vẫn giữ CREATE để chứng minh
+            // quyền sở hữu bản ghi tạm.
             item.setAction(SourceUpdateAction.CREATE);
         }
         captureActiveBaselines(List.of(item));
@@ -582,14 +652,16 @@ public class SourceUpdateService {
     }
 
     private void guardMutation(Long projectId, Long updateId) {
-        if (generationJdbc == null) return;
+        if (generationJdbc == null)
+            return;
         generationJdbc.queryForList("SELECT id FROM project WHERE id=? FOR UPDATE", projectId);
         Integer running = generationJdbc.queryForObject("""
                 SELECT COUNT(*) FROM generation_checkpoint WHERE project_id=? AND stage='PIPELINE'
                     AND target_key='__run__' AND state='RUNNING' AND lease_until > clock_timestamp()
                 """, Integer.class, projectId);
         if (running != null && running > 0) {
-            throw new GenerationInProgressException("Project đang sinh artifact; vui lòng chờ trước khi thay đổi bản nháp");
+            throw new GenerationInProgressException(
+                    "Project đang sinh artifact; vui lòng chờ trước khi thay đổi bản nháp");
         }
         generationJdbc.update("""
                 INSERT INTO generation_checkpoint(project_id,source_update_id,stage,target_key,state)
@@ -609,7 +681,8 @@ public class SourceUpdateService {
 
     private boolean sameAnalysisScope(Long updateId, String servicePath) {
         String requested = servicePath == null ? "" : servicePath.trim();
-        if (generationJdbc == null) return requested.isEmpty();
+        if (generationJdbc == null)
+            return requested.isEmpty();
         var scopes = generationJdbc.queryForList("""
                 SELECT provenance ->> 'analysisScope' FROM generation_checkpoint WHERE source_update_id=?
                     AND stage='PIPELINE' AND target_key='__run__'
@@ -619,30 +692,37 @@ public class SourceUpdateService {
     }
 
     private void verifySnapshotUnchanged(SourceUpdate update) {
-        if (generationJdbc == null) return;
+        if (generationJdbc == null)
+            return;
         var revision = sourceRevisionRepository.findById(update.getCandidateRevisionId()).orElseThrow();
         if (revision.getContentHash() == null || revision.getContentHash().isBlank()) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT, "Snapshot cũ thiếu digest; cần bản nháp mới để xác minh source");
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "Snapshot cũ thiếu digest; cần bản nháp mới để xác minh source");
         }
         Path root = Path.of(revision.getLogicalRoot() == null ? revision.getStoragePath() : revision.getLogicalRoot());
         if (!Files.isDirectory(root) || !revision.getContentHash().equals(storageService.computeContentHash(root))) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT, "Snapshot đã thay đổi; giữ nguyên review và tạo bản nháp source mới");
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "Snapshot đã thay đổi; giữ nguyên review và tạo bản nháp source mới");
         }
     }
 
     private void rememberAnalysisScope(Long updateId, String servicePath) {
-        if (generationJdbc == null) return;
-        generationJdbc.update("""
-                UPDATE generation_checkpoint SET provenance=jsonb_build_object('formatVersion',1,'analysisScope',CAST(? AS text))
-                WHERE source_update_id=? AND stage='PIPELINE' AND target_key='__run__'
-                """, servicePath == null ? "" : servicePath.trim(), updateId);
+        if (generationJdbc == null)
+            return;
+        generationJdbc.update(
+                """
+                        UPDATE generation_checkpoint SET provenance=jsonb_build_object('formatVersion',1,'analysisScope',CAST(? AS text))
+                        WHERE source_update_id=? AND stage='PIPELINE' AND target_key='__run__'
+                        """,
+                servicePath == null ? "" : servicePath.trim(), updateId);
     }
 
     private void resolveConflict(Long updateId, SourceUpdateItem item, SourceUpdateItemPatchRequest request) {
         if (generationJdbc == null || request.expectedVersion() == null || request.expectedUserRevision() == null
                 || request.conflictStage() == null || request.conflictTargetKey() == null
                 || !Set.of("KEEP_USER", "USE_PROPOSAL").contains(request.resolution())) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT, "Giải quyết xung đột cần version và revision hiện tại");
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "Giải quyết xung đột cần version và revision hiện tại");
         }
         var proposals = generationJdbc.queryForList("""
                 SELECT output_json FROM generation_checkpoint WHERE source_update_id=? AND stage=? AND target_key=?
@@ -653,7 +733,8 @@ public class SourceUpdateService {
         }
         try {
             var parsed = objectMapper.readTree(proposals.get(0));
-            if (parsed == null || !parsed.isObject()) throw new IllegalArgumentException("Invalid conflict envelope");
+            if (parsed == null || !parsed.isObject())
+                throw new IllegalArgumentException("Invalid conflict envelope");
             var proposal = (com.fasterxml.jackson.databind.node.ObjectNode) parsed;
             if (proposal.path("itemId").asLong(-1) != item.getId()) {
                 throw new ResponseStatusException(HttpStatus.CONFLICT, "Xung đột không thuộc đề xuất này");
@@ -662,13 +743,15 @@ public class SourceUpdateService {
                 String current = generationCoordinator == null ? null : generationCoordinator.activeSnapshot(item);
                 if (current == null || !Objects.equals(objectMapper.readTree(current),
                         objectMapper.readTree(proposal.path("activeSnapshot").asText(null)))) {
-                    throw new ResponseStatusException(HttpStatus.CONFLICT, "Artifact đã đổi sau khi ghi nhận xung đột; hãy tiếp tục sinh để tải đề xuất mới");
+                    throw new ResponseStatusException(HttpStatus.CONFLICT,
+                            "Artifact đã đổi sau khi ghi nhận xung đột; hãy tiếp tục sinh để tải đề xuất mới");
                 }
                 if ("KEEP_USER".equals(request.resolution())) {
                     item.setAction(SourceUpdateAction.KEEP);
                     item.setReviewStatus(SourceUpdateReviewStatus.MODIFIED);
                 } else {
-                    // Chỉ lựa chọn rõ ràng của người dùng mới được thay baseline đã ghi lúc tạo artifact tạm.
+                    // Chỉ lựa chọn rõ ràng của người dùng mới được thay baseline đã ghi lúc tạo
+                    // artifact tạm.
                     item.setBeforeData(current);
                 }
             }
@@ -682,36 +765,45 @@ public class SourceUpdateService {
                     UPDATE generation_checkpoint SET state='BLOCKED',output_json=?,output_digest=NULL,
                         error='User resolution requires current-context validation',updated_at=clock_timestamp()
                     WHERE source_update_id=? AND stage=? AND target_key=? AND state='CONFLICT'
-                    """, objectMapper.writeValueAsString(proposal), updateId, request.conflictStage(), request.conflictTargetKey());
+                    """, objectMapper.writeValueAsString(proposal), updateId, request.conflictStage(),
+                    request.conflictTargetKey());
         } catch (JsonProcessingException | IllegalArgumentException invalid) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Đề xuất cạnh tranh không hợp lệ", invalid);
         }
     }
 
     private void invalidateDependentStages(Long updateId, SourceUpdateTargetType targetType) {
-        if (generationJdbc == null) return;
+        if (generationJdbc == null)
+            return;
         List<String> stages = List.of("METHOD", "BUSINESS_RULE", "TEST_PLAN", "TEST_CASE", "UNIT_TEST");
         int changed = stages.indexOf(targetType.name());
         for (int index = Math.max(0, changed); index < stages.size(); index++) {
-            generationJdbc.update("""
-                    UPDATE generation_checkpoint SET state='BLOCKED',error='Draft input changed',updated_at=clock_timestamp()
-                    WHERE source_update_id=? AND stage=? AND target_key='__stage__'
-                    """, updateId, stages.get(index));
+            generationJdbc.update(
+                    """
+                            UPDATE generation_checkpoint SET state='BLOCKED',error='Draft input changed',updated_at=clock_timestamp()
+                            WHERE source_update_id=? AND stage=? AND target_key='__stage__'
+                            """,
+                    updateId, stages.get(index));
         }
     }
 
     private void ensureProtectedArtifactsReviewed(List<SourceUpdateItem> items) {
         for (SourceUpdateItem item : items) {
             if (item.getTargetId() == null || item.getAction() == SourceUpdateAction.CREATE
-                    || item.getAction() == SourceUpdateAction.KEEP || (item.getUserRevision() != null && item.getUserRevision() > 0)
-                    || item.getReviewStatus() == SourceUpdateReviewStatus.REJECTED) continue;
+                    || item.getAction() == SourceUpdateAction.KEEP
+                    || (item.getUserRevision() != null && item.getUserRevision() > 0)
+                    || item.getReviewStatus() == SourceUpdateReviewStatus.REJECTED)
+                continue;
             boolean protectedArtifact = switch (item.getTargetType()) {
                 case BUSINESS_RULE -> businessRuleRepository.findById(item.getTargetId())
-                        .map(r -> r.getStatus() == ReviewStatus.APPROVED || Boolean.TRUE.equals(r.getIsModified())).orElse(false);
+                        .map(r -> r.getStatus() == ReviewStatus.APPROVED || Boolean.TRUE.equals(r.getIsModified()))
+                        .orElse(false);
                 case TEST_PLAN -> testPlanRepository.findById(item.getTargetId())
-                        .map(p -> p.getStatus() == ReviewStatus.APPROVED || Boolean.TRUE.equals(p.getIsModified())).orElse(false);
+                        .map(p -> p.getStatus() == ReviewStatus.APPROVED || Boolean.TRUE.equals(p.getIsModified()))
+                        .orElse(false);
                 case TEST_CASE -> testCaseRepository.findById(item.getTargetId())
-                        .map(c -> c.getStatus() == ReviewStatus.APPROVED || Boolean.TRUE.equals(c.getIsModified())).orElse(false);
+                        .map(c -> c.getStatus() == ReviewStatus.APPROVED || Boolean.TRUE.equals(c.getIsModified()))
+                        .orElse(false);
                 case UNIT_TEST -> true;
                 default -> false;
             };
@@ -723,11 +815,14 @@ public class SourceUpdateService {
     }
 
     private void captureActiveBaselines(List<SourceUpdateItem> items) {
-        if (generationCoordinator == null) return;
+        if (generationCoordinator == null)
+            return;
         for (SourceUpdateItem item : items) {
-            // CREATE chỉ được ghi baseline tại lần tạo đầu tiên; review/retry không tự nhận một bản main đã sửa.
+            // CREATE chỉ được ghi baseline tại lần tạo đầu tiên; review/retry không tự nhận
+            // một bản main đã sửa.
             if (item.getTargetType() == SourceUpdateTargetType.METHOD || item.getTargetId() == null
-                    || item.getAction() == SourceUpdateAction.CREATE || item.getBeforeData() != null) continue;
+                    || item.getAction() == SourceUpdateAction.CREATE || item.getBeforeData() != null)
+                continue;
             String baseline = generationCoordinator.activeSnapshot(item);
             if (baseline != null) {
                 item.setBeforeData(baseline);
@@ -740,7 +835,8 @@ public class SourceUpdateService {
         for (SourceUpdateItem item : items) {
             if (item.getTargetType() == SourceUpdateTargetType.METHOD || item.getTargetId() == null
                     || item.getAction() == SourceUpdateAction.KEEP
-                    || item.getReviewStatus() == SourceUpdateReviewStatus.REJECTED) continue;
+                    || item.getReviewStatus() == SourceUpdateReviewStatus.REJECTED)
+                continue;
             if (item.getBeforeData() == null && item.getAction() != SourceUpdateAction.CREATE) {
                 throw new ResponseStatusException(HttpStatus.CONFLICT,
                         "Đề xuất cũ chưa có snapshot artifact; cần review lại trước Apply: " + item.getId());
@@ -750,7 +846,8 @@ public class SourceUpdateService {
     }
 
     /**
-     * Áp dụng toàn bộ các thay đổi trong bản nháp cập nhật vào project chính thức (Atomic Transaction).
+     * Áp dụng toàn bộ các thay đổi trong bản nháp cập nhật vào project chính thức
+     * (Atomic Transaction).
      */
     @Transactional
     public SourceUpdateDto applyUpdate(Long projectId, Long updateId, AuthUser user) {
@@ -764,7 +861,8 @@ public class SourceUpdateService {
                 .orElseThrow(() -> new IllegalArgumentException("Không tìm thấy bản cập nhật " + updateId));
 
         if (update.getStatus() == SourceUpdateStatus.APPLIED) {
-            List<SourceUpdateItem> items = sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId);
+            List<SourceUpdateItem> items = sourceUpdateItemRepository
+                    .findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId);
             return sourceUpdateMapper.toUpdateDto(update, items);
         }
 
@@ -776,7 +874,8 @@ public class SourceUpdateService {
 
         SourceRevision candidate = sourceRevisionRepository.findById(update.getCandidateRevisionId())
                 .orElseThrow(() -> new IllegalArgumentException("Không tìm thấy revision ứng viên"));
-        List<SourceUpdateItem> items = sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId);
+        List<SourceUpdateItem> items = sourceUpdateItemRepository
+                .findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId);
         lockArtifactRows(items);
         ensureItemsReviewed(items);
         if (generationCoordinator != null) {
@@ -784,18 +883,42 @@ public class SourceUpdateService {
             ensureProtectedArtifactsReviewed(items);
             assertActiveBaselines(items);
         }
-        // Snapshot được quảng bá nguyên khối; KEEP một method đã đổi cũng cần source ứng viên mới.
+        // Snapshot được quảng bá nguyên khối; KEEP một method đã đổi cũng cần source
+        // ứng viên mới.
         if (items.stream().anyMatch(i -> i.getTargetType() == SourceUpdateTargetType.METHOD
-                && (i.getReviewStatus() == SourceUpdateReviewStatus.REJECTED || i.getAction() == SourceUpdateAction.KEEP))) {
-            throw new IllegalArgumentException("Snapshot còn method bị từ chối hoặc KEEP. Vui lòng tải source đã loại bỏ thay đổi đó trước khi Apply.");
+                && (i.getReviewStatus() == SourceUpdateReviewStatus.REJECTED
+                        || i.getAction() == SourceUpdateAction.KEEP))) {
+            throw new IllegalArgumentException(
+                    "Snapshot còn method bị từ chối hoặc KEEP. Vui lòng tải source đã loại bỏ thay đổi đó trước khi Apply.");
         }
         var reviewedSources = validateReviewedMethodSources(projectId, candidate, items);
         ensureNoProtectedChildren(items.stream().filter(i -> i.getTargetId() != null
-                && ((i.getAction() == SourceUpdateAction.REMOVE && i.getReviewStatus() != SourceUpdateReviewStatus.REJECTED)
-                || (i.getAction() == SourceUpdateAction.CREATE && i.getReviewStatus() == SourceUpdateReviewStatus.REJECTED))).toList());
+                && ((i.getAction() == SourceUpdateAction.REMOVE
+                        && i.getReviewStatus() != SourceUpdateReviewStatus.REJECTED)
+                        || (i.getAction() == SourceUpdateAction.CREATE
+                                && i.getReviewStatus() == SourceUpdateReviewStatus.REJECTED)))
+                .toList());
         cleanupDiscardedCreates(items);
 
         // 1. Cập nhật con trỏ source và revision active của project
+        if (Boolean.TRUE.equals(project.getStorageEncrypted()) && storageEncryptionService != null) {
+            Path candDir = Path.of(candidate.getStoragePath());
+            if (!Boolean.TRUE.equals(candidate.getStorageEncrypted())) {
+                try {
+                    javax.crypto.SecretKey dek = storageEncryptionService.unwrapDek(project.getEncryptedDek());
+                    Path stagingEnc = candDir.resolveSibling(candDir.getFileName().toString() + ".staging-enc");
+                    storageEncryptionService.encryptDirectory(candDir, stagingEnc, dek, projectId);
+                    Path backup = candDir.resolveSibling(candDir.getFileName().toString() + ".bak");
+                    Files.move(candDir, backup, java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+                    Files.move(stagingEnc, candDir, java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+                    storageService.delete(backup);
+                    candidate.setStorageEncrypted(true);
+                    sourceRevisionRepository.save(candidate);
+                } catch (Exception e) {
+                    throw new StorageException("Không thể mã hóa revision mới khi cập nhật source", e);
+                }
+            }
+        }
         project.setStoragePath(candidate.getStoragePath());
         project.setActiveSourceRevisionId(candidate.getId());
         project.setActiveSourceUpdateId(null);
@@ -805,11 +928,13 @@ public class SourceUpdateService {
         int nextTpNumber = nextTestPlanNumber(projectId);
         int nextTestCaseNumber = nextTestCaseNumber(projectId);
 
-        // Phase 1: Xóa các mục REMOVE theo thứ tự từ dưới lên (UNIT_TEST -> TEST_CASE -> TEST_PLAN -> BUSINESS_RULE -> METHOD)
+        // Phase 1: Xóa các mục REMOVE theo thứ tự từ dưới lên (UNIT_TEST -> TEST_CASE
+        // -> TEST_PLAN -> BUSINESS_RULE -> METHOD)
         // để tránh vi phạm foreign key constraints của PostgreSQL.
         for (SourceUpdateItem item : items) {
             if (item.getAction() != SourceUpdateAction.REMOVE
-                    || (item.getReviewStatus() != SourceUpdateReviewStatus.ACCEPTED && item.getReviewStatus() != SourceUpdateReviewStatus.MODIFIED)) {
+                    || (item.getReviewStatus() != SourceUpdateReviewStatus.ACCEPTED
+                            && item.getReviewStatus() != SourceUpdateReviewStatus.MODIFIED)) {
                 continue;
             }
             if (item.getTargetType() == SourceUpdateTargetType.UNIT_TEST && item.getTargetId() != null) {
@@ -819,7 +944,8 @@ public class SourceUpdateService {
 
         for (SourceUpdateItem item : items) {
             if (item.getAction() != SourceUpdateAction.REMOVE
-                    || (item.getReviewStatus() != SourceUpdateReviewStatus.ACCEPTED && item.getReviewStatus() != SourceUpdateReviewStatus.MODIFIED)) {
+                    || (item.getReviewStatus() != SourceUpdateReviewStatus.ACCEPTED
+                            && item.getReviewStatus() != SourceUpdateReviewStatus.MODIFIED)) {
                 continue;
             }
             if (item.getTargetType() == SourceUpdateTargetType.TEST_CASE && item.getTargetId() != null) {
@@ -833,7 +959,8 @@ public class SourceUpdateService {
 
         for (SourceUpdateItem item : items) {
             if (item.getAction() != SourceUpdateAction.REMOVE
-                    || (item.getReviewStatus() != SourceUpdateReviewStatus.ACCEPTED && item.getReviewStatus() != SourceUpdateReviewStatus.MODIFIED)) {
+                    || (item.getReviewStatus() != SourceUpdateReviewStatus.ACCEPTED
+                            && item.getReviewStatus() != SourceUpdateReviewStatus.MODIFIED)) {
                 continue;
             }
             if (item.getTargetType() == SourceUpdateTargetType.TEST_PLAN && item.getTargetId() != null) {
@@ -843,7 +970,8 @@ public class SourceUpdateService {
 
         for (SourceUpdateItem item : items) {
             if (item.getAction() != SourceUpdateAction.REMOVE
-                    || (item.getReviewStatus() != SourceUpdateReviewStatus.ACCEPTED && item.getReviewStatus() != SourceUpdateReviewStatus.MODIFIED)) {
+                    || (item.getReviewStatus() != SourceUpdateReviewStatus.ACCEPTED
+                            && item.getReviewStatus() != SourceUpdateReviewStatus.MODIFIED)) {
                 continue;
             }
             if (item.getTargetType() == SourceUpdateTargetType.BUSINESS_RULE && item.getTargetId() != null) {
@@ -852,13 +980,17 @@ public class SourceUpdateService {
         }
 
         for (SourceUpdateItem item : items) {
-            if (item.getAction() == SourceUpdateAction.REMOVE && item.getTargetType() == SourceUpdateTargetType.METHOD) {
-                if (item.getReviewStatus() == SourceUpdateReviewStatus.REJECTED || item.getAction() == SourceUpdateAction.KEEP) continue;
+            if (item.getAction() == SourceUpdateAction.REMOVE
+                    && item.getTargetType() == SourceUpdateTargetType.METHOD) {
+                if (item.getReviewStatus() == SourceUpdateReviewStatus.REJECTED
+                        || item.getAction() == SourceUpdateAction.KEEP)
+                    continue;
                 applyMethodUpdate(projectId, item);
             }
         }
 
-        // Phase 2: Áp dụng CREATE và UPDATE theo thứ tự từ trên xuống (METHOD -> BR -> TP -> TC -> UT)
+        // Phase 2: Áp dụng CREATE và UPDATE theo thứ tự từ trên xuống (METHOD -> BR ->
+        // TP -> TC -> UT)
         // và ánh xạ ID thật giữa các thực thể cha - con mới được tạo.
         Map<Long, Long> ruleIdMap = new HashMap<>();
         Map<Long, Long> planIdMap = new HashMap<>();
@@ -867,32 +999,39 @@ public class SourceUpdateService {
         Set<Long> appliedPlansCoveringChangedRules = new HashSet<>();
 
         for (SourceUpdateItem item : items) {
-            if (item.getAction() != SourceUpdateAction.REMOVE && item.getTargetType() == SourceUpdateTargetType.METHOD) {
-                if (item.getReviewStatus() == SourceUpdateReviewStatus.REJECTED || item.getAction() == SourceUpdateAction.KEEP) continue;
+            if (item.getAction() != SourceUpdateAction.REMOVE
+                    && item.getTargetType() == SourceUpdateTargetType.METHOD) {
+                if (item.getReviewStatus() == SourceUpdateReviewStatus.REJECTED
+                        || item.getAction() == SourceUpdateAction.KEEP)
+                    continue;
                 applyMethodUpdate(projectId, item);
             }
         }
         synchronizeChangedSource(projectId, items, reviewedSources);
 
         for (SourceUpdateItem item : items) {
-            if (item.getReviewStatus() == SourceUpdateReviewStatus.REJECTED || item.getAction() == SourceUpdateAction.REMOVE
+            if (item.getReviewStatus() == SourceUpdateReviewStatus.REJECTED
+                    || item.getAction() == SourceUpdateAction.REMOVE
                     || item.getAction() == SourceUpdateAction.KEEP) {
                 continue;
             }
             if (item.getTargetType() == SourceUpdateTargetType.BUSINESS_RULE) {
                 if (item.getAfterData() != null) {
                     try {
-                        GeneratedBusinessRuleDto dto = objectMapper.readValue(item.getAfterData(), GeneratedBusinessRuleDto.class);
+                        GeneratedBusinessRuleDto dto = objectMapper.readValue(item.getAfterData(),
+                                GeneratedBusinessRuleDto.class);
                         if (item.getTargetId() != null) {
                             BusinessRule rule = businessRuleRepository.findById(item.getTargetId())
-                                    .orElseThrow(() -> new IllegalArgumentException("Không tìm thấy BR đã sinh " + item.getTargetId()));
-                            if (!Objects.equals(rule.getDescription(), dto.description())) changedOracleRuleIds.add(rule.getId());
-                                rule.setDescription(dto.description());
-                                rule.setStatus(ReviewStatus.APPROVED);
-                                rule.setIsModified(false);
-                                rule.setReviewNote(SourceBranchReference.write(dto.branchId(), rule.getReviewNote()));
-                                businessRuleRepository.save(rule);
-                                ruleIdMap.put(item.getTargetId(), rule.getId());
+                                    .orElseThrow(() -> new IllegalArgumentException(
+                                            "Không tìm thấy BR đã sinh " + item.getTargetId()));
+                            if (!Objects.equals(rule.getDescription(), dto.description()))
+                                changedOracleRuleIds.add(rule.getId());
+                            rule.setDescription(dto.description());
+                            rule.setStatus(ReviewStatus.APPROVED);
+                            rule.setIsModified(false);
+                            rule.setReviewNote(SourceBranchReference.write(dto.branchId(), rule.getReviewNote()));
+                            businessRuleRepository.save(rule);
+                            ruleIdMap.put(item.getTargetId(), rule.getId());
                         } else {
                             BusinessRule rule = new BusinessRule();
                             rule.setProjectId(projectId);
@@ -921,28 +1060,32 @@ public class SourceUpdateService {
         }
 
         for (SourceUpdateItem item : items) {
-            if (item.getReviewStatus() == SourceUpdateReviewStatus.REJECTED || item.getAction() == SourceUpdateAction.REMOVE
+            if (item.getReviewStatus() == SourceUpdateReviewStatus.REJECTED
+                    || item.getAction() == SourceUpdateAction.REMOVE
                     || item.getAction() == SourceUpdateAction.KEEP) {
                 continue;
             }
             if (item.getTargetType() == SourceUpdateTargetType.TEST_PLAN) {
                 if (item.getAfterData() != null) {
                     try {
-                        GeneratedTestPlanDto dto = objectMapper.readValue(item.getAfterData(), GeneratedTestPlanDto.class);
+                        GeneratedTestPlanDto dto = objectMapper.readValue(item.getAfterData(),
+                                GeneratedTestPlanDto.class);
                         Long targetRuleId = ruleIdMap.getOrDefault(dto.ruleId(), dto.ruleId());
                         if (item.getTargetId() != null) {
                             TestPlan plan = testPlanRepository.findById(item.getTargetId())
-                                    .orElseThrow(() -> new IllegalArgumentException("Không tìm thấy Test Plan đã sinh " + item.getTargetId()));
-                                plan.setTitle(dto.title());
-                                plan.setDescription(dto.description());
-                                plan.setBusinessRuleId(targetRuleId);
-                                plan.setTestType(TestType.valueOf(dto.testType()));
-                                plan.setStatus(ReviewStatus.APPROVED);
-                                plan.setIsModified(false);
-                                testPlanRepository.save(plan);
-                                savePlanCoverage(plan.getId(), dto.coveredRuleIds(), ruleIdMap);
-                                planIdMap.put(item.getTargetId(), plan.getId());
-                                if (coversChangedOracle(dto, changedOracleRuleIds, ruleIdMap)) appliedPlansCoveringChangedRules.add(plan.getId());
+                                    .orElseThrow(() -> new IllegalArgumentException(
+                                            "Không tìm thấy Test Plan đã sinh " + item.getTargetId()));
+                            plan.setTitle(dto.title());
+                            plan.setDescription(dto.description());
+                            plan.setBusinessRuleId(targetRuleId);
+                            plan.setTestType(TestType.valueOf(dto.testType()));
+                            plan.setStatus(ReviewStatus.APPROVED);
+                            plan.setIsModified(false);
+                            testPlanRepository.save(plan);
+                            savePlanCoverage(plan.getId(), dto.coveredRuleIds(), ruleIdMap);
+                            planIdMap.put(item.getTargetId(), plan.getId());
+                            if (coversChangedOracle(dto, changedOracleRuleIds, ruleIdMap))
+                                appliedPlansCoveringChangedRules.add(plan.getId());
                         } else {
                             TestPlan plan = new TestPlan();
                             plan.setProjectId(projectId);
@@ -955,7 +1098,8 @@ public class SourceUpdateService {
                             plan.setIsModified(false);
                             plan = testPlanRepository.save(plan);
                             savePlanCoverage(plan.getId(), dto.coveredRuleIds(), ruleIdMap);
-                            if (coversChangedOracle(dto, changedOracleRuleIds, ruleIdMap)) appliedPlansCoveringChangedRules.add(plan.getId());
+                            if (coversChangedOracle(dto, changedOracleRuleIds, ruleIdMap))
+                                appliedPlansCoveringChangedRules.add(plan.getId());
                             if (item.getTargetId() != null) {
                                 planIdMap.put(item.getTargetId(), plan.getId());
                             }
@@ -973,30 +1117,33 @@ public class SourceUpdateService {
         }
 
         for (SourceUpdateItem item : items) {
-            if (item.getReviewStatus() == SourceUpdateReviewStatus.REJECTED || item.getAction() == SourceUpdateAction.REMOVE
+            if (item.getReviewStatus() == SourceUpdateReviewStatus.REJECTED
+                    || item.getAction() == SourceUpdateAction.REMOVE
                     || item.getAction() == SourceUpdateAction.KEEP) {
                 continue;
             }
             if (item.getTargetType() == SourceUpdateTargetType.TEST_CASE) {
                 if (item.getAfterData() != null) {
                     try {
-                        GeneratedTestCaseDto dto = objectMapper.readValue(item.getAfterData(), GeneratedTestCaseDto.class);
+                        GeneratedTestCaseDto dto = objectMapper.readValue(item.getAfterData(),
+                                GeneratedTestCaseDto.class);
                         Long targetPlanId = planIdMap.getOrDefault(dto.planId(), dto.planId());
                         if (item.getTargetId() != null) {
                             TestCase tc = testCaseRepository.findById(item.getTargetId())
-                                    .orElseThrow(() -> new IllegalArgumentException("Không tìm thấy Test Case đã sinh " + item.getTargetId()));
-                                tc.setDescription(dto.description());
-                                tc.setPreconditions(dto.preconditions());
-                                tc.setTestData(dto.testData());
-                                tc.setExpectedResult(dto.expectedResult());
-                                tc.setTestType(TestType.valueOf(dto.testType()));
-                                tc.setPriority(Priority.valueOf(dto.priority()));
-                                tc.setTestPlanId(targetPlanId);
-                                tc.setTraceSource(dto.traceSource());
-                                tc.setStatus(ReviewStatus.APPROVED);
-                                tc.setIsModified(false);
-                                testCaseRepository.save(tc);
-                                caseIdMap.put(item.getTargetId(), tc.getId());
+                                    .orElseThrow(() -> new IllegalArgumentException(
+                                            "Không tìm thấy Test Case đã sinh " + item.getTargetId()));
+                            tc.setDescription(dto.description());
+                            tc.setPreconditions(dto.preconditions());
+                            tc.setTestData(dto.testData());
+                            tc.setExpectedResult(dto.expectedResult());
+                            tc.setTestType(TestType.valueOf(dto.testType()));
+                            tc.setPriority(Priority.valueOf(dto.priority()));
+                            tc.setTestPlanId(targetPlanId);
+                            tc.setTraceSource(dto.traceSource());
+                            tc.setStatus(ReviewStatus.APPROVED);
+                            tc.setIsModified(false);
+                            testCaseRepository.save(tc);
+                            caseIdMap.put(item.getTargetId(), tc.getId());
                         } else {
                             TestCase tc = new TestCase();
                             tc.setTestPlanId(targetPlanId);
@@ -1028,14 +1175,16 @@ public class SourceUpdateService {
         }
 
         for (SourceUpdateItem item : items) {
-            if (item.getReviewStatus() == SourceUpdateReviewStatus.REJECTED || item.getAction() == SourceUpdateAction.REMOVE
+            if (item.getReviewStatus() == SourceUpdateReviewStatus.REJECTED
+                    || item.getAction() == SourceUpdateAction.REMOVE
                     || item.getAction() == SourceUpdateAction.KEEP) {
                 continue;
             }
             if (item.getTargetType() == SourceUpdateTargetType.UNIT_TEST) {
                 if (item.getAfterData() != null) {
                     try {
-                        GeneratedUnitTestDto dto = objectMapper.readValue(item.getAfterData(), GeneratedUnitTestDto.class);
+                        GeneratedUnitTestDto dto = objectMapper.readValue(item.getAfterData(),
+                                GeneratedUnitTestDto.class);
                         Long targetCaseId = caseIdMap.getOrDefault(dto.caseId(), dto.caseId());
                         ensureTestCaseBelongsToProject(targetCaseId, projectId);
                         String genType = (dto.generationType() != null && !dto.generationType().isBlank())
@@ -1084,7 +1233,8 @@ public class SourceUpdateService {
         update.setStatus(SourceUpdateStatus.APPLIED);
         update = sourceUpdateRepository.save(update);
 
-        boolean invalidatedPlans = invalidateChangedOracleDescendants(projectId, changedOracleRuleIds, appliedPlansCoveringChangedRules, items);
+        boolean invalidatedPlans = invalidateChangedOracleDescendants(projectId, changedOracleRuleIds,
+                appliedPlansCoveringChangedRules, items);
         boolean hasUnitTests = items.stream().anyMatch(i -> i.getTargetType() == SourceUpdateTargetType.UNIT_TEST);
         if (invalidatedPlans) {
             project.setStatus(ProjectStatus.PLAN_PENDING_REVIEW);
@@ -1099,18 +1249,25 @@ public class SourceUpdateService {
         return sourceUpdateMapper.toUpdateDto(update, items);
     }
 
-    /** Giữ output cũ để đối chiếu, nhưng không gọi chúng là đã duyệt theo yêu cầu vừa thay đổi. */
-    private boolean invalidateChangedOracleDescendants(Long projectId, Set<Long> changedRuleIds, Set<Long> appliedPlanIds,
+    /**
+     * Giữ output cũ để đối chiếu, nhưng không gọi chúng là đã duyệt theo yêu cầu
+     * vừa thay đổi.
+     */
+    private boolean invalidateChangedOracleDescendants(Long projectId, Set<Long> changedRuleIds,
+            Set<Long> appliedPlanIds,
             List<SourceUpdateItem> items) {
-        if (changedRuleIds.isEmpty()) return false;
+        if (changedRuleIds.isEmpty())
+            return false;
         Set<Long> reviewedPlans = checkpointReviewedIds(items, SourceUpdateTargetType.TEST_PLAN);
         Set<Long> reviewedCases = checkpointReviewedIds(items, SourceUpdateTargetType.TEST_CASE);
         Set<Long> planIds = new HashSet<>(appliedPlanIds);
         for (Long ruleId : changedRuleIds) {
-            testPlanCoveredRuleRepository.findByBusinessRuleId(ruleId).forEach(link -> planIds.add(link.getTestPlanId()));
+            testPlanCoveredRuleRepository.findByBusinessRuleId(ruleId)
+                    .forEach(link -> planIds.add(link.getTestPlanId()));
         }
         List<TestPlan> affectedPlans = testPlanRepository.findByProjectId(projectId).stream()
-                .filter(plan -> changedRuleIds.contains(plan.getBusinessRuleId()) || planIds.contains(plan.getId())).toList();
+                .filter(plan -> changedRuleIds.contains(plan.getBusinessRuleId()) || planIds.contains(plan.getId()))
+                .toList();
         boolean invalidated = false;
         for (TestPlan plan : affectedPlans) {
             boolean reviewedPlan = reviewedPlans.contains(plan.getId());
@@ -1121,8 +1278,10 @@ public class SourceUpdateService {
                 invalidated = true;
             }
             for (TestCase testCase : testCaseRepository.findByTestPlanId(plan.getId())) {
-                // Giữ quyết định duyệt khi cả cha và con đã được kiểm chứng trong cùng checkpoint.
-                if (reviewedPlan && reviewedCases.contains(testCase.getId())) continue;
+                // Giữ quyết định duyệt khi cả cha và con đã được kiểm chứng trong cùng
+                // checkpoint.
+                if (reviewedPlan && reviewedCases.contains(testCase.getId()))
+                    continue;
                 testCase.setStatus(ReviewStatus.PENDING_REVIEW);
                 testCase.setIsModified(true);
                 testCaseRepository.save(testCase);
@@ -1133,14 +1292,21 @@ public class SourceUpdateService {
     }
 
     private Set<Long> checkpointReviewedIds(List<SourceUpdateItem> items, SourceUpdateTargetType type) {
-        if (generationCoordinator == null) return Set.of();
+        if (generationCoordinator == null)
+            return Set.of();
         return items.stream().filter(item -> item.getTargetType() == type && item.getTargetId() != null
-                && item.getAfterData() != null && (item.getAction() == SourceUpdateAction.CREATE || item.getAction() == SourceUpdateAction.UPDATE)
-                && (item.getReviewStatus() == SourceUpdateReviewStatus.ACCEPTED || item.getReviewStatus() == SourceUpdateReviewStatus.MODIFIED))
-                .filter(generationCoordinator::isRecordedOutput).map(SourceUpdateItem::getTargetId).collect(Collectors.toSet());
+                && item.getAfterData() != null
+                && (item.getAction() == SourceUpdateAction.CREATE || item.getAction() == SourceUpdateAction.UPDATE)
+                && (item.getReviewStatus() == SourceUpdateReviewStatus.ACCEPTED
+                        || item.getReviewStatus() == SourceUpdateReviewStatus.MODIFIED))
+                .filter(generationCoordinator::isRecordedOutput).map(SourceUpdateItem::getTargetId)
+                .collect(Collectors.toSet());
     }
 
-    /** Bao gồm liên kết mới trong payload đã áp dụng, kể cả chưa có persisted coverage link. */
+    /**
+     * Bao gồm liên kết mới trong payload đã áp dụng, kể cả chưa có persisted
+     * coverage link.
+     */
     private boolean coversChangedOracle(GeneratedTestPlanDto dto, Set<Long> changedRuleIds, Map<Long, Long> ruleIdMap) {
         return dto.coveredRuleIds() != null && dto.coveredRuleIds().stream()
                 .map(ruleId -> ruleIdMap.getOrDefault(ruleId, ruleId)).anyMatch(changedRuleIds::contains);
@@ -1150,7 +1316,8 @@ public class SourceUpdateService {
         Set<Long> desired = ruleIds.stream().map(id -> ruleIdMap.getOrDefault(id, id)).collect(Collectors.toSet());
         Set<Long> existing = testPlanCoveredRuleRepository.findByTestPlanId(planId).stream()
                 .map(TestPlanCoveredRule::getBusinessRuleId).collect(Collectors.toSet());
-        if (desired.equals(existing)) return;
+        if (desired.equals(existing))
+            return;
         testPlanCoveredRuleRepository.deleteByTestPlanId(planId);
         testPlanCoveredRuleRepository.flush();
         for (Long ruleId : desired) {
@@ -1166,13 +1333,16 @@ public class SourceUpdateService {
             List<SourceUpdateItem> items) {
         var changed = items.stream().filter(i -> i.getTargetType() == SourceUpdateTargetType.METHOD
                 && (i.getAction() == SourceUpdateAction.CREATE || i.getAction() == SourceUpdateAction.UPDATE
-                    || i.getAction() == SourceUpdateAction.REMOVE)
+                        || i.getAction() == SourceUpdateAction.REMOVE)
                 && (i.getReviewStatus() == SourceUpdateReviewStatus.ACCEPTED
-                    || i.getReviewStatus() == SourceUpdateReviewStatus.MODIFIED)).toList();
-        if (changed.isEmpty()) return null;
+                        || i.getReviewStatus() == SourceUpdateReviewStatus.MODIFIED))
+                .toList();
+        if (changed.isEmpty())
+            return null;
         JavaParserHelper parser = new JavaParserHelper();
         var scanned = parser.scanProject(Path.of(candidate.getStoragePath()));
-        if (!scanned.failedParseFiles().isEmpty()) throw new IllegalStateException("Snapshot còn source không parse được");
+        if (!scanned.failedParseFiles().isEmpty())
+            throw new IllegalStateException("Snapshot còn source không parse được");
         List<JavaClass> stored = javaClassRepository.findByProjectId(projectId);
         for (SourceUpdateItem item : changed) {
             try {
@@ -1180,25 +1350,36 @@ public class SourceUpdateService {
                 JavaClass owner = methodOwner(item, stored);
                 if (item.getAction() == SourceUpdateAction.REMOVE) {
                     // REMOVE chỉ hợp lệ khi snapshot không còn method trong đúng module.
-                    var remainingFiles = scanned.productionFiles().stream().filter(file -> parser.findTypes(file.compilationUnit()).stream()
-                            .anyMatch(type -> type.getFullyQualifiedName().filter(key[0]::equals).isPresent())).toList();
-                    if (owner != null && stored.stream().filter(c -> Objects.equals(c.getQualifiedName(), key[0])).count() > 1) {
-                        remainingFiles = remainingFiles.stream().filter(file -> ServiceScopeResolver.modulePath(file.relativePath())
-                                .equals(ServiceScopeResolver.modulePath(owner.getFilePath()))).toList();
+                    var remainingFiles = scanned.productionFiles().stream()
+                            .filter(file -> parser.findTypes(file.compilationUnit()).stream()
+                                    .anyMatch(type -> type.getFullyQualifiedName().filter(key[0]::equals).isPresent()))
+                            .toList();
+                    if (owner != null
+                            && stored.stream().filter(c -> Objects.equals(c.getQualifiedName(), key[0])).count() > 1) {
+                        remainingFiles = remainingFiles.stream()
+                                .filter(file -> ServiceScopeResolver.modulePath(file.relativePath())
+                                        .equals(ServiceScopeResolver.modulePath(owner.getFilePath())))
+                                .toList();
                     }
-                    if (remainingFiles.isEmpty()) continue;
+                    if (remainingFiles.isEmpty())
+                        continue;
                     var file = methodSourceFile(parser, scanned, key[0], owner, stored);
                     boolean methodRemains = parser.findTypes(file.compilationUnit()).stream()
                             .filter(type -> type.getFullyQualifiedName().filter(key[0]::equals).isPresent())
-                            .flatMap(type -> type.getMethods().stream()).anyMatch(method -> key[1].equals(parser.methodKey(method)));
-                    if (methodRemains) throw new IllegalArgumentException("METHOD REMOVE vẫn còn trong snapshot; cần tải source ứng viên mới");
+                            .flatMap(type -> type.getMethods().stream())
+                            .anyMatch(method -> key[1].equals(parser.methodKey(method)));
+                    if (methodRemains)
+                        throw new IllegalArgumentException(
+                                "METHOD REMOVE vẫn còn trong snapshot; cần tải source ứng viên mới");
                     continue;
                 }
                 MethodDeclaration reviewed = parser.parseMethodDeclaration(item.getAfterData());
-                if (!key[1].equals(parser.methodKey(reviewed))) throw new IllegalArgumentException("Signature không khớp target key");
+                if (!key[1].equals(parser.methodKey(reviewed)))
+                    throw new IllegalArgumentException("Signature không khớp target key");
                 var file = methodSourceFile(parser, scanned, key[0], owner, stored);
                 var type = parser.findTypes(file.compilationUnit()).stream()
-                        .filter(t -> t.getFullyQualifiedName().filter(key[0]::equals).isPresent()).findFirst().orElseThrow();
+                        .filter(t -> t.getFullyQualifiedName().filter(key[0]::equals).isPresent()).findFirst()
+                        .orElseThrow();
                 var methods = type.getMethods().stream().filter(m -> key[1].equals(parser.methodKey(m))).toList();
                 if (methods.size() != 1 || !methodCode(methods.get(0)).equals(methodCode(reviewed))) {
                     throw new IllegalArgumentException("METHOD đã duyệt khác snapshot; cần tải source ứng viên mới");
@@ -1210,52 +1391,71 @@ public class SourceUpdateService {
         return scanned;
     }
 
-    /** Đối chiếu AST như bước diff; giữ nguyên annotation và literal, bỏ khác biệt comment. */
+    /**
+     * Đối chiếu AST như bước diff; giữ nguyên annotation và literal, bỏ khác biệt
+     * comment.
+     */
     private String methodCode(MethodDeclaration declaration) {
-        return declaration.clone().toString(new PrettyPrinterConfiguration().setPrintComments(false).setPrintJavadoc(false));
+        return declaration.clone()
+                .toString(new PrettyPrinterConfiguration().setPrintComments(false).setPrintJavadoc(false));
     }
 
     private List<SourceUpdateItem> appliedMethodItems(List<SourceUpdateItem> items) {
         return items.stream().filter(i -> i.getTargetType() == SourceUpdateTargetType.METHOD
                 && (i.getAction() == SourceUpdateAction.CREATE || i.getAction() == SourceUpdateAction.UPDATE)
-                && (i.getReviewStatus() == SourceUpdateReviewStatus.ACCEPTED || i.getReviewStatus() == SourceUpdateReviewStatus.MODIFIED)).toList();
+                && (i.getReviewStatus() == SourceUpdateReviewStatus.ACCEPTED
+                        || i.getReviewStatus() == SourceUpdateReviewStatus.MODIFIED))
+                .toList();
     }
 
     private JavaClass methodOwner(SourceUpdateItem item, List<JavaClass> stored) {
         if (item.getTargetId() != null) {
             JavaMethod method = javaMethodRepository.findById(item.getTargetId()).orElseThrow();
-            return stored.stream().filter(c -> Objects.equals(c.getId(), method.getClassId())).findFirst().orElseThrow();
+            return stored.stream().filter(c -> Objects.equals(c.getId(), method.getClassId())).findFirst()
+                    .orElseThrow();
         }
         String owner = item.getTargetKey().split("#", 2)[0];
         var matches = stored.stream().filter(c -> Objects.equals(c.getQualifiedName(), owner)).toList();
-        if (matches.size() > 1) throw new IllegalArgumentException("Method thiếu ID và trùng qualified name giữa các module");
+        if (matches.size() > 1)
+            throw new IllegalArgumentException("Method thiếu ID và trùng qualified name giữa các module");
         return matches.isEmpty() ? null : matches.get(0);
     }
 
-    private JavaParserHelper.ParsedFile methodSourceFile(JavaParserHelper parser, JavaParserHelper.SourceScanResult scanned,
+    private JavaParserHelper.ParsedFile methodSourceFile(JavaParserHelper parser,
+            JavaParserHelper.SourceScanResult scanned,
             String qualifiedName, JavaClass owner, List<JavaClass> stored) {
-        var candidates = scanned.productionFiles().stream().filter(file -> parser.findTypes(file.compilationUnit()).stream()
-                .anyMatch(type -> type.getFullyQualifiedName().filter(qualifiedName::equals).isPresent())).toList();
+        var candidates = scanned.productionFiles().stream()
+                .filter(file -> parser.findTypes(file.compilationUnit()).stream()
+                        .anyMatch(type -> type.getFullyQualifiedName().filter(qualifiedName::equals).isPresent()))
+                .toList();
         if (owner != null) {
             var samePath = candidates.stream().filter(file -> Objects.equals(file.relativePath(),
                     owner.getFilePath() == null ? null : owner.getFilePath().replace('\\', '/'))).toList();
-            if (samePath.size() == 1) return samePath.get(0);
+            if (samePath.size() == 1)
+                return samePath.get(0);
             var sameModule = candidates.stream().filter(file -> ServiceScopeResolver.modulePath(file.relativePath())
                     .equals(ServiceScopeResolver.modulePath(owner.getFilePath()))).toList();
-            if (sameModule.size() == 1) return sameModule.get(0);
+            if (sameModule.size() == 1)
+                return sameModule.get(0);
             var aliases = candidates.stream().filter(file -> sameModuleAlias(
-                    ServiceScopeResolver.modulePath(file.relativePath()), ServiceScopeResolver.modulePath(owner.getFilePath()))).toList();
+                    ServiceScopeResolver.modulePath(file.relativePath()),
+                    ServiceScopeResolver.modulePath(owner.getFilePath()))).toList();
             if (aliases.size() == 1) {
                 String module = ServiceScopeResolver.modulePath(aliases.get(0).relativePath());
-                long reverseMatches = stored.stream().filter(type -> Objects.equals(type.getQualifiedName(), qualifiedName)
-                        && sameModuleAlias(module, ServiceScopeResolver.modulePath(type.getFilePath()))).count();
-                // ZIP có thể thêm/bớt thư mục ngoài cùng; chỉ nhận ánh xạ module duy nhất hai chiều.
-                if (reverseMatches == 1) return aliases.get(0);
+                long reverseMatches = stored.stream()
+                        .filter(type -> Objects.equals(type.getQualifiedName(), qualifiedName)
+                                && sameModuleAlias(module, ServiceScopeResolver.modulePath(type.getFilePath())))
+                        .count();
+                // ZIP có thể thêm/bớt thư mục ngoài cùng; chỉ nhận ánh xạ module duy nhất hai
+                // chiều.
+                if (reverseMatches == 1)
+                    return aliases.get(0);
             }
             if (stored.stream().filter(c -> Objects.equals(c.getQualifiedName(), qualifiedName)).count() > 1)
                 throw new IllegalArgumentException("Không xác định duy nhất module source của " + qualifiedName);
         }
-        if (candidates.size() != 1) throw new IllegalArgumentException("Không xác định duy nhất source cập nhật của " + qualifiedName);
+        if (candidates.size() != 1)
+            throw new IllegalArgumentException("Không xác định duy nhất source cập nhật của " + qualifiedName);
         return candidates.get(0);
     }
 
@@ -1265,30 +1465,36 @@ public class SourceUpdateService {
     }
 
     /** Dùng cùng AST đã xác minh, giữ ID/module và range của source thực tế. */
-    private void synchronizeChangedSource(Long projectId, List<SourceUpdateItem> items, JavaParserHelper.SourceScanResult scanned) {
-        if (scanned == null) return;
+    private void synchronizeChangedSource(Long projectId, List<SourceUpdateItem> items,
+            JavaParserHelper.SourceScanResult scanned) {
+        if (scanned == null)
+            return;
         var changed = appliedMethodItems(items);
         JavaParserHelper parser = new JavaParserHelper();
         List<JavaClass> stored = javaClassRepository.findByProjectId(projectId);
         Set<Long> affected = affectedClassIds(changed, stored);
         affected.addAll(removeDeletedControllerMethods(parser, scanned, stored));
         for (JavaClass owner : stored) {
-            if (!affected.contains(owner.getId())) continue;
+            if (!affected.contains(owner.getId()))
+                continue;
             var file = methodSourceFile(parser, scanned, owner.getQualifiedName(), owner, stored);
             var unit = file.compilationUnit().clone();
             TypeDeclaration<?> type = parser.findTypes(unit).stream().filter(t -> t.getFullyQualifiedName()
                     .filter(owner.getQualifiedName()::equals).isPresent()).findFirst().orElseThrow();
             // Method không đổi nội dung vẫn có thể dịch dòng khi method đứng trước dài hơn.
             for (JavaMethod method : javaMethodRepository.findByClassId(owner.getId())) {
-                type.getMethods().stream().filter(declaration -> Objects.equals(methodSignature(method), parser.methodKey(declaration)))
+                type.getMethods().stream()
+                        .filter(declaration -> Objects.equals(methodSignature(method), parser.methodKey(declaration)))
                         .findFirst().ifPresent(declaration -> {
                             method.setLineStart(declaration.getBegin().map(p -> p.line).orElse(1));
                             method.setLineEnd(declaration.getEnd().map(p -> p.line).orElse(method.getLineStart()));
                         });
             }
-            while (type.getParentNode().orElse(null) instanceof TypeDeclaration<?> enclosing) type = enclosing;
+            while (type.getParentNode().orElse(null) instanceof TypeDeclaration<?> enclosing)
+                type = enclosing;
             unit.setTypes(new NodeList<>(type));
-            owner.setSourceCode(unit.toString()); owner.setFilePath(file.relativePath());
+            owner.setSourceCode(unit.toString());
+            owner.setFilePath(file.relativePath());
             owner.setPackageName(parser.getPackageName(unit));
             javaClassRepository.save(owner);
         }
@@ -1298,17 +1504,25 @@ public class SourceUpdateService {
             JavaParserHelper.SourceScanResult scanned, List<JavaClass> stored) {
         Set<Long> affected = new HashSet<>();
         for (JavaClass owner : stored) {
-            if (owner.getClassType() != ClassType.CONTROLLER) continue;
-            boolean present = scanned.productionFiles().stream().anyMatch(file -> parser.findTypes(file.compilationUnit()).stream()
-                    .anyMatch(type -> type.getFullyQualifiedName().filter(owner.getQualifiedName()::equals).isPresent()));
-            if (!present) continue;
+            if (owner.getClassType() != ClassType.CONTROLLER)
+                continue;
+            boolean present = scanned.productionFiles().stream().anyMatch(file -> parser
+                    .findTypes(file.compilationUnit()).stream()
+                    .anyMatch(
+                            type -> type.getFullyQualifiedName().filter(owner.getQualifiedName()::equals).isPresent()));
+            if (!present)
+                continue;
             var file = methodSourceFile(parser, scanned, owner.getQualifiedName(), owner, stored);
-            var type = parser.findTypes(file.compilationUnit()).stream().filter(declaration -> declaration.getFullyQualifiedName()
-                    .filter(owner.getQualifiedName()::equals).isPresent()).findFirst().orElseThrow();
+            var type = parser.findTypes(file.compilationUnit()).stream()
+                    .filter(declaration -> declaration.getFullyQualifiedName()
+                            .filter(owner.getQualifiedName()::equals).isPresent())
+                    .findFirst().orElseThrow();
             Set<String> signatures = type.getMethods().stream().map(parser::methodKey).collect(Collectors.toSet());
             for (JavaMethod method : javaMethodRepository.findByClassId(owner.getId())) {
-                if (signatures.contains(methodSignature(method))) continue;
-                // FK cascade xóa endpoint và relation của đúng method, giữ ID các method còn lại.
+                if (signatures.contains(methodSignature(method)))
+                    continue;
+                // FK cascade xóa endpoint và relation của đúng method, giữ ID các method còn
+                // lại.
                 javaMethodRepository.delete(method);
                 affected.add(owner.getId());
             }
@@ -1328,7 +1542,8 @@ public class SourceUpdateService {
             } else if (item.getTargetKey() != null && item.getTargetKey().contains("#")) {
                 String owner = item.getTargetKey().split("#", 2)[0];
                 var matches = stored.stream().filter(c -> Objects.equals(c.getQualifiedName(), owner)).toList();
-                if (matches.size() != 1) throw new ResponseStatusException(HttpStatus.CONFLICT, "Không xác định duy nhất module của method");
+                if (matches.size() != 1)
+                    throw new ResponseStatusException(HttpStatus.CONFLICT, "Không xác định duy nhất module của method");
                 ids.add(matches.get(0).getId());
             }
         }
@@ -1337,17 +1552,20 @@ public class SourceUpdateService {
 
     private void applyMethodUpdate(Long projectId, SourceUpdateItem item) {
         if (item.getReviewStatus() != SourceUpdateReviewStatus.ACCEPTED
-                && item.getReviewStatus() != SourceUpdateReviewStatus.MODIFIED) return;
+                && item.getReviewStatus() != SourceUpdateReviewStatus.MODIFIED)
+            return;
         String targetKey = item.getTargetKey();
-        if (targetKey == null || !targetKey.contains("#")) return;
+        if (targetKey == null || !targetKey.contains("#"))
+            return;
 
         String[] parts = targetKey.split("#", 2);
         String qualifiedClassName = parts[0];
         String signature = parts[1];
 
         List<JavaClass> classes = javaClassRepository.findByProjectId(projectId);
-        JavaMethod pinned = item.getTargetId() == null ? null : javaMethodRepository.findById(item.getTargetId())
-                .orElseThrow(() -> new IllegalArgumentException("Không tìm thấy method " + item.getTargetId()));
+        JavaMethod pinned = item.getTargetId() == null ? null
+                : javaMethodRepository.findById(item.getTargetId())
+                        .orElseThrow(() -> new IllegalArgumentException("Không tìm thấy method " + item.getTargetId()));
         var owners = classes.stream().filter(c -> Objects.equals(c.getQualifiedName(), qualifiedClassName)).toList();
         if (pinned == null && owners.size() > 1) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Method chưa có ID và trùng class giữa các module");
@@ -1361,7 +1579,8 @@ public class SourceUpdateService {
         }
 
         // Chỉ cập nhật method cho các class thuộc tầng Service
-        if (targetClass != null && targetClass.getClassType() != null && targetClass.getClassType() != ClassType.SERVICE) {
+        if (targetClass != null && targetClass.getClassType() != null
+                && targetClass.getClassType() != ClassType.SERVICE) {
             log.warn("Bỏ qua cập nhật method {} vì class {} không phải là Service (type={})",
                     targetKey, qualifiedClassName, targetClass.getClassType());
             return;
@@ -1369,7 +1588,8 @@ public class SourceUpdateService {
 
         if (item.getAction() == SourceUpdateAction.REMOVE) {
             if (targetClass != null) {
-                List<JavaMethod> methods = pinned != null ? List.of(pinned) : javaMethodRepository.findByClassId(targetClass.getId());
+                List<JavaMethod> methods = pinned != null ? List.of(pinned)
+                        : javaMethodRepository.findByClassId(targetClass.getId());
                 for (JavaMethod m : methods) {
                     if (Objects.equals(methodSignature(m), signature)) {
                         javaMethodRepository.delete(m);
@@ -1378,7 +1598,8 @@ public class SourceUpdateService {
             }
         } else if (item.getAction() == SourceUpdateAction.UPDATE) {
             if (targetClass != null && item.getAfterData() != null) {
-                List<JavaMethod> methods = pinned != null ? List.of(pinned) : javaMethodRepository.findByClassId(targetClass.getId());
+                List<JavaMethod> methods = pinned != null ? List.of(pinned)
+                        : javaMethodRepository.findByClassId(targetClass.getId());
                 for (JavaMethod m : methods) {
                     if (Objects.equals(methodSignature(m), signature)) {
                         applyReviewedMethodSource(m, item, signature);
@@ -1395,7 +1616,8 @@ public class SourceUpdateService {
                 targetClass.setClassName(lastDot > 0 ? qualifiedClassName.substring(lastDot + 1) : qualifiedClassName);
                 targetClass.setPackageName(lastDot > 0 ? qualifiedClassName.substring(0, lastDot) : "");
                 targetClass.setClassType(ClassType.SERVICE);
-                String packagePrefix = qualifiedClassName.substring(0, Math.max(0, qualifiedClassName.lastIndexOf('.')));
+                String packagePrefix = qualifiedClassName.substring(0,
+                        Math.max(0, qualifiedClassName.lastIndexOf('.')));
                 String inferredFilePath = classes.stream()
                         .filter(c -> c.getQualifiedName() != null && c.getQualifiedName().startsWith(packagePrefix))
                         .map(JavaClass::getFilePath)
@@ -1433,8 +1655,10 @@ public class SourceUpdateService {
     }
 
     private String methodSignature(JavaMethod method) {
-        return method.getMethodName() + "(" + (method.getParameters() == null ? "" : method.getParameters().stream()
-                .map(MethodParam::type).collect(Collectors.joining(","))) + ")";
+        return method.getMethodName() + "(" + (method.getParameters() == null ? ""
+                : method.getParameters().stream()
+                        .map(MethodParam::type).collect(Collectors.joining(",")))
+                + ")";
     }
 
     /** Metadata và source phải cùng phản ánh method đã được người dùng duyệt. */
@@ -1448,10 +1672,13 @@ public class SourceUpdateService {
             method.setMethodName(declaration.getNameAsString());
             method.setReturnType(declaration.getTypeAsString());
             method.setParameters(declaration.getParameters().stream()
-                    .map(parameter -> new MethodParam(parameter.getNameAsString(), parameter.getTypeAsString())).toList());
+                    .map(parameter -> new MethodParam(parameter.getNameAsString(), parameter.getTypeAsString()))
+                    .toList());
             method.setThrowsList(declaration.getThrownExceptions().stream().map(Object::toString).toList());
-            method.setVisibility(declaration.isPublic() ? Visibility.PUBLIC : declaration.isProtected()
-                    ? Visibility.PROTECTED : declaration.isPrivate() ? Visibility.PRIVATE : Visibility.PACKAGE_PRIVATE);
+            method.setVisibility(declaration.isPublic() ? Visibility.PUBLIC
+                    : declaration.isProtected()
+                            ? Visibility.PROTECTED
+                            : declaration.isPrivate() ? Visibility.PRIVATE : Visibility.PACKAGE_PRIVATE);
             method.setSourceCode(item.getAfterData());
         } catch (RuntimeException exception) {
             throw new IllegalStateException("Không thể đồng bộ source method " + item.getTargetKey(), exception);
@@ -1472,14 +1699,16 @@ public class SourceUpdateService {
             throw new IllegalArgumentException("Không thể hủy bản cập nhật đã áp dụng");
         }
 
-        List<SourceUpdateItem> items = sourceUpdateItemRepository.findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId);
+        List<SourceUpdateItem> items = sourceUpdateItemRepository
+                .findBySourceUpdateIdOrderByTargetTypeAscIdAsc(updateId);
         lockArtifactRows(items.stream().filter(i -> i.getAction() == SourceUpdateAction.CREATE).toList());
         ensureCancelableArtifacts(items);
 
         update.setStatus(SourceUpdateStatus.CANCELLED);
         sourceUpdateRepository.save(update);
 
-        // Hoàn tác các thay đổi tạm thời đối với UT, TC, TP, BR, JavaMethod/JavaClass nếu có
+        // Hoàn tác các thay đổi tạm thời đối với UT, TC, TP, BR, JavaMethod/JavaClass
+        // nếu có
         for (SourceUpdateItem item : items) {
             if (item.getAction() == SourceUpdateAction.CREATE && item.getTargetId() != null) {
                 if (item.getTargetType() == SourceUpdateTargetType.UNIT_TEST) {
@@ -1531,17 +1760,22 @@ public class SourceUpdateService {
     }
 
     private void revertMethodUpdate(Long projectId, SourceUpdateItem item) {
-        if (item.getAction() != SourceUpdateAction.CREATE || item.getTargetId() == null) return;
+        if (item.getAction() != SourceUpdateAction.CREATE || item.getTargetId() == null)
+            return;
         String targetKey = item.getTargetKey();
-        if (targetKey == null || !targetKey.contains("#")) return;
+        if (targetKey == null || !targetKey.contains("#"))
+            return;
         String[] parts = targetKey.split("#", 2);
         String qualifiedClassName = parts[0];
         String signature = parts[1];
         javaMethodRepository.findById(item.getTargetId()).ifPresent(method -> {
             JavaClass owner = javaClassRepository.findById(method.getClassId()).orElseThrow();
-            if (!Objects.equals(owner.getProjectId(), projectId) || !Objects.equals(owner.getQualifiedName(), qualifiedClassName)
-                    || !Objects.equals(methodSignature(method), signature) || !Objects.equals(method.getSourceCode(), item.getAfterData())) {
-                throw new ResponseStatusException(HttpStatus.CONFLICT, "Method tạm đã thay đổi; không thể tự động xóa khi hủy bản nháp");
+            if (!Objects.equals(owner.getProjectId(), projectId)
+                    || !Objects.equals(owner.getQualifiedName(), qualifiedClassName)
+                    || !Objects.equals(methodSignature(method), signature)
+                    || !Objects.equals(method.getSourceCode(), item.getAfterData())) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT,
+                        "Method tạm đã thay đổi; không thể tự động xóa khi hủy bản nháp");
             }
             javaMethodRepository.delete(method);
         });
@@ -1550,29 +1784,37 @@ public class SourceUpdateService {
     private void ensureCancelableArtifacts(List<SourceUpdateItem> items) {
         ensureNoProtectedChildren(items.stream().filter(i -> i.getAction() == SourceUpdateAction.CREATE
                 && i.getTargetId() != null && i.getTargetType() != SourceUpdateTargetType.METHOD).toList());
-        if (generationCoordinator == null) return;
+        if (generationCoordinator == null)
+            return;
         for (SourceUpdateItem item : items) {
             if (item.getAction() != SourceUpdateAction.CREATE || item.getTargetId() == null
-                    || item.getTargetType() == SourceUpdateTargetType.METHOD) continue;
+                    || item.getTargetType() == SourceUpdateTargetType.METHOD)
+                continue;
             generationCoordinator.assertActiveArtifactUnchanged(item);
             boolean modified = switch (item.getTargetType()) {
-                case BUSINESS_RULE -> businessRuleRepository.findById(item.getTargetId()).map(r -> Boolean.TRUE.equals(r.getIsModified())).orElse(false);
-                case TEST_PLAN -> testPlanRepository.findById(item.getTargetId()).map(p -> Boolean.TRUE.equals(p.getIsModified())).orElse(false);
-                case TEST_CASE -> testCaseRepository.findById(item.getTargetId()).map(c -> Boolean.TRUE.equals(c.getIsModified())).orElse(false);
+                case BUSINESS_RULE -> businessRuleRepository.findById(item.getTargetId())
+                        .map(r -> Boolean.TRUE.equals(r.getIsModified())).orElse(false);
+                case TEST_PLAN -> testPlanRepository.findById(item.getTargetId())
+                        .map(p -> Boolean.TRUE.equals(p.getIsModified())).orElse(false);
+                case TEST_CASE -> testCaseRepository.findById(item.getTargetId())
+                        .map(c -> Boolean.TRUE.equals(c.getIsModified())).orElse(false);
                 default -> false;
             };
             boolean provenanceOk = generationCoordinator.isRecordedOutput(item)
                     || (item.getSourceUpdateId() != null && sourceUpdateItemRepository.existsById(item.getId()));
             if (modified || !provenanceOk) {
                 throw new ResponseStatusException(HttpStatus.CONFLICT,
-                        "Artifact có chỉnh sửa hoặc thiếu provenance; giữ nguyên dữ liệu trước khi hủy: " + item.getId());
+                        "Artifact có chỉnh sửa hoặc thiếu provenance; giữ nguyên dữ liệu trước khi hủy: "
+                                + item.getId());
             }
         }
     }
 
     private void lockArtifactRows(List<SourceUpdateItem> items) {
-        if (generationJdbc == null) return;
-        for (SourceUpdateTargetType type : List.of(SourceUpdateTargetType.BUSINESS_RULE, SourceUpdateTargetType.TEST_PLAN,
+        if (generationJdbc == null)
+            return;
+        for (SourceUpdateTargetType type : List.of(SourceUpdateTargetType.BUSINESS_RULE,
+                SourceUpdateTargetType.TEST_PLAN,
                 SourceUpdateTargetType.TEST_CASE, SourceUpdateTargetType.UNIT_TEST, SourceUpdateTargetType.METHOD)) {
             String sql = switch (type) {
                 case BUSINESS_RULE -> "SELECT id FROM business_rule WHERE id=? FOR UPDATE";
@@ -1596,13 +1838,15 @@ public class SourceUpdateService {
         for (SourceUpdateTargetType type : List.of(SourceUpdateTargetType.UNIT_TEST, SourceUpdateTargetType.TEST_CASE,
                 SourceUpdateTargetType.TEST_PLAN, SourceUpdateTargetType.BUSINESS_RULE)) {
             for (SourceUpdateItem item : discarded) {
-                if (item.getTargetType() != type) continue;
+                if (item.getTargetType() != type)
+                    continue;
                 switch (type) {
                     case UNIT_TEST -> unitTestRepository.deleteById(item.getTargetId());
                     case TEST_CASE -> testCaseRepository.deleteById(item.getTargetId());
                     case TEST_PLAN -> testPlanRepository.deleteById(item.getTargetId());
                     case BUSINESS_RULE -> businessRuleRepository.deleteById(item.getTargetId());
-                    default -> { }
+                    default -> {
+                    }
                 }
             }
         }
@@ -1610,8 +1854,10 @@ public class SourceUpdateService {
 
     private void ensureNoProtectedChildren(List<SourceUpdateItem> deleting) {
         Map<SourceUpdateTargetType, Set<Long>> ids = new java.util.EnumMap<>(SourceUpdateTargetType.class);
-        for (SourceUpdateTargetType type : SourceUpdateTargetType.values()) ids.put(type, new HashSet<>());
-        for (SourceUpdateItem item : deleting) ids.get(item.getTargetType()).add(item.getTargetId());
+        for (SourceUpdateTargetType type : SourceUpdateTargetType.values())
+            ids.put(type, new HashSet<>());
+        for (SourceUpdateItem item : deleting)
+            ids.get(item.getTargetType()).add(item.getTargetId());
         for (Long caseId : ids.get(SourceUpdateTargetType.TEST_CASE)) {
             for (UnitTest child : unitTestRepository.findByTestCaseIdIn(List.of(caseId))) {
                 requireExplicitChildDelete(ids.get(SourceUpdateTargetType.UNIT_TEST), child.getId());
@@ -1666,6 +1912,9 @@ public class SourceUpdateService {
         baseline.setStoragePath(baselineSnapshot.storageDir().toString());
         baseline.setLogicalRoot(baselineSnapshot.logicalRoot().toString());
         baseline.setContentHash(baselineSnapshot.contentHash());
+        if (Boolean.TRUE.equals(project.getStorageEncrypted())) {
+            baseline.setStorageEncrypted(true);
+        }
         baseline = sourceRevisionRepository.save(baseline);
 
         project.setActiveSourceRevisionId(baseline.getId());
@@ -1678,8 +1927,9 @@ public class SourceUpdateService {
     private void checkNoActiveDraft(Long projectId) {
         sourceUpdateRepository.findFirstByProjectIdAndStatusNotIn(projectId, TERMINAL_STATUSES)
                 .ifPresent(existing -> {
-                    throw new IllegalArgumentException("Project đang có một bản cập nhật nháp chưa hoàn tất (ID: " + existing.getId() + "). Vui lòng hoàn thành hoặc hủy bản nháp trước.");
-        });
+                    throw new IllegalArgumentException("Project đang có một bản cập nhật nháp chưa hoàn tất (ID: "
+                            + existing.getId() + "). Vui lòng hoàn thành hoặc hủy bản nháp trước.");
+                });
     }
 
     private void registerSnapshotCleanupOnRollback(Path snapshotDir) {
@@ -1732,10 +1982,18 @@ public class SourceUpdateService {
         return project;
     }
 
-    void checkProjectAccess(Project project, AuthUser user) {
-        if (user != null && user.getRole() != UserRole.ADMIN && !user.getId().equals(project.getOwnerUserId())) {
-            throw new AuthException("FORBIDDEN", "Không có quyền truy cập project này", HttpStatus.FORBIDDEN);
+    public void checkProjectAccess(Project project, AuthUser user) {
+        if (user == null) {
+            throw new AuthException("AUTH_ERROR", "Cần đăng nhập để truy cập project", HttpStatus.UNAUTHORIZED);
         }
+        if (project.getOwnerUserId() != null && project.getOwnerUserId().equals(user.getId())) {
+            return;
+        }
+        if (user.getRole() == UserRole.ADMIN && breakGlassAccessService != null
+                && breakGlassAccessService.hasActiveBreakGlass(project.getId(), user.getId())) {
+            return;
+        }
+        throw new AuthException("FORBIDDEN", "Không có quyền truy cập project này", HttpStatus.FORBIDDEN);
     }
 
     private String unitTestFilePath(String packageName, String testClassName) {
@@ -1749,7 +2007,8 @@ public class SourceUpdateService {
         int max = 0;
         for (BusinessRule rule : businessRuleRepository.findByProjectId(projectId)) {
             String code = rule.getRuleCode();
-            if (code == null || !code.startsWith("BR-")) continue;
+            if (code == null || !code.startsWith("BR-"))
+                continue;
             try {
                 max = Math.max(max, Integer.parseInt(code.substring(3)));
             } catch (NumberFormatException ignored) {
@@ -1762,7 +2021,8 @@ public class SourceUpdateService {
         int max = 0;
         for (TestPlan plan : testPlanRepository.findByProjectId(projectId)) {
             String code = plan.getPlanCode();
-            if (code == null || !code.startsWith("TP-")) continue;
+            if (code == null || !code.startsWith("TP-"))
+                continue;
             try {
                 max = Math.max(max, Integer.parseInt(code.substring(3)));
             } catch (NumberFormatException ignored) {
@@ -1776,7 +2036,8 @@ public class SourceUpdateService {
         for (TestPlan plan : testPlanRepository.findByProjectId(projectId)) {
             for (TestCase testCase : testCaseRepository.findByTestPlanId(plan.getId())) {
                 String code = testCase.getCaseCode();
-                if (code == null || !code.startsWith("TC-")) continue;
+                if (code == null || !code.startsWith("TC-"))
+                    continue;
                 try {
                     max = Math.max(max, Integer.parseInt(code.substring(3)));
                 } catch (NumberFormatException ignored) {
@@ -1789,7 +2050,8 @@ public class SourceUpdateService {
 
     private void ensureTestCaseBelongsToProject(Long caseId, Long projectId) {
         TestCase testCase = testCaseRepository.findById(caseId).orElse(null);
-        TestPlan testPlan = testCase == null ? null : testPlanRepository.findById(testCase.getTestPlanId()).orElse(null);
+        TestPlan testPlan = testCase == null ? null
+                : testPlanRepository.findById(testCase.getTestPlanId()).orElse(null);
         if (testPlan == null || !projectId.equals(testPlan.getProjectId())) {
             throw new IllegalArgumentException("Test Case " + caseId + " không thuộc project " + projectId);
         }
@@ -1799,9 +2061,11 @@ public class SourceUpdateService {
         String source = dto.sourceCode() == null ? "" : dto.sourceCode();
         source = source.startsWith("\uFEFF") ? source.substring(1) : source;
         source = source.replace("org.mockito.Matchers", "org.mockito.ArgumentMatchers");
-        if (source.contains("// GreyTest trace:")) return source;
+        if (source.contains("// GreyTest trace:"))
+            return source;
         TestCase testCase = testCaseRepository.findById(dto.caseId()).orElse(null);
-        if (testCase == null) return source;
+        if (testCase == null)
+            return source;
         return "// GreyTest trace: " + testCase.getCaseCode() + " | " + testCase.getTraceSource() + "\n" + source;
     }
 

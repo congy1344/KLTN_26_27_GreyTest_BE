@@ -84,7 +84,8 @@ import jakarta.persistence.criteria.Predicate;
 @Service
 public class AdminService {
 
-    private static final Set<String> DATABASE_USER_SORTS = Set.of("id", "fullName", "email", "createdAt", "role", "enabled", "tier");
+    private static final Set<String> DATABASE_USER_SORTS = Set.of("id", "fullName", "email", "createdAt", "role",
+            "enabled", "tier");
     private static final Set<String> COMPUTED_USER_SORTS = Set.of("totalGenerationRequests", "lastActivityAt", "quota",
             "quotaUsed");
     private static final Set<String> SUPPORTED_GRANULARITIES = Set.of("day", "week", "month", "year");
@@ -143,18 +144,26 @@ public class AdminService {
     @Autowired(required = false)
     private LlmBatchExecutor llmBatchExecutor;
     // @Lazy để tránh vòng phụ thuộc khi Spring dựng các service sinh test.
-    @Autowired(required = false) @org.springframework.context.annotation.Lazy
+    @Autowired(required = false)
+    @org.springframework.context.annotation.Lazy
     private GenerationJobService generationJobService;
-    @Autowired(required = false) @org.springframework.context.annotation.Lazy
+    @Autowired(required = false)
+    @org.springframework.context.annotation.Lazy
     private BusinessRuleService businessRuleService;
-    @Autowired(required = false) @org.springframework.context.annotation.Lazy
+    @Autowired(required = false)
+    @org.springframework.context.annotation.Lazy
     private TestPlanService testPlanService;
-    @Autowired(required = false) @org.springframework.context.annotation.Lazy
+    @Autowired(required = false)
+    @org.springframework.context.annotation.Lazy
     private TestCaseService testCaseService;
-    @Autowired(required = false) @org.springframework.context.annotation.Lazy
+    @Autowired(required = false)
+    @org.springframework.context.annotation.Lazy
     private UnitTestService unitTestService;
 
-    /** Cấu hình nội bộ lưu bền trong system_setting; không hiện và không sửa được qua form Cài đặt chung. */
+    /**
+     * Cấu hình nội bộ lưu bền trong system_setting; không hiện và không sửa được
+     * qua form Cài đặt chung.
+     */
     static final String RUNTIME_PREFIX = "runtime.";
     static final String KEY_API_KEYS = "runtime.ai.api_keys";
     static final String KEY_STAGE_LIMITS = "runtime.ai.stage_limits";
@@ -174,6 +183,7 @@ public class AdminService {
         String name;
         long price;
         String cycle;
+        String resetCycle;
         int quotaLimit;
         int batchConcurrency;
         List<String> features;
@@ -181,16 +191,22 @@ public class AdminService {
         boolean active;
 
         TierPackageInternal(String code, String name, long price, String cycle, int quotaLimit, int batchConcurrency,
-                List<String> features, String description, boolean active) {
+                List<String> features, String description, boolean active, String resetCycle) {
             this.code = code;
             this.name = name;
             this.price = price;
             this.cycle = cycle;
+            this.resetCycle = (resetCycle != null && !resetCycle.isBlank()) ? resetCycle : "WEEKLY";
             this.quotaLimit = quotaLimit;
             this.batchConcurrency = batchConcurrency;
             this.features = new ArrayList<>(features != null ? features : List.of());
             this.description = description != null ? description : "";
             this.active = active;
+        }
+
+        TierPackageInternal(String code, String name, long price, String cycle, int quotaLimit, int batchConcurrency,
+                List<String> features, String description, boolean active) {
+            this(code, name, price, cycle, quotaLimit, batchConcurrency, features, description, active, "WEEKLY");
         }
     }
 
@@ -270,13 +286,13 @@ public class AdminService {
                 null, null);
     }
 
-    @Transactional
+    @Transactional(readOnly = true)
     public PageDto<UserSummaryDto> listUsers(
             String search, UserRole role, Boolean enabled, int page, int size, String sort, String direction) {
         return listUsers(search, role, enabled, null, page, size, sort, direction);
     }
 
-    @Transactional
+    @Transactional(readOnly = true)
     public PageDto<UserSummaryDto> listUsers(
             String search, UserRole role, Boolean enabled, UserTier tier, int page, int size, String sort,
             String direction) {
@@ -323,7 +339,7 @@ public class AdminService {
                 result.getTotalPages());
     }
 
-    @Transactional
+    @Transactional(readOnly = true)
     public UserDetailDto userDetail(Long userId) {
         AuthUser user = requireUser(userId);
         List<ProjectSummaryDto> userProjects = projects.findByOwnerUserIdOrderByCreatedAtDesc(userId).stream()
@@ -341,7 +357,8 @@ public class AdminService {
                 .map(this::toLoginHistory)
                 .toList();
 
-        return new UserDetailDto(summary(user), userProjects, unitTests.countByOwnerUserId(userId), recent, lastLoginAt, loginHistory);
+        return new UserDetailDto(summary(user), userProjects, unitTests.countByOwnerUserId(userId), recent, lastLoginAt,
+                loginHistory);
     }
 
     @Transactional
@@ -505,6 +522,9 @@ public class AdminService {
         if (paymentTransactions != null) {
             paymentTransactions.deleteByUserId(userId);
         }
+        if (systemSettingRepository != null) {
+            systemSettingRepository.reassignUpdatedBy(userId, admin.getId());
+        }
         quotas.deleteByUserId(userId);
         users.delete(user);
 
@@ -531,8 +551,18 @@ public class AdminService {
         if (progressService != null) {
             progressService.fail(projectId, stage, "Tác vụ đã bị hủy bởi Quản trị viên.");
         }
-        activityService.record(admin.getId(), ActivityAction.ADMIN_STATUS_CHANGE, projectId,
-                Map.of("action", "ADMIN_CANCEL_JOB", "stage", stage != null ? stage.name() : "ALL"));
+        // Tránh lỗi khóa ngoại user_activity_log nếu dự án vừa bị xóa trước khi admin
+        // hủy job.
+        Long relatedProjectId = (projectId != null && projects != null && projects.existsById(projectId))
+                ? projectId
+                : null;
+        Map<String, Object> metadata = new LinkedHashMap<>();
+        metadata.put("action", "ADMIN_CANCEL_JOB");
+        metadata.put("stage", stage != null ? stage.name() : "ALL");
+        if (projectId != null) {
+            metadata.put("projectId", projectId);
+        }
+        activityService.record(admin.getId(), ActivityAction.ADMIN_STATUS_CHANGE, relatedProjectId, metadata);
     }
 
     @Transactional(readOnly = true)
@@ -543,7 +573,8 @@ public class AdminService {
 
     @Transactional(readOnly = true)
     public PageDto<ActivityDto> activities(
-            Long userId, String userSearch, ActivityAction action, LocalDateTime from, LocalDateTime to, int page, int size) {
+            Long userId, String userSearch, ActivityAction action, LocalDateTime from, LocalDateTime to, int page,
+            int size) {
         int safePage = Math.max(page, 0);
         int safeSize = Math.min(Math.max(size, 1), 100);
 
@@ -556,13 +587,13 @@ public class AdminService {
                 String pattern = "%" + searchTrimmed.toLowerCase() + "%";
                 return cb.or(
                         cb.like(cb.lower(uRoot.get("email")), pattern),
-                        cb.like(cb.lower(uRoot.get("fullName")), pattern)
-                );
+                        cb.like(cb.lower(uRoot.get("fullName")), pattern));
             });
             matchedUserIds = new java.util.ArrayList<>(matchedUsers.stream().map(AuthUser::getId).toList());
             try {
                 matchedUserIds.add(Long.parseLong(searchTrimmed));
-            } catch (NumberFormatException ignored) {}
+            } catch (NumberFormatException ignored) {
+            }
             if (matchedUserIds.isEmpty()) {
                 return new PageDto<>(List.of(), safePage, safeSize, 0L, 0);
             }
@@ -661,7 +692,8 @@ public class AdminService {
     }
 
     @Transactional(readOnly = true)
-    public List<TrendPointDto> trend(LocalDateTime from, LocalDateTime to, int days, String granularity, ActivityAction action) {
+    public List<TrendPointDto> trend(LocalDateTime from, LocalDateTime to, int days, String granularity,
+            ActivityAction action) {
         String bucket = (granularity != null && SUPPORTED_GRANULARITIES.contains(granularity.trim().toLowerCase()))
                 ? granularity.trim().toLowerCase()
                 : "day";
@@ -736,7 +768,8 @@ public class AdminService {
         Runtime runtime = Runtime.getRuntime();
         long heapUsedMb = (runtime.totalMemory() - runtime.freeMemory()) / (1024 * 1024);
         long heapMaxMb = runtime.maxMemory() / (1024 * 1024);
-        long nonHeapMb = java.lang.management.ManagementFactory.getMemoryMXBean().getNonHeapMemoryUsage().getUsed() / (1024 * 1024);
+        long nonHeapMb = java.lang.management.ManagementFactory.getMemoryMXBean().getNonHeapMemoryUsage().getUsed()
+                / (1024 * 1024);
         int threadCount = java.lang.management.ManagementFactory.getThreadMXBean().getThreadCount();
         long uptimeSeconds = java.lang.management.ManagementFactory.getRuntimeMXBean().getUptime() / 1000;
 
@@ -797,7 +830,8 @@ public class AdminService {
     }
 
     public com.greytest.dto.admin.AdminDtos.TrafficOverviewDto getTrafficOverview(String window) {
-        Long wafBlocked = ddosProtectionService != null ? ddosProtectionService.getWafStatus().totalBlockedRequests() : null;
+        Long wafBlocked = ddosProtectionService != null ? ddosProtectionService.getWafStatus().totalBlockedRequests()
+                : null;
         if (telemetryService != null) {
             return telemetryService.getTrafficOverview(window, wafBlocked);
         }
@@ -825,7 +859,8 @@ public class AdminService {
             String sort,
             String direction) {
         if (telemetryService != null) {
-            return telemetryService.getRecentRequests(page, size, search, method, status, statusGroup, minLatencyMs, sort, direction);
+            return telemetryService.getRecentRequests(page, size, search, method, status, statusGroup, minLatencyMs,
+                    sort, direction);
         }
         return new PageDto<>(java.util.List.of(), 0, size, 0L, 1);
     }
@@ -835,7 +870,8 @@ public class AdminService {
             return telemetryService.getEndpointAnalytics(window, limit);
         }
         return new com.greytest.dto.admin.AdminDtos.EndpointAnalyticsDto(
-                "1m", java.util.List.of(), java.util.List.of(), java.util.List.of(), java.util.Map.of(), java.util.Map.of());
+                "1m", java.util.List.of(), java.util.List.of(), java.util.List.of(), java.util.Map.of(),
+                java.util.Map.of());
     }
 
     public java.util.List<com.greytest.dto.admin.AdminDtos.TrafficAlertDto> getTrafficAlerts(String window) {
@@ -858,7 +894,8 @@ public class AdminService {
         if (ddosProtectionService != null) {
             return ddosProtectionService.getWafStatus();
         }
-        return new com.greytest.dto.admin.AdminDtos.WafStatusDto(true, false, 100, 100, 30, 15, 0, 0, java.util.List.of());
+        return new com.greytest.dto.admin.AdminDtos.WafStatusDto(true, false, 100, 100, 30, 15, 0, 0,
+                java.util.List.of());
     }
 
     public void setUnderAttackMode(boolean enabled) {
@@ -875,13 +912,31 @@ public class AdminService {
                 "underAttackMode", enabled));
     }
 
+    public void setEmergencySafeMode(boolean enabled) {
+        setEmergencySafeMode(null, enabled);
+    }
+
+    public void setEmergencySafeMode(AuthUser admin, boolean enabled) {
+        if (ddosProtectionService != null) {
+            ddosProtectionService.setEmergencySafeMode(enabled);
+            persistWafConfig(admin);
+        }
+        recordSecurityAudit(admin, Map.of(
+                "action", "TOGGLE_EMERGENCY_SAFE_MODE",
+                "emergencySafeMode", enabled));
+    }
+
     public void blockIp(String ip, String reason, int durationMinutes) {
-        blockIp(null, ip, reason, durationMinutes);
+        blockIp(null, ip, reason, durationMinutes, null);
     }
 
     public void blockIp(AuthUser admin, String ip, String reason, int durationMinutes) {
+        blockIp(admin, ip, reason, durationMinutes, null);
+    }
+
+    public void blockIp(AuthUser admin, String ip, String reason, int durationMinutes, String requesterIp) {
         if (ddosProtectionService != null) {
-            ddosProtectionService.blockIp(ip, reason, durationMinutes);
+            ddosProtectionService.blockIp(ip, reason, durationMinutes, requesterIp);
         }
         recordSecurityAudit(admin, Map.of(
                 "action", "BLOCK_IP",
@@ -938,6 +993,9 @@ public class AdminService {
             if (request.underAttackMode() != null) {
                 ddosProtectionService.setUnderAttackMode(request.underAttackMode());
             }
+            if (request.emergencySafeMode() != null) {
+                ddosProtectionService.setEmergencySafeMode(request.emergencySafeMode());
+            }
             if (request.rateLimitPerMinute() != null && request.rateLimitPerMinute() > 0) {
                 ddosProtectionService.setStandardRateLimit(request.rateLimitPerMinute());
             }
@@ -952,11 +1010,18 @@ public class AdminService {
         Map<String, Object> auditMeta = new HashMap<>();
         auditMeta.put("action", "UPDATE_RATE_LIMIT_CONFIG");
         if (request != null) {
-            if (request.active() != null) auditMeta.put("active", request.active());
-            if (request.underAttackMode() != null) auditMeta.put("underAttackMode", request.underAttackMode());
-            if (request.rateLimitPerMinute() != null) auditMeta.put("rateLimitPerMinute", request.rateLimitPerMinute());
-            if (request.underAttackRateLimitPerMinute() != null) auditMeta.put("underAttackRateLimitPerMinute", request.underAttackRateLimitPerMinute());
-            if (request.burstLimitPerSecond() != null) auditMeta.put("burstLimitPerSecond", request.burstLimitPerSecond());
+            if (request.active() != null)
+                auditMeta.put("active", request.active());
+            if (request.underAttackMode() != null)
+                auditMeta.put("underAttackMode", request.underAttackMode());
+            if (request.emergencySafeMode() != null)
+                  auditMeta.put("emergencySafeMode", request.emergencySafeMode());
+              if (request.rateLimitPerMinute() != null)
+                auditMeta.put("rateLimitPerMinute", request.rateLimitPerMinute());
+            if (request.underAttackRateLimitPerMinute() != null)
+                auditMeta.put("underAttackRateLimitPerMinute", request.underAttackRateLimitPerMinute());
+            if (request.burstLimitPerSecond() != null)
+                auditMeta.put("burstLimitPerSecond", request.burstLimitPerSecond());
         }
         recordSecurityAudit(admin, auditMeta);
         return getWafStatus();
@@ -1039,9 +1104,11 @@ public class AdminService {
     }
 
     public synchronized AiRuntimeConfigDto updateAiKeys(AuthUser admin, UpdateAiKeysRequest request) {
-        // Không lưu bền được thì không áp dụng, tránh khoá "mất tích" sau lần khởi động lại.
+        // Không lưu bền được thì không áp dụng, tránh khoá "mất tích" sau lần khởi động
+        // lại.
         if (settingsCipher == null || !settingsCipher.isConfigured()) {
-            throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.CONFLICT,
+            throw new org.springframework.web.server.ResponseStatusException(
+                    org.springframework.http.HttpStatus.CONFLICT,
                     "Chưa cấu hình GREYTEST_SETTINGS_SECRET nên không thể lưu khoá API bền vững.");
         }
         if (currentKeys.isEmpty()) {
@@ -1084,11 +1151,13 @@ public class AdminService {
 
     public synchronized AiRuntimeConfigDto updateAiModel(AuthUser admin, UpdateAiModelRequest request) {
         if (request != null) {
-            String activeProvider = openAiLlmClient != null ? "openai" : (googleLlmClient != null ? "google" : (llmProvider != null ? llmProvider : "openai"));
+            String activeProvider = openAiLlmClient != null ? "openai"
+                    : (googleLlmClient != null ? "google" : (llmProvider != null ? llmProvider : "openai"));
             if (request.provider() != null && !request.provider().isBlank()) {
                 String requestedProvider = request.provider().trim().toLowerCase();
                 if (!requestedProvider.equalsIgnoreCase(activeProvider)) {
-                    throw new IllegalArgumentException("Hệ thống hiện đang chạy provider '" + activeProvider + "'. Đổi sang provider khác yêu cầu cấu hình llm.provider và khởi động lại server.");
+                    throw new IllegalArgumentException("Hệ thống hiện đang chạy provider '" + activeProvider
+                            + "'. Đổi sang provider khác yêu cầu cấu hình llm.provider và khởi động lại server.");
                 }
                 this.dynamicProvider = requestedProvider;
             }
@@ -1104,7 +1173,8 @@ public class AdminService {
             SystemSetting modelSetting = systemSettingRepository.findById("ai.model")
                     .orElse(new SystemSetting("ai.model", this.dynamicModel, "Mô hình suy luận AI mặc định"));
             modelSetting.setSettingValue(this.dynamicModel);
-            if (admin != null) modelSetting.setUpdatedBy(admin.getId());
+            if (admin != null)
+                modelSetting.setUpdatedBy(admin.getId());
             systemSettingRepository.save(modelSetting);
         }
         activityService.record(admin.getId(), ActivityAction.ADMIN_STATUS_CHANGE, null,
@@ -1116,18 +1186,18 @@ public class AdminService {
     }
 
     private void initTierPackagesInDb() {
-        if (tierPackageRepository == null) return;
+        if (tierPackageRepository == null)
+            return;
         List<TierPackage> defaults = List.of(
                 new TierPackage("FREE", "Gói Miễn Phí (FREE)", 0L, "MONTHLY", 100, 2,
                         "Trích xuất Quy tắc Nghiệp vụ (AST)\nSinh Test Plan & Test Case\nSinh Unit Test JUnit 5 cơ bản",
-                        "Dành cho sinh viên và dự án thử nghiệm cơ bản", true),
-                new TierPackage("PLUS", "Gói Tiêu Chuẩn (PLUS)", 10000L, "WEEKLY", 200, 3,
+                        "Dành cho sinh viên và dự án thử nghiệm cơ bản", true, "MONTHLY"),
+                new TierPackage("PLUS", "Gói Tiêu Chuẩn (PLUS)", 10000L, "MONTHLY", 200, 3,
                         "Toàn bộ tính năng gói FREE\n200 lượt gọi AI hồi lại hàng tuần\nSinh tối đa 3 batch song song\nƯu tiên xử lý hàng đợi tác vụ",
-                        "Dành cho nhóm phát triển mở rộng / dự án sprint nước rút", true),
+                        "Dành cho nhóm phát triển mở rộng / dự án sprint nước rút", true, "WEEKLY"),
                 new TierPackage("PRO", "Gói Chuyên Nghiệp (PRO)", 20000L, "MONTHLY", 300, 4,
                         "Toàn bộ tính năng gói PLUS\nPhân tích cú pháp AST & Call Graph sâu\nSinh Unit Test JUnit 5 song song 4 luồng\nVòng lặp JaCoCo Refinement tự cải thiện độ bao phủ",
-                        "Toàn bộ tính năng phân tích sâu & JaCoCo Refinement", true)
-        );
+                        "Toàn bộ tính năng phân tích sâu & JaCoCo Refinement", true, "WEEKLY"));
         for (TierPackage p : defaults) {
             if (!tierPackageRepository.existsById(p.getCode())) {
                 tierPackageRepository.save(p);
@@ -1146,18 +1216,20 @@ public class AdminService {
                 List.of("Trích xuất Quy tắc Nghiệp vụ (AST)", "Sinh Test Plan & Test Case",
                         "Sinh Unit Test JUnit 5 cơ bản"),
                 "Dành cho sinh viên và dự án thử nghiệm cơ bản",
-                true));
+                true,
+                "MONTHLY"));
         tierPackages.put("PLUS", new TierPackageInternal(
                 "PLUS",
                 "Gói Tiêu Chuẩn (PLUS)",
                 10_000L,
-                "WEEKLY",
+                "MONTHLY",
                 200,
                 3,
                 List.of("Toàn bộ tính năng gói FREE", "200 lượt gọi AI hồi lại hàng tuần",
                         "Sinh tối đa 3 batch song song", "Ưu tiên xử lý hàng đợi tác vụ"),
                 "Dành cho nhóm phát triển mở rộng / dự án sprint nước rút",
-                true));
+                true,
+                "WEEKLY"));
         tierPackages.put("PRO", new TierPackageInternal(
                 "PRO",
                 "Gói Chuyên Nghiệp (PRO)",
@@ -1169,7 +1241,8 @@ public class AdminService {
                         "Sinh Unit Test JUnit 5 song song 4 luồng",
                         "Vòng lặp JaCoCo Refinement tự cải thiện độ bao phủ"),
                 "Toàn bộ tính năng phân tích sâu & JaCoCo Refinement",
-                true));
+                true,
+                "WEEKLY"));
     }
 
     public List<TierPackageDto> getTierPackages() {
@@ -1259,7 +1332,8 @@ public class AdminService {
                 featureList,
                 pkg.getDescription(),
                 Boolean.TRUE.equals(pkg.getActive()),
-                count);
+                count,
+                pkg.getResetCycle() != null ? pkg.getResetCycle() : "WEEKLY");
     }
 
     private TierPackageDto toTierPackageDto(TierPackageInternal pkg, long count) {
@@ -1273,7 +1347,8 @@ public class AdminService {
                 List.copyOf(pkg.features),
                 pkg.description,
                 pkg.active,
-                count);
+                count,
+                pkg.resetCycle != null ? pkg.resetCycle : "WEEKLY");
     }
 
     @Transactional
@@ -1299,7 +1374,8 @@ public class AdminService {
                     req.batchConcurrency() != null && req.batchConcurrency() > 0 ? req.batchConcurrency() : 2,
                     String.join("\n", sanitizedFeatures),
                     req.description() != null ? req.description() : "",
-                    req.active() != null ? req.active() : true);
+                    req.active() != null ? req.active() : true,
+                    req.resetCycle() != null && !req.resetCycle().isBlank() ? req.resetCycle().trim().toUpperCase() : "WEEKLY");
             pkg = tierPackageRepository.save(pkg);
             activityService.record(admin.getId(), ActivityAction.ADMIN_STATUS_CHANGE, null,
                     Map.of("action", "CREATE_TIER_PACKAGE", "code", code));
@@ -1324,7 +1400,8 @@ public class AdminService {
                 req.batchConcurrency() != null && req.batchConcurrency() > 0 ? req.batchConcurrency() : 2,
                 sanitizedFeatures,
                 req.description() != null ? req.description() : "",
-                req.active() != null ? req.active() : true);
+                req.active() != null ? req.active() : true,
+                req.resetCycle() != null && !req.resetCycle().isBlank() ? req.resetCycle().trim().toUpperCase() : "WEEKLY");
         tierPackages.put(code, pkg);
         activityService.record(admin.getId(), ActivityAction.ADMIN_STATUS_CHANGE, null,
                 Map.of("action", "CREATE_TIER_PACKAGE", "code", code));
@@ -1344,9 +1421,14 @@ public class AdminService {
         if (tierPackageRepository != null) {
             TierPackage pkg = tierPackageRepository.findById(key)
                     .orElseThrow(() -> new IllegalArgumentException("Không tìm thấy gói: " + key));
-            if (req.name() != null && !req.name().isBlank()) pkg.setName(req.name().trim());
-            if (req.price() != null && req.price() >= 0) pkg.setPrice(req.price());
-            if (req.cycle() != null && !req.cycle().isBlank()) pkg.setCycle(req.cycle().trim().toUpperCase());
+            if (req.name() != null && !req.name().isBlank())
+                pkg.setName(req.name().trim());
+            if (req.price() != null && req.price() >= 0)
+                pkg.setPrice(req.price());
+            if (req.cycle() != null && !req.cycle().isBlank())
+                pkg.setCycle(req.cycle().trim().toUpperCase());
+            if (req.resetCycle() != null && !req.resetCycle().isBlank())
+                pkg.setResetCycle(req.resetCycle().trim().toUpperCase());
             if (req.quotaLimit() != null && req.quotaLimit() > 0) {
                 final int newLimit = req.quotaLimit();
                 pkg.setQuotaLimit(newLimit);
@@ -1356,10 +1438,9 @@ public class AdminService {
                         quotaService.setTierLimit(userTier, newLimit);
                     }
                     if (users != null && quotas != null) {
-                        List<AuthUser> tierUsers = users.findAll((root, q, cb) ->
-                                userTier == UserTier.FREE
-                                        ? cb.or(cb.equal(root.get("tier"), UserTier.FREE), cb.isNull(root.get("tier")))
-                                        : cb.equal(root.get("tier"), userTier));
+                        List<AuthUser> tierUsers = users.findAll((root, q, cb) -> userTier == UserTier.FREE
+                                ? cb.or(cb.equal(root.get("tier"), UserTier.FREE), cb.isNull(root.get("tier")))
+                                : cb.equal(root.get("tier"), userTier));
                         for (AuthUser u : tierUsers) {
                             quotas.findByUserId(u.getId()).ifPresent(quota -> {
                                 quota.setQuotaLimit(newLimit);
@@ -1367,15 +1448,20 @@ public class AdminService {
                             });
                         }
                     }
-                } catch (IllegalArgumentException ignored) {}
+                } catch (IllegalArgumentException ignored) {
+                }
             }
-            if (req.batchConcurrency() != null && req.batchConcurrency() > 0) pkg.setBatchConcurrency(req.batchConcurrency());
+            if (req.batchConcurrency() != null && req.batchConcurrency() > 0)
+                pkg.setBatchConcurrency(req.batchConcurrency());
             if (req.features() != null) {
-                List<String> feats = req.features().stream().filter(f -> f != null && !f.isBlank()).map(String::trim).toList();
+                List<String> feats = req.features().stream().filter(f -> f != null && !f.isBlank()).map(String::trim)
+                        .toList();
                 pkg.setFeatures(String.join("\n", feats));
             }
-            if (req.description() != null) pkg.setDescription(req.description());
-            if (req.active() != null) pkg.setActive(req.active());
+            if (req.description() != null)
+                pkg.setDescription(req.description());
+            if (req.active() != null)
+                pkg.setActive(req.active());
             TierPackage savedPkg = tierPackageRepository.save(pkg);
             activityService.record(admin.getId(), ActivityAction.ADMIN_STATUS_CHANGE, null,
                     Map.of("action", "UPDATE_TIER_PACKAGE", "code", key));
@@ -1395,6 +1481,8 @@ public class AdminService {
             pkg.price = req.price();
         if (req.cycle() != null && !req.cycle().isBlank())
             pkg.cycle = req.cycle().trim().toUpperCase();
+        if (req.resetCycle() != null && !req.resetCycle().isBlank())
+            pkg.resetCycle = req.resetCycle().trim().toUpperCase();
         if (req.quotaLimit() != null && req.quotaLimit() > 0) {
             pkg.quotaLimit = req.quotaLimit();
             try {
@@ -1403,10 +1491,9 @@ public class AdminService {
                     quotaService.setTierLimit(userTier, pkg.quotaLimit);
                 }
                 if (users != null && quotas != null) {
-                    List<AuthUser> tierUsers = users.findAll((root, q, cb) ->
-                            userTier == UserTier.FREE
-                                    ? cb.or(cb.equal(root.get("tier"), UserTier.FREE), cb.isNull(root.get("tier")))
-                                    : cb.equal(root.get("tier"), userTier));
+                    List<AuthUser> tierUsers = users.findAll((root, q, cb) -> userTier == UserTier.FREE
+                            ? cb.or(cb.equal(root.get("tier"), UserTier.FREE), cb.isNull(root.get("tier")))
+                            : cb.equal(root.get("tier"), userTier));
                     for (AuthUser u : tierUsers) {
                         quotas.findByUserId(u.getId()).ifPresent(quota -> {
                             quota.setQuotaLimit(pkg.quotaLimit);
@@ -1414,7 +1501,8 @@ public class AdminService {
                         });
                     }
                 }
-            } catch (IllegalArgumentException ignored) {}
+            } catch (IllegalArgumentException ignored) {
+            }
         }
         if (req.batchConcurrency() != null && req.batchConcurrency() > 0)
             pkg.batchConcurrency = req.batchConcurrency();
@@ -1450,7 +1538,8 @@ public class AdminService {
             }
             long activeCount = countUsersInTier(key);
             if (activeCount > 0) {
-                throw new IllegalArgumentException("Không thể xóa gói " + key + " vì đang có " + activeCount + " người dùng sử dụng. Hãy chuyển gói sang TẠM DỪNG.");
+                throw new IllegalArgumentException("Không thể xóa gói " + key + " vì đang có " + activeCount
+                        + " người dùng sử dụng. Hãy chuyển gói sang TẠM DỪNG.");
             }
             tierPackageRepository.delete(pkg);
             activityService.record(admin.getId(), ActivityAction.ADMIN_STATUS_CHANGE, null,
@@ -1488,42 +1577,55 @@ public class AdminService {
     }
 
     /**
-     * Nạp lại cấu hình admin đã lưu trong DB khi backend khởi động (kể cả sau mỗi lần deploy).
-     * Giá trị trong DB được ưu tiên hơn biến môi trường; dòng nào hỏng thì bỏ qua và ghi cảnh báo.
+     * Nạp lại cấu hình admin đã lưu trong DB khi backend khởi động (kể cả sau mỗi
+     * lần deploy).
+     * Giá trị trong DB được ưu tiên hơn biến môi trường; dòng nào hỏng thì bỏ qua
+     * và ghi cảnh báo.
      */
     @org.springframework.context.event.EventListener(org.springframework.boot.context.event.ApplicationReadyEvent.class)
     public synchronized void restoreRuntimeConfig() {
-        if (systemSettingRepository == null) return;
+        if (systemSettingRepository == null)
+            return;
         restore("ai.model", value -> {
             this.dynamicModel = value;
-            if (openAiLlmClient != null) openAiLlmClient.setModel(value);
-            if (googleLlmClient != null) googleLlmClient.setModel(value);
+            if (openAiLlmClient != null)
+                openAiLlmClient.setModel(value);
+            if (googleLlmClient != null)
+                googleLlmClient.setModel(value);
         });
         restore("ai.batch_concurrency", value -> applyBatchConcurrency(Integer.parseInt(value)));
         restore(KEY_STAGE_LIMITS, value -> {
-            if (stageTokenLimits != null) stageTokenLimits.updateAll(JSON.readValue(value,
-                    new com.fasterxml.jackson.core.type.TypeReference<Map<String, Integer>>() {}));
+            if (stageTokenLimits != null)
+                stageTokenLimits.updateAll(JSON.readValue(value,
+                        new com.fasterxml.jackson.core.type.TypeReference<Map<String, Integer>>() {
+                        }));
         });
         restore(KEY_API_KEYS, value -> {
             if (settingsCipher == null || !settingsCipher.isConfigured()) {
                 throw new IllegalStateException("thiếu GREYTEST_SETTINGS_SECRET để giải mã");
             }
             List<String> keys = JSON.readValue(settingsCipher.decrypt(value),
-                    new com.fasterxml.jackson.core.type.TypeReference<List<String>>() {});
+                    new com.fasterxml.jackson.core.type.TypeReference<List<String>>() {
+                    });
             currentKeys.clear();
             currentKeys.addAll(keys.stream().map(k -> k == null ? "" : k).toList());
             List<String> active = currentKeys.stream().filter(k -> !k.isBlank()).toList();
-            if (openAiLlmClient != null) openAiLlmClient.setApiKeys(active);
-            if (googleLlmClient != null) googleLlmClient.setApiKeys(active);
+            if (openAiLlmClient != null)
+                openAiLlmClient.setApiKeys(active);
+            if (googleLlmClient != null)
+                googleLlmClient.setApiKeys(active);
         });
         restore(KEY_WAF, value -> {
-            if (ddosProtectionService == null) return;
+            if (ddosProtectionService == null)
+                return;
             Map<String, Object> waf = JSON.readValue(value,
-                    new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {});
+                    new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {
+                    });
             ddosProtectionService.setWafActive(Boolean.TRUE.equals(waf.get("active")));
             ddosProtectionService.setUnderAttackMode(Boolean.TRUE.equals(waf.get("underAttackMode")));
             ddosProtectionService.setStandardRateLimit(((Number) waf.get("rateLimitPerMinute")).intValue());
-            ddosProtectionService.setUnderAttackRateLimit(((Number) waf.get("underAttackRateLimitPerMinute")).intValue());
+            ddosProtectionService
+                    .setUnderAttackRateLimit(((Number) waf.get("underAttackRateLimitPerMinute")).intValue());
             ddosProtectionService.setBurstPerSecondLimit(((Number) waf.get("burstLimitPerSecond")).intValue());
         });
     }
@@ -1536,8 +1638,10 @@ public class AdminService {
     private void restore(String key, SettingApplier applier) {
         try {
             systemSettingRepository.findById(key)
-                    // Chỉ nạp giá trị admin thực sự đã sửa; dòng mẫu do migration chèn (không có updated_by)
-                    // không được đè lên biến môi trường. Dòng runtime.* chỉ sinh ra từ thao tác của admin.
+                    // Chỉ nạp giá trị admin thực sự đã sửa; dòng mẫu do migration chèn (không có
+                    // updated_by)
+                    // không được đè lên biến môi trường. Dòng runtime.* chỉ sinh ra từ thao tác của
+                    // admin.
                     .filter(row -> row.getUpdatedBy() != null || key.startsWith(RUNTIME_PREFIX))
                     .map(SystemSetting::getSettingValue)
                     .filter(value -> !value.isBlank())
@@ -1554,7 +1658,8 @@ public class AdminService {
     }
 
     private void persistWafConfig(AuthUser admin) {
-        if (ddosProtectionService == null) return;
+        if (ddosProtectionService == null)
+            return;
         var waf = ddosProtectionService.getWafStatus();
         Map<String, Object> snapshot = new LinkedHashMap<>();
         snapshot.put("active", waf.active());
@@ -1566,10 +1671,12 @@ public class AdminService {
     }
 
     private void persistSetting(String key, String value, String description, AuthUser admin) {
-        if (systemSettingRepository == null) return;
+        if (systemSettingRepository == null)
+            return;
         SystemSetting row = systemSettingRepository.findById(key).orElse(new SystemSetting(key, value, description));
         row.setSettingValue(value);
-        if (admin != null) row.setUpdatedBy(admin.getId());
+        if (admin != null)
+            row.setUpdatedBy(admin.getId());
         systemSettingRepository.save(row);
     }
 
@@ -1578,7 +1685,8 @@ public class AdminService {
             throw new IllegalArgumentException("Số batch song song phải từ 1 đến " + MAX_BATCH_CONCURRENCY + ".");
         }
         this.batchConcurrency = value;
-        if (llmBatchExecutor != null) llmBatchExecutor.setConcurrency(value);
+        if (llmBatchExecutor != null)
+            llmBatchExecutor.setConcurrency(value);
     }
 
     private void validateSettings(Map<String, String> requested) {
@@ -1590,9 +1698,11 @@ public class AdminService {
             if ("ai.batch_concurrency".equalsIgnoreCase(key)) {
                 try {
                     int value = Integer.parseInt(entry.getValue() == null ? "" : entry.getValue().trim());
-                    if (value < 1 || value > MAX_BATCH_CONCURRENCY) throw new NumberFormatException();
+                    if (value < 1 || value > MAX_BATCH_CONCURRENCY)
+                        throw new NumberFormatException();
                 } catch (NumberFormatException ex) {
-                    throw new IllegalArgumentException("Số batch song song phải từ 1 đến " + MAX_BATCH_CONCURRENCY + ".");
+                    throw new IllegalArgumentException(
+                            "Số batch song song phải từ 1 đến " + MAX_BATCH_CONCURRENCY + ".");
                 }
             }
         }
@@ -1613,7 +1723,8 @@ public class AdminService {
     public SystemSettingsDto getSystemSettings() {
         Map<String, String> map = new LinkedHashMap<>();
         List<SystemSettingDto> details = new ArrayList<>();
-        // Các khoá AI hiển thị giá trị backend đang thực sự dùng, không phải dòng mẫu trong DB,
+        // Các khoá AI hiển thị giá trị backend đang thực sự dùng, không phải dòng mẫu
+        // trong DB,
         // để form Cài đặt không vô tình gửi lại một model cũ khi admin bấm Lưu.
         Map<String, String> effective = Map.of(
                 "ai.provider", dynamicProvider != null ? dynamicProvider : llmProvider,
@@ -1622,10 +1733,12 @@ public class AdminService {
         if (systemSettingRepository != null) {
             List<SystemSetting> list = systemSettingRepository.findAll();
             for (SystemSetting s : list) {
-                if (!isListedSetting(s.getSettingKey())) continue;
+                if (!isListedSetting(s.getSettingKey()))
+                    continue;
                 String value = effective.getOrDefault(s.getSettingKey(), s.getSettingValue());
                 map.put(s.getSettingKey(), value);
-                details.add(new SystemSettingDto(s.getSettingKey(), value, s.getDescription(), toInstant(s.getUpdatedAt())));
+                details.add(new SystemSettingDto(s.getSettingKey(), value, s.getDescription(),
+                        toInstant(s.getUpdatedAt())));
             }
         }
         effective.forEach(map::putIfAbsent);
@@ -1650,8 +1763,10 @@ public class AdminService {
                 // Apply live
                 if ("ai.model".equalsIgnoreCase(key) && !val.isBlank()) {
                     this.dynamicModel = val;
-                    if (openAiLlmClient != null) openAiLlmClient.setModel(val);
-                    if (googleLlmClient != null) googleLlmClient.setModel(val);
+                    if (openAiLlmClient != null)
+                        openAiLlmClient.setModel(val);
+                    if (googleLlmClient != null)
+                        googleLlmClient.setModel(val);
                 } else if ("ai.batch_concurrency".equalsIgnoreCase(key)) {
                     applyBatchConcurrency(Integer.parseInt(val));
                 }
@@ -1663,7 +1778,8 @@ public class AdminService {
     }
 
     public PageDto<JobHistoryDto> getJobHistory(int page, int size, GenerationProgressStage stage) {
-        PageRequest pageable = PageRequest.of(Math.max(page, 0), Math.min(Math.max(size, 1), 100), Sort.by(Sort.Direction.DESC, "createdAt"));
+        PageRequest pageable = PageRequest.of(Math.max(page, 0), Math.min(Math.max(size, 1), 100),
+                Sort.by(Sort.Direction.DESC, "createdAt"));
         List<ActivityAction> targetActions = stage != null ? List.of(stageToAction(stage)) : GENERATION_ACTIONS;
         Page<UserActivityLog> logPage = activities.findAll(
                 (root, q, cb) -> root.get("actionType").in(targetActions),
@@ -1671,7 +1787,8 @@ public class AdminService {
         List<JobHistoryDto> dtos = logPage.getContent().stream().map(log -> {
             String projName = "—";
             if (log.getRelatedProjectId() != null) {
-                projName = projects.findById(log.getRelatedProjectId()).map(Project::getName).orElse("Project #" + log.getRelatedProjectId());
+                projName = projects.findById(log.getRelatedProjectId()).map(Project::getName)
+                        .orElse("Project #" + log.getRelatedProjectId());
             }
             String email = "—";
             if (log.getUserId() != null) {
@@ -1681,9 +1798,11 @@ public class AdminService {
             if (log.getMetadata() != null && log.getMetadata().containsKey("status")) {
                 status = String.valueOf(log.getMetadata().get("status"));
             }
-            return new JobHistoryDto(log.getId(), log.getRelatedProjectId(), projName, log.getUserId(), email, log.getActionType(), status, toInstant(log.getCreatedAt()), log.getMetadata());
+            return new JobHistoryDto(log.getId(), log.getRelatedProjectId(), projName, log.getUserId(), email,
+                    log.getActionType(), status, toInstant(log.getCreatedAt()), log.getMetadata());
         }).toList();
-        return new PageDto<>(dtos, logPage.getNumber(), logPage.getSize(), logPage.getTotalElements(), logPage.getTotalPages());
+        return new PageDto<>(dtos, logPage.getNumber(), logPage.getSize(), logPage.getTotalElements(),
+                logPage.getTotalPages());
     }
 
     public void retryJob(AuthUser admin, Long projectId, GenerationProgressStage stage) {
@@ -1695,7 +1814,8 @@ public class AdminService {
         if (generationJobService == null) {
             throw new IllegalStateException("Hệ thống chưa sẵn sàng để chạy lại tác vụ.");
         }
-        // Chạy lại thật ở chế độ "tiếp tục" cho toàn dự án; bản submit này tính quota cho chủ dự án.
+        // Chạy lại thật ở chế độ "tiếp tục" cho toàn dự án; bản submit này tính quota
+        // cho chủ dự án.
         generationJobService.submit(projectId, stage, retryTask(projectId, stage));
         activityService.record(admin.getId(), ActivityAction.ADMIN_STATUS_CHANGE, projectId,
                 Map.of("action", "ADMIN_RETRY_JOB", "stage", stage.name(), "projectName", project.getName()));
@@ -1757,7 +1877,8 @@ public class AdminService {
     }
 
     private void initFeedbacks() {
-        // Để trống, không khởi tạo dữ liệu mẫu mock để đảm bảo hệ thống phản ánh dữ liệu thực tế từ người dùng
+        // Để trống, không khởi tạo dữ liệu mẫu mock để đảm bảo hệ thống phản ánh dữ
+        // liệu thực tế từ người dùng
     }
 
     public List<UserFeedbackDto> getUserFeedbacks(Long userId) {
@@ -1772,7 +1893,8 @@ public class AdminService {
         ensureFeedbacksInitialized();
         return feedbacks.values().stream()
                 .filter(f -> userId.equals(f.userId))
-                .sorted(Comparator.comparing((UserFeedbackInternal f) -> f.createdAt, Comparator.nullsLast(Comparator.reverseOrder())))
+                .sorted(Comparator.comparing((UserFeedbackInternal f) -> f.createdAt,
+                        Comparator.nullsLast(Comparator.reverseOrder())))
                 .map(this::toUserFeedbackDto)
                 .toList();
     }
@@ -1793,8 +1915,7 @@ public class AdminService {
                             cb.like(cb.lower(root.get("title")), pattern),
                             cb.like(cb.lower(root.get("content")), pattern),
                             cb.like(cb.lower(root.get("userEmail")), pattern),
-                            cb.like(cb.lower(root.get("userName")), pattern)
-                    ));
+                            cb.like(cb.lower(root.get("userName")), pattern)));
                 }
                 return cb.and(predicates.toArray(Predicate[]::new));
             };
@@ -1829,7 +1950,8 @@ public class AdminService {
         long total = feedbacks.size();
         long pending = feedbacks.values().stream().filter(f -> "NEW".equals(f.status) || "IN_PROGRESS".equals(f.status))
                 .count();
-        long resolved = feedbacks.values().stream().filter(f -> "RESOLVED".equals(f.status) || "CLOSED".equals(f.status)).count();
+        long resolved = feedbacks.values().stream()
+                .filter(f -> "RESOLVED".equals(f.status) || "CLOSED".equals(f.status)).count();
         return new FeedbackOverviewDto(total, pending, resolved);
     }
 
@@ -1843,7 +1965,8 @@ public class AdminService {
             fb.setUserId(user != null ? user.getId() : null);
             fb.setUserEmail(user != null ? user.getEmail() : "anonymous@greytest.dev");
             fb.setUserName(user != null ? user.getFullName() : "Anonymous User");
-            fb.setCategory(req.category() != null && !req.category().isBlank() ? req.category().trim().toUpperCase() : "GENERAL");
+            fb.setCategory(req.category() != null && !req.category().isBlank() ? req.category().trim().toUpperCase()
+                    : "GENERAL");
             fb.setTitle(req.title().trim());
             fb.setContent(req.content() != null ? req.content().trim() : "");
             fb.setStatus("NEW");
@@ -1953,8 +2076,8 @@ public class AdminService {
                 fb.getContent(),
                 fb.getStatus(),
                 fb.getAdminNote(),
-                fb.getCreatedAt(),
-                fb.getUpdatedAt(),
+                toInstant(fb.getCreatedAt()),
+                toInstant(fb.getUpdatedAt()),
                 fb.getProjectName());
     }
 
@@ -1969,8 +2092,8 @@ public class AdminService {
                 fb.content,
                 fb.status,
                 fb.adminNote,
-                fb.createdAt,
-                fb.resolvedAt,
+                toInstant(fb.createdAt),
+                toInstant(fb.resolvedAt),
                 fb.projectName);
     }
 
@@ -2015,6 +2138,12 @@ public class AdminService {
     }
 
     private UserSummaryDto summary(AuthUser user) {
+        // Đọc quota chế độ chỉ đọc để tránh giữ khóa FOR UPDATE trong vòng lặp danh
+        // sách user.
+        UsageQuota quota = quotaService.currentReadOnly(user.getId());
+        if (quota == null) {
+            quota = quotaService.current(user.getId());
+        }
         return new UserSummaryDto(
                 user.getId(), user.getEmail(), user.getFullName(), user.getRole(),
                 user.getTier() != null ? user.getTier() : UserTier.FREE,
@@ -2022,7 +2151,7 @@ public class AdminService {
                 activities.countByUserIdAndActionTypeIn(user.getId(), GENERATION_ACTIONS),
                 activities.findFirstByUserIdOrderByCreatedAtDesc(user.getId())
                         .map(activity -> toInstant(activity.getCreatedAt())).orElse(null),
-                toQuota(quotaService.current(user.getId())));
+                toQuota(quota));
     }
 
     private QuotaDto toQuota(UsageQuota quota) {
@@ -2031,8 +2160,20 @@ public class AdminService {
         }
         Integer limit = quota.getQuotaLimit();
         Integer remaining = limit == null ? null : Math.max(limit - quota.getQuotaUsed(), 0);
+        java.time.LocalDate periodStart = quota.getPeriodStart();
+        java.time.LocalDate resetDate = null;
+        if (periodStart != null) {
+            String resetCycle = quotaService != null ? quotaService.resolveResetCycle(quota) : "MONTHLY";
+            if ("DAILY".equals(resetCycle)) {
+                resetDate = periodStart.plusDays(1);
+            } else if ("WEEKLY".equals(resetCycle)) {
+                resetDate = periodStart.plusWeeks(1);
+            } else {
+                resetDate = periodStart.plusMonths(1);
+            }
+        }
         return new QuotaDto(limit, quota.getQuotaUsed(), remaining,
-                quota.getPeriodStart(), quota.getPeriodStart().plusMonths(1),
+                periodStart, resetDate,
                 limit != null && quota.getQuotaUsed() >= limit);
     }
 
@@ -2053,10 +2194,16 @@ public class AdminService {
     }
 
     private String resolveDevice(String userAgent) {
-        if (userAgent == null || userAgent.isBlank()) return "Web Browser";
+        if (userAgent == null || userAgent.isBlank())
+            return "Web Browser";
         String lower = userAgent.toLowerCase();
-        String os = lower.contains("windows") ? "Windows" : lower.contains("mac") ? "macOS" : lower.contains("linux") ? "Linux" : lower.contains("android") ? "Android" : lower.contains("iphone") ? "iOS" : "PC";
-        String browser = lower.contains("edg") ? "Edge" : lower.contains("chrome") ? "Chrome" : lower.contains("firefox") ? "Firefox" : lower.contains("safari") ? "Safari" : "Browser";
+        String os = lower.contains("windows") ? "Windows"
+                : lower.contains("mac") ? "macOS"
+                        : lower.contains("linux") ? "Linux"
+                                : lower.contains("android") ? "Android" : lower.contains("iphone") ? "iOS" : "PC";
+        String browser = lower.contains("edg") ? "Edge"
+                : lower.contains("chrome") ? "Chrome"
+                        : lower.contains("firefox") ? "Firefox" : lower.contains("safari") ? "Safari" : "Browser";
         return browser + " (" + os + ")";
     }
 

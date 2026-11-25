@@ -55,6 +55,9 @@ public class FileStorageService {
         } catch (IOException e) {
             delete(dir);
             throw new StorageException("Không giải nén được file ZIP", e);
+        } catch (RuntimeException e) {
+            delete(dir);
+            throw e;
         }
         return dir;
     }

@@ -88,10 +88,29 @@ public class GlobalExceptionHandler {
                 .body(new ErrorResponse("NOT_FOUND", "Endpoint không tồn tại"));
     }
 
+    @ExceptionHandler(org.springframework.web.method.annotation.MethodArgumentTypeMismatchException.class)
+    public ResponseEntity<ErrorResponse> handleTypeMismatch(
+            org.springframework.web.method.annotation.MethodArgumentTypeMismatchException e) {
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                .body(new ErrorResponse("BAD_REQUEST", "Tham số '" + e.getName() + "' không hợp lệ"));
+    }
+
+    @ExceptionHandler(SecurityException.class)
+    public ResponseEntity<ErrorResponse> handleSecurity(SecurityException e) {
+        log.warn("Cảnh báo vi phạm bảo mật: {}", e.getMessage());
+        return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                .body(new ErrorResponse("FORBIDDEN", "Truy cập bị từ chối vì lý do bảo mật"));
+    }
+
     @ExceptionHandler(IllegalArgumentException.class)
     public ResponseEntity<ErrorResponse> handleIllegalArgument(IllegalArgumentException e) {
         return ResponseEntity.status(HttpStatus.BAD_REQUEST)
-                .body(new ErrorResponse("BAD_REQUEST", e.getMessage()));
+                .body(new ErrorResponse("BAD_REQUEST", sanitizeErrorMessage(e.getMessage())));
+    }
+
+    private static String sanitizeErrorMessage(String msg) {
+        if (msg == null) return "";
+        return msg.replaceAll("(?i)(\\b[a-z]:[/\\\\][^,;\"'<>\r\n]+|/(?:app|var|opt|tmp|home|storage)[^,;\"'<>\r\n]+)", "[REDACTED_PATH]");
     }
 
     @ExceptionHandler(MaxUploadSizeExceededException.class)

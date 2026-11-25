@@ -47,8 +47,13 @@ class GenerationJobServiceTest {
     void attributesGenerationAndWorkerContextToAuthenticatedActor() {
         ManualExecutor executor = new ManualExecutor();
         UserActivityService activity = mock(UserActivityService.class);
+        ProjectRepository projectRepo = mock(ProjectRepository.class);
+        com.greytest.entity.Project project = new com.greytest.entity.Project();
+        project.setId(1L);
+        project.setOwnerUserId(99L);
+        org.mockito.Mockito.when(projectRepo.findById(1L)).thenReturn(java.util.Optional.of(project));
         GenerationJobService jobs = new GenerationJobService(
-                executor, new GenerationProgressService(), mock(ProjectRepository.class), activity);
+                executor, new GenerationProgressService(), projectRepo, activity);
         java.util.concurrent.atomic.AtomicReference<Long> actorInWorker = new java.util.concurrent.atomic.AtomicReference<>();
 
         jobs.submit(1L, 99L, GenerationProgressStage.TEST_PLAN,
@@ -88,9 +93,11 @@ class GenerationJobServiceTest {
         GenerationProgressService progress = new GenerationProgressService();
         GenerationJobService jobs = new GenerationJobService(executor, progress);
 
-        jobs.submit(1L, GenerationProgressStage.TEST_PLAN, () -> {});
+        jobs.submit(1L, GenerationProgressStage.TEST_PLAN, () -> {
+        });
 
-        assertThatThrownBy(() -> jobs.submit(1L, GenerationProgressStage.TEST_CASE, () -> {}))
+        assertThatThrownBy(() -> jobs.submit(1L, GenerationProgressStage.TEST_CASE, () -> {
+        }))
                 .isInstanceOf(GenerationInProgressException.class)
                 .hasMessageContaining("Log");
     }
@@ -100,7 +107,8 @@ class GenerationJobServiceTest {
         ManualExecutor executor = new ManualExecutor();
         GenerationProgressService progress = new GenerationProgressService();
         GenerationJobService jobs = new GenerationJobService(executor, progress);
-        jobs.submit(1L, GenerationProgressStage.TEST_PLAN, () -> {});
+        jobs.submit(1L, GenerationProgressStage.TEST_PLAN, () -> {
+        });
 
         assertThatThrownBy(() -> jobs.executeMutation(1L, () -> "stale change"))
                 .isInstanceOf(GenerationInProgressException.class)
@@ -117,10 +125,12 @@ class GenerationJobServiceTest {
         GenerationJobService jobs = new GenerationJobService(executor, progress);
 
         jobs.executeMutation(1L, () -> assertThatThrownBy(
-                () -> jobs.submit(1L, GenerationProgressStage.BUSINESS_RULE, () -> {}))
+                () -> jobs.submit(1L, GenerationProgressStage.BUSINESS_RULE, () -> {
+                }))
                 .isInstanceOf(GenerationInProgressException.class));
 
-        assertThat(jobs.submit(1L, GenerationProgressStage.BUSINESS_RULE, () -> {}).status())
+        assertThat(jobs.submit(1L, GenerationProgressStage.BUSINESS_RULE, () -> {
+        }).status())
                 .isEqualTo(GenerationProgressStatus.QUEUED);
     }
 
@@ -129,7 +139,8 @@ class GenerationJobServiceTest {
         ManualExecutor executor = new ManualExecutor();
         GenerationProgressService progress = new GenerationProgressService();
         GenerationJobService jobs = new GenerationJobService(executor, progress);
-        jobs.submit(1L, GenerationProgressStage.BUSINESS_RULE, () -> {});
+        jobs.submit(1L, GenerationProgressStage.BUSINESS_RULE, () -> {
+        });
 
         executor.runNext();
 
@@ -255,7 +266,8 @@ class GenerationJobServiceTest {
                 .when(quotaService).checkQuotaAvailable(99L);
         GenerationJobService jobs = new GenerationJobService(executor, progress, quotaService);
 
-        assertThatThrownBy(() -> jobs.submit(1L, 99L, GenerationProgressStage.BUSINESS_RULE, () -> {}))
+        assertThatThrownBy(() -> jobs.submit(1L, 99L, GenerationProgressStage.BUSINESS_RULE, () -> {
+        }))
                 .isInstanceOf(com.greytest.exception.UsageQuotaExceededException.class)
                 .hasMessageContaining("Hết quota");
     }

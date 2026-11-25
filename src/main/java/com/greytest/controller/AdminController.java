@@ -2,6 +2,8 @@ package com.greytest.controller;
 
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.HttpStatus;
@@ -35,6 +37,17 @@ import com.greytest.dto.admin.AdminDtos.TrafficOverviewDto;
 import com.greytest.dto.admin.AdminDtos.TrafficTimeseriesDto;
 import com.greytest.dto.admin.AdminDtos.UpdateRateLimitRequest;
 import com.greytest.dto.admin.AdminDtos.WafStatusDto;
+import com.greytest.dto.admin.BreakGlassGrantDto;
+import com.greytest.dto.admin.BreakGlassRequestDto;
+import com.greytest.entity.Project;
+import com.greytest.entity.enums.ActivityAction;
+import com.greytest.exception.ProjectNotFoundException;
+import com.greytest.repository.ProjectRepository;
+import com.greytest.service.DdosProtectionService;
+import com.greytest.service.BreakGlassAccessService;
+import com.greytest.service.UserActivityService;
+import com.greytest.service.storage.migration.StorageMigrationService;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import com.greytest.dto.admin.AdminDtos.JobHistoryDto;
@@ -75,9 +88,47 @@ import jakarta.validation.Valid;
 public class AdminController {
 
     private final AdminService service;
+    private final BreakGlassAccessService breakGlassAccessService;
+    private StorageMigrationService storageMigrationService;
+    @Autowired(required = false)
+    private ProjectRepository projectRepository;
+    @Autowired(required = false)
+    private UserActivityService userActivityService;
+    @Autowired(required = false)
+    private com.greytest.security.waf.TrustedProxyResolver trustedProxyResolver = new com.greytest.security.waf.TrustedProxyResolver();
+
+    public void setTrustedProxyResolver(com.greytest.security.waf.TrustedProxyResolver trustedProxyResolver) {
+        this.trustedProxyResolver = trustedProxyResolver;
+    }
+
+    public void setProjectRepository(ProjectRepository projectRepository) {
+        this.projectRepository = projectRepository;
+    }
+
+    public void setUserActivityService(UserActivityService userActivityService) {
+        this.userActivityService = userActivityService;
+    }
+
+    @Autowired
+    public AdminController(
+            AdminService service,
+            @Autowired(required = false) BreakGlassAccessService breakGlassAccessService,
+            @Autowired(required = false) StorageMigrationService storageMigrationService) {
+        this.service = service;
+        this.breakGlassAccessService = breakGlassAccessService;
+        this.storageMigrationService = storageMigrationService;
+    }
+
+    public AdminController(AdminService service, BreakGlassAccessService breakGlassAccessService) {
+        this(service, breakGlassAccessService, null);
+    }
 
     public AdminController(AdminService service) {
-        this.service = service;
+        this(service, null, null);
+    }
+
+    public void setStorageMigrationService(StorageMigrationService storageMigrationService) {
+        this.storageMigrationService = storageMigrationService;
     }
 
     @GetMapping("/users")
@@ -239,10 +290,32 @@ public class AdminController {
         return service.getWafStatus();
     }
 
+    @PostMapping("/system/security/emergency-safe-mode")
+    public WafStatusDto toggleEmergencySafeMode(
+            @RequestAttribute(value = AdminAuthorizationInterceptor.ADMIN_USER_ATTRIBUTE, required = false) AuthUser admin,
+            @RequestBody com.greytest.dto.admin.AdminDtos.ToggleEmergencySafeModeRequest request) {
+        service.setEmergencySafeMode(admin, request.enabled());
+        return service.getWafStatus();
+    }
+
     @PostMapping("/system/security/block-ip")
     public WafStatusDto blockIp(
             @RequestAttribute(value = AdminAuthorizationInterceptor.ADMIN_USER_ATTRIBUTE, required = false) AuthUser admin,
-            @RequestBody BlockIpRequest request) {
+            @RequestBody BlockIpRequest request,
+            jakarta.servlet.http.HttpServletRequest httpRequest) {
+        String requesterIp = httpRequest != null
+                ? (trustedProxyResolver != null ? trustedProxyResolver.resolveClientIp(httpRequest)
+                        : httpRequest.getRemoteAddr())
+                : null;
+        if (requesterIp != null && request != null && request.ip() != null) {
+            String canonTarget = com.greytest.security.waf.TrustedProxyResolver.canonicalizeIp(
+                    com.greytest.security.waf.TrustedProxyResolver.extractIpCandidate(request.ip()));
+            String canonReq = com.greytest.security.waf.TrustedProxyResolver.canonicalizeIp(
+                    com.greytest.security.waf.TrustedProxyResolver.extractIpCandidate(requesterIp));
+            if (canonTarget != null && canonTarget.equals(canonReq)) {
+                throw new IllegalArgumentException("Không thể tự chặn địa chỉ IP của chính mình (Anti-self-lockout)");
+            }
+        }
         service.blockIp(request.ip(), request.reason(), request.durationMinutes());
         service.auditSecurityChange(admin, java.util.Map.of(
                 "action", "BLOCK_IP",
@@ -304,7 +377,8 @@ public class AdminController {
             @RequestParam(required = false) Long minLatencyMs,
             @RequestParam(defaultValue = "timestamp") String sort,
             @RequestParam(defaultValue = "desc") String direction) {
-        return service.getRecentRequests(page, size, search, method, status, statusGroup, minLatencyMs, sort, direction);
+        return service.getRecentRequests(page, size, search, method, status, statusGroup, minLatencyMs, sort,
+                direction);
     }
 
     @GetMapping("/monitoring/endpoints")
@@ -454,5 +528,109 @@ public class AdminController {
             @PathVariable Long projectId,
             @PathVariable GenerationProgressStage stage) {
         service.retryJob(admin, projectId, stage);
+    }
+
+    @PostMapping("/break-glass/request")
+    @ResponseStatus(HttpStatus.CREATED)
+    public BreakGlassGrantDto requestBreakGlass(
+            @RequestAttribute(AdminAuthorizationInterceptor.ADMIN_USER_ATTRIBUTE) AuthUser admin,
+            @Valid @RequestBody BreakGlassRequestDto request) {
+        if (breakGlassAccessService == null) {
+            throw new org.springframework.web.server.ResponseStatusException(HttpStatus.NOT_IMPLEMENTED,
+                    "Break-Glass service chưa sẵn sàng");
+        }
+        return breakGlassAccessService.requestAccess(request, admin);
+    }
+
+    @PostMapping("/break-glass/{grantId}/approve")
+    public BreakGlassGrantDto approveBreakGlass(
+            @RequestAttribute(AdminAuthorizationInterceptor.ADMIN_USER_ATTRIBUTE) AuthUser approver,
+            @PathVariable Long grantId) {
+        if (breakGlassAccessService == null) {
+            throw new org.springframework.web.server.ResponseStatusException(HttpStatus.NOT_IMPLEMENTED,
+                    "Break-Glass service chưa sẵn sàng");
+        }
+        return breakGlassAccessService.approveAccess(grantId, approver);
+    }
+
+    @PostMapping("/break-glass/{grantId}/revoke")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void revokeBreakGlass(
+            @RequestAttribute(AdminAuthorizationInterceptor.ADMIN_USER_ATTRIBUTE) AuthUser admin,
+            @PathVariable Long grantId) {
+        if (breakGlassAccessService == null) {
+            throw new org.springframework.web.server.ResponseStatusException(HttpStatus.NOT_IMPLEMENTED,
+                    "Break-Glass service chưa sẵn sàng");
+        }
+        breakGlassAccessService.revokeGrant(grantId, admin);
+    }
+
+    @GetMapping("/break-glass/active")
+    public List<BreakGlassGrantDto> listActiveBreakGlass(
+            @RequestAttribute(AdminAuthorizationInterceptor.ADMIN_USER_ATTRIBUTE) AuthUser admin) {
+        if (breakGlassAccessService == null) {
+            return List.of();
+        }
+        return breakGlassAccessService.listActiveGrants(admin);
+    }
+
+    @GetMapping("/break-glass/pending")
+    public List<BreakGlassGrantDto> listPendingBreakGlass(
+            @RequestAttribute(AdminAuthorizationInterceptor.ADMIN_USER_ATTRIBUTE) AuthUser admin) {
+        if (breakGlassAccessService == null) {
+            return List.of();
+        }
+        return breakGlassAccessService.listPendingRequests(admin);
+    }
+
+    @PostMapping("/storage/projects/{id}/migrate")
+    public StorageMigrationService.MigrationResult migrateProjectStorage(
+            @PathVariable Long id,
+            @RequestParam(defaultValue = "true") boolean dryRun,
+            @RequestAttribute(value = AdminAuthorizationInterceptor.ADMIN_USER_ATTRIBUTE, required = false) AuthUser admin) {
+        if (storageMigrationService == null) {
+            throw new org.springframework.web.server.ResponseStatusException(HttpStatus.NOT_IMPLEMENTED,
+                    "Migration service chưa sẵn sàng");
+        }
+        if (!dryRun && admin != null && breakGlassAccessService != null && projectRepository != null) {
+            Project project = projectRepository.findById(id).orElseThrow(() -> new ProjectNotFoundException(id));
+            if (!Objects.equals(admin.getId(), project.getOwnerUserId())) {
+                if (!breakGlassAccessService.hasActiveBreakGlass(id, admin.getId())) {
+                    throw new org.springframework.web.server.ResponseStatusException(HttpStatus.FORBIDDEN,
+                            "Thao tác yêu cầu quyền Break-Glass đối với dự án này");
+                }
+            }
+        }
+        StorageMigrationService.MigrationResult result = storageMigrationService.migrateProject(id, dryRun);
+        if (!dryRun && admin != null && userActivityService != null) {
+            userActivityService.record(admin.getId(), ActivityAction.STORAGE_ENCRYPTION_MIGRATED, id,
+                    Map.of("fileCount", result.fileCount(), "totalBytes", result.totalBytes()));
+        }
+        return result;
+    }
+
+    @PostMapping("/storage/projects/{id}/rollback")
+    public StorageMigrationService.RollbackResult rollbackProjectStorage(
+            @PathVariable Long id,
+            @RequestAttribute(value = AdminAuthorizationInterceptor.ADMIN_USER_ATTRIBUTE, required = false) AuthUser admin) {
+        if (storageMigrationService == null) {
+            throw new org.springframework.web.server.ResponseStatusException(HttpStatus.NOT_IMPLEMENTED,
+                    "Migration service chưa sẵn sàng");
+        }
+        if (admin != null && breakGlassAccessService != null && projectRepository != null) {
+            Project project = projectRepository.findById(id).orElseThrow(() -> new ProjectNotFoundException(id));
+            if (!Objects.equals(admin.getId(), project.getOwnerUserId())) {
+                if (!breakGlassAccessService.hasActiveBreakGlass(id, admin.getId())) {
+                    throw new org.springframework.web.server.ResponseStatusException(HttpStatus.FORBIDDEN,
+                            "Thao tác yêu cầu quyền Break-Glass đối với dự án này");
+                }
+            }
+        }
+        StorageMigrationService.RollbackResult result = storageMigrationService.rollbackProject(id);
+        if (admin != null && userActivityService != null) {
+            userActivityService.record(admin.getId(), ActivityAction.STORAGE_ENCRYPTION_ROLLED_BACK, id,
+                    Map.of("status", result.status(), "message", result.message()));
+        }
+        return result;
     }
 }

@@ -43,6 +43,18 @@ public class Project {
 
     private String storagePath;
 
+    @Column(nullable = false)
+    private Boolean storageEncrypted = false;
+
+    @Column(length = 512)
+    private String encryptedDek;
+
+    @Column(length = 64)
+    private String dekKeyVersion;
+
+    @Column(length = 32)
+    private String encryptionAlgorithm;
+
     @Enumerated(EnumType.STRING)
     private ProjectStatus status;
 

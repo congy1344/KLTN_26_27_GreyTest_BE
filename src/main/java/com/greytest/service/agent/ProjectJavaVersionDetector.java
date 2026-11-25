@@ -45,6 +45,12 @@ public class ProjectJavaVersionDetector {
             "maven-compiler-plugin", "maven-surefire-plugin", "maven-failsafe-plugin");
 
     private final ProjectRepository projects;
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private com.greytest.service.storage.workspace.StorageWorkspaceService storageWorkspaceService;
+
+    public void setStorageWorkspaceService(com.greytest.service.storage.workspace.StorageWorkspaceService storageWorkspaceService) {
+        this.storageWorkspaceService = storageWorkspaceService;
+    }
 
     public ProjectJavaVersionDetector(ProjectRepository projects) {
         this.projects = projects;
@@ -163,6 +169,12 @@ public class ProjectJavaVersionDetector {
 
     private Optional<Path> projectRoot(Long projectId) {
         if (projectId == null) return Optional.empty();
+        if (storageWorkspaceService != null) {
+            Path active = storageWorkspaceService.getActiveSourcePath(projectId);
+            if (active != null && Files.isDirectory(active)) {
+                return Optional.of(active);
+            }
+        }
         Project project = projects.findById(projectId).orElse(null);
         if (project == null || project.getStoragePath() == null || project.getStoragePath().isBlank()) {
             return Optional.empty();

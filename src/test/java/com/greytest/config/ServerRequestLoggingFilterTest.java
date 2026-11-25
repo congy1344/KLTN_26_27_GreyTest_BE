@@ -176,7 +176,9 @@ class ServerRequestLoggingFilterTest {
         try {
             DdosProtectionService realDdos = new DdosProtectionService();
             realDdos.setStandardRateLimit(2);
-            ServerRequestLoggingFilter realFilter = new ServerRequestLoggingFilter(realTelemetry, authService, realDdos);
+            com.greytest.security.waf.TrustedProxyResolver testProxyResolver =
+                    new com.greytest.security.waf.TrustedProxyResolver("127.0.0.1/32,::1/128,172.20.0.0/16", true);
+            ServerRequestLoggingFilter realFilter = new ServerRequestLoggingFilter(realTelemetry, authService, realDdos, testProxyResolver);
 
             // 1. Request trực tiếp không có forwarded headers
             MockHttpServletRequest directReq = new MockHttpServletRequest("GET", "/api/projects");
@@ -217,6 +219,17 @@ class ServerRequestLoggingFilterTest {
             assertEquals("203.0.113.88", DdosProtectionService.normalizeClientIp("203.0.113.88, 10.0.0.1, 172.16.0.1"));
             assertEquals("127.0.0.1", DdosProtectionService.normalizeClientIp("invalid-ip;<script>alert(1)</script>"));
             assertEquals("127.0.0.1", DdosProtectionService.normalizeClientIp("[::1"));
+
+            // 6. Cho phép X-Test-Client-IP khi kiểm thử từ localhost/Docker, từ chối khi từ external IP
+            MockHttpServletRequest testIpReq = new MockHttpServletRequest("GET", "/api/projects");
+            testIpReq.setRemoteAddr("172.20.0.1");
+            testIpReq.addHeader("X-Test-Client-IP", "203.0.113.195");
+            assertEquals("203.0.113.195", realFilter.resolveClientIp(testIpReq));
+
+            MockHttpServletRequest untrustedReq = new MockHttpServletRequest("GET", "/api/projects");
+            untrustedReq.setRemoteAddr("198.51.100.20");
+            untrustedReq.addHeader("X-Test-Client-IP", "203.0.113.195");
+            assertEquals("198.51.100.20", realFilter.resolveClientIp(untrustedReq));
         } finally {
             realTelemetry.destroy();
         }
