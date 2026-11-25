@@ -56,8 +56,25 @@ greytest:
   frontend-url: ${GREYTEST_FRONTEND_URL:http://localhost:3000}
   storage:
     path: ${GREYTEST_STORAGE_PATH:./storage}
+    encryption-enabled: ${GREYTEST_ENCRYPTION_ENABLED:false}
+    kek: ${APP_STORAGE_KEK:}
+    kek-version: ${APP_STORAGE_KEK_VERSION:v1}
   auth:
     token-secret: ${GREYTEST_AUTH_TOKEN_SECRET:}
+    google-client-id: ${GOOGLE_CLIENT_ID:}
+    github-client-id: ${GITHUB_CLIENT_ID:}
+    github-client-secret: ${GITHUB_CLIENT_SECRET:}
+    github-redirect-uri: ${GITHUB_REDIRECT_URI:http://localhost:3000/auth/callback/github}
+  waf:
+    trusted-proxies: ${GREYTEST_WAF_TRUSTED_PROXIES:127.0.0.1/32,::1/128}
+    allow-test-header: ${GREYTEST_WAF_ALLOW_TEST_HEADER:false}
+    max-tracked-ips: ${GREYTEST_WAF_MAX_TRACKED_IPS:20000}
+    redis:
+      enabled: ${GREYTEST_WAF_REDIS_ENABLED:false}
+      host: ${GREYTEST_WAF_REDIS_HOST:localhost}
+      port: ${GREYTEST_WAF_REDIS_PORT:6379}
+      timeout: ${GREYTEST_WAF_REDIS_TIMEOUT:2000}
+      password: ${GREYTEST_WAF_REDIS_PASSWORD:}
   # Mã hoá khoá API AI mà admin lưu vào DB; để trống thì chỉ dùng được khoá trong biến môi trường.
   settings-secret: ${GREYTEST_SETTINGS_SECRET:}
   usage:

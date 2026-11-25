@@ -18,10 +18,17 @@ public class UnitTestController {
  @GetMapping("/api/projects/{projectId}/unit-tests") public List<UnitTestDto> list(@PathVariable Long projectId,@RequestParam(required=false) String servicePath,@RequestHeader("Authorization") String a){access(projectId,a);return service.list(projectId,servicePath);}
  @GetMapping("/api/projects/{projectId}/unit-tests/files") public List<com.greytest.dto.UnitTestFileDto> files(@PathVariable Long projectId,@RequestParam(required=false) String servicePath,@RequestHeader("Authorization") String a){access(projectId,a);return service.listFiles(projectId,servicePath);}
  @GetMapping("/api/projects/{projectId}/unit-tests/download") public org.springframework.http.ResponseEntity<byte[]> download(@PathVariable Long projectId,@RequestParam(required=false) String servicePath,@RequestHeader("Authorization") String a){
-  access(projectId,a);
+  var user = auth.currentUser(a);
+  projects.requireSourceAccess(projectId, user);
+  if (servicePath != null && (servicePath.contains("..") || servicePath.startsWith("/") || servicePath.startsWith("\\") || servicePath.contains(":"))) {
+   throw new SecurityException("Đường dẫn servicePath không hợp lệ hoặc chứa ký tự nguy hiểm");
+  }
   var archive=service.exportArchive(projectId,servicePath);
   return org.springframework.http.ResponseEntity.ok()
     .header(org.springframework.http.HttpHeaders.CONTENT_DISPOSITION,"attachment; filename=\"greytest-unit-tests.zip\"")
+    .header(org.springframework.http.HttpHeaders.CACHE_CONTROL, "no-cache, no-store, max-age=0, must-revalidate")
+    .header("Pragma", "no-cache")
+    .header("Expires", "0")
     .header("X-GreyTest-Skipped-Cases",String.join(",",archive.skippedCaseCodes()))
     .header(org.springframework.http.HttpHeaders.ACCESS_CONTROL_EXPOSE_HEADERS,"X-GreyTest-Skipped-Cases")
     .contentType(org.springframework.http.MediaType.parseMediaType("application/zip"))

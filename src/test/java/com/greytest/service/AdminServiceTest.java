@@ -596,10 +596,14 @@ class AdminServiceTest {
         target.setId(30L);
         target.setEmail("to-delete@greytest.dev");
 
+        com.greytest.repository.SystemSettingRepository settingRepo =
+                mock(com.greytest.repository.SystemSettingRepository.class);
+        service.setSystemSettingRepository(settingRepo);
         when(users.findById(30L)).thenReturn(Optional.of(target));
 
         service.deleteUser(actor(), 30L);
 
+        verify(settingRepo).reassignUpdatedBy(30L, 1L);
         verify(quotas).deleteByUserId(30L);
         verify(users).delete(target);
     }
@@ -646,15 +650,18 @@ class AdminServiceTest {
     }
 
     @Test
-    void cancelActiveJobFailsProgressService() {
+    void cancelActiveJobFailsProgressServiceAndOmitsMissingProjectFk() {
         GenerationProgressService progressService = mock(GenerationProgressService.class);
         AdminService svc = new AdminService(
                 users, projects, unitTests, activities, quotas, quotaService, activityService,
                 businessRules, testPlans, testCases, coverageReports, progressService);
+        when(projects.existsById(88L)).thenReturn(false);
 
         svc.cancelActiveJob(actor(), 88L, com.greytest.dto.GenerationProgressStage.UNIT_TEST);
 
         verify(progressService).fail(88L, com.greytest.dto.GenerationProgressStage.UNIT_TEST, "Tác vụ đã bị hủy bởi Quản trị viên.");
+        verify(activityService).record(eq(1L), eq(ActivityAction.ADMIN_STATUS_CHANGE), isNull(),
+                argThat(meta -> meta.get("projectId").equals(88L) && "ADMIN_CANCEL_JOB".equals(meta.get("action"))));
     }
 
     @Test
@@ -711,23 +718,25 @@ class AdminServiceTest {
         assertThat(pkgs.get(2).code()).isEqualTo("PRO");
         assertThat(pkgs.get(2).activeUsersCount()).isEqualTo(5L);
 
-        // Create with features containing null/blank (sanitized)
-        var createReq = new AdminDtos.SaveTierPackageRequest("ENT", "Enterprise", 50000L, "YEARLY", 500, 8, java.util.Arrays.asList("Dedicated Support", null, "  "), "Cho doanh nghiệp", true);
+        // Create with features containing null/blank (sanitized) and custom resetCycle
+        var createReq = new AdminDtos.SaveTierPackageRequest("ENT", "Enterprise", 50000L, "YEARLY", 500, 8, java.util.Arrays.asList("Dedicated Support", null, "  "), "Cho doanh nghiệp", true, "DAILY");
         var created = service.createTierPackage(actor(), createReq);
         assertThat(created.code()).isEqualTo("ENT");
         assertThat(created.price()).isEqualTo(50000L);
+        assertThat(created.resetCycle()).isEqualTo("DAILY");
         assertThat(created.features()).containsExactly("Dedicated Support");
 
         // Update with null req throws IllegalArgumentException
         org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
                 () -> service.updateTierPackage(actor(), "PRO", null));
 
-        // Update
-        var updateReq = new AdminDtos.SaveTierPackageRequest("PRO", "Gói PRO Nâng Cao", 25000L, "MONTHLY", 350, 4, List.of("Full AST"), "Mô tả mới", true);
+        // Update with resetCycle
+        var updateReq = new AdminDtos.SaveTierPackageRequest("PRO", "Gói PRO Nâng Cao", 25000L, "MONTHLY", 350, 4, List.of("Full AST"), "Mô tả mới", true, "WEEKLY");
         var updated = service.updateTierPackage(actor(), "PRO", updateReq);
         assertThat(updated.name()).isEqualTo("Gói PRO Nâng Cao");
         assertThat(updated.price()).isEqualTo(25000L);
         assertThat(updated.quotaLimit()).isEqualTo(350);
+        assertThat(updated.resetCycle()).isEqualTo("WEEKLY");
 
         // Delete non-existent package throws IllegalArgumentException
         org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,

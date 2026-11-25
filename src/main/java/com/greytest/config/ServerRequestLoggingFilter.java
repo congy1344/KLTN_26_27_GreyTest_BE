@@ -11,6 +11,7 @@ import org.springframework.web.filter.OncePerRequestFilter;
 import org.springframework.web.servlet.HandlerMapping;
 
 import com.greytest.entity.AuthUser;
+import com.greytest.security.waf.TrustedProxyResolver;
 import com.greytest.service.AuthService;
 import com.greytest.service.DdosProtectionService;
 import com.greytest.service.ServerTelemetryService;
@@ -40,15 +41,25 @@ public class ServerRequestLoggingFilter extends OncePerRequestFilter {
     private final ServerTelemetryService telemetryService;
     private final AuthService authService;
     private final DdosProtectionService ddosProtectionService;
+    private final TrustedProxyResolver trustedProxyResolver;
+
+    public ServerRequestLoggingFilter(
+            ServerTelemetryService telemetryService,
+            AuthService authService,
+            DdosProtectionService ddosProtectionService) {
+        this(telemetryService, authService, ddosProtectionService, new TrustedProxyResolver());
+    }
 
     @Autowired
     public ServerRequestLoggingFilter(
             ServerTelemetryService telemetryService,
             @Autowired(required = false) AuthService authService,
-            @Autowired(required = false) DdosProtectionService ddosProtectionService) {
+            @Autowired(required = false) DdosProtectionService ddosProtectionService,
+            @Autowired(required = false) TrustedProxyResolver trustedProxyResolver) {
         this.telemetryService = telemetryService;
         this.authService = authService;
         this.ddosProtectionService = ddosProtectionService;
+        this.trustedProxyResolver = trustedProxyResolver != null ? trustedProxyResolver : new TrustedProxyResolver();
     }
 
     @Override
@@ -76,38 +87,46 @@ public class ServerRequestLoggingFilter extends OncePerRequestFilter {
 
         long startTime = System.currentTimeMillis();
         String clientIp = resolveClientIp(request);
-        String path = request.getRequestURI();
+        String rawPath = request.getRequestURI();
+        String path = rawPath;
+        if (path != null) {
+            int semi = path.indexOf(';');
+            if (semi >= 0) {
+                path = path.substring(0, semi);
+            }
+        }
         String sanitizedUri = ServerTelemetryService.sanitizeUri(buildRawUriWithQuery(request));
         String requestId = resolveOrGenerateRequestId(request, response);
 
-        // 1. Kiểm tra phòng vệ tầng WAF / Anti-DDoS (trừ các endpoint cấu hình an ninh của admin)
-        if (ddosProtectionService != null
-                && path != null
-                && !path.startsWith("/api/admin/system/security")
-                && !path.startsWith("/api/admin/monitoring/rate-limit")) {
-            DdosProtectionService.CheckResult checkResult = null;
-            try {
-                checkResult = ddosProtectionService.checkRequest(clientIp, path);
-            } catch (Exception ignored) {
-                // Không để lỗi bộ kiểm tra WAF làm gián đoạn request
-            }
+        // 1. Kiểm tra phòng vệ tầng WAF / Anti-DDoS (vẫn chặn IP nếu đã trong danh sách đen)
+        if (ddosProtectionService != null && path != null) {
+            boolean isSecurityMgmt = path.equals("/api/admin/system/security/waf-status")
+                    || path.startsWith("/api/admin/monitoring/rate-limit");
+            if (!isSecurityMgmt || ddosProtectionService.isIpBlocked(clientIp)) {
+                DdosProtectionService.CheckResult checkResult = null;
+                try {
+                    checkResult = ddosProtectionService.checkRequest(clientIp, path);
+                } catch (Exception ignored) {
+                    // Không để lỗi bộ kiểm tra WAF làm gián đoạn request
+                }
 
-            if (checkResult != null && checkResult.isBlocked()) {
-                response.setStatus(429);
-                response.setContentType("application/json;charset=UTF-8");
-                response.setHeader("Retry-After", String.valueOf(checkResult.retryAfterSeconds()));
-                response.setHeader("X-WAF-Defense", "Active-Blocked");
-                String safeReason = checkResult.reason() != null
-                        ? checkResult.reason().replace("\\", "\\\\").replace("\"", "'").replace("\n", " ")
-                        : "";
-                response.getWriter().write(
-                        "{\"status\":429,\"error\":\"TOO_MANY_REQUESTS\",\"code\":\"TOO_MANY_REQUESTS\",\"message\":\"" +
-                        safeReason + "\",\"retryAfter\":" + checkResult.retryAfterSeconds() + "}"
-                );
+                if (checkResult != null && checkResult.isBlocked()) {
+                    response.setStatus(429);
+                    response.setContentType("application/json;charset=UTF-8");
+                    response.setHeader("Retry-After", String.valueOf(checkResult.retryAfterSeconds()));
+                    response.setHeader("X-WAF-Defense", "Active-Blocked");
+                    String safeReason = checkResult.reason() != null
+                            ? checkResult.reason().replace("\\", "\\\\").replace("\"", "'").replace("\n", " ")
+                            : "";
+                    response.getWriter().write(
+                            "{\"status\":429,\"error\":\"TOO_MANY_REQUESTS\",\"code\":\"TOO_MANY_REQUESTS\",\"message\":\"" +
+                            safeReason + "\",\"retryAfter\":" + checkResult.retryAfterSeconds() + "}"
+                    );
 
-                long duration = Math.max(0L, System.currentTimeMillis() - startTime);
-                recordSafely(request, path, sanitizedUri, 429, duration, clientIp, "rate-limited", requestId, null);
-                return;
+                    long duration = Math.max(0L, System.currentTimeMillis() - startTime);
+                    recordSafely(request, path, sanitizedUri, 429, duration, clientIp, "rate-limited", requestId, null);
+                    return;
+                }
             }
         }
 
@@ -120,6 +139,9 @@ public class ServerRequestLoggingFilter extends OncePerRequestFilter {
 
         Throwable unhandledError = null;
         try {
+            response.setHeader("Cache-Control", "no-cache, no-store, max-age=0, must-revalidate");
+            response.setHeader("Pragma", "no-cache");
+            response.setHeader("X-Content-Type-Options", "nosniff");
             filterChain.doFilter(request, response);
         } catch (Throwable ex) {
             unhandledError = ex;
@@ -221,10 +243,20 @@ public class ServerRequestLoggingFilter extends OncePerRequestFilter {
     }
 
     String resolveClientIp(HttpServletRequest request) {
-        // Chỉ sử dụng request.getRemoteAddr() (đã được Tomcat RemoteIpValve / Spring ForwardedHeaderFilter
-        // xác thực khi cấu hình server.forward-headers-strategy). Tuyệt đối không tự đọc X-Forwarded-For
-        // thô từ client để tránh giả mạo IP vượt qua Rate Limit.
-        return DdosProtectionService.normalizeClientIp(request != null ? request.getRemoteAddr() : null);
+        if (request == null) {
+            return "127.0.0.1";
+        }
+        if (trustedProxyResolver != null) {
+            return trustedProxyResolver.resolveClientIp(request);
+        }
+        String remoteAddr = request.getRemoteAddr();
+        if (DdosProtectionService.isLoopbackOrDockerIp(remoteAddr)) {
+            String testIp = request.getHeader("X-Test-Client-IP");
+            if (testIp != null && !testIp.isBlank()) {
+                return DdosProtectionService.normalizeClientIp(testIp);
+            }
+        }
+        return DdosProtectionService.normalizeClientIp(remoteAddr);
     }
 
     private String resolveUserEmail(HttpServletRequest request) {

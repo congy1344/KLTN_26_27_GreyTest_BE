@@ -38,6 +38,9 @@ public class TierPackage {
     @Column(nullable = false, length = 20)
     private String cycle = "MONTHLY";
 
+    @Column(name = "reset_cycle", nullable = false, length = 20)
+    private String resetCycle = "WEEKLY";
+
     @Column(name = "quota_limit", nullable = false)
     private Integer quotaLimit = 100;
 
@@ -63,6 +66,11 @@ public class TierPackage {
 
     public TierPackage(String code, String name, Long price, String cycle, Integer quotaLimit, Integer batchConcurrency,
             String features, String description, Boolean active) {
+        this(code, name, price, cycle, quotaLimit, batchConcurrency, features, description, active, cycle != null ? cycle : "WEEKLY");
+    }
+
+    public TierPackage(String code, String name, Long price, String cycle, Integer quotaLimit, Integer batchConcurrency,
+            String features, String description, Boolean active, String resetCycle) {
         this.code = code;
         this.name = name;
         this.price = price != null ? price : 0L;
@@ -72,6 +80,7 @@ public class TierPackage {
         this.features = features != null ? features : "";
         this.description = description != null ? description : "";
         this.active = active != null ? active : true;
+        this.resetCycle = (resetCycle != null && !resetCycle.isBlank()) ? resetCycle : "WEEKLY";
     }
 }
 

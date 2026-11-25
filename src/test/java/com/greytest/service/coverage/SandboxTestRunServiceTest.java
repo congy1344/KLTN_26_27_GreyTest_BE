@@ -545,6 +545,18 @@ class SandboxTestRunServiceTest {
     }
 
     @Test
+    void buildsTheSandboxImageFromTheBundledDockerfileWhenItIsMissing() {
+        imageMissing = true;
+        producesReport = true;
+        casesPerRun = List.of("");
+
+        service.start(1L, null);
+
+        assertThat(service.state(1L).status()).isEqualTo(Status.SUCCEEDED);
+        assertThat(commands).anyMatch(c -> c.get(0).equals("build") && c.contains("greytest-sandbox:21") && c.contains("JAVA_VERSION=21"));
+    }
+
+    @Test
     void runsGeneratedTestsInAnIsolatedContainerAndStoresTheCoverage() {
         startExit = 3; // script báo: có coverage nhưng có test fail
         producesReport = true;
@@ -557,8 +569,12 @@ class SandboxTestRunServiceTest {
         assertThat(state.failed()).isEqualTo(1);
         assertThat(generatedTestReachedContainer).isTrue();
         verify(coverage).upload(eq(1L), eq(null), any());
-        List<String> create = commands.get(0);
-        assertThat(create).contains("create", "--memory", "--pids-limit", "maven:3.9-eclipse-temurin-21");
+        List<String> create = commands.stream().filter(c -> c.get(0).equals("create")).findFirst().orElseThrow();
+        assertThat(create).contains("create", "--memory", "--pids-limit");
+        assertThat(create).anyMatch(arg -> arg.endsWith("21"));
+        assertThat(create).contains("--cap-drop", "ALL", "--security-opt", "no-new-privileges:true", "--read-only", "--user", "1000:1000");
+        assertThat(create).contains("--network");
+        assertThat(create).contains("-v", "greytest_sandbox_m2_p1:/home/greytest/.m2");
         // Container luôn bị xóa, không để lại rác trên máy chạy demo.
         assertThat(commands.get(commands.size() - 1)).startsWith("rm", "-f");
     }
@@ -826,8 +842,8 @@ class SandboxTestRunServiceTest {
         assertThat(service.state(1L).message()).isEqualTo("AI đã sửa 1 lượt test qua 1 vòng. Đã chạy 2 test: 2 đạt, 0 không đạt. Coverage đã được cập nhật.");
         verify(units, never()).restore(any(), any());
         assertThat(commands.stream().filter(command -> command.get(0).equals("create"))).hasSize(1);
-        assertThat(commands.stream().filter(command -> command.get(0).equals("cp") && command.get(2).endsWith(":/work"))).hasSize(1);
-        var executions = commands.stream().filter(command -> command.get(0).equals("exec")).toList();
+        assertThat(commands.stream().filter(command -> command.get(0).equals("exec") && command.contains("cp") && command.contains("/work/"))).hasSize(2);
+        var executions = commands.stream().filter(command -> command.get(0).equals("exec") && !command.contains("cp")).toList();
         assertThat(executions).hasSize(2);
         assertThat(executions.get(0)).doesNotContain("GREYTEST_FAST_RERUN=1", "-o");
         assertThat(executions.get(1)).contains("GREYTEST_FAST_RERUN=1", "-o");
@@ -875,11 +891,24 @@ class SandboxTestRunServiceTest {
 
         service.start(1L, null, 7L);
 
-        var executions = commands.stream().filter(command -> command.get(0).equals("exec")).toList();
+        var executions = commands.stream().filter(command -> command.get(0).equals("exec") && !command.contains("cp")).toList();
         assertThat(executions).hasSize(3);
         assertThat(executions.get(1)).contains("GREYTEST_FAST_RERUN=1", "-o");
         assertThat(executions.get(2)).contains("GREYTEST_FAST_RERUN=1").doesNotContain("-o");
         assertThat(service.state(1L).status()).isEqualTo(Status.SUCCEEDED);
+    }
+
+    @Test
+    void disconnectsTheNetworkOnlyOnceAcrossConsecutiveOfflineRepairs() {
+        producesReport = true;
+        casesPerRun = List.of(errorCase("first") + errorCase("second"), errorCase("first"), "");
+        when(units.repairFailing(eq(1L), any())).thenReturn(List.of(new UnitTest()));
+
+        service.start(1L, null, 7L);
+
+        assertThat(service.state(1L).status()).isEqualTo(Status.SUCCEEDED);
+        assertThat(commands.stream().filter(command -> command.contains("-o"))).hasSize(2);
+        assertThat(commands.stream().filter(command -> command.contains("disconnect"))).hasSize(1);
     }
 
     @Test
@@ -915,11 +944,11 @@ class SandboxTestRunServiceTest {
 
         assertThat(commands.stream().filter(command -> command.contains("rm") && command.get(0).equals("exec")))
                 .singleElement().satisfies(command -> assertThat(command).contains("--", "/work/shop/src/test/java/demo/OldTest.java"));
-        assertThat(commands.stream().filter(command -> command.get(0).equals("cp") && command.get(2).contains(":/work")))
-                .hasSize(2).anySatisfy(command -> {
-                    assertThat(command.get(2)).endsWith(":/work/shop/.");
-                    assertThat(command.get(1)).contains("export");
-                });
+        assertThat(commands.stream().filter(command -> command.get(0).equals("cp") && command.get(2).contains(":/stage/")))
+                .hasSize(2).anySatisfy(command -> assertThat(command.get(1)).contains("export"));
+        // Người dùng sandbox (UID 1000) tự copy nên sở hữu file và ghi được vào thư mục module.
+        assertThat(commands.stream().filter(command -> command.get(0).equals("exec") && command.contains("cp")))
+                .hasSize(2).anySatisfy(command -> assertThat(command).endsWith("/work/shop/"));
         assertThat(service.state(1L).status()).isEqualTo(Status.SUCCEEDED);
     }
 
@@ -929,7 +958,7 @@ class SandboxTestRunServiceTest {
         logsPerRun = List.of(compileError(8, "no suitable method found for thenReturn(boolean)"));
         when(units.repairFailing(eq(1L), any())).thenReturn(List.of(new UnitTest()));
         service.start(1L, null, 7L);
-        assertThat(commands.stream().filter(command -> command.get(0).equals("exec"))).hasSize(2);
+        assertThat(commands.stream().filter(command -> command.get(0).equals("exec") && !command.contains("cp"))).hasSize(2);
     }
 
     @Test
@@ -1017,6 +1046,9 @@ class SandboxTestRunServiceTest {
         return "[ERROR] /work/src/test/java/demo/ShopTest.java:[" + line + ",5] " + message + "\n";
     }
 
+    private final java.util.Set<String> disconnected = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private boolean imageMissing;
+
     private SandboxTestRunService.Result fakeDocker(List<String> args, Path log) throws IOException {
         commands.add(args);
         if (dockerUnavailable) throw new IOException("Docker không khả dụng.");
@@ -1026,7 +1058,7 @@ class SandboxTestRunServiceTest {
             if(createExit!=0)return new SandboxTestRunService.Result(createExit);
         }
         if (args.get(0).equals("rm")) containers.remove(args.get(2));
-        if (executionEntered != null && args.get(0).equals("exec") && !args.contains("rm")) {
+        if (executionEntered != null && args.get(0).equals("exec") && !args.contains("rm") && !args.contains("cp")) {
             executionEntered.countDown();
             try {
                 if (!executionRelease.await(5, java.util.concurrent.TimeUnit.SECONDS)) throw new IOException("test timed out");
@@ -1039,7 +1071,7 @@ class SandboxTestRunServiceTest {
         }
         switch (args.get(0)) {
             case "exec" -> {
-                if (args.contains("rm")) return new SandboxTestRunService.Result(0);
+                if (args.contains("rm") || args.contains("cp")) return new SandboxTestRunService.Result(0);
                 runs++;
                 if (throwsOnRun) throw new IOException("fake timeout");
                 String output = logsPerRun.get(Math.min(runs, logsPerRun.size()) - 1);
@@ -1049,7 +1081,7 @@ class SandboxTestRunServiceTest {
             }
             case "cp" -> {
                 String from = args.get(1), to = args.get(2);
-                if (to.contains(":/work")) { // host -> container
+                if (to.contains(":/stage/")) { // host -> container
                     generatedTestReachedContainer |= Files.exists(Path.of(from).resolve("src/test/java/demo/ShopTest.java"))
                             && Files.exists(Path.of(from).resolve("pom.xml"));
                 } else if (!producesReport || runs > reportRuns || runs < firstReportRun) {
@@ -1065,6 +1097,13 @@ class SandboxTestRunServiceTest {
                                     + failed + "\">" + cases + "</testsuite>");
                 }
             }
+            case "network" -> {
+                // Docker thật báo lỗi khi ngắt mạng một container đã ngắt.
+                if (args.get(1).equals("disconnect") && !disconnected.add(args.get(3)))
+                    return new SandboxTestRunService.Result(1);
+                if (args.get(1).equals("connect")) disconnected.remove(args.get(3));
+            }
+            case "image" -> { return new SandboxTestRunService.Result(imageMissing ? 1 : 0); }
             default -> { }
         }
         return new SandboxTestRunService.Result(0);

@@ -119,12 +119,41 @@ class DdosProtectionServiceTest {
         assertFalse(DdosProtectionService.isLoopbackOrDockerIp("172.32.0.1"));
         assertFalse(DdosProtectionService.isLoopbackOrDockerIp("203.0.113.1"));
 
-        // Loopback and Docker IPs are never blocked by burst or rate limiting
+        // Loopback and Docker IPs are never blocked by burst or rate limiting when configured
+        service.setExemptDockerSubnets(true);
         service.setStandardRateLimit(1);
         for (int i = 0; i < 20; i++) {
             assertFalse(service.checkRequest("172.20.0.1", "/api/projects").isBlocked());
             assertFalse(service.checkRequest("127.0.0.1", "/api/projects").isBlocked());
         }
+    }
+
+    @Test
+    void testEmergencySafeModeDoesNotDisableSensitiveTiers() {
+        service.setEmergencySafeMode(true);
+        assertTrue(service.isEmergencySafeMode());
+
+        // Standard browsing endpoint is relaxed to 500 req/min
+        assertEquals(500, service.resolveTierLimit("/api/projects"));
+
+        // Sensitive tiers REMAIN strictly protected at dedicated limits
+        assertEquals(20, service.resolveTierLimit("/api/auth/login"));
+        assertEquals(10, service.resolveTierLimit("/api/projects/upload"));
+        assertEquals(15, service.resolveTierLimit("/api/projects/1/generate"));
+        assertEquals(30, service.resolveTierLimit("/api/projects/1/export"));
+        assertEquals(60, service.resolveTierLimit("/api/admin/system/metrics"));
+
+        // Blacklist and Burst detection still active
+        service.blockIp("198.51.100.88", "Attacker", 10);
+        assertTrue(service.checkRequest("198.51.100.88", "/api/projects").isBlocked());
+    }
+
+    @Test
+    void testEmergencySafeModeAutoExpires() {
+        // Safe mode with negative duration -> already expired
+        service.setEmergencySafeMode(true, -1);
+        assertFalse(service.isEmergencySafeMode());
+        assertEquals(100, service.resolveTierLimit("/api/projects"));
     }
 
     @Test
@@ -137,5 +166,28 @@ class DdosProtectionServiceTest {
         assertEquals(0, service.getWafStatus().activeBlockedIpCount());
         assertFalse(service.checkRequest("198.51.100.11", "/api/projects").isBlocked());
     }
-}
 
+    @Test
+    void neverBansTheReverseProxyThatAllUsersShare() {
+        DdosProtectionService behindProxy = new DdosProtectionService(
+                new com.greytest.security.waf.InMemoryRateLimitStore(),
+                new com.greytest.security.waf.TrustedProxyResolver("127.0.0.1/32,172.16.0.0/12"));
+        for (int i = 0; i < 400; i++) {
+            assertFalse(behindProxy.checkRequest("172.18.0.5", "/api/projects").isBlocked());
+        }
+        // IP proxy không phải lối vòng: vượt hạn mức chung thì bị giới hạn nhịp, nhưng không bị khóa IP.
+        DdosProtectionService.CheckResult flooded = null;
+        for (int i = 0; i < 250; i++) {
+            flooded = behindProxy.checkRequest("172.18.0.5", "/api/auth/login");
+        }
+        assertEquals(DdosProtectionService.CheckStatus.RATE_LIMITED, flooded.status());
+        assertFalse(behindProxy.isIpBlocked("172.18.0.5"));
+        assertFalse(behindProxy.checkRequest("172.18.0.5", "/api/projects").isBlocked());
+        // Client thật phía sau proxy vẫn bị giới hạn.
+        boolean blocked = false;
+        for (int i = 0; i < 400; i++) {
+            blocked |= behindProxy.checkRequest("203.0.113.9", "/api/projects").isBlocked();
+        }
+        assertTrue(blocked);
+    }
+}

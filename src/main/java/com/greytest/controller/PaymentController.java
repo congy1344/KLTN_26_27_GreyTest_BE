@@ -80,12 +80,12 @@ public class PaymentController {
     public ResponseEntity<List<TierPackageDto>> getPublicPackages() {
         if (adminService == null) {
             return ResponseEntity.ok(List.of(
-                    new TierPackageDto("PLUS", "Gói Tiêu Chuẩn (PLUS)", 10_000L, "WEEKLY", 200, 3,
+                    new TierPackageDto("PLUS", "Gói Tiêu Chuẩn (PLUS)", 10_000L, "MONTHLY", 200, 3,
                             List.of("Toàn bộ tính năng gói FREE", "200 lượt gọi AI hồi lại hàng tuần", "Sinh tối đa 3 batch song song"),
-                            "Dành cho nhóm phát triển mở rộng", true, 0L),
+                            "Dành cho nhóm phát triển mở rộng", true, 0L, "WEEKLY"),
                     new TierPackageDto("PRO", "Gói Chuyên Nghiệp (PRO)", 20_000L, "MONTHLY", 300, 4,
                             List.of("Toàn bộ tính năng gói PLUS", "Phân tích cú pháp AST & Call Graph sâu", "Sinh Unit Test JUnit 5 song song 4 luồng"),
-                            "Toàn bộ tính năng phân tích sâu & JaCoCo Refinement", true, 0L)
+                            "Toàn bộ tính năng phân tích sâu & JaCoCo Refinement", true, 0L, "WEEKLY")
             ));
         }
         List<TierPackageDto> active = adminService.getTierPackages().stream()
@@ -100,7 +100,8 @@ public class PaymentController {
                         p.features(),
                         p.description(),
                         p.active(),
-                        0L))
+                        0L,
+                        p.resetCycle()))
                 .toList();
         return ResponseEntity.ok(active);
     }

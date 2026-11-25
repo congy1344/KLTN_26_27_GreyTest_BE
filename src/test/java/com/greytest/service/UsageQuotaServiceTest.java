@@ -318,7 +318,44 @@ class UsageQuotaServiceTest {
         assertThat(service.current(7L).getQuotaUsed()).isZero();
     }
 
-    private UsageQuotaService serviceWithTier(AtomicReference<UsageQuota> stored, UserTier tier, String cycle) {
+    @Test
+    void currentReadOnlyRollsOverWithoutLockingOrSaving() {
+        UsageQuota stale = quota(100, 42, LocalDate.of(2026, 7, 1));
+        UsageQuotaRepository repo = repository(new AtomicReference<>(stale));
+        UsageQuotaService service = new UsageQuotaService(repo, 100, AUGUST);
+
+        UsageQuota snapshot = service.currentReadOnly(7L);
+
+        assertThat(snapshot.getQuotaUsed()).isZero();
+        assertThat(snapshot.getPeriodStart()).isEqualTo(LocalDate.of(2026, 8, 1));
+        verify(repo).findByUserId(7L);
+        verify(repo, org.mockito.Mockito.never()).findByUserIdForUpdate(any());
+        verify(repo, org.mockito.Mockito.never()).save(any());
+    }
+
+    @Test
+    void dailyTierPackageResetsUsageAfterOneDay() {
+        AtomicReference<UsageQuota> stored = new AtomicReference<>(quota(50, 40, LocalDate.of(2026, 8, 20)));
+        UsageQuotaService service = serviceWithTierAndResetCycle(stored, UserTier.PLUS, "MONTHLY", "DAILY");
+
+        UsageQuota current = service.current(7L);
+
+        assertThat(current.getQuotaUsed()).isZero();
+        assertThat(current.getPeriodStart()).isEqualTo(LocalDate.of(2026, 8, 21));
+    }
+
+    @Test
+    void dailyTierPackageKeepsUsageOnSameDay() {
+        AtomicReference<UsageQuota> stored = new AtomicReference<>(quota(50, 30, LocalDate.of(2026, 8, 21)));
+        UsageQuotaService service = serviceWithTierAndResetCycle(stored, UserTier.PLUS, "MONTHLY", "DAILY");
+
+        UsageQuota current = service.current(7L);
+
+        assertThat(current.getQuotaUsed()).isEqualTo(30);
+        assertThat(current.getPeriodStart()).isEqualTo(LocalDate.of(2026, 8, 21));
+    }
+
+    private UsageQuotaService serviceWithTierAndResetCycle(AtomicReference<UsageQuota> stored, UserTier tier, String cycle, String resetCycle) {
         UsageQuotaService service = new UsageQuotaService(repository(stored), 100, AUGUST);
         AuthUser user = new AuthUser();
         user.setTier(tier);
@@ -326,10 +363,14 @@ class UsageQuotaServiceTest {
         when(users.findById(7L)).thenReturn(Optional.of(user));
         TierPackageRepository packages = mock(TierPackageRepository.class);
         when(packages.findById(tier.name())).thenReturn(Optional.of(
-                new TierPackage(tier.name(), tier.name(), 0L, cycle, 300, 2, "", "", true)));
+                new TierPackage(tier.name(), tier.name(), 0L, cycle, 300, 2, "", "", true, resetCycle)));
         service.setUserRepository(users);
         service.setTierPackageRepository(packages);
         return service;
+    }
+
+    private UsageQuotaService serviceWithTier(AtomicReference<UsageQuota> stored, UserTier tier, String cycle) {
+        return serviceWithTierAndResetCycle(stored, tier, cycle, cycle);
     }
 
     private static UsageQuota quota(int limit, int used, LocalDate periodStart) {

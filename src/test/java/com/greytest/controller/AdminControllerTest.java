@@ -510,4 +510,17 @@ class AdminControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.underAttackMode").value(true));
     }
+
+    @Test
+    void rejectsInvalidEnumQueryParameterWithBadRequest() throws Exception {
+        when(authService.currentUser("Bearer admin-token")).thenReturn(user(UserRole.ADMIN));
+
+        mvc.perform(get("/api/admin/users")
+                        .header("Authorization", "Bearer admin-token")
+                        .param("tier", "INVALID_TIER"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("BAD_REQUEST"));
+
+        verifyNoInteractions(adminService);
+    }
 }

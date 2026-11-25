@@ -11,12 +11,16 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.i18n.LocaleContextHolder;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 
 import com.greytest.dto.GenerationJobAcceptedDto;
 import com.greytest.dto.GenerationProgressStage;
 import com.greytest.dto.GenerationProgressStatus;
+import com.greytest.entity.Project;
+import com.greytest.exception.AuthException;
 import com.greytest.exception.GenerationInProgressException;
+import com.greytest.exception.ProjectNotFoundException;
 import com.greytest.exception.UsageQuotaExceededException;
 import com.greytest.service.agent.LlmResponseException;
 import com.greytest.entity.enums.ActivityAction;
@@ -32,6 +36,13 @@ public class GenerationJobService {
     private final ProjectRepository projectRepository;
     private final UserActivityService activityService;
     private final UsageQuotaService quotaService;
+    private final BreakGlassAccessService breakGlassAccessService;
+    @Autowired(required = false)
+    private com.greytest.service.storage.workspace.StorageWorkspaceService storageWorkspaceService;
+
+    public void setStorageWorkspaceService(com.greytest.service.storage.workspace.StorageWorkspaceService storageWorkspaceService) {
+        this.storageWorkspaceService = storageWorkspaceService;
+    }
     private static final Object MANUAL_MUTATION = new Object();
     private static final Object JOB_LOCK = new Object();
     private record ProjectStageLock(GenerationProgressStage stage, long runId) {}
@@ -50,28 +61,39 @@ public class GenerationJobService {
             GenerationProgressService progressService,
             ProjectRepository projectRepository,
             UserActivityService activityService,
-            @Autowired(required = false) UsageQuotaService quotaService) {
+            @Autowired(required = false) UsageQuotaService quotaService,
+            @Autowired(required = false) BreakGlassAccessService breakGlassAccessService) {
         this.executor = executor;
         this.progressService = progressService;
         this.projectRepository = projectRepository;
         this.activityService = activityService;
         this.quotaService = quotaService;
+        this.breakGlassAccessService = breakGlassAccessService;
     }
 
     GenerationJobService(Executor executor, GenerationProgressService progressService) {
-        this(executor, progressService, null, null, null);
+        this(executor, progressService, null, null, null, null);
     }
 
-    GenerationJobService(
+    public GenerationJobService(
             Executor executor,
             GenerationProgressService progressService,
             ProjectRepository projectRepository,
             UserActivityService activityService) {
-        this(executor, progressService, projectRepository, activityService, null);
+        this(executor, progressService, projectRepository, activityService, null, null);
+    }
+
+    public GenerationJobService(
+            Executor executor,
+            GenerationProgressService progressService,
+            ProjectRepository projectRepository,
+            UserActivityService activityService,
+            BreakGlassAccessService breakGlassAccessService) {
+        this(executor, progressService, projectRepository, activityService, null, breakGlassAccessService);
     }
 
     GenerationJobService(Executor executor, GenerationProgressService progressService, UsageQuotaService quotaService) {
-        this(executor, progressService, null, null, quotaService);
+        this(executor, progressService, null, null, quotaService, null);
     }
 
     public GenerationJobAcceptedDto submit(Long projectId, GenerationProgressStage stage, Runnable task) {
@@ -106,6 +128,17 @@ public class GenerationJobService {
 
     private GenerationJobAcceptedDto enqueue(
             Long projectId, Long actorUserId, GenerationProgressStage stage, Runnable task) {
+        // Kiểm tra quyền sở hữu project của actor trước khi cho phép chạy background job
+        if (projectRepository != null && actorUserId != null) {
+            Project project = projectRepository.findById(projectId)
+                    .orElseThrow(() -> new ProjectNotFoundException(projectId));
+            if (project.getOwnerUserId() == null || !project.getOwnerUserId().equals(actorUserId)) {
+                if (breakGlassAccessService == null || !breakGlassAccessService.hasActiveBreakGlass(projectId, actorUserId)) {
+                    throw new AuthException("FORBIDDEN", "Actor không có quyền thực thi job trên project này", HttpStatus.FORBIDDEN);
+                }
+            }
+        }
+
         // Kiểm tra hạn mức quota của người dùng trước khi xếp hàng tác vụ
         if (actorUserId != null && quotaService != null) {
             quotaService.checkQuotaAvailable(actorUserId);
@@ -260,11 +293,30 @@ public class GenerationJobService {
                 if (!lock.equals(activeProjects.get(projectId)) || progressService.isPaused(projectId, stage)) return;
                 measurement = progressService.beginMeasurement(projectId, stage, GenerationJobContext.metricsSupplier());
             }
+            // SEC-3.5-01: Kiểm tra lại quyền của actor ngay trước khi chạy tác vụ (xử lý Break-Glass bị thu hồi/hết hạn in-flight)
+            if (projectRepository != null && actorUserId != null) {
+                Project project = projectRepository.findById(projectId).orElse(null);
+                if (project != null && (project.getOwnerUserId() == null || !project.getOwnerUserId().equals(actorUserId))) {
+                    if (breakGlassAccessService == null || !breakGlassAccessService.hasActiveBreakGlass(projectId, actorUserId)) {
+                        throw new AuthException("FORBIDDEN", "Quyền Break-Glass đã hết hạn hoặc bị thu hồi khi đang chờ thực thi", HttpStatus.FORBIDDEN);
+                    }
+                }
+            }
             GenerationRunMetrics currentMeasurement = measurement;
-            GenerationJobContext.withValue(JOB_LOCK, lock, () -> {
-                GenerationProgressService.withMeasurementOwner(projectId, stage, currentMeasurement, task);
-                return null;
-            });
+            com.greytest.service.storage.workspace.StorageWorkspace ws = (storageWorkspaceService != null && projectRepository != null)
+                    ? projectRepository.findById(projectId).filter(p -> Boolean.TRUE.equals(p.getStorageEncrypted()))
+                        .map(storageWorkspaceService::acquireWorkspace).orElse(null)
+                    : null;
+            try {
+                GenerationJobContext.withValue(JOB_LOCK, lock, () -> {
+                    GenerationProgressService.withMeasurementOwner(projectId, stage, currentMeasurement, task);
+                    return null;
+                });
+            } finally {
+                if (ws != null) {
+                    ws.close();
+                }
+            }
             synchronized (progressService) {
             if (lock.equals(activeProjects.get(projectId))) progressService.completeIfActive(
                     projectId,

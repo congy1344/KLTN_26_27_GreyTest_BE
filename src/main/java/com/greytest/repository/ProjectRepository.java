@@ -17,6 +17,8 @@ public interface ProjectRepository extends JpaRepository<Project, Long> {
 
     List<Project> findByOwnerUserIdOrderByCreatedAtDesc(Long ownerUserId);
 
+    Optional<Project> findByIdAndOwnerUserId(Long id, Long ownerUserId);
+
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select project from Project project where project.id = :id")
     Optional<Project> findByIdForUpdate(@Param("id") Long id);
