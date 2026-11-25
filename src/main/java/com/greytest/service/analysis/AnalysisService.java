@@ -40,6 +40,8 @@ import com.greytest.repository.JavaMethodRepository;
 import com.greytest.repository.ProjectRepository;
 import com.greytest.repository.RelevantAnnotationRepository;
 import com.greytest.repository.ServiceRepositoryRelationRepository;
+import com.greytest.service.storage.workspace.StorageWorkspace;
+import com.greytest.service.storage.workspace.StorageWorkspaceService;
 import com.greytest.service.analysis.JavaParserHelper.ControllerServiceCall;
 import com.greytest.service.analysis.JavaParserHelper.ExtractedAnnotation;
 import com.greytest.service.analysis.JavaParserHelper.ExtractedEndpoint;
@@ -70,6 +72,12 @@ public class AnalysisService {
     private final ExistingTestService existingTestService;
     private final com.greytest.repository.BusinessRuleRepository businessRuleRepository;
     private final com.greytest.repository.CoverageReportRepository coverageReportRepository;
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private StorageWorkspaceService storageWorkspaceService;
+
+    public void setStorageWorkspaceService(StorageWorkspaceService storageWorkspaceService) {
+        this.storageWorkspaceService = storageWorkspaceService;
+    }
 
     public AnalysisService(
             ProjectRepository projectRepository,
@@ -105,9 +113,11 @@ public class AnalysisService {
     @Transactional
     public AnalysisResultDto analyze(Long projectId) {
         Project project = findOrThrow(projectId);
-        Path sourceDir = resolveSourceDir(project);
+        StorageWorkspace ws = storageWorkspaceService != null ? storageWorkspaceService.acquireWorkspace(project) : null;
+        try {
+            Path sourceDir = ws != null ? ws.getPath() : resolveSourceDir(project);
 
-        log.info("Bắt đầu phân tích project: {} (id={})", project.getName(), projectId);
+            log.info("Bắt đầu phân tích project: {} (id={})", project.getName(), projectId);
 
         // Re-analyze ở bất kỳ pha nào = reset về đầu pipeline: xóa data phân tích cũ,
         // xóa Business Rule (nếu không, FK SET NULL làm BR mồ côi method và bước sinh
@@ -308,6 +318,11 @@ public class AnalysisService {
                 totalMethods, totalEndpoints, totalRelations, totalControllerServiceRelations);
 
         return resultBuilder.build(project, storedExistingTests);
+        } finally {
+            if (ws != null) {
+                ws.close();
+            }
+        }
     }
 
     /**
@@ -352,13 +367,21 @@ public class AnalysisService {
         if (project.getStoragePath() == null || project.getStoragePath().isBlank()) {
             return 0;
         }
-        Path sourceDir = Path.of(project.getStoragePath());
-        if (!Files.isDirectory(sourceDir)) {
-            log.warn("Bỏ qua đếm existing tests vì không còn thư mục source của project {} tại {}",
-                    project.getId(), sourceDir);
-            return 0;
+        StorageWorkspace ws = storageWorkspaceService != null && Boolean.TRUE.equals(project.getStorageEncrypted())
+                ? storageWorkspaceService.acquireWorkspace(project) : null;
+        try {
+            Path sourceDir = ws != null ? ws.getPath() : Path.of(project.getStoragePath());
+            if (!Files.isDirectory(sourceDir)) {
+                log.warn("Bỏ qua đếm existing tests vì không còn thư mục source của project {} tại {}",
+                        project.getId(), sourceDir);
+                return 0;
+            }
+            return parserHelper.countExistingTestFiles(sourceDir);
+        } finally {
+            if (ws != null) {
+                ws.close();
+            }
         }
-        return parserHelper.countExistingTestFiles(sourceDir);
     }
 
     private void saveAnnotations(Long projectId, Long classId, Long methodId,

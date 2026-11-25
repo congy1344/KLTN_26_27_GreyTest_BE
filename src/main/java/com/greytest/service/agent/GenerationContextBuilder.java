@@ -18,6 +18,7 @@ import com.github.javaparser.ast.expr.NameExpr;
 import com.github.javaparser.ast.type.ClassOrInterfaceType;
 import com.github.javaparser.printer.lexicalpreservation.LexicalPreservingPrinter;
 
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -133,6 +134,12 @@ public class GenerationContextBuilder {
     private final TestCaseRepository testCaseRepository;
     private final UnitTestRepository unitTestRepository;
     private final ProjectRepository projectRepository;
+    @Autowired(required = false)
+    private com.greytest.service.storage.workspace.StorageWorkspaceService storageWorkspaceService;
+
+    public void setStorageWorkspaceService(com.greytest.service.storage.workspace.StorageWorkspaceService storageWorkspaceService) {
+        this.storageWorkspaceService = storageWorkspaceService;
+    }
     private PersistentSourceAnalysisService persistentAnalysis;
     private com.greytest.repository.SourceUpdateRepository sourceUpdates;
     private com.greytest.repository.SourceUpdateItemRepository sourceUpdateItems;
@@ -577,13 +584,23 @@ public class GenerationContextBuilder {
 
     private AnalysisResultDto activeGenerationAnalysis(Long projectId) {
         AnalysisResultDto analysis = storedAnalysis(projectId);
-        return projectRepository.findById(projectId).map(Project::getStoragePath)
-                .filter(path -> !path.isBlank())
-                .map(path -> sourceAnalysis(projectId, java.nio.file.Path.of(path), false))
-                .orElse(analysis);
+        if (projectId == null) return analysis;
+        java.nio.file.Path activeRoot = activeSourceRoot(projectId);
+        if (activeRoot == null) return analysis;
+        boolean isEncrypted = projectRepository.findById(projectId)
+                .map(p -> Boolean.TRUE.equals(p.getStorageEncrypted())).orElse(false);
+        boolean isEphemeral = storageWorkspaceService != null && storageWorkspaceService.getActiveSourcePath(projectId) != null;
+        if (isEncrypted && !isEphemeral) {
+            return analysis;
+        }
+        return sourceAnalysis(projectId, activeRoot, false);
     }
 
     private java.nio.file.Path activeSourceRoot(Long projectId) {
+        if (storageWorkspaceService != null && projectId != null) {
+            java.nio.file.Path active = storageWorkspaceService.getActiveSourcePath(projectId);
+            if (active != null) return active;
+        }
         return projectRepository.findById(projectId).map(Project::getStoragePath)
                 .filter(path -> !path.isBlank()).map(java.nio.file.Path::of).orElse(null);
     }

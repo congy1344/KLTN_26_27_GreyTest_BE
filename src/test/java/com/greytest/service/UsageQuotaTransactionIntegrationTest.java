@@ -61,4 +61,35 @@ class UsageQuotaTransactionIntegrationTest {
         assertThat(quotas.findByUserId(user.getId())).get().extracting("quotaUsed").isEqualTo(25);
         assertThat(activities.countByUserId(user.getId())).isEqualTo(2);
     }
+
+    @Test
+    void concurrentConsumeLlmCallOnNewUserCreatesSingleRowAndCountsEveryCall() throws Exception {
+        assertThat(quotas.findByUserId(user.getId())).isEmpty();
+
+        int threads = 4;
+        java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(threads);
+        java.util.concurrent.CountDownLatch ready = new java.util.concurrent.CountDownLatch(threads);
+        java.util.concurrent.CountDownLatch start = new java.util.concurrent.CountDownLatch(1);
+        try {
+            java.util.List<java.util.concurrent.Future<com.greytest.entity.UsageQuota>> futures = new java.util.ArrayList<>();
+            for (int i = 0; i < threads; i++) {
+                futures.add(pool.submit(() -> {
+                    ready.countDown();
+                    assertThat(start.await(5, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+                    return service.consumeLlmCall(user.getId(), null, 1, Map.of());
+                }));
+            }
+            assertThat(ready.await(5, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+            start.countDown();
+
+            for (java.util.concurrent.Future<com.greytest.entity.UsageQuota> future : futures) {
+                assertThat(future.get(15, java.util.concurrent.TimeUnit.SECONDS)).isNotNull();
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+
+        assertThat(quotas.findByUserId(user.getId())).get().extracting("quotaUsed").isEqualTo(threads);
+        assertThat(activities.countByUserId(user.getId())).isEqualTo((long) threads);
+    }
 }

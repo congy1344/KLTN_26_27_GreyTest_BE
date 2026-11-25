@@ -5,6 +5,8 @@ target/
 !.env.example
 !.env.aws.example
 *.log
+hs_err_pid*.log
+replay_pid*.log
 
 # Source code upload/clone của user (không commit)
 /storage/

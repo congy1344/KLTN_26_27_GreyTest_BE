@@ -54,6 +54,15 @@ public class AuthUser {
 
     private Boolean enabled;
 
+    @Column(length = 50)
+    private String githubUserId;
+
+    @Column(length = 100)
+    private String githubUsername;
+
+    @Column(columnDefinition = "TEXT")
+    private String githubAccessToken;
+
     @CreationTimestamp
     @Column(updatable = false)
     private LocalDateTime createdAt;

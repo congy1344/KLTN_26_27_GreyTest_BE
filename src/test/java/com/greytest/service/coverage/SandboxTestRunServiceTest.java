@@ -443,7 +443,11 @@ class SandboxTestRunServiceTest {
         assertThat(generatedTestReachedContainer).isTrue();
         verify(coverage).upload(eq(1L), eq(null), any());
         List<String> create = commands.get(0);
-        assertThat(create).contains("create", "--memory", "--pids-limit", "maven:3.9-eclipse-temurin-21");
+        assertThat(create).contains("create", "--memory", "--pids-limit");
+        assertThat(create).anyMatch(arg -> arg.endsWith("21"));
+        assertThat(create).contains("--cap-drop", "ALL", "--security-opt", "no-new-privileges:true", "--read-only", "--user", "1000:1000");
+        assertThat(create).contains("--network");
+        assertThat(create).contains("-v", "greytest_sandbox_m2_p1:/home/greytest/.m2");
         // Container luôn bị xóa, không để lại rác trên máy chạy demo.
         assertThat(commands.get(commands.size() - 1)).startsWith("rm", "-f");
     }

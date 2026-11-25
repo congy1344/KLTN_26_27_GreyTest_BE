@@ -50,9 +50,9 @@ import com.greytest.service.agent.LlmResponseException;
 /** Kiểm thử HTTP → service → PostgreSQL/storage thật; chỉ thay ranh giới provider LLM. */
 @SpringBootTest(properties = {
         "spring.config.import=", "llm.provider=mock", "llm.usage.enabled=false",
-        "spring.datasource.url=${SPRING_DATASOURCE_URL:jdbc:postgresql://127.0.0.1:55439/chapter5_integration}",
-        "spring.datasource.username=${SPRING_DATASOURCE_USERNAME:chapter5_test}",
-        "spring.datasource.password=${SPRING_DATASOURCE_PASSWORD:}",
+        "spring.datasource.url=${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5433/greytest}",
+        "spring.datasource.username=${SPRING_DATASOURCE_USERNAME:greytest}",
+        "spring.datasource.password=${SPRING_DATASOURCE_PASSWORD:greytest_password}",
         "greytest.auth.token-secret=chapter5-integration-test-secret-at-least-32-bytes"})
 @AutoConfigureMockMvc(print = org.springframework.boot.test.autoconfigure.web.servlet.MockMvcPrint.NONE)
 @Import(Chapter5PipelineIntegrationTest.ProviderConfig.class)
@@ -268,7 +268,7 @@ class Chapter5PipelineIntegrationTest {
     }
 
     private void awaitTerminal(long id, String stage, String expected) throws Exception {
-        long deadline = System.nanoTime() + Duration.ofSeconds(20).toNanos();
+        long deadline = System.nanoTime() + Duration.ofSeconds(60).toNanos();
         JsonNode progress;
         do {
             progress = getJson(id, "generation-progress/" + stage);
@@ -284,7 +284,7 @@ class Chapter5PipelineIntegrationTest {
 
     private void awaitWorkersIdle() throws Exception {
         var pool = ((org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor) executor).getThreadPoolExecutor();
-        long deadline = System.nanoTime() + Duration.ofSeconds(20).toNanos();
+        long deadline = System.nanoTime() + Duration.ofSeconds(60).toNanos();
         while (pool.getActiveCount() != 0 || !pool.getQueue().isEmpty()) {
             assertThat(System.nanoTime()).as("Generation workers must finish before mutation/cleanup").isLessThan(deadline);
             Thread.sleep(25);

@@ -14,12 +14,14 @@ import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 
 import com.greytest.dto.ChangePasswordRequest;
 import com.greytest.dto.ForgotPasswordRequest;
+import com.greytest.dto.GoogleLoginRequest;
 import com.greytest.dto.LoginRequest;
 import com.greytest.dto.RegisterRequest;
 import com.greytest.dto.ResetPasswordRequest;
 import com.greytest.dto.UpdateProfileRequest;
 import com.greytest.entity.AuthUser;
 import com.greytest.entity.enums.UserRole;
+import com.greytest.entity.enums.UserTier;
 import com.greytest.exception.AuthException;
 import com.greytest.repository.AuthUserRepository;
 
@@ -278,6 +280,154 @@ class AuthServiceTest {
         assertThatThrownBy(() -> authService.updateProfile(bearer, new UpdateProfileRequest("A")))
                 .isInstanceOf(AuthException.class)
                 .hasMessageContaining("Họ và tên phải từ 2 đến 100 ký tự");
+    }
+
+    @Test
+    void forgotAndResetPasswordWithOtpValidatesAttemptsAndSingleUse() {
+        AuthUserRepository repository = mock(AuthUserRepository.class);
+        AuthUser existingUser = user(UserRole.USER);
+        when(repository.findByEmailIgnoreCase("user@greytest.dev")).thenReturn(Optional.of(existingUser));
+
+        AuthService authService = new AuthService(repository, TOKEN_SECRET);
+        var forgotRes = authService.forgotPassword(new ForgotPasswordRequest("user@greytest.dev"));
+        assertThat(forgotRes.devOtp()).matches("\\d{6}");
+        String validOtp = forgotRes.devOtp();
+        String wrongOtp = validOtp.equals("000000") ? "111111" : "000000";
+
+        // Nhập sai OTP giảm dần số lần thử
+        assertThatThrownBy(() -> authService.resetPassword(
+                new ResetPasswordRequest("user@greytest.dev", wrongOtp, "OtpNewPass1", "OtpNewPass1")))
+                .isInstanceOfSatisfying(AuthException.class, ex -> assertThat(ex.getCode()).isEqualTo("INVALID_OTP"));
+
+        // Nhập đúng OTP -> đặt lại mật khẩu thành công
+        var resetRes = authService.resetPassword(
+                new ResetPasswordRequest("user@greytest.dev", validOtp, "OtpNewPass1", "OtpNewPass1"));
+        assertThat(resetRes.message()).contains("thành công");
+        assertThat(authService.login(new LoginRequest("user@greytest.dev", "OtpNewPass1")).token()).isNotBlank();
+
+        // Dùng lại OTP lần 2 phải bị từ chối
+        assertThatThrownBy(() -> authService.resetPassword(
+                new ResetPasswordRequest("user@greytest.dev", validOtp, "OtpNewPass2", "OtpNewPass2")))
+                .isInstanceOfSatisfying(AuthException.class, ex -> assertThat(ex.getCode()).isEqualTo("INVALID_OTP"));
+
+        // Sai OTP quá 5 lần liên tiếp bị khóa OTP hiện tại
+        authService.forgotPassword(new ForgotPasswordRequest("user@greytest.dev"));
+        for (int i = 1; i <= 4; i++) {
+            assertThatThrownBy(() -> authService.resetPassword(
+                    new ResetPasswordRequest("user@greytest.dev", "999999", "OtpNewPass3", "OtpNewPass3")))
+                    .isInstanceOfSatisfying(AuthException.class, ex -> assertThat(ex.getCode()).isEqualTo("INVALID_OTP"));
+        }
+        assertThatThrownBy(() -> authService.resetPassword(
+                new ResetPasswordRequest("user@greytest.dev", "999999", "OtpNewPass3", "OtpNewPass3")))
+                .isInstanceOfSatisfying(AuthException.class, ex -> {
+                    assertThat(ex.getCode()).isEqualTo("OTP_ATTEMPTS_EXCEEDED");
+                    assertThat(ex.getStatus()).isEqualTo(HttpStatus.TOO_MANY_REQUESTS);
+                });
+    }
+
+    @Test
+    void googleLoginProvisionsNewUserAndBlocksDisabledOrAdminAccounts() {
+        AuthUserRepository repository = mock(AuthUserRepository.class);
+        GoogleTokenVerifier verifier = mock(GoogleTokenVerifier.class);
+        when(verifier.isConfigured()).thenReturn(true);
+        when(verifier.getGoogleClientId()).thenReturn("test-google-client-id");
+
+        AuthService authService = new AuthService(repository, TOKEN_SECRET, null, null, null, verifier);
+        assertThat(authService.getGoogleConfig().enabled()).isTrue();
+        assertThat(authService.getGoogleConfig().clientId()).isEqualTo("test-google-client-id");
+
+        // 1. Tạo user mới khi lần đầu đăng nhập Google
+        when(verifier.verifyIdToken("valid-new-token"))
+                .thenReturn(new GoogleTokenVerifier.GoogleUserPayload("newgoogle@gmail.com", "Google New", "sub-1"));
+        when(repository.findByEmailIgnoreCase("newgoogle@gmail.com")).thenReturn(Optional.empty());
+        when(repository.save(any(AuthUser.class))).thenAnswer(invocation -> {
+            AuthUser saved = invocation.getArgument(0);
+            saved.setId(99L);
+            return saved;
+        });
+
+        var createdLogin = authService.googleLogin(new GoogleLoginRequest("valid-new-token"));
+        assertThat(createdLogin.token()).isNotBlank();
+        assertThat(createdLogin.user().email()).isEqualTo("newgoogle@gmail.com");
+        assertThat(createdLogin.user().role()).isEqualTo(UserRole.USER);
+        assertThat(createdLogin.user().tier()).isEqualTo(UserTier.FREE);
+
+        // 2. Chặn tài khoản bị khóa
+        AuthUser disabledUser = user(UserRole.USER);
+        disabledUser.setEmail("disabled@gmail.com");
+        disabledUser.setEnabled(false);
+        when(verifier.verifyIdToken("disabled-token"))
+                .thenReturn(new GoogleTokenVerifier.GoogleUserPayload("disabled@gmail.com", "Disabled", "sub-2"));
+        when(repository.findByEmailIgnoreCase("disabled@gmail.com")).thenReturn(Optional.of(disabledUser));
+
+        assertThatThrownBy(() -> authService.googleLogin(new GoogleLoginRequest("disabled-token")))
+                .isInstanceOfSatisfying(AuthException.class, ex -> assertThat(ex.getCode()).isEqualTo("ACCOUNT_DISABLED"));
+
+        // 3. Chặn tài khoản ADMIN đăng nhập qua cổng User Google
+        AuthUser adminUser = user(UserRole.ADMIN);
+        when(verifier.verifyIdToken("admin-token"))
+                .thenReturn(new GoogleTokenVerifier.GoogleUserPayload("admin@greytest.dev", "Admin", "sub-3"));
+        when(repository.findByEmailIgnoreCase("admin@greytest.dev")).thenReturn(Optional.of(adminUser));
+
+        assertThatThrownBy(() -> authService.googleLogin(new GoogleLoginRequest("admin-token")))
+                .isInstanceOfSatisfying(AuthException.class, ex -> assertThat(ex.getCode()).isEqualTo("ADMIN_LOGIN_REQUIRED"));
+    }
+
+    @Test
+    void googleLoginRejectsWhenClientIdNotConfigured() {
+        AuthService authService = new AuthService(mock(AuthUserRepository.class), TOKEN_SECRET);
+        assertThat(authService.getGoogleConfig().enabled()).isFalse();
+
+        assertThatThrownBy(() -> authService.googleLogin(new GoogleLoginRequest("some-token")))
+                .isInstanceOfSatisfying(AuthException.class, ex -> {
+                    assertThat(ex.getCode()).isEqualTo("GOOGLE_AUTH_NOT_CONFIGURED");
+                    assertThat(ex.getStatus()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+                });
+    }
+
+    @Test
+    void forgotPasswordEnforcesCooldownBlocksAdminAndFailsClosedWhenConfiguredSmtpErrors() {
+        AuthUserRepository repository = mock(AuthUserRepository.class);
+        AuthUser regularUser = user(UserRole.USER);
+        AuthUser adminUser = user(UserRole.ADMIN);
+        when(repository.findByEmailIgnoreCase("user@greytest.dev")).thenReturn(Optional.of(regularUser));
+        when(repository.findByEmailIgnoreCase("admin@greytest.dev")).thenReturn(Optional.of(adminUser));
+
+        // 1. Chặn admin gọi forgotPassword qua cổng người dùng
+        AuthService baseService = new AuthService(repository, TOKEN_SECRET);
+        assertThatThrownBy(() -> baseService.forgotPassword(new ForgotPasswordRequest("admin@greytest.dev")))
+                .isInstanceOfSatisfying(AuthException.class, ex -> assertThat(ex.getCode()).isEqualTo("ADMIN_ACCESS_DENIED"));
+
+        // 2. Chặn spam forgotPassword liên tiếp trong vòng 60s khi OTP chưa tiêu thụ
+        baseService.forgotPassword(new ForgotPasswordRequest("user@greytest.dev"));
+        assertThatThrownBy(() -> baseService.forgotPassword(new ForgotPasswordRequest("user@greytest.dev")))
+                .isInstanceOfSatisfying(AuthException.class, ex -> {
+                    assertThat(ex.getCode()).isEqualTo("OTP_COOLDOWN");
+                    assertThat(ex.getStatus()).isEqualTo(HttpStatus.TOO_MANY_REQUESTS);
+                });
+
+        // 3. Khi SMTP đã cấu hình nhưng gửi lỗi -> ném 503 MAIL_SEND_FAILED, không trả devOtp/resetUrl
+        PasswordResetMailService failingMailService = mock(PasswordResetMailService.class);
+        when(failingMailService.isSmtpConfigured()).thenReturn(true);
+        when(failingMailService.sendPasswordResetOtpEmail(any(), any(), any())).thenReturn(false);
+
+        AuthService smtpService = new AuthService(repository, TOKEN_SECRET, null, null, failingMailService, null);
+        assertThatThrownBy(() -> smtpService.forgotPassword(new ForgotPasswordRequest("user@greytest.dev")))
+                .isInstanceOfSatisfying(AuthException.class, ex -> {
+                    assertThat(ex.getCode()).isEqualTo("MAIL_SEND_FAILED");
+                    assertThat(ex.getStatus()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+                });
+
+        // 4. Khi SMTP gửi thành công -> không trả devOtp hay resetUrl
+        PasswordResetMailService okMailService = mock(PasswordResetMailService.class);
+        when(okMailService.isSmtpConfigured()).thenReturn(true);
+        when(okMailService.sendPasswordResetOtpEmail(any(), any(), any())).thenReturn(true);
+
+        AuthService okSmtpService = new AuthService(repository, TOKEN_SECRET, null, null, okMailService, null);
+        var res = okSmtpService.forgotPassword(new ForgotPasswordRequest("user@greytest.dev"));
+        assertThat(res.mailSent()).isTrue();
+        assertThat(res.devOtp()).isNull();
+        assertThat(res.resetUrl()).isNull();
     }
 
     private AuthUser user(UserRole role) {

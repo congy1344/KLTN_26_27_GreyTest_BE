@@ -87,12 +87,22 @@ public class UserService {
     private UserQuotaResponse toQuotaResponse(UserTier tier, UsageQuota quota) {
         Integer limit = quota.getQuotaLimit();
         Integer remaining = limit == null ? null : Math.max(limit - quota.getQuotaUsed(), 0);
-        boolean isWeekly = tier == UserTier.PRO || tier == UserTier.PLUS || (limit != null && limit > quotaService.getDefaultLimit());
-        LocalDate resetDate = isWeekly
-                ? (quota.getPeriodStart() != null ? quota.getPeriodStart().plusWeeks(1) : null)
-                : (quota.getPeriodStart() != null ? quota.getPeriodStart().plusMonths(1) : null);
+        String resetCycle = quotaService != null ? quotaService.resolveResetCycle(quota.getUserId()) : null;
+        if (resetCycle == null) {
+            resetCycle = (tier == UserTier.PRO || tier == UserTier.PLUS) ? "WEEKLY" : "MONTHLY";
+        }
+        LocalDate resetDate = null;
+        if (quota.getPeriodStart() != null) {
+            if ("DAILY".equals(resetCycle)) {
+                resetDate = quota.getPeriodStart().plusDays(1);
+            } else if ("WEEKLY".equals(resetCycle)) {
+                resetDate = quota.getPeriodStart().plusWeeks(1);
+            } else {
+                resetDate = quota.getPeriodStart().plusMonths(1);
+            }
+        }
         return new UserQuotaResponse(
-                tier != null ? tier : (isWeekly ? UserTier.PLUS : UserTier.FREE),
+                tier != null ? tier : UserTier.FREE,
                 limit,
                 quota.getQuotaUsed(),
                 remaining,

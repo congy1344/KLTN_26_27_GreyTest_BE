@@ -48,6 +48,9 @@ public class SourceRevision {
     @Column(nullable = false)
     private String storagePath;
 
+    @Column(nullable = false)
+    private Boolean storageEncrypted = false;
+
     private String contentHash;
 
     private String logicalRoot;

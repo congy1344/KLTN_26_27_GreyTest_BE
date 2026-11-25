@@ -209,6 +209,12 @@ public class OpenAiLlmClient implements LlmClient {
         }
     }
 
+    private boolean isReasoningModel(String modelName) {
+        if (modelName == null) return false;
+        String m = modelName.toLowerCase();
+        return m.startsWith("o1") || m.startsWith("o3") || m.startsWith("o4");
+    }
+
     private String requestBody(String prompt, LlmRequestOptions options) {
         ObjectNode root = objectMapper.createObjectNode();
         root.put("model", model);
@@ -226,11 +232,15 @@ public class OpenAiLlmClient implements LlmClient {
         } else {
             messages.addObject().put("role", "user").put("content", prompt);
         }
-        root.put("temperature", temperature);
-        if ("gpt-6-luna".equals(model)) {
-            // Luna cần tham số token mới; tắt reasoning để giữ temperature hiện tại.
+        if (!isReasoningModel(model)) {
+            root.put("temperature", temperature);
+        }
+        if ("gpt-6-luna".equals(model) || isReasoningModel(model)) {
+            // Luna và reasoning models (o1, o3-mini) dùng max_completion_tokens thay vì max_tokens.
             root.put("max_completion_tokens", options.maxTokens());
-            root.put("reasoning_effort", "none");
+            if ("gpt-6-luna".equals(model)) {
+                root.put("reasoning_effort", "none");
+            }
         } else {
             root.put("max_tokens", options.maxTokens());
         }

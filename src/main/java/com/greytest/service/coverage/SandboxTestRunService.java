@@ -27,6 +27,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
+import jakarta.annotation.PostConstruct;
+
 import com.greytest.entity.Project;
 import com.greytest.entity.UnitTest;
 import com.greytest.entity.enums.ActivityAction;
@@ -39,6 +41,7 @@ import com.greytest.service.GenerationJobContext;
 import com.greytest.service.GenerationProgressService;
 import com.greytest.service.UnitTestService;
 import com.greytest.service.agent.ProjectJavaVersionDetector;
+import com.greytest.service.storage.workspace.StorageWorkspaceService;
 
 /**
  * Chạy Unit Test đã sinh ngay trên server, trong một container Docker riêng cho mỗi lần chạy,
@@ -55,11 +58,21 @@ public class SandboxTestRunService {
     public record Result(int exitCode) { }
 
     /** Điểm cắt để test không cần Docker thật: chạy `docker <args>`, ghi output vào log. */
-    interface Docker {
+    public interface Docker {
         Result run(List<String> args, Path log) throws IOException;
     }
 
-    private static final Set<String> JAVA_IMAGES = Set.of("8", "11", "17", "21");
+    public static final Set<String> JAVA_IMAGES = Set.of("8", "11", "17", "21");
+    public static final Set<String> ALLOWED_IMAGES = Set.of(
+            "greytest-sandbox:8", "greytest-sandbox:11", "greytest-sandbox:17", "greytest-sandbox:21",
+            "maven:3.9-eclipse-temurin-8", "maven:3.9-eclipse-temurin-11",
+            "maven:3.9-eclipse-temurin-17", "maven:3.9-eclipse-temurin-21"
+    );
+    public static final String NETWORK_NONE = "none";
+    public static final String NETWORK_ISOLATED = "greytest_sandbox_net";
+    public static final Set<String> ALLOWED_NETWORKS = Set.of(NETWORK_NONE, NETWORK_ISOLATED);
+
+    private static final org.slf4j.Logger auditLogger = org.slf4j.LoggerFactory.getLogger("com.greytest.security.audit");
     private static final long TIMEOUT_MINUTES = 20;
     private static final int LOG_TAIL_LINES = 60;
     private static final int MAX_FAILURE_DETAIL = 3000;
@@ -76,6 +89,43 @@ public class SandboxTestRunService {
     private final Docker docker;
     private final Map<Long, RunState> states = new ConcurrentHashMap<>();
     private final Map<Long, Path> liveLogs = new ConcurrentHashMap<>();
+    private final Map<Long, Sandbox> activeSandboxes = new ConcurrentHashMap<>();
+
+    @PostConstruct
+    public void cleanupLeftoverSandboxes() {
+        // 1. Dọn dẹp thư mục temp greytest-run-* còn sót trên host sau sự cố crash
+        try {
+            Path tmpDir = Path.of(System.getProperty("java.io.tmpdir"));
+            if (Files.isDirectory(tmpDir)) {
+                try (var stream = Files.list(tmpDir)) {
+                    stream.filter(p -> p.getFileName().toString().startsWith("greytest-run-"))
+                            .forEach(SandboxTestRunService::deleteTree);
+                }
+            }
+        } catch (Exception ignored) {}
+
+        // 2. Dọn dẹp container greytest-run-* và anonymous volumes mồ côi trên Docker daemon
+        try {
+            Process process = new ProcessBuilder("docker", "ps", "-a", "--filter", "name=greytest-run-", "--format", "{{.Names}}")
+                    .redirectErrorStream(true)
+                    .start();
+            try (var reader = new java.io.BufferedReader(new java.io.InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    String containerName = line.trim();
+                    if (containerName.startsWith("greytest-run-")) {
+                        new ProcessBuilder("docker", "rm", "-f", "-v", containerName)
+                                .redirectErrorStream(true)
+                                .start()
+                                .waitFor(5, TimeUnit.SECONDS);
+                        recordSecurityAudit("ORPHANED_CONTAINER_REMOVED", null, containerName, NETWORK_NONE, "REMOVED", 0,
+                                "Dọn dẹp container và volume mồ côi khi khởi động lại backend");
+                    }
+                }
+            }
+            process.waitFor(5, TimeUnit.SECONDS);
+        } catch (Exception ignored) {}
+    }
 
     @Autowired
     public SandboxTestRunService(UnitTestService units, ProjectRepository projects, CoverageService coverage,
@@ -88,7 +138,7 @@ public class SandboxTestRunService {
         }), SandboxTestRunService::dockerCli);
     }
 
-    SandboxTestRunService(UnitTestService units, ProjectRepository projects, CoverageService coverage,
+    public SandboxTestRunService(UnitTestService units, ProjectRepository projects, CoverageService coverage,
             GenerationJobService jobs, ProjectJavaVersionDetector javaVersions, Executor executor, Docker docker) {
         this.units = units;
         this.projects = projects;
@@ -97,6 +147,13 @@ public class SandboxTestRunService {
         this.javaVersions = javaVersions;
         this.executor = executor;
         this.docker = docker;
+    }
+
+    @Autowired(required = false)
+    private StorageWorkspaceService storageWorkspaceService;
+
+    public void setStorageWorkspaceService(StorageWorkspaceService storageWorkspaceService) {
+        this.storageWorkspaceService = storageWorkspaceService;
     }
 
     public RunState start(Long projectId, String servicePath) {
@@ -263,7 +320,7 @@ public class SandboxTestRunService {
     private record Outcome(RunState state, List<UnitTestService.TestFailure> failures) { }
 
     private record Sandbox(Long projectId, String servicePath, Path work, Path root, String workdir,
-            String container, Set<String> generatedFiles) { }
+            String container, Set<String> generatedFiles, String networkPolicy) { }
 
     private void run(Long projectId, String servicePath, Long repairActorId) {
         Sandbox sandbox = null;
@@ -287,13 +344,52 @@ public class SandboxTestRunService {
 
     private void cleanup(Sandbox sandbox) {
         if (sandbox == null) return;
+        activeSandboxes.remove(sandbox.projectId(), sandbox);
+        long startTime = System.currentTimeMillis();
         try {
-            if (Files.exists(sandbox.work().resolve("container-created")))
-                docker.run(List.of("rm", "-f", sandbox.container()), sandbox.work().resolve("docker.log"));
+            if (Files.exists(sandbox.work().resolve("container-created"))) {
+                docker.run(List.of("rm", "-f", sandbox.container(), "-v"), sandbox.work().resolve("docker.log"));
+                recordSecurityAudit("SANDBOX_CLEANED", sandbox.projectId(), sandbox.container(), NETWORK_NONE, "REMOVED",
+                        System.currentTimeMillis() - startTime, "Container và volume tạm đã được xóa sạch");
+            }
         } catch (IOException | RuntimeException ignored) {
             // Tên có tiền tố greytest-run- để dọn tay nếu Docker không phản hồi.
         }
         deleteTree(sandbox.work());
+    }
+
+    /**
+     * Hủy bỏ tác vụ sandbox đang chạy cho một project và dọn dẹp sạch sẽ tài nguyên.
+     */
+    public void cancel(Long projectId) {
+        if (projectId == null) return;
+        Sandbox sandbox = activeSandboxes.remove(projectId);
+        if (sandbox != null) {
+            cleanup(sandbox);
+            recordSecurityAudit("SANDBOX_CANCELLED", projectId, sandbox.container(), NETWORK_NONE, "CANCELLED", 0,
+                    "Hủy bỏ sandbox theo yêu cầu người dùng");
+        }
+        states.put(projectId, new RunState(Status.FAILED, "Tác vụ chạy test trong sandbox đã bị hủy.", 0, 0, ""));
+        liveLogs.remove(projectId);
+    }
+
+    /**
+     * Xóa sạch toàn bộ tài nguyên sandbox (container, volume tạm, per-project maven cache volume) của project khi xóa project.
+     */
+    public void cleanupProjectResources(Long projectId) {
+        if (projectId == null) return;
+        cancel(projectId);
+        // Xóa per-project Maven cache volume: greytest_sandbox_m2_p{projectId}
+        try {
+            new ProcessBuilder("docker", "volume", "rm", "-f", "greytest_sandbox_m2_p" + projectId)
+                    .redirectErrorStream(true)
+                    .start()
+                    .waitFor(5, TimeUnit.SECONDS);
+            recordSecurityAudit("MAVEN_CACHE_REMOVED", projectId, "greytest_sandbox_m2_p" + projectId, NETWORK_NONE, "REMOVED", 0,
+                    "Xóa per-project Maven cache volume khi xóa project");
+        } catch (Exception ignored) {}
+        states.remove(projectId);
+        liveLogs.remove(projectId);
     }
 
     private record RepairResult(Outcome outcome, String prefix, String note) {
@@ -372,15 +468,26 @@ public class SandboxTestRunService {
         if (project.getStoragePath() == null || project.getStoragePath().isBlank()) {
             throw new IllegalStateException("Project chưa có source trên server.");
         }
+        Path work = createSecureTempDirectory("greytest-run-p" + projectId + "-");
         Path sourceRoot = Path.of(project.getStoragePath()).toAbsolutePath().normalize();
+        if (Boolean.TRUE.equals(project.getStorageEncrypted()) && storageWorkspaceService != null) {
+            Path decryptedRoot = work.resolve("decrypted-source");
+            Files.createDirectories(decryptedRoot);
+            storageWorkspaceService.decryptToDirectory(project, decryptedRoot);
+            sourceRoot = decryptedRoot;
+        }
         Path module = Path.of(servicePath == null || servicePath.isBlank() ? "." : servicePath).normalize();
         // servicePath đến từ request: không cho trỏ ra ngoài thư mục source của project.
         if (module.isAbsolute() || !sourceRoot.resolve(module).normalize().startsWith(sourceRoot)) {
             throw new IllegalStateException("Đường dẫn module không hợp lệ.");
         }
-        Path work = Files.createTempDirectory("greytest-run-");
-        return new Sandbox(projectId, servicePath, work, sourceRoot, "/work" + (module.toString().isEmpty() ? "" : "/" + module.toString().replace('\\', '/')),
-                "greytest-run-" + UUID.randomUUID(), new java.util.LinkedHashSet<>());
+        String defaultPolicy = System.getProperty("greytest.sandbox.network-policy",
+                System.getenv().getOrDefault("GREYTEST_SANDBOX_NETWORK_POLICY", NETWORK_ISOLATED));
+        String networkPolicy = ALLOWED_NETWORKS.contains(defaultPolicy) ? defaultPolicy : NETWORK_ISOLATED;
+        Sandbox sandbox = new Sandbox(projectId, servicePath, work, sourceRoot, "/work" + (module.toString().isEmpty() ? "" : "/" + module.toString().replace('\\', '/')),
+                "greytest-run-" + UUID.randomUUID(), new java.util.LinkedHashSet<>(), networkPolicy);
+        activeSandboxes.put(projectId, sandbox);
+        return sandbox;
     }
 
     private Outcome attempt(Sandbox sandbox, boolean fast) {
@@ -467,11 +574,49 @@ public class SandboxTestRunService {
         sandbox.generatedFiles().addAll(files);
     }
 
+    private void ensureNetwork(String network) {
+        if (NETWORK_ISOLATED.equals(network)) {
+            try {
+                new ProcessBuilder("docker", "network", "create", "--driver", "bridge", NETWORK_ISOLATED)
+                        .redirectErrorStream(true)
+                        .start()
+                        .waitFor(5, TimeUnit.SECONDS);
+            } catch (Exception ignored) {
+                // Network có thể đã tồn tại hoặc môi trường test mock
+            }
+        }
+    }
+
     private void createContainer(Sandbox sandbox, Path source, Path log) throws IOException {
         Files.createFile(sandbox.work().resolve("container-created"));
-        requireDocker(List.of("create", "--name", sandbox.container(), "--memory", "2g", "--cpus", "2",
-                "--pids-limit", "512", "--security-opt", "no-new-privileges", "-v", "greytest_sandbox_m2:/root/.m2",
-                "-w", sandbox.workdir(), image(sandbox.projectId()), "sh", "-c", "while :; do sleep 3600; done"), log);
+        String selectedImage = image(sandbox.projectId());
+        validateImage(selectedImage);
+        validateContainerName(sandbox.container());
+        validateNetwork(sandbox.networkPolicy());
+        ensureNetwork(sandbox.networkPolicy());
+        String cacheVolume = "greytest_sandbox_m2_p" + sandbox.projectId();
+        String m2Mount = selectedImage.startsWith("greytest-sandbox") ? "/home/greytest/.m2" : "/home/ubuntu/.m2";
+
+        List<String> createArgs = new ArrayList<>(List.of(
+                "create", "--name", sandbox.container(),
+                "--network", sandbox.networkPolicy(),
+                "--memory", "2g",
+                "--cpus", "2",
+                "--pids-limit", "512",
+                "--cap-drop", "ALL",
+                "--security-opt", "no-new-privileges:true",
+                "--read-only",
+                "--user", "1000:1000",
+                "--tmpfs", "/tmp:exec,mode=1777,size=256m",
+                "-v", cacheVolume + ":" + m2Mount,
+                "-v", "/work",
+                "-w", sandbox.workdir(),
+                selectedImage,
+                "sh", "-c", "while :; do sleep 3600; done"
+        ));
+        requireDocker(createArgs, log);
+        recordSecurityAudit("SANDBOX_CREATED", sandbox.projectId(), sandbox.container(), sandbox.networkPolicy(), "SUCCESS", 0,
+                "Khởi tạo container bảo mật với network policy: " + sandbox.networkPolicy());
         Path root = source;
         if (source.equals(sandbox.root())) {
             root = sandbox.work().resolve("project");
@@ -495,11 +640,28 @@ public class SandboxTestRunService {
 
     private void execute(Sandbox sandbox, boolean fast, boolean offline, Path log) throws IOException {
         Files.writeString(log, "");
+        long startTime = System.currentTimeMillis();
+
+        // Phase 3.2: Ngắt kết nối mạng khi chạy offline (Air-Gap); kết nối lại nếu cần online
+        if (offline) {
+            disconnectNetwork(sandbox.projectId(), sandbox.container(), sandbox.networkPolicy(), log);
+        } else {
+            connectNetwork(sandbox.container(), sandbox.networkPolicy(), log);
+        }
+
+        recordSecurityAudit("TEST_EXECUTION_STARTED", sandbox.projectId(), sandbox.container(),
+                offline ? NETWORK_NONE : sandbox.networkPolicy(), "RUNNING", 0,
+                offline ? "Bắt đầu chạy test trong môi trường Air-Gap" : "Bắt đầu tải dependency");
+
         List<String> command = new ArrayList<>(List.of("exec"));
         if (fast) command.addAll(List.of("-e", "GREYTEST_FAST_RERUN=1"));
         command.addAll(List.of(sandbox.container(), "sh", "./run-greytest-coverage.sh", "-B", "-ntp"));
         if (offline) command.add("-o");
         int exit = docker.run(command, log).exitCode();
+        long duration = System.currentTimeMillis() - startTime;
+        recordSecurityAudit("TEST_EXECUTION_FINISHED", sandbox.projectId(), sandbox.container(),
+                offline ? NETWORK_NONE : sandbox.networkPolicy(),
+                exit == 0 ? "SUCCESS" : "EXIT_" + exit, duration, "Hoàn tất chạy test");
         if (exit == -1) throw new IOException("Chạy test trong sandbox quá thời gian cho phép. " + tail(log));
         String output = Files.readString(log);
         if (offline && exit != 0 && output.contains("offline")
@@ -508,10 +670,121 @@ public class SandboxTestRunService {
         }
     }
 
+    private void connectNetwork(String container, String network, Path log) {
+        if (NETWORK_NONE.equals(network)) {
+            return;
+        }
+        try {
+            docker.run(List.of("network", "connect", network, container), log);
+        } catch (Exception ignored) {}
+    }
+
+    private void disconnectNetwork(Long projectId, String container, String network, Path log) {
+        if (NETWORK_NONE.equals(network)) {
+            recordSecurityAudit("AIR_GAP_ENFORCED", projectId, container, NETWORK_NONE, "ALREADY_NONE", 0,
+                    "Container đã khởi tạo ở chế độ air-gap (network=none), không cần ngắt kết nối");
+            return;
+        }
+        try {
+            var res = docker.run(List.of("network", "disconnect", network, container), log);
+            if (res.exitCode() != 0) {
+                auditLogger.warn("[SANDBOX_AUDIT] Failed to disconnect network {} from container {}: exit={}", network, container, res.exitCode());
+                throw new SecurityException("Không thể ngắt kết nối mạng an toàn (" + network + ") cho sandbox container: exit=" + res.exitCode());
+            } else {
+                recordSecurityAudit("AIR_GAP_ENFORCED", projectId, container, NETWORK_NONE, "DISCONNECTED", 0,
+                        "Ngắt kết nối mạng trước khi chạy Unit Test");
+            }
+        } catch (SecurityException se) {
+            throw se;
+        } catch (Exception e) {
+            auditLogger.warn("[SANDBOX_AUDIT] Exception disconnecting network {} from container {}: {}", network, container, e.getMessage());
+            throw new SecurityException("Lỗi hệ thống khi ngắt kết nối mạng sandbox container: " + e.getMessage(), e);
+        }
+    }
+
     private String image(Long projectId) {
         String version = javaVersions.detect(projectId).map(ProjectJavaVersionDetector.JavaVersionInfo::version)
                 .map(value -> value.startsWith("1.") ? value.substring(2) : value).orElse("17");
-        return "maven:3.9-eclipse-temurin-" + (JAVA_IMAGES.contains(version) ? version : "17");
+        String ver = JAVA_IMAGES.contains(version) ? version : "17";
+        String prefix = System.getProperty("greytest.sandbox.image-prefix",
+                System.getenv().getOrDefault("GREYTEST_SANDBOX_IMAGE_PREFIX", "greytest-sandbox:"));
+        return prefix + ver;
+    }
+
+    public static void validateImage(String image) {
+        if (image == null || !ALLOWED_IMAGES.contains(image)) {
+            throw new IllegalArgumentException("Docker image không nằm trong allowlist an toàn: " + image);
+        }
+    }
+
+    public static void validateContainerName(String name) {
+        if (name == null || !name.matches("^greytest-run-[a-zA-Z0-9\\-]{1,64}$")) {
+            throw new IllegalArgumentException("Tên container không hợp lệ: " + name);
+        }
+    }
+
+    public static void validateMount(String mount) {
+        if (mount == null || mount.isBlank()) {
+            throw new IllegalArgumentException("Mount volume không hợp lệ.");
+        }
+        if (mount.contains("/var/run/docker.sock") || mount.contains("/etc")
+                || mount.contains("/proc") || mount.contains("/sys") || mount.contains("/app/storage")
+                || mount.startsWith("/root") || mount.matches("^[a-zA-Z]:.*")) {
+            throw new SecurityException("Cấm mount các thư mục hệ thống hoặc dữ liệu nhạy cảm: " + mount);
+        }
+        if (mount.contains(":")) {
+            String hostPart = mount.substring(0, mount.indexOf(':'));
+            if (hostPart.startsWith("/") || hostPart.startsWith("\\") || hostPart.matches("^[a-zA-Z]:.*") || hostPart.contains("..")) {
+                throw new SecurityException("Cấm bind-mount trực tiếp đường dẫn host vào sandbox: " + mount);
+            }
+        }
+    }
+
+    public static void validateDockerArgs(List<String> args) {
+        if (args == null || args.isEmpty()) {
+            throw new IllegalArgumentException("Danh sách tham số Docker không được rỗng.");
+        }
+        for (int i = 0; i < args.size(); i++) {
+            String arg = args.get(i);
+            if (arg == null) {
+                throw new IllegalArgumentException("Tham số Docker không được null.");
+            }
+            if (arg.contains("\n") || arg.contains("\r")) {
+                throw new IllegalArgumentException("Tham số Docker chứa ký tự xuống dòng nguy hiểm: " + arg);
+            }
+            if (arg.startsWith("--privileged")) {
+                throw new SecurityException("Không được phép sử dụng cờ --privileged.");
+            }
+            if (arg.startsWith("--mount")) {
+                throw new SecurityException("Không được phép sử dụng cờ --mount tùy ý.");
+            }
+            if (arg.equals("--net=host") || arg.equals("--network=host")
+                    || ((arg.equals("--net") || arg.equals("--network")) && i + 1 < args.size() && "host".equalsIgnoreCase(args.get(i + 1)))) {
+                recordSecurityAudit("SECURITY_VIOLATION_BLOCKED", null, null, "HOST_NETWORK", "BLOCKED", 0, "Cấm host network");
+                throw new SecurityException("Cấm sử dụng host network trong sandbox: " + arg);
+            }
+            if (arg.equals("-v") || arg.equals("--volume")) {
+                if (i + 1 < args.size()) {
+                    validateMount(args.get(i + 1));
+                }
+            } else if (arg.startsWith("--volume=")) {
+                validateMount(arg.substring("--volume=".length()));
+            }
+        }
+    }
+
+    public static void validateNetwork(String network) {
+        if (network == null || !ALLOWED_NETWORKS.contains(network)) {
+            recordSecurityAudit("SECURITY_VIOLATION_BLOCKED", null, null, network, "BLOCKED", 0, "Network không hợp lệ");
+            throw new SecurityException("Network không nằm trong allowlist an toàn: " + network);
+        }
+    }
+
+    public static void recordSecurityAudit(String event, Long projectId, String container, String networkPolicy,
+            String status, long durationMs, String detail) {
+        auditLogger.info("[SANDBOX_AUDIT] event={} projectId={} containerId={} networkPolicy={} status={} durationMs={} detail={}",
+                event, projectId != null ? projectId : "N/A", container != null ? container : "N/A",
+                networkPolicy != null ? networkPolicy : "NONE", status, durationMs, detail);
     }
 
     /** Tổng số test và số test không đạt (failures + errors) từ báo cáo Surefire. */
@@ -607,7 +880,30 @@ public class SandboxTestRunService {
         }
     }
 
-    private static void deleteTree(Path dir) {
+    public static Path createSecureTempDirectory(String prefix) throws IOException {
+        Path tempDir;
+        try {
+            if (java.nio.file.FileSystems.getDefault().supportedFileAttributeViews().contains("posix")) {
+                var attrs = java.nio.file.attribute.PosixFilePermissions.asFileAttribute(
+                        java.nio.file.attribute.PosixFilePermissions.fromString("rwx------"));
+                tempDir = Files.createTempDirectory(prefix, attrs);
+            } else {
+                tempDir = Files.createTempDirectory(prefix);
+                File file = tempDir.toFile();
+                file.setReadable(false, false);
+                file.setReadable(true, true);
+                file.setWritable(false, false);
+                file.setWritable(true, true);
+                file.setExecutable(false, false);
+                file.setExecutable(true, true);
+            }
+        } catch (Exception e) {
+            tempDir = Files.createTempDirectory(prefix);
+        }
+        return tempDir;
+    }
+
+    public static void deleteTree(Path dir) {
         if (dir == null) return;
         try (var paths = Files.walk(dir)) {
             paths.sorted(Comparator.reverseOrder()).forEach(path -> path.toFile().delete());
@@ -617,6 +913,7 @@ public class SandboxTestRunService {
     }
 
     static Result dockerCli(List<String> args, Path log) throws IOException {
+        validateDockerArgs(args);
         List<String> command = new ArrayList<>(List.of("docker"));
         command.addAll(args);
         Process process = new ProcessBuilder(command).redirectErrorStream(true)
