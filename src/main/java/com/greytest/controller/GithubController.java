@@ -59,7 +59,7 @@ public class GithubController {
         ProjectDto project = projectService.createFromGithubWithToken(
                 request.cloneUrl(),
                 request.branch(),
-                user.getGithubAccessToken(),
+                githubOAuthService.accessToken(user),
                 user);
         return ResponseEntity.status(HttpStatus.CREATED).body(project);
     }

@@ -32,7 +32,8 @@ class GithubOAuthServiceTest {
                 "test-client-secret",
                 "http://localhost:5173/auth/callback/github",
                 userRepository,
-                authService);
+                authService,
+                new SettingsCipher("github-oauth-test-secret"));
 
         assertThat(service.isConfigured()).isTrue();
         GithubConfigResponse config = service.getConfig();
@@ -48,7 +49,8 @@ class GithubOAuthServiceTest {
                 "",
                 "http://localhost:5173/auth/callback/github",
                 userRepository,
-                authService);
+                authService,
+                new SettingsCipher("github-oauth-test-secret"));
 
         assertThat(service.isConfigured()).isFalse();
         assertThat(service.getConfig().enabled()).isFalse();
@@ -61,7 +63,8 @@ class GithubOAuthServiceTest {
                 "",
                 "http://localhost:5173/auth/callback/github",
                 userRepository,
-                authService);
+                authService,
+                new SettingsCipher("github-oauth-test-secret"));
 
         assertThatThrownBy(() -> service.loginWithGithub("test-code", null))
                 .isInstanceOf(AuthException.class)
@@ -75,7 +78,8 @@ class GithubOAuthServiceTest {
                 "client-secret",
                 "http://localhost:5173/auth/callback/github",
                 userRepository,
-                authService);
+                authService,
+                new SettingsCipher("github-oauth-test-secret"));
 
         assertThatThrownBy(() -> service.loginWithGithub("  ", null))
                 .isInstanceOf(AuthException.class)
@@ -89,7 +93,8 @@ class GithubOAuthServiceTest {
                 "client-secret",
                 "http://localhost:5173/auth/callback/github",
                 userRepository,
-                authService);
+                authService,
+                new SettingsCipher("github-oauth-test-secret"));
 
         AuthUser user = new AuthUser();
         user.setEmail("user@example.com");
@@ -107,7 +112,8 @@ class GithubOAuthServiceTest {
                 "",
                 "http://localhost:3000/auth/callback/github",
                 userRepository,
-                authService);
+                authService,
+                new SettingsCipher("github-oauth-test-secret"));
 
         AuthUser user = new AuthUser();
         user.setEmail("user@example.com");
@@ -122,5 +128,32 @@ class GithubOAuthServiceTest {
         assertThat(updated.getGithubUsername()).isNull();
         assertThat(updated.getGithubAccessToken()).isNull();
         verify(userRepository).save(user);
+    }
+
+    @Test
+    void githubTokenIsStoredEncryptedAndNeverUsedAsPlaintext() {
+        SettingsCipher cipher = new SettingsCipher("github-oauth-test-secret");
+        GithubOAuthService service = new GithubOAuthService(
+                "client-id", "client-secret", "http://localhost:3000/auth/callback/github",
+                userRepository, authService, cipher);
+        AuthUser user = new AuthUser();
+
+        String sealed = org.springframework.test.util.ReflectionTestUtils.invokeMethod(service, "seal", "gho_secret_token");
+        assertThat(sealed).isNotNull().doesNotContain("gho_secret_token");
+        user.setGithubAccessToken(sealed);
+        assertThat(service.accessToken(user)).isEqualTo("gho_secret_token");
+
+        // Token cũ lưu dạng văn bản thường không được dùng tiếp: người dùng phải kết nối lại.
+        user.setGithubAccessToken("gho_legacy_plaintext");
+        assertThat(service.accessToken(user)).isNull();
+    }
+
+    @Test
+    void githubTokenIsNotStoredWithoutSettingsSecret() {
+        GithubOAuthService service = new GithubOAuthService(
+                "client-id", "client-secret", "http://localhost:3000/auth/callback/github",
+                userRepository, authService, new SettingsCipher(""));
+        String sealed = org.springframework.test.util.ReflectionTestUtils.invokeMethod(service, "seal", "gho_secret_token");
+        assertThat(sealed).isNull();
     }
 }

@@ -209,6 +209,7 @@ public class AuthService {
             user.setRole(UserRole.USER);
             user.setTier(com.greytest.entity.enums.UserTier.FREE);
             user.setEnabled(true);
+            user.setEmailVerified(true);
             user = userRepository.save(user);
             recordLoginEvent(user, "GOOGLE_REGISTER");
         } else {
@@ -219,6 +220,9 @@ public class AuthService {
                 throw new AuthException("ADMIN_LOGIN_REQUIRED",
                         "Tài khoản quản trị phải đăng nhập tại cổng đăng nhập Admin",
                         HttpStatus.FORBIDDEN);
+            }
+            if (claimByVerifiedEmail(user, passwordEncoder)) {
+                user = userRepository.save(user);
             }
             recordLoginEvent(user, "GOOGLE_OAUTH");
         }
@@ -379,6 +383,11 @@ public class AuthService {
         }
 
         user.setPasswordHash(passwordEncoder.encode(request.newPassword()));
+        if (mailService != null && mailService.isSmtpConfigured()) {
+            // Mã chỉ đến được hộp thư của chủ email nên coi là đã xác minh.
+            user.setEmailVerified(true);
+        }
+        invalidateSessions(user);
         userRepository.save(user);
 
         String normalizedEmail = normalizeEmail(user.getEmail());
@@ -390,6 +399,25 @@ public class AuthService {
         loginAttemptMap.keySet().removeIf(key -> key.endsWith("|" + normalizedEmail));
 
         return new PasswordActionResponse("Đặt lại mật khẩu thành công. Bạn có thể đăng nhập bằng mật khẩu mới.");
+    }
+
+    /**
+     * Nhà cung cấp OAuth vừa xác nhận chủ email. Nếu tài khoản được tạo bằng mật khẩu mà chưa xác minh email thì
+     * người tạo có thể là kẻ chiếm chỗ: hủy mật khẩu và mọi phiên cũ. Trả true nếu tài khoản đã thay đổi.
+     */
+    static boolean claimByVerifiedEmail(AuthUser user, PasswordEncoder encoder) {
+        if (Boolean.TRUE.equals(user.getEmailVerified())) {
+            return false;
+        }
+        user.setPasswordHash(encoder.encode(UUID.randomUUID().toString()));
+        user.setEmailVerified(true);
+        invalidateSessions(user);
+        return true;
+    }
+
+    /** JWT chỉ lưu thời điểm cấp tới giây nên cắt phần lẻ để phiên mới cấp ngay sau đó vẫn dùng được. */
+    private static void invalidateSessions(AuthUser user) {
+        user.setSessionsValidFrom(java.time.LocalDateTime.now().truncatedTo(java.time.temporal.ChronoUnit.SECONDS));
     }
 
     private AuthUser verifyAndConsumeOtp(String rawEmail, String otp) {
@@ -555,10 +583,14 @@ public class AuthService {
 
     @Transactional(readOnly = true)
     public AuthUser currentUser(String authorizationHeader) {
-        Long userId = parseBearerToken(authorizationHeader)
+        BearerToken token = parseBearerToken(authorizationHeader)
                 .orElseThrow(() -> unauthorized("Token không hợp lệ hoặc đã hết hạn"));
-        AuthUser user = userRepository.findById(userId)
+        AuthUser user = userRepository.findById(token.userId())
                 .orElseThrow(() -> unauthorized("Người dùng không tồn tại"));
+        if (user.getSessionsValidFrom() != null && token.issuedAt().toInstant()
+                .isBefore(user.getSessionsValidFrom().atZone(java.time.ZoneId.systemDefault()).toInstant())) {
+            throw unauthorized("Phiên đăng nhập đã bị hủy. Vui lòng đăng nhập lại");
+        }
         if (!Boolean.TRUE.equals(user.getEnabled())) {
             throw new AuthException("ACCOUNT_DISABLED", "Tài khoản của bạn đã bị vô hiệu hóa", HttpStatus.FORBIDDEN);
         }
@@ -602,7 +634,10 @@ public class AuthService {
         }
     }
 
-    private Optional<Long> parseBearerToken(String authorizationHeader) {
+    private record BearerToken(long userId, Date issuedAt) {
+    }
+
+    private Optional<BearerToken> parseBearerToken(String authorizationHeader) {
         try {
             if (authorizationHeader == null || !authorizationHeader.startsWith("Bearer ")) {
                 return Optional.empty();
@@ -631,7 +666,7 @@ public class AuthService {
                 return Optional.empty();
             }
             long userId = Long.parseLong(claims.getSubject());
-            return userId > 0 ? Optional.of(userId) : Optional.empty();
+            return userId > 0 ? Optional.of(new BearerToken(userId, issuedAt)) : Optional.empty();
         } catch (ParseException | JOSEException | IllegalArgumentException exception) {
             return Optional.empty();
         }

@@ -90,6 +90,7 @@ public class StorageMigrationService {
         deleteTreeQuietly(stagingEncDir);
         deleteTreeQuietly(verifyDecDir);
 
+        Path swappedBackup = null;
         try {
             // 1. Mã hóa toàn bộ thư mục vào staging
             encryptionService.encryptDirectory(originalDir, stagingEncDir, dek, projectId);
@@ -130,21 +131,11 @@ public class StorageMigrationService {
 
             // 4. Áp dụng chính thức (Atomic Swap có cơ chế phục hồi và trì hoãn xóa backup đến khi commit)
             Path backupPlainDir = originalDir.resolveSibling(originalDir.getFileName().toString() + ".bak-plain");
-            deleteTreeQuietly(backupPlainDir);
+            requireNoLeftoverBackup(backupPlainDir);
 
-            try {
-                moveOrReplace(originalDir, backupPlainDir);
-                moveOrReplace(stagingEncDir, originalDir);
-            } catch (Exception moveEx) {
-                if (Files.exists(backupPlainDir) && !Files.exists(originalDir)) {
-                    try {
-                        moveOrReplace(backupPlainDir, originalDir);
-                    } catch (Exception restoreEx) {
-                        log.error("Lỗi khôi phục backupPlainDir cho project {}: {}", projectId, restoreEx.getMessage());
-                    }
-                }
-                throw moveEx;
-            }
+            moveOrReplace(originalDir, backupPlainDir);
+            swappedBackup = backupPlainDir;
+            moveOrReplace(stagingEncDir, originalDir);
 
             // Cập nhật Database metadata
             project.setStorageEncrypted(true);
@@ -162,14 +153,8 @@ public class StorageMigrationService {
                     }
                     @Override
                     public void afterCompletion(int status) {
-                        if (status != STATUS_COMMITTED) {
-                            if (Files.exists(backupPlainDir) && !Files.exists(originalDir)) {
-                                try {
-                                    moveOrReplace(backupPlainDir, originalDir);
-                                } catch (Exception ex) {
-                                    log.error("DB rollback khôi phục thất bại cho project {}: {}", projectId, ex.getMessage());
-                                }
-                            }
+                        if (status == STATUS_ROLLED_BACK) {
+                            restoreBackup(backupPlainDir, originalDir, projectId);
                         }
                     }
                 });
@@ -185,15 +170,8 @@ public class StorageMigrationService {
             // Phục hồi nguyên trạng nếu có lỗi
             deleteTreeQuietly(stagingEncDir);
             deleteTreeQuietly(verifyDecDir);
-            if (originalDir != null) {
-                Path backupPlainDir = originalDir.resolveSibling(originalDir.getFileName().toString() + ".bak-plain");
-                if (Files.exists(backupPlainDir) && !Files.exists(originalDir)) {
-                    try {
-                        moveOrReplace(backupPlainDir, originalDir);
-                    } catch (Exception restoreEx) {
-                        log.error("Lỗi khôi phục backupPlainDir cho project {}: {}", projectId, restoreEx.getMessage());
-                    }
-                }
+            if (swappedBackup != null) {
+                restoreBackup(swappedBackup, originalDir, projectId);
             }
             log.error("Migration project {} thất bại, dữ liệu gốc được bảo toàn: {}", projectId, e.getMessage(), e);
             throw new StorageException("Migration project " + projectId + " thất bại: " + e.getMessage(), e);
@@ -218,27 +196,18 @@ public class StorageMigrationService {
         Path stagingPlainDir = encryptedDir.resolveSibling(encryptedDir.getFileName().toString() + ".staging-plain");
         deleteTreeQuietly(stagingPlainDir);
 
+        Path swappedBackup = null;
         try {
             // Giải mã ra staging
             encryptionService.decryptDirectory(encryptedDir, stagingPlainDir, dek, projectId);
 
             // Atomic Swap có cơ chế phục hồi
             Path backupEncDir = encryptedDir.resolveSibling(encryptedDir.getFileName().toString() + ".bak-enc");
-            deleteTreeQuietly(backupEncDir);
+            requireNoLeftoverBackup(backupEncDir);
 
-            try {
-                moveOrReplace(encryptedDir, backupEncDir);
-                moveOrReplace(stagingPlainDir, encryptedDir);
-            } catch (Exception moveEx) {
-                if (Files.exists(backupEncDir) && !Files.exists(encryptedDir)) {
-                    try {
-                        moveOrReplace(backupEncDir, encryptedDir);
-                    } catch (Exception restoreEx) {
-                        log.error("Lỗi khôi phục backupEncDir cho rollback project {}: {}", projectId, restoreEx.getMessage());
-                    }
-                }
-                throw moveEx;
-            }
+            moveOrReplace(encryptedDir, backupEncDir);
+            swappedBackup = backupEncDir;
+            moveOrReplace(stagingPlainDir, encryptedDir);
 
             project.setStorageEncrypted(false);
             project.setEncryptedDek(null);
@@ -254,14 +223,8 @@ public class StorageMigrationService {
                     }
                     @Override
                     public void afterCompletion(int status) {
-                        if (status != STATUS_COMMITTED) {
-                            if (Files.exists(backupEncDir) && !Files.exists(encryptedDir)) {
-                                try {
-                                    moveOrReplace(backupEncDir, encryptedDir);
-                                } catch (Exception ex) {
-                                    log.error("DB rollback khôi phục thất bại cho rollback project {}: {}", projectId, ex.getMessage());
-                                }
-                            }
+                        if (status == STATUS_ROLLED_BACK) {
+                            restoreBackup(backupEncDir, encryptedDir, projectId);
                         }
                     }
                 });
@@ -273,15 +236,8 @@ public class StorageMigrationService {
             return new RollbackResult(projectId, "ROLLBACK_SUCCESS", "Đã giải mã dự án về dạng plaintext thành công.");
         } catch (Exception e) {
             deleteTreeQuietly(stagingPlainDir);
-            if (encryptedDir != null) {
-                Path backupEncDir = encryptedDir.resolveSibling(encryptedDir.getFileName().toString() + ".bak-enc");
-                if (Files.exists(backupEncDir) && !Files.exists(encryptedDir)) {
-                    try {
-                        moveOrReplace(backupEncDir, encryptedDir);
-                    } catch (Exception restoreEx) {
-                        log.error("Lỗi khôi phục backupEncDir cho rollback project {}: {}", projectId, restoreEx.getMessage());
-                    }
-                }
+            if (swappedBackup != null) {
+                restoreBackup(swappedBackup, encryptedDir, projectId);
             }
             throw new StorageException("Rollback project " + projectId + " thất bại: " + e.getMessage(), e);
         }
@@ -305,6 +261,25 @@ public class StorageMigrationService {
         projectRepository.save(project);
         log.info("Đã rotate KEK thành công cho project {} sang version {}", projectId, newKeyVersion);
         return new MigrationResult(projectId, "ROTATED", 1, 0, "Đã re-wrap DEK thành công sang KEK version: " + newKeyVersion);
+    }
+
+    /** Bản sao còn sót lại có thể là bản gốc duy nhất của lần chạy bị gián đoạn: không được tự xóa. */
+    private void requireNoLeftoverBackup(Path backup) {
+        if (Files.exists(backup)) {
+            throw new StorageException("Còn bản sao lưu của lần chuyển đổi bị gián đoạn: " + backup
+                    + ". Cần kiểm tra và khôi phục thủ công trước khi chạy lại.");
+        }
+    }
+
+    /** Đưa bản sao lưu về chỗ cũ khi DB không commit; bản vừa hoán đổi không còn khóa trong DB nên phải bỏ. */
+    private void restoreBackup(Path backup, Path current, Long projectId) {
+        if (!Files.exists(backup)) return;
+        try {
+            deleteTreeQuietly(current);
+            moveOrReplace(backup, current);
+        } catch (Exception ex) {
+            log.error("Không khôi phục được bản sao lưu {} cho project {}: {}", backup, projectId, ex.getMessage());
+        }
     }
 
     private void moveOrReplace(Path source, Path target) throws IOException {

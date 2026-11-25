@@ -228,6 +228,12 @@ public class DdosProtectionService {
             }
         }
 
+        // IP còn lại là chính proxy tin cậy nghĩa là proxy không gửi X-Forwarded-For: không biết client nào,
+        // chặn IP này sẽ khóa toàn bộ người dùng phía sau proxy.
+        if (trustedProxyResolver.isTrustedProxy(clientIp)) {
+            return new CheckResult(CheckStatus.ALLOWED, "Trusted proxy exempt", 0);
+        }
+
         // Lưu ý Workstream C: Tuyệt đối KHÔNG miễn trừ toàn bộ cho /api/auth/admin/login để tránh tấn công vét cạn.
         // Endpoint đăng nhập admin được bảo vệ bằng Auth Tier (20 req/phút) và Admin Brute-Force Protection.
 

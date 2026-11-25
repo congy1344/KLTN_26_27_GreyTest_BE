@@ -117,7 +117,7 @@ public class DockerSandboxFaultInjectionIntegrationTest {
         // Container tạo và start thành công; nhưng khi execute test qua docker exec thì bị kill với mã 137
         Docker killedDocker = (args, log) -> {
             executedCommands.add(new ArrayList<>(args));
-            if (args.contains("exec")) {
+            if (args.contains("exec") && !args.contains("cp")) {
                 return new Result(137); // SIGKILL / OOM mid-run
             }
             return new Result(0);
@@ -166,7 +166,7 @@ public class DockerSandboxFaultInjectionIntegrationTest {
         // Mock docker exec trả về exit code -1 (Timeout theo quy ước của SandboxTestRunService.dockerCli)
         Docker timeoutDocker = (args, log) -> {
             executedCommands.add(new ArrayList<>(args));
-            if (args.contains("exec")) {
+            if (args.contains("exec") && !args.contains("cp")) {
                 return new Result(-1); // Process timed out
             }
             return new Result(0);

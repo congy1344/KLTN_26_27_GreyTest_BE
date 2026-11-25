@@ -166,5 +166,20 @@ class DdosProtectionServiceTest {
         assertEquals(0, service.getWafStatus().activeBlockedIpCount());
         assertFalse(service.checkRequest("198.51.100.11", "/api/projects").isBlocked());
     }
-}
 
+    @Test
+    void neverBansTheReverseProxyThatAllUsersShare() {
+        DdosProtectionService behindProxy = new DdosProtectionService(
+                new com.greytest.security.waf.InMemoryRateLimitStore(),
+                new com.greytest.security.waf.TrustedProxyResolver("127.0.0.1/32,172.16.0.0/12"));
+        for (int i = 0; i < 400; i++) {
+            assertFalse(behindProxy.checkRequest("172.18.0.5", "/api/projects").isBlocked());
+        }
+        // Client thật phía sau proxy vẫn bị giới hạn.
+        boolean blocked = false;
+        for (int i = 0; i < 400; i++) {
+            blocked |= behindProxy.checkRequest("203.0.113.9", "/api/projects").isBlocked();
+        }
+        assertTrue(blocked);
+    }
+}

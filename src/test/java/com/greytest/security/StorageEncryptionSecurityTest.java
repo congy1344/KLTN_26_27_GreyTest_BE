@@ -312,6 +312,55 @@ class StorageEncryptionSecurityTest {
     }
 
     @Test
+    @DisplayName("7d. DB không commit: khôi phục đúng bản plaintext gốc, không để lại ciphertext mất khóa")
+    void migrationRestoresPlaintextWhenTransactionRollsBack() throws IOException {
+        Path dir = projectsDir.resolve("proj-migrate-70");
+        Files.createDirectories(dir);
+        Files.writeString(dir.resolve("pom.xml"), "<project>v1</project>");
+        Project project = new Project();
+        project.setId(70L);
+        project.setStoragePath(dir.toString());
+        project.setStorageEncrypted(false);
+        when(projectRepository.findById(70L)).thenReturn(Optional.of(project));
+
+        org.springframework.transaction.support.TransactionSynchronizationManager.initSynchronization();
+        try {
+            migrationService.migrateProject(70L, false);
+            assertThat(encryptionService.isEncryptedFile(dir.resolve("pom.xml"))).isTrue();
+            org.springframework.transaction.support.TransactionSynchronizationManager.getSynchronizations().forEach(sync ->
+                    sync.afterCompletion(org.springframework.transaction.support.TransactionSynchronization.STATUS_ROLLED_BACK));
+        } finally {
+            org.springframework.transaction.support.TransactionSynchronizationManager.clearSynchronization();
+        }
+        assertThat(Files.readString(dir.resolve("pom.xml"))).isEqualTo("<project>v1</project>");
+        assertThat(projectsDir.resolve("proj-migrate-70.bak-plain")).doesNotExist();
+    }
+
+    @Test
+    @DisplayName("7e. Lỗi khi lưu DB hoặc còn bản sao lưu dở dang: không làm mất mã nguồn gốc")
+    void migrationNeverDropsTheOnlyPlaintextCopy() throws IOException {
+        Path dir = projectsDir.resolve("proj-migrate-71");
+        Files.createDirectories(dir);
+        Files.writeString(dir.resolve("pom.xml"), "<project>v1</project>");
+        Project project = new Project();
+        project.setId(71L);
+        project.setStoragePath(dir.toString());
+        project.setStorageEncrypted(false);
+        when(projectRepository.findById(71L)).thenReturn(Optional.of(project));
+        when(projectRepository.save(project)).thenThrow(new IllegalStateException("db down"));
+
+        assertThatThrownBy(() -> migrationService.migrateProject(71L, false)).isInstanceOf(StorageException.class);
+        assertThat(Files.readString(dir.resolve("pom.xml"))).isEqualTo("<project>v1</project>");
+
+        Path leftover = projectsDir.resolve("proj-migrate-71.bak-plain");
+        Files.createDirectories(leftover);
+        Files.writeString(leftover.resolve("pom.xml"), "<project>original</project>");
+        project.setStorageEncrypted(false);
+        assertThatThrownBy(() -> migrationService.migrateProject(71L, false)).isInstanceOf(StorageException.class);
+        assertThat(Files.readString(leftover.resolve("pom.xml"))).isEqualTo("<project>original</project>");
+    }
+
+    @Test
     @DisplayName("8. Dọn dẹp các workspace mồ côi (cleanupLeftoverWorkspaces) khi hệ thống khởi động")
     void cleanupLeftoverWorkspacesOnStartup() throws IOException {
         Path orphanedWs = workspacesDir.resolve("ws-orphaned-123");

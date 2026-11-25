@@ -54,6 +54,13 @@ public class AuthUser {
 
     private Boolean enabled;
 
+    /** Chủ tài khoản đã chứng minh sở hữu email (Google, GitHub hoặc OTP gửi qua email). */
+    @Column(nullable = false)
+    private Boolean emailVerified = false;
+
+    /** JWT cấp trước thời điểm này không còn hiệu lực; null nghĩa là chưa từng hủy phiên. */
+    private java.time.LocalDateTime sessionsValidFrom;
+
     @Column(length = 50)
     private String githubUserId;
 

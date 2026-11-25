@@ -110,7 +110,7 @@ public class GlobalExceptionHandler {
 
     private static String sanitizeErrorMessage(String msg) {
         if (msg == null) return "";
-        return msg.replaceAll("(?i)([a-z]:[/\\\\][^,;\"'<>\r\n]+|/(?:app|var|opt|tmp|home|storage)[^,;\"'<>\r\n]+)", "[REDACTED_PATH]");
+        return msg.replaceAll("(?i)(\\b[a-z]:[/\\\\][^,;\"'<>\r\n]+|/(?:app|var|opt|tmp|home|storage)[^,;\"'<>\r\n]+)", "[REDACTED_PATH]");
     }
 
     @ExceptionHandler(MaxUploadSizeExceededException.class)

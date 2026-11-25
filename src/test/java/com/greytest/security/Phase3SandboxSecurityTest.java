@@ -765,7 +765,7 @@ class Phase3SandboxSecurityTest {
         SandboxTestRunService service = new SandboxTestRunService(
                 units, projects, coverage, jobs, javaVersions,
                 Runnable::run,
-                (args, log) -> args.get(0).equals("exec") ? new SandboxTestRunService.Result(-1) : new SandboxTestRunService.Result(0));
+                (args, log) -> args.get(0).equals("exec") && !args.contains("cp") ? new SandboxTestRunService.Result(-1) : new SandboxTestRunService.Result(0));
 
         service.start(101L, null);
         var state = service.state(101L);

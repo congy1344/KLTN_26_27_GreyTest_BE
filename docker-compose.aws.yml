@@ -39,6 +39,8 @@ services:
       GREYTEST_AUTH_TOKEN_SECRET: ${GREYTEST_AUTH_TOKEN_SECRET:?Set a random JWT secret of at least 32 bytes}
       GREYTEST_SETTINGS_SECRET: ${GREYTEST_SETTINGS_SECRET:-}
       GREYTEST_STORAGE_PATH: /app/storage
+      # Caddy/Vite nằm trong mạng Docker; không khai báo thì mọi người dùng bị tính chung IP của proxy.
+      GREYTEST_WAF_TRUSTED_PROXIES: ${GREYTEST_WAF_TRUSTED_PROXIES:-127.0.0.1/32,::1/128,172.16.0.0/12}
       GREYTEST_AI_CONTEXT_LOG_PATH: /app/log
       GREYTEST_AI_CONTEXT_LOG_ENABLED: "false"
       GREYTEST_AI_CONTEXT_LOG_CONSOLE_ENABLED: "false"

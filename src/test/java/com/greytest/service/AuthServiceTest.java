@@ -430,6 +430,27 @@ class AuthServiceTest {
         assertThat(res.resetUrl()).isNull();
     }
 
+    @Test
+    void verifiedEmailLoginEvictsWhoeverRegisteredTheAddressFirst() {
+        AuthUser squatted = user(UserRole.USER);
+        AuthUserRepository repository = mock(AuthUserRepository.class);
+        when(repository.findById(1L)).thenReturn(Optional.of(squatted));
+        AuthService service = new AuthService(repository, TOKEN_SECRET);
+        String oldSession = "Bearer " + service.issueToken(squatted);
+        assertThat(service.currentUser(oldSession)).isSameAs(squatted);
+
+        assertThat(AuthService.claimByVerifiedEmail(squatted, new BCryptPasswordEncoder())).isTrue();
+        assertThat(new BCryptPasswordEncoder().matches("correct-password", squatted.getPasswordHash())).isFalse();
+        // Lùi mốc để không phụ thuộc việc JWT làm tròn tới giây.
+        squatted.setSessionsValidFrom(squatted.getSessionsValidFrom().plusSeconds(2));
+        assertThatThrownBy(() -> service.currentUser(oldSession)).isInstanceOf(AuthException.class);
+
+        // Lần đăng nhập OAuth sau không đụng tới mật khẩu người dùng đã đặt.
+        String hash = squatted.getPasswordHash();
+        assertThat(AuthService.claimByVerifiedEmail(squatted, new BCryptPasswordEncoder())).isFalse();
+        assertThat(squatted.getPasswordHash()).isEqualTo(hash);
+    }
+
     private AuthUser user(UserRole role) {
         AuthUser user = new AuthUser();
         user.setId(1L);

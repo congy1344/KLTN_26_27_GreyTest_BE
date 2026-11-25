@@ -18,7 +18,6 @@ import org.springframework.http.HttpStatus;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -51,6 +50,7 @@ public class GithubOAuthService {
     private final String redirectUri;
     private final AuthUserRepository userRepository;
     private final AuthService authService;
+    private final SettingsCipher cipher;
     private final ObjectMapper objectMapper;
     private final HttpClient httpClient;
     private final PasswordEncoder passwordEncoder = new BCryptPasswordEncoder();
@@ -61,12 +61,14 @@ public class GithubOAuthService {
             @Value("${greytest.auth.github-client-secret:}") String clientSecret,
             @Value("${greytest.auth.github-redirect-uri:http://localhost:3000/auth/callback/github}") String redirectUri,
             AuthUserRepository userRepository,
-            AuthService authService) {
+            AuthService authService,
+            SettingsCipher cipher) {
         this.clientId = clientId != null ? clientId.trim() : "";
         this.clientSecret = clientSecret != null ? clientSecret.trim() : "";
         this.redirectUri = redirectUri != null ? redirectUri.trim() : "";
         this.userRepository = userRepository;
         this.authService = authService;
+        this.cipher = cipher;
         this.objectMapper = new ObjectMapper();
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(10))
@@ -86,8 +88,8 @@ public class GithubOAuthService {
     /**
      * Xác thực với GitHub bằng authorization code, lấy thông tin tài khoản và đăng
      * nhập/liên kết vào GreyTest.
+     * Không gắn @Transactional để các lời gọi GitHub không giữ kết nối DB.
      */
-    @Transactional
     public LoginResponse loginWithGithub(String code, String authorizationHeader) {
         if (!isConfigured()) {
             throw new AuthException(
@@ -151,11 +153,13 @@ public class GithubOAuthService {
             user.setRole(UserRole.USER);
             user.setTier(UserTier.FREE);
             user.setEnabled(true);
+            user.setEmailVerified(profile.emailVerified());
             user = saveGithubLink(user, profile, accessToken);
             authService.recordLoginEvent(user, "GITHUB_REGISTER");
             log.info("Tạo mới tài khoản qua GitHub OAuth: email={}, github={}", user.getEmail(), profile.login());
         } else {
             assertLoginEligible(user);
+            AuthService.claimByVerifiedEmail(user, passwordEncoder);
             user = saveGithubLink(user, profile, accessToken);
             authService.recordLoginEvent(user, "GITHUB_OAUTH_LINK");
             log.info("Liên kết tài khoản hiện có {} với GitHub @{}", user.getEmail(), profile.login());
@@ -177,16 +181,38 @@ public class GithubOAuthService {
     private AuthUser saveGithubLink(AuthUser user, GithubUserProfile profile, String accessToken) {
         user.setGithubUserId(profile.id());
         user.setGithubUsername(profile.login());
-        user.setGithubAccessToken(accessToken);
+        user.setGithubAccessToken(seal(accessToken));
         return userRepository.save(user);
     }
 
+    /** Token đọc được repo private nên chỉ lưu dạng mã hóa; thiếu GREYTEST_SETTINGS_SECRET thì không lưu. */
+    private String seal(String accessToken) {
+        if (cipher == null || !cipher.isConfigured()) {
+            log.warn("Chưa cấu hình GREYTEST_SETTINGS_SECRET nên không lưu GitHub token; chức năng lấy repository sẽ yêu cầu kết nối lại.");
+            return null;
+        }
+        return cipher.encrypt(accessToken);
+    }
+
+    /** GitHub token đã giải mã của người dùng; null nếu chưa liên kết hoặc không giải mã được. */
+    public String accessToken(AuthUser user) {
+        String stored = user.getGithubAccessToken();
+        if (stored == null || stored.isBlank() || cipher == null || !cipher.isConfigured()) {
+            return null;
+        }
+        try {
+            return cipher.decrypt(stored);
+        } catch (IllegalStateException unreadable) {
+            log.warn("Không giải mã được GitHub token của người dùng {}; cần kết nối lại.", user.getId());
+            return null;
+        }
+    }
+
     /** Ngắt liên kết tài khoản GitHub khỏi người dùng hiện tại và thu hồi grant OAuth trên GitHub (best-effort) */
-    @Transactional
     public AuthUser disconnectGithub(AuthUser user) {
-        String existingToken = user.getGithubAccessToken();
-        if (isConfigured() && existingToken != null && !existingToken.isBlank()) {
-            revokeGithubGrantBestEffort(existingToken.trim());
+        String existingToken = accessToken(user);
+        if (isConfigured() && existingToken != null) {
+            revokeGithubGrantBestEffort(existingToken);
         }
         user.setGithubUserId(null);
         user.setGithubUsername(null);
@@ -233,13 +259,14 @@ public class GithubOAuthService {
      * liên kết.
      */
     public List<GithubRepoDto> getUserRepositories(AuthUser user) {
-        if (user.getGithubAccessToken() == null || user.getGithubAccessToken().isBlank()) {
+        String token = accessToken(user);
+        if (token == null) {
             throw new AuthException("GITHUB_NOT_CONNECTED",
                     "Tài khoản chưa liên kết GitHub. Vui lòng đăng nhập hoặc kết nối tài khoản GitHub trước.",
                     HttpStatus.BAD_REQUEST);
         }
 
-        HttpRequest request = buildGithubGetRequest(GITHUB_REPOS_API, user.getGithubAccessToken(), 15);
+        HttpRequest request = buildGithubGetRequest(GITHUB_REPOS_API, token, 15);
 
         try {
             HttpResponse<String> response = httpClient.send(request,

@@ -90,6 +90,9 @@ public class SandboxTestRunService {
     private final Map<Long, RunState> states = new ConcurrentHashMap<>();
     private final Map<Long, Path> liveLogs = new ConcurrentHashMap<>();
     private final Map<Long, Sandbox> activeSandboxes = new ConcurrentHashMap<>();
+    /** Container đã ngắt mạng: `docker network disconnect` lần hai trả lỗi nên chỉ ngắt một lần. */
+    private final Set<String> airGapped = ConcurrentHashMap.newKeySet();
+    private static final Object IMAGE_LOCK = new Object();
 
     @PostConstruct
     public void cleanupLeftoverSandboxes() {
@@ -345,6 +348,7 @@ public class SandboxTestRunService {
     private void cleanup(Sandbox sandbox) {
         if (sandbox == null) return;
         activeSandboxes.remove(sandbox.projectId(), sandbox);
+        airGapped.remove(sandbox.container());
         long startTime = System.currentTimeMillis();
         try {
             if (Files.exists(sandbox.work().resolve("container-created"))) {
@@ -568,10 +572,39 @@ public class SandboxTestRunService {
             List<String> remove = new ArrayList<>(List.of("exec", container, "rm", "-f", "--"));
             sandbox.generatedFiles().stream().filter(file -> !files.contains(file)).forEach(file -> remove.add(sandbox.workdir() + "/" + file));
             if (remove.size() > 5) requireDocker(remove, log);
-            requireDocker(List.of("cp", exported + File.separator + ".", container + ":" + sandbox.workdir() + "/."), log);
+            copyIn(sandbox, exported, sandbox.workdir(), log);
         }
         sandbox.generatedFiles().clear();
         sandbox.generatedFiles().addAll(files);
+    }
+
+    /** Image sandbox không có trên registry: tự build một lần từ Dockerfile đi kèm ứng dụng. */
+    private void ensureImage(String image, Path work, Path log) throws IOException {
+        if (!image.startsWith("greytest-sandbox:")) return;
+        synchronized (IMAGE_LOCK) {
+            try {
+                if (docker.run(List.of("image", "inspect", image), work.resolve("image-inspect.log")).exitCode() == 0) return;
+            } catch (IOException unavailable) {
+                throw new IOException("Docker không khả dụng.", unavailable);
+            }
+            Path context = Files.createDirectories(work.resolve("sandbox-image"));
+            try (InputStream dockerfile = SandboxTestRunService.class.getResourceAsStream("/sandbox/Dockerfile")) {
+                if (dockerfile == null) throw new IOException("Thiếu Dockerfile của sandbox trong ứng dụng.");
+                Files.copy(dockerfile, context.resolve("Dockerfile"), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            }
+            requireDocker(List.of("build", "-t", image, "--build-arg",
+                    "JAVA_VERSION=" + image.substring(image.indexOf(':') + 1), context.toString()), log);
+        }
+    }
+
+    /**
+     * Đưa file vào /work. `docker cp` luôn tạo file thuộc root trong khi sandbox chạy UID 1000 và bỏ hết capability
+     * (không chown được), nên chép qua volume /stage rồi để chính người dùng sandbox copy sang.
+     */
+    private void copyIn(Sandbox sandbox, Path source, String target, Path log) throws IOException {
+        String stage = "/stage/" + UUID.randomUUID();
+        requireDocker(List.of("cp", source + File.separator + ".", sandbox.container() + ":" + stage), log);
+        requireDocker(List.of("exec", sandbox.container(), "cp", "-R", stage + "/.", target + "/"), log);
     }
 
     private void ensureNetwork(String network) {
@@ -591,6 +624,7 @@ public class SandboxTestRunService {
         Files.createFile(sandbox.work().resolve("container-created"));
         String selectedImage = image(sandbox.projectId());
         validateImage(selectedImage);
+        ensureImage(selectedImage, sandbox.work(), log);
         validateContainerName(sandbox.container());
         validateNetwork(sandbox.networkPolicy());
         ensureNetwork(sandbox.networkPolicy());
@@ -610,6 +644,7 @@ public class SandboxTestRunService {
                 "--tmpfs", "/tmp:exec,mode=1777,size=256m",
                 "-v", cacheVolume + ":" + m2Mount,
                 "-v", "/work",
+                "-v", "/stage",
                 "-w", sandbox.workdir(),
                 selectedImage,
                 "sh", "-c", "while :; do sleep 3600; done"
@@ -622,8 +657,8 @@ public class SandboxTestRunService {
             root = sandbox.work().resolve("project");
             copyTree(source, root);
         }
-        requireDocker(List.of("cp", root + File.separator + ".", sandbox.container() + ":/work"), log);
         requireDocker(List.of("start", sandbox.container()), log);
+        copyIn(sandbox, root, "/work", log);
         Files.createFile(sandbox.work().resolve("container-ready"));
     }
 
@@ -674,6 +709,7 @@ public class SandboxTestRunService {
         if (NETWORK_NONE.equals(network)) {
             return;
         }
+        if (!airGapped.remove(container)) return;
         try {
             docker.run(List.of("network", "connect", network, container), log);
         } catch (Exception ignored) {}
@@ -685,12 +721,14 @@ public class SandboxTestRunService {
                     "Container đã khởi tạo ở chế độ air-gap (network=none), không cần ngắt kết nối");
             return;
         }
+        if (airGapped.contains(container)) return;
         try {
             var res = docker.run(List.of("network", "disconnect", network, container), log);
             if (res.exitCode() != 0) {
                 auditLogger.warn("[SANDBOX_AUDIT] Failed to disconnect network {} from container {}: exit={}", network, container, res.exitCode());
                 throw new SecurityException("Không thể ngắt kết nối mạng an toàn (" + network + ") cho sandbox container: exit=" + res.exitCode());
             } else {
+                airGapped.add(container);
                 recordSecurityAudit("AIR_GAP_ENFORCED", projectId, container, NETWORK_NONE, "DISCONNECTED", 0,
                         "Ngắt kết nối mạng trước khi chạy Unit Test");
             }
