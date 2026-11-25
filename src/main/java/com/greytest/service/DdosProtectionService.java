@@ -63,6 +63,9 @@ public class DdosProtectionService {
     // Giới hạn bộ nhớ tối đa cho bảng theo dõi IP
     public static final int MAX_TRACKED_IPS = 20_000;
 
+    /** Hạn mức của IP proxy dùng chung gấp nhiều lần một client. */
+    private static final int SHARED_PROXY_LIMIT_FACTOR = 10;
+
     // Cấu hình WAF & DDoS
     private final AtomicBoolean wafActive = new AtomicBoolean(true);
     private final AtomicBoolean underAttackMode = new AtomicBoolean(false);
@@ -229,9 +232,15 @@ public class DdosProtectionService {
         }
 
         // IP còn lại là chính proxy tin cậy nghĩa là proxy không gửi X-Forwarded-For: không biết client nào,
-        // chặn IP này sẽ khóa toàn bộ người dùng phía sau proxy.
+        // khóa IP này sẽ khóa toàn bộ người dùng phía sau proxy. Vẫn giới hạn nhịp với hạn mức rộng, chỉ không auto-ban.
         if (trustedProxyResolver.isTrustedProxy(clientIp)) {
-            return new CheckResult(CheckStatus.ALLOWED, "Trusted proxy exempt", 0);
+            int sharedLimit = resolveTierLimit(uri) * SHARED_PROXY_LIMIT_FACTOR;
+            if (!rateLimitStore.recordAndCheck(clientIp + ":" + resolveTierName(uri), 60, sharedLimit)) {
+                totalBlockedRequests.incrementAndGet();
+                totalRateLimitExceeded.incrementAndGet();
+                return new CheckResult(CheckStatus.RATE_LIMITED, "Vượt quá giới hạn tần suất WAF (" + sharedLimit + " req/phút)", 60);
+            }
+            return new CheckResult(CheckStatus.ALLOWED, "Trusted proxy", 0);
         }
 
         // Lưu ý Workstream C: Tuyệt đối KHÔNG miễn trừ toàn bộ cho /api/auth/admin/login để tránh tấn công vét cạn.

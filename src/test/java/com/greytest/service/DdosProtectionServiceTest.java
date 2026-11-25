@@ -175,6 +175,14 @@ class DdosProtectionServiceTest {
         for (int i = 0; i < 400; i++) {
             assertFalse(behindProxy.checkRequest("172.18.0.5", "/api/projects").isBlocked());
         }
+        // IP proxy không phải lối vòng: vượt hạn mức chung thì bị giới hạn nhịp, nhưng không bị khóa IP.
+        DdosProtectionService.CheckResult flooded = null;
+        for (int i = 0; i < 250; i++) {
+            flooded = behindProxy.checkRequest("172.18.0.5", "/api/auth/login");
+        }
+        assertEquals(DdosProtectionService.CheckStatus.RATE_LIMITED, flooded.status());
+        assertFalse(behindProxy.isIpBlocked("172.18.0.5"));
+        assertFalse(behindProxy.checkRequest("172.18.0.5", "/api/projects").isBlocked());
         // Client thật phía sau proxy vẫn bị giới hạn.
         boolean blocked = false;
         for (int i = 0; i < 400; i++) {
