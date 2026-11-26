@@ -66,6 +66,9 @@ public class DdosProtectionService {
     /** Hạn mức của IP proxy dùng chung gấp nhiều lần một client. */
     private static final int SHARED_PROXY_LIMIT_FACTOR = 10;
 
+    /** Hạn mức request/phút cho API theo dõi tiến trình; vượt chỉ trả 429, không tự khóa IP. */
+    private static final int POLLING_TIER_LIMIT = 300;
+
     // Cấu hình WAF & DDoS
     private final AtomicBoolean wafActive = new AtomicBoolean(true);
     private final AtomicBoolean underAttackMode = new AtomicBoolean(false);
@@ -281,7 +284,7 @@ public class DdosProtectionService {
                 int currentMinuteCount = rateLimitStore.getRequestCount(rateKey, 60);
 
                 // Nếu vượt quá 150% ngưỡng cho phép -> tự động khóa IP lũy tiến (10m, 30m, 60m)
-                if (currentMinuteCount > (effectiveLimit * 1.5)) {
+                if (!"polling".equals(tier) && currentMinuteCount > (effectiveLimit * 1.5)) {
                     totalAutoBans.incrementAndGet();
                     int banDuration = calculateProgressiveBanMinutes(clientIp);
                     autoBlockIp(clientIp, "Gửi dồn dập " + currentMinuteCount + " req/phút (ngưỡng: " + effectiveLimit + ")", banDuration);
@@ -304,7 +307,7 @@ public class DdosProtectionService {
                 totalBlockedRequests.incrementAndGet();
                 totalRateLimitExceeded.incrementAndGet();
 
-                if (currentMinuteCount > (effectiveLimit * 1.5)) {
+                if (!"polling".equals(tier) && currentMinuteCount > (effectiveLimit * 1.5)) {
                     totalAutoBans.incrementAndGet();
                     int banDuration = calculateProgressiveBanMinutes(clientIp);
                     autoBlockIp(clientIp, "Gửi dồn dập " + currentMinuteCount + " req/phút (ngưỡng: " + effectiveLimit + ")", banDuration);
@@ -325,6 +328,7 @@ public class DdosProtectionService {
         if (uri == null || uri.isBlank()) return "standard";
         String path = uri.toLowerCase();
         if (path.startsWith("/api/auth/")) return "auth";
+        if (path.contains("/generation-progress")) return "polling";
         if (path.equals("/api/projects/upload") || path.startsWith("/api/projects/upload/")) return "upload";
         if (path.contains("/generate") || path.startsWith("/api/generation/")) return "generation";
         if (path.contains("/export") || path.contains("/download")) return "export";
@@ -346,6 +350,10 @@ public class DdosProtectionService {
             // Các Tier nhạy cảm (Auth, Upload, Generation, Export, Admin) luôn được bảo vệ theo ngưỡng riêng, kể cả khi Safe Mode bật
             if (path.startsWith("/api/auth/")) {
                 return authTierLimit.get();
+            }
+            // Theo dõi tiến trình AI được gọi định kỳ khi đang sinh; nhiều tab mở cùng lúc vẫn không bị chặn nhầm.
+            if (path.contains("/generation-progress")) {
+                return POLLING_TIER_LIMIT;
             }
             if (path.equals("/api/projects/upload") || path.startsWith("/api/projects/upload/")) {
                 return uploadTierLimit.get();

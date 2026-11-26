@@ -26,6 +26,23 @@ class DdosProtectionServiceTest {
     }
 
     @Test
+    void progressPollingHasItsOwnTierAndIsNeverAutoBanned() {
+        org.springframework.test.util.ReflectionTestUtils.setField(service, "burstPerSecondLimit",
+                new java.util.concurrent.atomic.AtomicInteger(10_000));
+        String ip = "10.0.0.42";
+        String progress = "/api/projects/7/generation-progress/UNIT_TEST";
+        assertEquals("polling", service.resolveTierName(progress));
+
+        DdosProtectionService.CheckResult last = null;
+        for (int i = 0; i < 500; i++) last = service.checkRequest(ip, progress);
+
+        // Vượt hạn mức polling chỉ trả 429, không khóa cả IP (khóa IP chặn luôn người dùng chung mạng).
+        assertEquals(DdosProtectionService.CheckStatus.RATE_LIMITED, last.status());
+        assertFalse(service.isIpBlocked(ip));
+        assertFalse(service.checkRequest(ip, "/api/projects").isBlocked());
+    }
+
+    @Test
     void blocksTrafficWhenRateLimitExceeded() {
         service.setStandardRateLimit(5);
         String ip = "10.0.0.99";
