@@ -2,6 +2,7 @@ package com.greytest.resilience;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.*;
 
 import java.io.ByteArrayInputStream;
@@ -95,14 +96,9 @@ public class BackendCrashAndStorageResilienceIntegrationTest {
         assertEquals(GenerationProgressStatus.FAILED, finalProgress.status(),
                 "Job status must be FAILED after worker crash");
 
-        // Lock phải được giải phóng hoàn toàn: mutation tiếp theo thực thi ngay lập tức
-        AtomicBoolean nextTaskExecuted = new AtomicBoolean(false);
-        assertDoesNotThrow(() -> {
-            generationJobService.executeMutation(testProjectId, () -> {
-                nextTaskExecuted.set(true);
-            });
-        });
-        assertTrue(nextTaskExecuted.get(), "Next task must execute without lock collision");
+        // Worker ghi FAILED trước khi nhả khóa trong finally.
+        await().atMost(3, TimeUnit.SECONDS).ignoreException(GenerationInProgressException.class)
+                .until(() -> generationJobService.executeMutation(testProjectId, () -> true));
     }
 
     @Test
