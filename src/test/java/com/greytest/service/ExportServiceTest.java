@@ -121,6 +121,43 @@ class ExportServiceTest {
     }
 
     @Test
+    void exportKemKetQuaChayTestGanNhat() {
+        var sandbox = mock(com.greytest.service.coverage.SandboxTestRunService.class);
+        when(sandbox.state(5L)).thenReturn(new com.greytest.service.coverage.SandboxTestRunService.RunState(
+                com.greytest.service.coverage.SandboxTestRunService.Status.TESTS_FAILED, "Phát hiện 1 test cho kết quả khác mong đợi", 4, 1, ""));
+        when(sandbox.lastRunServicePath(5L)).thenReturn("");
+        org.springframework.test.util.ReflectionTestUtils.setField(service, "sandbox", sandbox);
+
+        assertThat(service.export(5L, "markdown")).contains("## Kết quả chạy test", "| TESTS_FAILED | 4 | 3 | 1 |",
+                "Phát hiện 1 test cho kết quả khác mong đợi");
+        assertThat(service.export(5L, "json")).contains("\"testRun\"", "\"passed\" : 3");
+
+        // Lượt chạy gần nhất thuộc service khác thì report toàn project không lấy kết quả đó
+        when(sandbox.lastRunServicePath(5L)).thenReturn("billing-service");
+        assertThat(service.export(5L, "markdown")).doesNotContain("## Kết quả chạy test");
+    }
+
+    @Test
+    void exportLayKetQuaChayTestDaLuuKhiBackendVuaKhoiDongLai() {
+        var sandbox = mock(com.greytest.service.coverage.SandboxTestRunService.class);
+        when(sandbox.state(5L)).thenReturn(new com.greytest.service.coverage.SandboxTestRunService.RunState(
+                com.greytest.service.coverage.SandboxTestRunService.Status.IDLE, "", 0, 0, ""));
+        org.springframework.test.util.ReflectionTestUtils.setField(service, "sandbox", sandbox);
+        var cov = mock(com.greytest.dto.CoverageReportDto.class);
+        when(cov.gaps()).thenReturn(List.of());
+        when(cov.testsRun()).thenReturn(62);
+        when(cov.testsFailed()).thenReturn(2);
+        when(coverage.latest(5L)).thenReturn(Optional.of(cov));
+
+        assertThat(service.export(5L, "markdown")).contains("## Kết quả chạy test", "| TESTS_FAILED | 62 | 60 | 2 |");
+
+        // Đang chạy lượt mới thì chưa báo kết quả cũ
+        when(sandbox.state(5L)).thenReturn(new com.greytest.service.coverage.SandboxTestRunService.RunState(
+                com.greytest.service.coverage.SandboxTestRunService.Status.RUNNING, "", 0, 0, ""));
+        assertThat(service.export(5L, "markdown")).doesNotContain("## Kết quả chạy test");
+    }
+
+    @Test
     void exportTheoServiceChiLayArtifactsCuaServiceDo() {
         BusinessRule rule = rule();
         rule.setId(1L);

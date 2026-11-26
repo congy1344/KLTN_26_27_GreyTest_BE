@@ -54,7 +54,14 @@ public class SandboxTestRunService {
     public enum Status { IDLE, RUNNING, SUCCEEDED, TESTS_FAILED, FAILED }
 
     /** Trạng thái lần chạy gần nhất của một project; chỉ giữ trong bộ nhớ, mất khi backend khởi động lại. */
-    public record RunState(Status status, String message, int tests, int failed, String logTail) { }
+    public record RunState(Status status, String message, int tests, int failed, String logTail,
+                           boolean compilationError, List<FailedTestDto> failures) {
+        public RunState(Status status, String message, int tests, int failed, String logTail) {
+            this(status, message, tests, failed, logTail, false, List.of());
+        }
+    }
+
+    public record FailedTestDto(String className, String methodName, String testCaseCode, String message) { }
 
     public record Result(int exitCode) { }
 
@@ -79,6 +86,8 @@ public class SandboxTestRunService {
     private static final int MAX_FAILURE_DETAIL = 3000;
     private static final int MAX_REPAIR_ROUNDS = 2;
     private static final int MAX_LISTED_ASSERTIONS = 5;
+    private static final int MAX_REPORTED_FAILURES = 20;
+    private static final int MAX_FAILURE_MESSAGE_LENGTH = 300;
     private static final Pattern SUITE = Pattern.compile("<testsuite\\b[^>]*>");
 
     private final UnitTestService units;
@@ -92,6 +101,10 @@ public class SandboxTestRunService {
     private String mavenArgs = "";
     private final Map<Long, RunState> states = new ConcurrentHashMap<>();
     private final Map<Long, Path> liveLogs = new ConcurrentHashMap<>();
+    // Service của lượt chạy gần nhất theo project ("" = toàn project), để report theo service không lấy nhầm kết quả
+    private final Map<Long, String> runScopes = new ConcurrentHashMap<>();
+    // Báo cáo coverage của lượt xác minh đang xét, theo project + module; lượt chạy lại trong cùng lượt thay báo cáo này
+    private final Map<String, Long> runReports = new ConcurrentHashMap<>();
     private final Map<Long, Sandbox> activeSandboxes = new ConcurrentHashMap<>();
     /** Container đã ngắt mạng: `docker network disconnect` lần hai trả lỗi nên chỉ ngắt một lần. */
     private final Set<String> airGapped = ConcurrentHashMap.newKeySet();
@@ -175,8 +188,14 @@ public class SandboxTestRunService {
             states.put(projectId, previous);
             throw new GenerationInProgressException("Project này đang chạy test trong sandbox. Vui lòng chờ lượt hiện tại xong.");
         }
+        runScopes.put(projectId, java.util.Objects.toString(servicePath, ""));
         executor.execute(() -> run(projectId, servicePath, repairActorId));
         return queued;
+    }
+
+    /** Service của lượt chạy gần nhất; "" là toàn project, null khi chưa chạy. */
+    public String lastRunServicePath(Long projectId) {
+        return runScopes.get(projectId);
     }
 
     public RunState state(Long projectId) {
@@ -187,11 +206,17 @@ public class SandboxTestRunService {
                 ? new RunState(state.status(), state.message(), 0, 0, tail(live)) : state;
     }
 
-    /** Worker giữ độc quyền sandbox từ pre-warm đến xác minh; thread sinh chỉ chờ sau khi đã lưu test. */
-    public void generateAndVerify(Long projectId, String servicePath, Supplier<Boolean> generation) {
+    /**
+     * Worker giữ độc quyền sandbox từ pre-warm đến xác minh; thread sinh chỉ chờ sau khi đã lưu test.
+     *
+     * @param continuation true khi "Tiếp tục sinh": vẫn là vòng coverage cũ nên báo cáo mới thay báo cáo của lượt trước.
+     */
+    public void generateAndVerify(Long projectId, String servicePath, boolean continuation, Supplier<Boolean> generation) {
         CompletableFuture<Boolean> generated = new CompletableFuture<>();
+        runScopes.put(projectId, java.util.Objects.toString(servicePath, ""));
         CompletableFuture<Void> verified = new CompletableFuture<>();
         var worker = GenerationJobContext.wrap(() -> {
+            if (!continuation) startCoverageRound(projectId, servicePath);
             verifyWhenGenerated(projectId, servicePath, generated, verified);
             return null;
         });
@@ -206,6 +231,34 @@ public class SandboxTestRunService {
         } finally {
             generated.complete(false);
             verified.join();
+        }
+    }
+
+    /**
+     * Xác minh nền các Unit Test đã lưu (vòng bổ sung coverage), cùng quy tắc với lượt sinh chính: sửa lỗi kỹ thuật,
+     * loại test không biên dịch được rồi nạp coverage. Gọi sau khi đã nhả khóa project; không ném lỗi vì test đã được lưu.
+     */
+    public void verifyInBackground(Long projectId, String servicePath, Long actorUserId) {
+        runScopes.put(projectId, java.util.Objects.toString(servicePath, ""));
+        states.put(projectId, new RunState(Status.RUNNING, "Đang chờ sandbox để xác minh Unit Test...", 0, 0, ""));
+        try {
+            executor.execute(() -> verifySaved(projectId, servicePath, actorUserId));
+        } catch (RuntimeException unavailable) {
+            warnUnverified(projectId, unavailable);
+        }
+    }
+
+    private void verifySaved(Long projectId, String servicePath, Long actorUserId) {
+        Sandbox sandbox = null;
+        startCoverageRound(projectId, servicePath);
+        try (var scope = GenerationJobContext.openScope(actorUserId)) {
+            sandbox = prepare(projectId, servicePath);
+            verifyGenerated(sandbox, false);
+        } catch (Exception failure) {
+            warnUnverified(projectId, failure);
+        } finally {
+            liveLogs.remove(projectId);
+            cleanup(sandbox);
         }
     }
 
@@ -245,7 +298,7 @@ public class SandboxTestRunService {
                 createContainer(sandbox, sandbox.root(), sandbox.work().resolve("docker.log"));
                 boolean compiled;
                 try {
-                    compiled = docker.run(List.of("exec", "-e", "MAVEN_CONFIG=", "-e", "MAVEN_ARGS=" + mavenArgs,
+                    compiled = docker.run(List.of("exec", "-w", sandbox.workdir(), "-e", "MAVEN_CONFIG=", "-e", "MAVEN_ARGS=" + mavenArgs,
                                     sandbox.container(), "sh", "-c", warmCompile()),
                             sandbox.work().resolve("docker.log")).exitCode() == 0;
                 } catch (IOException | RuntimeException unavailable) {
@@ -282,7 +335,7 @@ public class SandboxTestRunService {
                         + "Phần còn lại chưa được xác minh lại; hãy dùng 'Tiếp tục sinh' để sinh lại các test đã loại.";
                 announce(projectId, message);
                 GenerationProgressService.verificationFinished(message);
-                states.put(projectId, new RunState(Status.FAILED, message, 0, 0, current.state().logTail()));
+                states.put(projectId, new RunState(Status.FAILED, message, 0, 0, current.state().logTail(), true, List.of()));
                 return;
             }
             announce(projectId, "Đã loại " + count + " Unit Test không biên dịch được. Đang xác minh lại phần còn lại...");
@@ -301,7 +354,16 @@ public class SandboxTestRunService {
 
     private static void requireVerified(Outcome outcome) {
         if (outcome.state().status() == Status.FAILED && outcome.failures().isEmpty())
-            throw new IllegalStateException(outcome.state().message());
+            throw new UnverifiedRunException(outcome.state());
+    }
+
+    private static class UnverifiedRunException extends IllegalStateException {
+        private final RunState state;
+
+        UnverifiedRunException(RunState state) {
+            super(state.message());
+            this.state = state;
+        }
     }
 
     private void warnUnverified(Long projectId, Exception failure) {
@@ -310,7 +372,10 @@ public class SandboxTestRunService {
         String message = "Cảnh báo: Unit Test CHƯA được xác minh: " + reason + " Các Unit Test đã lưu được giữ lại.";
         Path log = liveLogs.get(projectId);
         // Giữ chẩn đoán build trước khi sandbox bị dọn, để lỗi cấu hình không che mất lỗi compiler.
-        states.put(projectId, new RunState(Status.FAILED, message, 0, 0, log == null ? "" : tail(log)));
+        String logTail = log == null ? "" : tail(log);
+        RunState state = failure instanceof UnverifiedRunException unverified ? unverified.state : null;
+        states.put(projectId, state == null ? new RunState(Status.FAILED, message, 0, 0, logTail)
+                : new RunState(Status.FAILED, message, state.tests(), state.failed(), logTail, state.compilationError(), state.failures()));
         if (!GenerationProgressService.verificationFinished(message)) GenerationJobContext.log(message);
     }
 
@@ -333,6 +398,7 @@ public class SandboxTestRunService {
 
     private void run(Long projectId, String servicePath, Long repairActorId) {
         Sandbox sandbox = null;
+        startCoverageRound(projectId, servicePath);
         try (var scope = GenerationJobContext.openScope(repairActorId)) {
             sandbox = prepare(projectId, servicePath);
             Outcome first = attempt(sandbox, false);
@@ -487,7 +553,8 @@ public class SandboxTestRunService {
         String message = compileNames.isEmpty() ? state.message() : "Còn " + compileNames.size() + " test không biên dịch được: "
                 + String.join(", ", compileNames.subList(0, Math.min(compileNames.size(), MAX_LISTED_ASSERTIONS)))
                 + (compileNames.size() > MAX_LISTED_ASSERTIONS ? " … và " + (compileNames.size() - MAX_LISTED_ASSERTIONS) + " test khác" : "") + ".";
-        return new RunState(state.status(), prefix + message + note + assertions, state.tests(), state.failed(), state.logTail());
+        return new RunState(state.status(), prefix + message + note + assertions, state.tests(), state.failed(),
+                state.logTail(), state.compilationError(), state.failures());
     }
 
     private Sandbox prepare(Long projectId, String servicePath) throws IOException {
@@ -530,7 +597,8 @@ public class SandboxTestRunService {
         String servicePath = sandbox.servicePath(), container = sandbox.container(), workdir = sandbox.workdir();
         Path work = sandbox.work();
         try {
-            byte[] archive = (allowEmpty ? units.exportSandboxArchive(projectId, servicePath) : units.exportArchive(projectId, servicePath)).content();
+            var exportedArchive = allowEmpty ? units.exportSandboxArchive(projectId, servicePath) : units.exportArchive(projectId, servicePath);
+            byte[] archive = exportedArchive.content();
             Path exported = work.resolve("export");
             deleteTree(exported);
             unzip(archive, exported);
@@ -549,29 +617,59 @@ public class SandboxTestRunService {
             docker.run(List.of("cp", container + ":" + workdir + "/target/surefire-reports", surefire.toString()), dockerLog);
             boolean hasReport = docker.run(List.of("cp", container + ":" + workdir + "/target/site/jacoco/jacoco.xml",
                     report.toString()), dockerLog).exitCode() == 0 && Files.isRegularFile(report);
-            if (!hasReport) {
-                var compilation = SandboxCompilationFailures.parse(Files.readString(log), archive, workdir, MAX_FAILURE_DETAIL);
-                return new Outcome(new RunState(Status.FAILED,
-                        compilation.projectError() == null ? "Không tạo được báo cáo coverage. Xem log bên dưới để biết lỗi biên dịch hoặc cấu hình."
-                                : "Source của project không biên dịch được: " + compilation.projectError(),
-                        0, compilation.failures().size(), tail(log)), compilation.failures());
-            }
+            if (!hasReport) return withoutCoverage(log, surefire, workdir, exportedArchive);
             int[] counts = surefireCounts(surefire);
             byte[] xml = Files.readAllBytes(report);
             String coverageNote = "Coverage đã được cập nhật.";
             try {
-                jobs.executeMutation(projectId, () -> coverage.upload(projectId, servicePath, new XmlUpload(xml)));
+                jobs.executeMutation(projectId, () -> storeCoverage(projectId, servicePath, xml, counts));
             } catch (RuntimeException rejected) {
                 // Coverage chỉ là kết quả đi kèm: module chưa đủ điều kiện nhận coverage thì kết quả chạy test vẫn phải được dùng.
                 coverageNote = "Chưa cập nhật coverage: " + rejected.getMessage();
             }
             int passed = counts[0] - counts[1];
+            var failures = surefireFailures(surefire, exportedArchive);
             return new Outcome(new RunState(counts[1] > 0 ? Status.TESTS_FAILED : Status.SUCCEEDED,
                     "Đã chạy " + counts[0] + " test: " + passed + " đạt, " + counts[1] + " không đạt. " + coverageNote,
-                    counts[0], counts[1], tail(log)), surefireFailures(surefire, archive));
+                    counts[0], counts[1], tail(log), false, failures.reported()), failures.details());
         } catch (Exception failure) {
             return failed(failure);
         }
+    }
+
+    private Outcome withoutCoverage(Path log, Path surefire, String workdir, UnitTestService.ExportArchive archive) throws IOException {
+        var compilation = SandboxCompilationFailures.parse(Files.readString(log), archive.content(), workdir, MAX_FAILURE_DETAIL);
+        String message = compilation.projectError() == null
+                ? "Không tạo được báo cáo coverage. Xem log bên dưới để biết lỗi biên dịch hoặc cấu hình."
+                : "Source của project không biên dịch được: " + compilation.projectError();
+        if (compilation.compilationError()) {
+            return new Outcome(new RunState(Status.FAILED, message, 0, compilation.failures().size(),
+                    tail(log), true, List.of()), compilation.failures());
+        }
+        // Surefire vẫn có thể ghi kết quả test khi JaCoCo không tạo được báo cáo.
+        int[] counts = surefireCounts(surefire);
+        var failures = surefireFailures(surefire, archive);
+        return new Outcome(new RunState(Status.FAILED, message, counts[0], counts[1], tail(log),
+                false, failures.reported()), List.of());
+    }
+
+    private static String reportKey(Long projectId, String servicePath) {
+        return projectId + ":" + java.util.Objects.toString(servicePath, "");
+    }
+
+    private void startCoverageRound(Long projectId, String servicePath) {
+        runReports.remove(reportKey(projectId, servicePath));
+    }
+
+    /** Mỗi lượt xác minh chỉ giữ báo cáo mới nhất, để số vòng và chênh lệch không tăng theo số lần AI sửa rồi chạy lại. */
+    private com.greytest.dto.CoverageReportDto storeCoverage(Long projectId, String servicePath, byte[] xml, int[] counts) {
+        var saved = coverage.upload(projectId, servicePath, new XmlUpload(xml));
+        if (saved != null && saved.id() != null) {
+            coverage.recordTestRun(saved.id(), counts[0], counts[1]);
+            Long replaced = runReports.put(reportKey(projectId, servicePath), saved.id());
+            if (replaced != null) coverage.discard(replaced);
+        }
+        return saved;
     }
 
     private static Outcome failed(Exception failure) {
@@ -668,7 +766,9 @@ public class SandboxTestRunService {
                 "-v", cacheVolume + ":" + m2Mount,
                 "-v", "/work",
                 "-v", "/stage",
-                "-w", sandbox.workdir(),
+                // Không đặt -w vào thư mục module: Docker sẽ tạo sẵn thư mục đó thuộc root và UID 1000 không chép source vào được.
+                // Lệnh exec chạy Maven tự chỉ định -w module.
+                "-w", "/work",
                 selectedImage,
                 "sh", "-c", "while :; do sleep 3600; done"
         ));
@@ -713,7 +813,7 @@ public class SandboxTestRunService {
 
         // Image maven:* đặt MAVEN_CONFIG=/root/.m2; mvnw của project chèn biến này vào làm tham số → "Unknown lifecycle phase /root/.m2".
         // Truyền cùng cờ build cho compile sớm và chạy test; không nội suy vào lệnh shell.
-        List<String> command = new ArrayList<>(List.of("exec", "-e", "MAVEN_CONFIG=", "-e", "MAVEN_ARGS=" + mavenArgs));
+        List<String> command = new ArrayList<>(List.of("exec", "-w", sandbox.workdir(), "-e", "MAVEN_CONFIG=", "-e", "MAVEN_ARGS=" + mavenArgs));
         if (fast) command.addAll(List.of("-e", "GREYTEST_FAST_RERUN=1"));
         command.addAll(List.of(sandbox.container(), "sh", "./run-greytest-coverage.sh", "-B", "-ntp"));
         if (offline) command.add("-o");
@@ -865,10 +965,14 @@ public class SandboxTestRunService {
         return counts;
     }
 
-    /** Từng test không đạt kèm lỗi Surefire ghi lại, để AI sửa đúng chỗ. */
-    static List<UnitTestService.TestFailure> surefireFailures(Path dir, byte[] archive) throws IOException {
+    private record SurefireFailures(List<UnitTestService.TestFailure> details, List<FailedTestDto> reported) { }
+
+    /** Giữ stack trace cho AI sửa lỗi kỹ thuật; giao diện chỉ cần thông báo ngắn từ Surefire. */
+    private static SurefireFailures surefireFailures(Path dir, UnitTestService.ExportArchive exportedArchive) throws IOException {
         List<UnitTestService.TestFailure> failures = new ArrayList<>();
-        if (!Files.isDirectory(dir)) return failures;
+        List<FailedTestDto> reported = new ArrayList<>();
+        if (!Files.isDirectory(dir)) return new SurefireFailures(failures, List.of());
+        byte[] archive = exportedArchive.content();
         var exportedFixtures = SandboxCompilationFailures.exportedFixtureMethods(archive);
         try (var files = Files.list(dir)) {
             // Báo cáo đến từ sandbox nên là dữ liệu không tin cậy: cấm DOCTYPE để chặn XXE.
@@ -904,12 +1008,19 @@ public class SandboxTestRunService {
                     failures.add(new UnitTestService.TestFailure(className, methodName,
                             detail.substring(0, Math.min(detail.length(), MAX_FAILURE_DETAIL)),
                             error == null && !unexpectedException && !mockitoVerification));
+                    if (reported.size() < MAX_REPORTED_FAILURES) {
+                        String shortMessage = (message.isBlank() ? type : message.strip()).lines().findFirst().orElse("").strip();
+                        if (shortMessage.length() > MAX_FAILURE_MESSAGE_LENGTH)
+                            shortMessage = shortMessage.substring(0, MAX_FAILURE_MESSAGE_LENGTH - 1) + "…";
+                        String caseCode = exportedArchive.caseCodesByTest().get(className + "#" + methodName);
+                        reported.add(new FailedTestDto(className, methodName, caseCode, shortMessage));
+                    }
                 }
             }
         } catch (javax.xml.parsers.ParserConfigurationException | org.xml.sax.SAXException unreadable) {
             // Báo cáo hỏng thì coi như không có chi tiết lỗi; số đếm vẫn lấy được từ surefireCounts.
         }
-        return failures;
+        return new SurefireFailures(failures, List.copyOf(reported));
     }
 
     public static final String UNUSED_STUB_LINE = "Unused stub source line: ";

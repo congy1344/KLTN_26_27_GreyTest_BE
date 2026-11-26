@@ -3,13 +3,14 @@ package com.greytest.service;
 import java.util.List;
 
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
 import com.greytest.dto.CoverageRefinementDto;
 import com.greytest.exception.InvalidProjectStatusException;
 
 /**
  * Điều phối một vòng bổ sung Test Case và Unit Test từ coverage gap mới nhất.
+ * Không bọc transaction: batch Unit Test chạy ở luồng khác nên Test Case bổ sung phải commit trước;
+ * nếu sinh Unit Test lỗi, Test Case vẫn được giữ và người dùng chọn "Tiếp tục sinh".
  */
 @Service
 public class CoverageRefinementService {
@@ -27,7 +28,6 @@ public class CoverageRefinementService {
         this.unitTests = unitTests;
     }
 
-    @Transactional
     public CoverageRefinementDto start(Long projectId) {
         var report = coverage.latest(projectId)
                 .orElseThrow(() -> new InvalidProjectStatusException("Chưa có JaCoCo report để bắt đầu vòng mới."));
@@ -42,7 +42,6 @@ public class CoverageRefinementService {
         return new CoverageRefinementDto(round, cases, tests);
     }
 
-    @Transactional
     public CoverageRefinementDto start(Long projectId, String servicePath) {
         var report = coverage.latest(projectId, servicePath)
                 .orElseThrow(() -> new InvalidProjectStatusException("Chưa có JaCoCo report để bắt đầu vòng mới."));

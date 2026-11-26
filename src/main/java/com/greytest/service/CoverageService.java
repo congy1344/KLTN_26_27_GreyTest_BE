@@ -6,9 +6,11 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -302,13 +304,12 @@ public class CoverageService {
                 ? reports.findByProjectId(projectId) : reportsForScope(projectId, scope);
         int round = history.stream().map(CoverageReport::getId).toList().indexOf(report.getId()) + 1;
         CoverageReport previous = round > 1 ? history.get(round - 2) : null;
-        Map<Long, CoverageDetail> previousDetailByMethod = previous == null ? Map.of()
-                : details.findByReportId(previous.getId()).stream()
-                        .collect(Collectors.toMap(CoverageDetail::getMethodId, Function.identity(), (a, b) -> a));
+        Map<Long, LocalDateTime> supplementedAt = lastSupplementedAt(projectId);
+        Map<Long, Map<Long, CoverageDetail>> detailsByReport = new HashMap<>();
         List<CoverageGapDto> gaps = reportDetails.stream()
                 .filter(d -> Boolean.TRUE.equals(d.getHasGap()))
                 .sorted(Comparator.comparing(CoverageDetail::getLineCoverage))
-                .map(d -> toGap(d, previousDetailByMethod.get(d.getMethodId()),
+                .map(d -> toGap(d, beforeSupplement(d.getMethodId(), report, history, supplementedAt, detailsByReport),
                         methodById.get(d.getMethodId()), classById, refinableMethodIds))
                 .toList();
         String resolvedServicePath = scope == null ? report.getServicePath() : scope.servicePath();
@@ -319,7 +320,60 @@ public class CoverageService {
                 previous == null ? null : previous.getRequirementCoverage(),
                 report.getTotalLines(), report.getCoveredLines(), report.getTotalBranches(),
                 report.getCoveredBranches(), report.getUploadedAt(), gaps,
-                serviceCoverage(report, classById.values()));
+                serviceCoverage(report, classById.values()), report.getTestsRun(), report.getTestsFailed());
+    }
+
+    /** Gắn số test của lượt chạy sandbox vào báo cáo coverage mà lượt đó tạo ra. */
+    @Transactional
+    public void recordTestRun(Long reportId, int tests, int failed) {
+        reports.findById(reportId).ifPresent(report -> {
+            report.setTestsRun(tests);
+            report.setTestsFailed(failed);
+            reports.save(report);
+        });
+    }
+
+    /**
+     * Xóa báo cáo đã được thay bằng lượt đo lại; chi tiết theo method xóa theo khóa ngoại.
+     * ponytail: giữ lại file XML trên đĩa (vài chục KB); dọn khi thư mục coverage thật sự lớn.
+     */
+    @Transactional
+    public void discard(Long reportId) {
+        if (reports.existsById(reportId)) reports.deleteById(reportId);
+    }
+
+    /** Lúc tạo Test Case bổ sung coverage gần nhất của từng method (nhận biết qua dấu "JaCoCo round" trong traceSource). */
+    private Map<Long, LocalDateTime> lastSupplementedAt(Long projectId) {
+        Map<Long, Long> methodByPlan = new HashMap<>();
+        Map<Long, LocalDateTime> result = new HashMap<>();
+        for (var testCase : cases.findByProjectId(projectId)) {
+            if (testCase.getCreatedAt() == null || testCase.getTraceSource() == null
+                    || !testCase.getTraceSource().contains("JaCoCo")) continue;
+            if (methodByPlan.isEmpty()) {
+                plans.findByProjectId(projectId).forEach(plan -> rules.findById(plan.getBusinessRuleId())
+                        .ifPresent(rule -> methodByPlan.put(plan.getId(), rule.getMethodId())));
+            }
+            Long methodId = methodByPlan.get(testCase.getTestPlanId());
+            if (methodId != null) result.merge(methodId, testCase.getCreatedAt(), (a, b) -> a.isAfter(b) ? a : b);
+        }
+        return result;
+    }
+
+    /**
+     * Số đo của method ngay trước lượt bổ sung gần nhất; null nếu chưa bổ sung hoặc report này chưa đo lại sau lượt đó.
+     * Không lấy report liền trước: sandbox nạp coverage sau mỗi lần chạy (AI sửa test, tự "Tiếp tục sinh") nên report
+     * liền trước thường cùng một lượt sinh, chưa phải bằng chứng rằng đã thử bổ sung mà không cải thiện.
+     */
+    private CoverageDetail beforeSupplement(Long methodId, CoverageReport report, List<CoverageReport> history,
+            Map<Long, LocalDateTime> supplementedAt, Map<Long, Map<Long, CoverageDetail>> detailsByReport) {
+        LocalDateTime supplemented = supplementedAt.get(methodId);
+        if (supplemented == null || report.getUploadedAt() == null || report.getUploadedAt().isBefore(supplemented)) return null;
+        return history.stream()
+                .filter(past -> past.getUploadedAt() != null && past.getUploadedAt().isBefore(supplemented))
+                .max(Comparator.comparing(CoverageReport::getUploadedAt))
+                .map(past -> detailsByReport.computeIfAbsent(past.getId(), id -> details.findByReportId(id).stream()
+                        .collect(Collectors.toMap(CoverageDetail::getMethodId, Function.identity(), (a, b) -> a))).get(methodId))
+                .orElse(null);
     }
 
     /**

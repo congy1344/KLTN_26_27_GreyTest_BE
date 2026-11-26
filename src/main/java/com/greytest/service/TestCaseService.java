@@ -526,7 +526,7 @@ public class TestCaseService {
         return batches;
     }
     /** Bổ sung case theo gap; nút bắt đầu vòng mới là xác nhận HITL nên case được duyệt ngay. */
-    public List<TestCaseDto> generateSupplemental(Long projectId,String servicePath,List<CoverageGapDto> gaps,int round) {
+    @Transactional public List<TestCaseDto> generateSupplemental(Long projectId,String servicePath,List<CoverageGapDto> gaps,int round) {
         var scope=scopeResolver.resolve(projectId,servicePath);
         if(gaps.stream().map(CoverageGapDto::methodId).anyMatch(id->id==null||!scope.methodIds().contains(id))) {
             throw new IllegalArgumentException("Coverage gap không thuộc servicePath đã chọn.");
@@ -589,7 +589,12 @@ public class TestCaseService {
 
     @Transactional(readOnly=true) public Long projectIdForCase(Long caseId) { TestCase c=cases.findById(caseId).orElseThrow(()->new IllegalArgumentException("Không tìm thấy Test Case "+caseId)); return plans.findById(c.getTestPlanId()).orElseThrow(()->new IllegalArgumentException("Test Case không có Test Plan")).getProjectId(); }
     // Sửa case (HITL): đánh dấu isModified và đưa project về trạng thái chờ review lại
-    @Transactional public TestCaseDto update(Long caseId, com.greytest.dto.UpdateTestCaseRequest r) { TestCase c=cases.findById(caseId).orElseThrow(()->new IllegalArgumentException("Không tìm thấy Test Case "+caseId)); Project p=ensureProject(projectIdForCase(caseId)); ensureEditable(p); c.setTestType(r.testType()); c.setDescription(r.description().trim()); c.setPreconditions(r.preconditions().trim()); c.setTestData(r.testData()); c.setExpectedResult(r.expectedResult().trim()); c.setPriority(r.priority()); c.setTraceSource(r.traceSource().trim()); c.setStatus(ReviewStatus.PENDING_REVIEW); c.setIsModified(true); p.setStatus(ProjectStatus.CASE_PENDING_REVIEW); projects.save(p); return dto(cases.save(c)); }
+    private static boolean sameText(String requested, String current) { return current != null && requested != null && requested.trim().equals(current.trim()); }
+    @Transactional public TestCaseDto update(Long caseId, com.greytest.dto.UpdateTestCaseRequest r) { TestCase c=cases.findById(caseId).orElseThrow(()->new IllegalArgumentException("Không tìm thấy Test Case "+caseId)); Project p=ensureProject(projectIdForCase(caseId)); ensureEditable(p);
+        // Bấm lưu mà nội dung không đổi thì không tính là người dùng đã sửa (giữ trạng thái duyệt).
+        if (r.testType()==c.getTestType() && r.priority()==c.getPriority() && sameText(r.description(),c.getDescription()) && sameText(r.preconditions(),c.getPreconditions())
+                && sameText(r.expectedResult(),c.getExpectedResult()) && sameText(r.traceSource(),c.getTraceSource()) && java.util.Objects.equals(r.testData(),c.getTestData())) return dto(c);
+        c.setTestType(r.testType()); c.setDescription(r.description().trim()); c.setPreconditions(r.preconditions().trim()); c.setTestData(r.testData()); c.setExpectedResult(r.expectedResult().trim()); c.setPriority(r.priority()); c.setTraceSource(r.traceSource().trim()); c.setStatus(ReviewStatus.PENDING_REVIEW); c.setIsModified(true); p.setStatus(ProjectStatus.CASE_PENDING_REVIEW); projects.save(p); return dto(cases.save(c)); }
     @Transactional public void delete(Long caseId) { TestCase c=cases.findById(caseId).orElseThrow(()->new IllegalArgumentException("Không tìm thấy Test Case "+caseId)); Project p=ensureProject(projectIdForCase(caseId)); ensureEditable(p); cases.delete(c); p.setStatus(ProjectStatus.CASE_PENDING_REVIEW); projects.save(p); }
     @Transactional public List<TestCaseDto> approve(Long projectId) { Project p=ensureProject(projectId); if(p.getStatus()!=ProjectStatus.CASE_PENDING_REVIEW) throw new InvalidProjectStatusException("Chỉ approve Test Case đang chờ review."); var all=list(projectId); if(all.isEmpty()) throw new InvalidProjectStatusException("Cần có ít nhất một Test Case."); var entities=plans.findByProjectId(projectId).stream().flatMap(x->cases.findByTestPlanId(x.getId()).stream()).toList(); entities.forEach(c->{c.setStatus(ReviewStatus.APPROVED); cases.save(c);}); p.setStatus(ProjectStatus.CASE_APPROVED); projects.save(p); return entities.stream().map(this::dto).toList(); }
     @Transactional public List<TestCaseDto> approve(Long projectId,String servicePath) {

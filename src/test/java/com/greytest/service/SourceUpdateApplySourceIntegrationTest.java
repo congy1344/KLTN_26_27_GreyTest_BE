@@ -29,6 +29,7 @@ class SourceUpdateApplySourceIntegrationTest {
     @Autowired private ServicePipelineStatusService pipelineStatus;
     @Autowired private ServiceScopeResolver scopeResolver;
     @Autowired private ProjectRepository projects;
+    @Autowired private com.greytest.repository.AuthUserRepository users;
     @Autowired private SourceRevisionRepository revisions;
     @Autowired private SourceUpdateRepository updates;
     @Autowired private SourceUpdateItemRepository items;
@@ -47,7 +48,7 @@ class SourceUpdateApplySourceIntegrationTest {
         var scope = scopeResolver.resolve(fixture.projectId(), null);
         assertThat(pipelineStatus.status(fixture.projectId(), scope)).isEqualTo(ProjectStatus.TEST_GENERATED);
 
-        service.applySourceChanges(fixture.projectId(), update.getId(), admin());
+        service.applySourceChanges(fixture.projectId(), update.getId(), owner);
         rules.flush();
 
         assertDeleted(fixture.changed());
@@ -78,7 +79,7 @@ class SourceUpdateApplySourceIntegrationTest {
         Fixture fixture = prepare(root, SERVICE_SOURCE.replace("public int send() { return 1; } ", ""));
         SourceUpdate update = update(fixture, SourceUpdateAction.REMOVE, null);
 
-        service.applySourceChanges(fixture.projectId(), update.getId(), admin());
+        service.applySourceChanges(fixture.projectId(), update.getId(), owner);
         rules.flush();
 
         assertDeleted(fixture.changed());
@@ -102,6 +103,7 @@ class SourceUpdateApplySourceIntegrationTest {
         }
         Project project = new Project(); project.setName("apply-source-" + System.nanoTime());
         project.setSourceType(SourceType.ZIP); project.setStatus(ProjectStatus.ANALYZED);
+        project.setOwnerUserId(owner().getId());
         project.setStoragePath(baseline.toString()); project = projects.save(project);
         analysis.analyze(project.getId());
         project = projects.findById(project.getId()).orElseThrow();
@@ -156,5 +158,12 @@ class SourceUpdateApplySourceIntegrationTest {
         return new Chain(rule, plan, testCase, unitTest);
     }
 
-    private AuthUser admin() { AuthUser admin = new AuthUser(); admin.setRole(UserRole.ADMIN); return admin; }
+    // Admin không còn tự động được sửa dự án của người dùng (Break-Glass), nên test thao tác bằng chủ dự án.
+    private AuthUser owner;
+    private AuthUser owner() {
+        AuthUser user = new AuthUser();
+        user.setEmail("apply-source-" + System.nanoTime() + "@greytest.test"); user.setPasswordHash("x");
+        user.setFullName("Owner"); user.setRole(UserRole.USER); user.setEnabled(true);
+        return owner = users.save(user);
+    }
 }

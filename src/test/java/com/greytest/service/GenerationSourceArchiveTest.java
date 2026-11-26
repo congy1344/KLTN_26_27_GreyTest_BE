@@ -434,6 +434,8 @@ class GenerationSourceArchiveTest {
 
     private static Result run(Path directory, String... command) throws Exception {
         ProcessBuilder builder = new ProcessBuilder(command).directory(directory.toFile()).redirectErrorStream(true);
+        // Biến này làm cmd không tìm lệnh ở thư mục hiện tại (Maven viết hoa tên biến); người dùng chạy script thì không có nó.
+        builder.environment().keySet().removeIf("NoDefaultCurrentDirectoryInExePath"::equalsIgnoreCase);
         builder.environment().put("PATH", Path.of(System.getProperty("java.home"), "bin")
                 + java.io.File.pathSeparator + builder.environment().getOrDefault("PATH", ""));
         Process process = builder.start();

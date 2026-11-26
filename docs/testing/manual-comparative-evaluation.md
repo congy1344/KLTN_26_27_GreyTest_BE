@@ -14,7 +14,7 @@ BR do GreyTest sinh là đầu vào dùng chung của thực nghiệm này. Ngư
 
 1. Cập nhật backend và frontend có tính năng này, khởi động lại backend và tải lại trang. Số liệu không thể phục hồi cho lượt sinh trước khi cập nhật.
 2. Nhập source, phân tích và chọn phạm vi service cần đánh giá. Lưu ZIP source gốc hoặc URL GitHub kèm commit SHA; giữ nguyên source trong cả đợt chạy.
-3. Sinh BR, rà soát nội dung và phê duyệt. Bấm **Tải BR (JSON)** tại thanh thao tác Business Rules. Tệp chứa các BR của phạm vi đang xem, cả trạng thái duyệt và chữ ký phương thức; chỉ các BR đã duyệt được dùng làm đầu vào so sánh. Kiểm tra `method` không bị `null`.
+3. Sinh BR, rà soát nội dung và phê duyệt. Nút **Tải BR (JSON)** đã được gỡ khỏi giao diện; danh sách BR (mã, mô tả, trạng thái duyệt) lấy từ mục `businessRules` của Report JSON ở bước cuối. Chỉ các BR đã duyệt được dùng làm đầu vào so sánh. Report JSON không có chữ ký phương thức, nên ghi lại class/method của từng BR từ tab Business Rules (BR được nhóm theo `Class.method`).
 4. Sinh và duyệt Test Plan; sinh và duyệt Test Case; sinh Unit Test. Sau mỗi bước sinh, ghi lại mục **Số liệu lượt chạy** trong Log AI: ID lượt chạy, stage, tổng thời gian, token đầu vào/đầu ra/tổng, số phản hồi và thông báo token ước tính nếu có.
 5. Tải Unit Test ZIP gốc. Giữ bản tải xuống trước khi tự sửa. Nếu có chỉnh sửa Plan/Case/Unit Test, lưu bản trước và sau, ghi rõ nội dung và thời điểm sửa; kết quả sau sửa phải được trình bày riêng.
 6. Gửi bộ đầu vào bàn giao bên dưới để chạy hai baseline và thực thi kiểm thử của cả ba phương pháp.
@@ -33,7 +33,7 @@ Nếu hệ thống yêu cầu BR cho mọi quyết định trong phạm vi đã 
 
 ## Bộ đầu vào bàn giao
 
-- Tệp `greytest-project-<id>-business-rules.json` đã tải sau khi duyệt.
+- Tệp Report JSON `greytest-report-<id>.json` (mục `businessRules`) kèm danh sách class/method của từng BR đã duyệt.
 - ZIP source gốc hoặc GitHub URL **kèm commit SHA** và module/build profile đã chọn. Không gửi `.env` hoặc khóa API.
 - Phạm vi class/phương thức: đối chiếu danh sách trong BR với chữ ký trong source. Ba cách phải bao phủ cùng phạm vi.
 - ZIP Unit Test GreyTest gốc; bản sửa nếu có và nhật ký sửa. Có thể gửi thêm Test Plan/Test Case để đối chiếu truy vết và nội dung.

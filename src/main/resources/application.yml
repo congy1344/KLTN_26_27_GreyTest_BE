@@ -78,9 +78,9 @@ greytest:
   # Mã hoá khoá API AI mà admin lưu vào DB; để trống thì chỉ dùng được khoá trong biến môi trường.
   settings-secret: ${GREYTEST_SETTINGS_SECRET:}
   usage:
-    default-monthly-llm-quota: ${GREYTEST_DEFAULT_MONTHLY_LLM_QUOTA:100}
-    plus-weekly-llm-quota: ${GREYTEST_PLUS_WEEKLY_LLM_QUOTA:200}
-    pro-monthly-llm-quota: ${GREYTEST_PRO_MONTHLY_LLM_QUOTA:300}
+    default-monthly-llm-quota: ${GREYTEST_DEFAULT_MONTHLY_LLM_QUOTA:150}
+    plus-weekly-llm-quota: ${GREYTEST_PLUS_WEEKLY_LLM_QUOTA:600}
+    pro-monthly-llm-quota: ${GREYTEST_PRO_MONTHLY_LLM_QUOTA:1500}
   llm-cache:
     max-entries: ${GREYTEST_LLM_CACHE_MAX_ENTRIES:500}
   llm-batch:

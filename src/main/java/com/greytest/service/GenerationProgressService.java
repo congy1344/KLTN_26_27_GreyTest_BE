@@ -59,6 +59,17 @@ public class GenerationProgressService {
         }
     }
 
+    /**
+     * Cho worker báo hoàn tất khi còn giữ phép đo, hoặc khi người dùng tạm dừng đúng lúc nó đang chạy lô cuối:
+     * dữ liệu đã lưu đủ nên không còn gì để tiếp tục. Worker đã bị hủy hoặc bị lượt mới thay thế vẫn bị chặn.
+     */
+    private synchronized void requireCompletableMeasurement(ProgressKey key) {
+        MeasurementOwner owner = GenerationJobContext.scopedValue(MEASUREMENT_OWNER);
+        ProgressState state = states.get(key);
+        if (owner != null && owner.key().equals(key) && state != null && state.isPausedRunOf(owner.measurement())) return;
+        requireCurrentMeasurement(key);
+    }
+
     synchronized void assertCurrentMeasurement(Long projectId, GenerationProgressStage stage) {
         requireCurrentMeasurement(new ProgressKey(projectId, stage));
     }
@@ -232,7 +243,7 @@ public class GenerationProgressService {
     }
 
     public synchronized void complete(Long projectId, GenerationProgressStage stage, String message) {
-        requireCurrentMeasurement(new ProgressKey(projectId, stage));
+        requireCompletableMeasurement(new ProgressKey(projectId, stage));
         ProgressState state = states.get(new ProgressKey(projectId, stage));
         if (state != null) state.complete(message, clock.instant());
     }
@@ -244,7 +255,7 @@ public class GenerationProgressService {
 
     /** Chỉ công bố hoàn tất sau khi transaction ngoài cùng commit thành công. */
     public void completeAfterCommit(Long projectId, GenerationProgressStage stage, String message) {
-        assertCurrentMeasurement(projectId, stage);
+        requireCompletableMeasurement(new ProgressKey(projectId, stage));
         DeferredCompletion deferred = GenerationJobContext.scopedValue(DEFERRED_COMPLETION);
         if (deferred != null && stage == GenerationProgressStage.UNIT_TEST) {
             deferred.completion = () -> completeAfterCommit(projectId, stage, message + deferred.verification);
@@ -579,6 +590,10 @@ public class GenerationProgressService {
             status = GenerationProgressStatus.PAUSED;
             updatedAt = now;
             addLog(message, now);
+        }
+
+        private synchronized boolean isPausedRunOf(GenerationRunMetrics run) {
+            return status == GenerationProgressStatus.PAUSED && run != null && run == measurement;
         }
 
         private synchronized boolean isPaused() {

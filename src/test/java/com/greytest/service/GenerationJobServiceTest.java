@@ -42,6 +42,41 @@ class GenerationJobServiceTest {
         assertThat(progress.get(1L, GenerationProgressStage.TEST_CASE).status()).isEqualTo(GenerationProgressStatus.PARTIAL);    }
 
     @Test
+    void aPartialUnitTestStageWithDeferredVerificationIsResumedAutomatically() {
+        // Bước UT chốt trạng thái sau khi sandbox xác minh (deferCompletion), như UnitTestController.generateVerified.
+        var progress = new GenerationProgressService();
+        var jobs = new GenerationJobService(Runnable::run, progress);
+        var resumed = new java.util.concurrent.atomic.AtomicInteger();
+        Runnable partialUnitRound = () -> GenerationProgressService.deferCompletion(() -> {
+            progress.start(1L, GenerationProgressStage.UNIT_TEST, 1, "Round");
+            progress.partialAfterCommit(1L, GenerationProgressStage.UNIT_TEST, "Hoàn tất một phần: còn 5 Test Case chưa sinh được.");
+            GenerationProgressService.verificationFinished("Đã chạy 97 test.");
+        });
+
+        jobs.submit(1L, 7L, GenerationProgressStage.UNIT_TEST, partialUnitRound, () -> {
+            resumed.incrementAndGet();
+            partialUnitRound.run();
+        });
+
+        assertThat(resumed).hasValue(2);
+    }
+
+    @Test
+    void theQueuedAutoResumeTellsTheUserItWasStartedAutomatically() {
+        var executor = new ManualExecutor();
+        var progress = new GenerationProgressService();
+        var jobs = new GenerationJobService(executor, progress);
+        var rounds = new java.util.concurrent.atomic.AtomicInteger();
+        jobs.submit(1L, 7L, GenerationProgressStage.TEST_CASE, partialRound(progress, rounds), partialRound(progress, rounds));
+
+        executor.runNext();
+
+        var queued = progress.get(1L, GenerationProgressStage.TEST_CASE);
+        assertThat(queued.status()).isEqualTo(GenerationProgressStatus.QUEUED);
+        assertThat(queued.logs()).anyMatch(line -> line.toString().contains("Tự động tiếp tục sinh (lần 1/2)"));
+    }
+
+    @Test
     void autoResumeStopsOnceTheStageCompletes() {
         var progress = new GenerationProgressService();
         var jobs = new GenerationJobService(Runnable::run, progress);
@@ -58,7 +93,7 @@ class GenerationJobServiceTest {
     }
 
     @org.junit.jupiter.params.ParameterizedTest
-    @org.junit.jupiter.params.provider.ValueSource(strings = {"ai", "quota", "other", "pause"})
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"ai", "marked", "quota", "other", "pause"})
     void onlyAiFailuresAreResumedAutomatically(String outcome) {
         var progress = new GenerationProgressService();
         var jobs = new GenerationJobService(Runnable::run, progress);
@@ -68,6 +103,8 @@ class GenerationJobServiceTest {
             progress.start(1L, GenerationProgressStage.BUSINESS_RULE, 1, "Round");
             switch (outcome) {
                 case "ai" -> throw new LlmResponseException("Generation validation gate failed");
+                // Service tự báo thất bại (còn plan thiếu) mà không ném lỗi.
+                case "marked" -> progress.fail(1L, GenerationProgressStage.BUSINESS_RULE, "Còn TP-027 chưa sinh được.");
                 case "quota" -> throw new com.greytest.exception.UsageQuotaExceededException("hết quota");
                 case "other" -> throw new IllegalStateException("Chỉ sinh sau khi đã duyệt");
                 default -> jobs.pause(1L, GenerationProgressStage.BUSINESS_RULE);
@@ -78,7 +115,7 @@ class GenerationJobServiceTest {
             progress.complete(1L, GenerationProgressStage.BUSINESS_RULE, "Done");
         });
 
-        assertThat(resumed).hasValue(outcome.equals("ai") ? 1 : 0);
+        assertThat(resumed).hasValue(outcome.equals("ai") || outcome.equals("marked") ? 1 : 0);
     }
 
     @Test
@@ -126,6 +163,31 @@ class GenerationJobServiceTest {
             progress.complete(1L, GenerationProgressStage.UNIT_TEST, "Done");
         });
         assertThat(progress.get(1L, GenerationProgressStage.UNIT_TEST).status()).isEqualTo(GenerationProgressStatus.COMPLETED);
+    }
+
+    @Test
+    void workerPausedDuringItsLastBatchStillReportsCompletion() {
+        var progress = new GenerationProgressService();
+        var jobs = new GenerationJobService(Runnable::run, progress);
+        jobs.submit(1L, GenerationProgressStage.TEST_PLAN, () -> {
+            progress.start(1L, GenerationProgressStage.TEST_PLAN, 1, "Only batch");
+            jobs.pause(1L, GenerationProgressStage.TEST_PLAN);
+            progress.completeAfterCommit(1L, GenerationProgressStage.TEST_PLAN, "Hoàn tất: đã lưu 1 Test Plan.");
+        });
+        assertThat(progress.get(1L, GenerationProgressStage.TEST_PLAN).status()).isEqualTo(GenerationProgressStatus.COMPLETED);
+    }
+
+    @Test
+    void cancelledWorkerCannotReportCompletion() {
+        var progress = new GenerationProgressService();
+        var jobs = new GenerationJobService(Runnable::run, progress);
+        jobs.submit(1L, GenerationProgressStage.TEST_PLAN, () -> {
+            progress.start(1L, GenerationProgressStage.TEST_PLAN, 1, "Only batch");
+            jobs.cancel(1L, GenerationProgressStage.TEST_PLAN);
+            assertThatThrownBy(() -> progress.completeAfterCommit(1L, GenerationProgressStage.TEST_PLAN, "Done"))
+                    .isInstanceOf(GenerationInProgressException.class);
+        });
+        assertThat(progress.get(1L, GenerationProgressStage.TEST_PLAN).status()).isEqualTo(GenerationProgressStatus.FAILED);
     }
 
     @Test

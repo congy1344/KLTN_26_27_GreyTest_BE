@@ -480,6 +480,8 @@ class UnitTestFileServiceTest {
         builder.environment().remove("GREYTEST_JUNCTION_RUN");
         String systemRoot = System.getenv("SystemRoot");
         builder.environment().put("PATH", systemRoot + "\\System32;" + systemRoot + "\\System32\\WindowsPowerShell\\v1.0");
+        // PATH chỉ còn công cụ hệ thống nên phải chỉ rõ JDK, không dựa vào JAVA_HOME của máy chạy test.
+        builder.environment().put("JAVA_HOME", System.getProperty("java.home"));
         Process process = builder.start();
         try {
             assertThat(process.waitFor(30, java.util.concurrent.TimeUnit.SECONDS)).isTrue();

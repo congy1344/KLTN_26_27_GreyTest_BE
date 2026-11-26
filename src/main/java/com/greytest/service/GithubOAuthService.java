@@ -9,8 +9,12 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.security.SecureRandom;
+import java.util.Base64;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -55,6 +59,17 @@ public class GithubOAuthService {
     private final HttpClient httpClient;
     private final PasswordEncoder passwordEncoder = new BCryptPasswordEncoder();
 
+    private static final long STATE_TTL_MILLIS = Duration.ofMinutes(10).toMillis();
+    private static final int MAX_PENDING_STATES = 10_000;
+    private static final SecureRandom RANDOM = new SecureRandom();
+
+    /** State OAuth đang chờ: gắn với người dùng khởi tạo luồng (null khi đăng nhập mới) và hạn dùng. */
+    private record PendingState(Long userId, long expiresAt) {
+    }
+
+    // ponytail: lưu trong bộ nhớ, chỉ đúng khi chạy một instance backend; nhiều instance thì chuyển sang DB/Redis.
+    private final Map<String, PendingState> pendingStates = new ConcurrentHashMap<>();
+
     @Autowired
     public GithubOAuthService(
             @Value("${greytest.auth.github-client-id:}") String clientId,
@@ -86,11 +101,44 @@ public class GithubOAuthService {
     }
 
     /**
+     * Cấp state chống CSRF dùng một lần cho luồng OAuth GitHub. Nếu đang đăng nhập (liên kết tài khoản),
+     * state gắn với người dùng đó để kẻ tấn công không thể dùng state của mình trong phiên của nạn nhân.
+     */
+    public String issueState(String authorizationHeader) {
+        Long userId = isBearer(authorizationHeader) ? authService.currentUser(authorizationHeader).getId() : null;
+        long now = System.currentTimeMillis();
+        pendingStates.values().removeIf(pending -> pending.expiresAt() < now);
+        if (pendingStates.size() >= MAX_PENDING_STATES) {
+            throw new AuthException("GITHUB_OAUTH_BUSY", "Quá nhiều yêu cầu đăng nhập GitHub đang chờ, vui lòng thử lại sau",
+                    HttpStatus.TOO_MANY_REQUESTS);
+        }
+        byte[] bytes = new byte[32];
+        RANDOM.nextBytes(bytes);
+        String state = Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
+        pendingStates.put(state, new PendingState(userId, now + STATE_TTL_MILLIS));
+        return state;
+    }
+
+    /** Tiêu thụ state: chỉ hợp lệ một lần, còn hạn và đúng người dùng đã khởi tạo luồng. */
+    void consumeState(String state, Long currentUserId) {
+        PendingState pending = state == null ? null : pendingStates.remove(state);
+        if (pending == null || pending.expiresAt() < System.currentTimeMillis()
+                || !Objects.equals(pending.userId(), currentUserId)) {
+            throw new AuthException("GITHUB_OAUTH_STATE_INVALID",
+                    "Phiên đăng nhập GitHub không hợp lệ hoặc đã hết hạn, vui lòng thử lại", HttpStatus.BAD_REQUEST);
+        }
+    }
+
+    private static boolean isBearer(String authorizationHeader) {
+        return authorizationHeader != null && authorizationHeader.startsWith("Bearer ");
+    }
+
+    /**
      * Xác thực với GitHub bằng authorization code, lấy thông tin tài khoản và đăng
      * nhập/liên kết vào GreyTest.
      * Không gắn @Transactional để các lời gọi GitHub không giữ kết nối DB.
      */
-    public LoginResponse loginWithGithub(String code, String authorizationHeader) {
+    public LoginResponse loginWithGithub(String code, String state, String authorizationHeader) {
         if (!isConfigured()) {
             throw new AuthException(
                     "GITHUB_AUTH_NOT_CONFIGURED",
@@ -101,14 +149,18 @@ public class GithubOAuthService {
             throw new AuthException("VALIDATION_ERROR", "Mã xác thực GitHub code không hợp lệ", HttpStatus.BAD_REQUEST);
         }
 
+        // Kiểm tra state trước khi gọi GitHub để code bị giả mạo không được đổi lấy token.
+        AuthUser currentUser = isBearer(authorizationHeader) ? authService.currentUser(authorizationHeader) : null;
+        consumeState(state, currentUser != null ? currentUser.getId() : null);
+
         // 1. Đổi code lấy Access Token từ GitHub và lấy hồ sơ người dùng
         String accessToken = exchangeCodeForToken(code.trim());
         GithubUserProfile profile = fetchUserProfile(accessToken);
 
         // 2. Liên kết tài khoản đang đăng nhập hoặc đăng nhập/tạo mới
         AuthUser user;
-        if (authorizationHeader != null && authorizationHeader.startsWith("Bearer ")) {
-            user = authService.currentUser(authorizationHeader);
+        if (currentUser != null) {
+            user = currentUser;
             final Long currentUserId = user.getId();
             userRepository.findByGithubUserId(profile.id()).ifPresent(existing -> {
                 if (!existing.getId().equals(currentUserId)) {

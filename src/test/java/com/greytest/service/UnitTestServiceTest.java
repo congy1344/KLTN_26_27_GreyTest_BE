@@ -928,13 +928,16 @@ class UnitTestServiceTest {
         when(units.findByTestCaseId(2L)).thenReturn(dropped);
         org.mockito.Mockito.lenient().doThrow(new LlmResponseException("stub is never used")).when(ai).validateExistingUnitTest(1L, dropped, null);
 
+        when(files.mergeByClass(List.of(kept))).thenAnswer(call -> new UnitTestFileService().mergeByClass(call.getArgument(0)));
         when(files.createCoverageArchive(org.mockito.ArgumentMatchers.anyList(), org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyList())).thenReturn(new byte[] {1});
 
         var archive = service.exportArchive(1L);
 
         assertThat(archive.skippedCaseCodes()).containsExactly("TC-002");
+        assertThat(archive.caseCodesByTest()).containsExactlyEntriesOf(java.util.Map.of("demo.KeptTest#case1", "TC-001"));
         verify(files).mergeByClass(List.of(kept));
-        verify(files).createCoverageArchive(List.of(), null, List.of("TC-002: stub is never used"));
+        verify(files).createCoverageArchive(org.mockito.ArgumentMatchers.argThat(entries -> entries.size() == 1),
+                org.mockito.ArgumentMatchers.isNull(), org.mockito.ArgumentMatchers.eq(List.of("TC-002: stub is never used")));
         verify(units, never()).delete(dropped);
     }
 
@@ -1144,6 +1147,41 @@ class UnitTestServiceTest {
         verify(ai).generateUnitTests(1L, Set.of(2L));
         verify(ai, never()).generateUnitTests(1L, Set.of(1L));
         verify(units, never()).delete(existingUnit1);
+    }
+
+    @Test
+    void generationResumeRegeneratesUnitTestBuiltFromOldSourceVersion() {
+        // Project 2113: UT cũ qua kiểm tra ngữ nghĩa nhưng dấu phiên bản source đã lệch; xuất file sẽ từ chối nên phải sinh lại.
+        Project project = new Project();
+        project.setId(1L);
+        project.setStatus(ProjectStatus.CASE_APPROVED);
+        project.setStoragePath("/tmp/greytest-source");
+        TestPlan plan = new TestPlan();
+        plan.setStatus(ReviewStatus.APPROVED);
+        plan.setId(20L);
+        plan.setProjectId(1L);
+        TestCase case1 = approvedCase(1L, 20L);
+        UnitTest stale = new UnitTest();
+        stale.setId(101L);
+        stale.setTestCaseId(1L);
+
+        when(projects.findById(1L)).thenReturn(Optional.of(project));
+        when(projects.findByIdForUpdate(1L)).thenReturn(Optional.of(project));
+        when(cases.findByProjectId(org.mockito.ArgumentMatchers.any())).thenReturn(List.of(case1));
+        when(cases.findById(1L)).thenReturn(Optional.of(case1));
+        when(plans.findById(20L)).thenReturn(Optional.of(plan));
+        when(units.findByTestCaseId(1L)).thenReturn(stale);
+        var provenance = org.mockito.Mockito.mock(com.greytest.service.generation.UnitTestExportProvenanceService.class);
+        when(provenance.prepareValidated(org.mockito.ArgumentMatchers.eq(1L), org.mockito.ArgumentMatchers.eq(List.of(stale)), org.mockito.ArgumentMatchers.any()))
+                .thenThrow(new IllegalArgumentException("được sinh từ phiên bản source cũ"));
+        org.springframework.test.util.ReflectionTestUtils.setField(service, "exportProvenance", provenance);
+        when(ai.generateUnitTests(1L, Set.of(1L))).thenReturn(new UnitTestResponseDto(List.of(
+                new GeneratedUnitTestDto(1L, "ServiceTest", "case1", "demo", "NEW_TEST", validSource("ServiceTest", "case1")))));
+        when(units.saveAll(org.mockito.ArgumentMatchers.anyList())).thenAnswer(invocation -> invocation.getArgument(0));
+
+        service.generate(1L, (String) null, true);
+
+        verify(ai).generateUnitTests(1L, Set.of(1L));
     }
 
     private com.greytest.service.generation.UnitTestExportProvenanceService exportFixture() {

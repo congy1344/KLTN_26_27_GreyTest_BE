@@ -39,13 +39,13 @@ class UnitTestControllerGenerationTest {
         var verifying = new CountDownLatch(1);
         var finish = new CountDownLatch(1);
         doAnswer(call -> {
-            assertThat(call.<Supplier<Boolean>>getArgument(2).get()).isTrue();
+            assertThat(call.<Supplier<Boolean>>getArgument(3).get()).isTrue();
             assertThat(GenerationJobContext.actorUserId()).isEqualTo(7L);
             verifying.countDown();
             assertThat(finish.await(5, TimeUnit.SECONDS)).isTrue();
             GenerationJobContext.log("Đã xác minh Unit Test.");
             return null;
-        }).when(sandbox).generateAndVerify(eq(1L), eq("shop"), any());
+        }).when(sandbox).generateAndVerify(eq(1L), eq("shop"), eq(resume), any());
         var controller = new UnitTestController(units, auth, projects, jobs, sandbox);
         var job = java.util.concurrent.CompletableFuture.runAsync(() -> controller.generate(1L, "shop", resume, "token"));
         try {

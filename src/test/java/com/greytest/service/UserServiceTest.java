@@ -66,7 +66,7 @@ class UserServiceTest {
         assertThat(response.limit()).isEqualTo(300);
         assertThat(response.used()).isEqualTo(100);
         assertThat(response.remaining()).isEqualTo(200);
-        assertThat(response.resetDate()).isEqualTo(LocalDate.of(2026, 10, 8));
+        assertThat(response.resetDate()).isEqualTo(LocalDate.of(2026, 11, 1)); // mọi gói reset theo tháng
         assertThat(response.exceeded()).isFalse();
 
         verify(authUserRepository).save(user);

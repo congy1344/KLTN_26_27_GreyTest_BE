@@ -82,7 +82,20 @@ public class AuthController {
                     "Chức năng GitHub OAuth chưa được cấu hình",
                     org.springframework.http.HttpStatus.SERVICE_UNAVAILABLE);
         }
-        return githubOAuthService.loginWithGithub(request.code(), authorization);
+        return githubOAuthService.loginWithGithub(request.code(), request.state(), authorization);
+    }
+
+    /** Cấp state dùng một lần trước khi chuyển người dùng sang trang cấp quyền GitHub. */
+    @PostMapping("/github/state")
+    public java.util.Map<String, String> githubState(
+            @RequestHeader(value = "Authorization", required = false) String authorization) {
+        if (githubOAuthService == null || !githubOAuthService.isConfigured()) {
+            throw new com.greytest.exception.AuthException(
+                    "GITHUB_AUTH_NOT_CONFIGURED",
+                    "Chức năng GitHub OAuth chưa được cấu hình",
+                    org.springframework.http.HttpStatus.SERVICE_UNAVAILABLE);
+        }
+        return java.util.Map.of("state", githubOAuthService.issueState(authorization));
     }
 
     @PostMapping("/admin/login")

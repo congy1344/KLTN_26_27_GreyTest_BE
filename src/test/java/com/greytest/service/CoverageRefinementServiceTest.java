@@ -36,7 +36,7 @@ class CoverageRefinementServiceTest {
                 "HIGH", "Cover missed branch", true);
         CoverageReportDto report = new CoverageReportDto(7L, 1L, ".", 1,
                 BigDecimal.valueOf(70), BigDecimal.valueOf(60), BigDecimal.valueOf(100),
-                null, null, null, 100, 70, 20, 12, LocalDateTime.now(), List.of(gap), null);
+                null, null, null, 100, 70, 20, 12, LocalDateTime.now(), List.of(gap), null, null, null);
         TestCaseDto testCase = org.mockito.Mockito.mock(TestCaseDto.class);
         UnitTestDto unitTest = org.mockito.Mockito.mock(UnitTestDto.class);
         when(testCase.id()).thenReturn(31L);
@@ -60,7 +60,7 @@ class CoverageRefinementServiceTest {
                 "HIGH", "Ngoài phạm vi sinh Service Unit Test của GreyTest", false);
         CoverageReportDto report = new CoverageReportDto(7L, 1L, ".", 1,
                 BigDecimal.valueOf(70), BigDecimal.valueOf(60), BigDecimal.valueOf(100),
-                null, null, null, 100, 70, 20, 12, LocalDateTime.now(), List.of(gap), null);
+                null, null, null, 100, 70, 20, 12, LocalDateTime.now(), List.of(gap), null, null, null);
         when(coverageService.latest(1L)).thenReturn(java.util.Optional.of(report));
 
         assertThatThrownBy(() -> service.start(1L))

@@ -366,6 +366,20 @@ class TestPlanServiceTest {
     }
 
     @Test
+    void updateWithoutChangesKeepsApprovalAndDoesNotSave() {
+        Project project = mockProject(ProjectStatus.PLAN_APPROVED);
+        TestPlan plan = plan(3L, 7L, "Happy path");
+        plan.setStatus(ReviewStatus.APPROVED);
+        when(testPlanRepository.findById(3L)).thenReturn(Optional.of(plan));
+
+        TestPlanDto updated = service().update(3L, new UpdateTestPlanRequest(7L, " Happy path ", "Mo ta", TestType.HAPPY_PATH));
+
+        assertThat(updated.status()).isEqualTo(ReviewStatus.APPROVED);
+        assertThat(project.getStatus()).isEqualTo(ProjectStatus.PLAN_APPROVED);
+        verify(testPlanRepository, never()).save(any(TestPlan.class));
+    }
+
+    @Test
     void updateRewritesCoveredRuleLinksWhenAnchorRuleChanges() {
         mockProject(ProjectStatus.PLAN_PENDING_REVIEW);
         TestPlan plan = plan(3L, 7L, "Happy path");

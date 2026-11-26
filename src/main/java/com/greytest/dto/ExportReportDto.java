@@ -22,7 +22,8 @@ public record ExportReportDto(
         List<UnitTestItem> unitTests,
         List<TraceabilityRowDto> traceability,
         List<CoverageGapDto> coverageGaps,
-        List<String> uncoveredRuleCodes) {
+        List<String> uncoveredRuleCodes,
+        TestRunSummary testRun) {
 
     public record BusinessRuleItem(String ruleCode, String description, String status) {
     }
@@ -50,5 +51,9 @@ public record ExportReportDto(
             String packageName,
             String generationType,
             String filePath) {
+    }
+
+    /** Kết quả lượt chạy test trên server gần nhất; null khi chưa chạy (chỉ giữ trong bộ nhớ backend). */
+    public record TestRunSummary(String status, int tests, int passed, int failed, String message) {
     }
 }

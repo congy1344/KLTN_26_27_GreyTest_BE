@@ -80,12 +80,12 @@ public class PaymentController {
     public ResponseEntity<List<TierPackageDto>> getPublicPackages() {
         if (adminService == null) {
             return ResponseEntity.ok(List.of(
-                    new TierPackageDto("PLUS", "Gói Tiêu Chuẩn (PLUS)", 10_000L, "MONTHLY", 200, 3,
-                            List.of("Toàn bộ tính năng gói FREE", "200 lượt gọi AI hồi lại hàng tuần", "Sinh tối đa 3 batch song song"),
-                            "Dành cho nhóm phát triển mở rộng", true, 0L, "WEEKLY"),
-                    new TierPackageDto("PRO", "Gói Chuyên Nghiệp (PRO)", 20_000L, "MONTHLY", 300, 4,
-                            List.of("Toàn bộ tính năng gói PLUS", "Phân tích cú pháp AST & Call Graph sâu", "Sinh Unit Test JUnit 5 song song 4 luồng"),
-                            "Toàn bộ tính năng phân tích sâu & JaCoCo Refinement", true, 0L, "WEEKLY")
+                    new TierPackageDto("PLUS", "Gói Tiêu Chuẩn (PLUS)", 40_000L, "MONTHLY", 600, 4,
+                            List.of("Toàn bộ tính năng gói FREE", "600 lượt gọi AI mỗi tháng", "Sinh tối đa 4 batch song song"),
+                            "Dành cho nhóm phát triển mở rộng", true, 0L, "MONTHLY"),
+                    new TierPackageDto("PRO", "Gói Chuyên Nghiệp (PRO)", 80_000L, "MONTHLY", 1500, 8,
+                            List.of("Toàn bộ tính năng gói PLUS", "1.500 lượt gọi AI mỗi tháng", "Sinh song song tối đa 8 batch"),
+                            "Toàn bộ tính năng phân tích sâu & JaCoCo Refinement", true, 0L, "MONTHLY")
             ));
         }
         List<TierPackageDto> active = adminService.getTierPackages().stream()
@@ -124,7 +124,7 @@ public class PaymentController {
         }
 
         // Lấy giá động do Admin thiết lập trong hệ thống
-        long amount = (targetTier == UserTier.PLUS) ? 10_000L : 20_000L;
+        long amount = (targetTier == UserTier.PLUS) ? 40_000L : 80_000L;
         if (adminService != null) {
             TierPackageDto configuredPkg = adminService.getTierPackage(targetTier.name());
             if (configuredPkg != null) {

@@ -548,6 +548,7 @@ public class AdminService {
      * Hủy/Dừng tác vụ đang chạy hoặc đang trong hàng đợi sinh test.
      */
     public void cancelActiveJob(AuthUser admin, Long projectId, GenerationProgressStage stage) {
+        if (generationJobService != null) generationJobService.stopAutoResume(projectId);
         if (progressService != null) {
             progressService.fail(projectId, stage, "Tác vụ đã bị hủy bởi Quản trị viên.");
         }
@@ -1189,15 +1190,15 @@ public class AdminService {
         if (tierPackageRepository == null)
             return;
         List<TierPackage> defaults = List.of(
-                new TierPackage("FREE", "Gói Miễn Phí (FREE)", 0L, "MONTHLY", 100, 2,
-                        "Trích xuất Quy tắc Nghiệp vụ (AST)\nSinh Test Plan & Test Case\nSinh Unit Test JUnit 5 cơ bản",
+                new TierPackage("FREE", "Gói Miễn Phí (FREE)", 0L, "MONTHLY", 150, 2,
+                        "Trích xuất Quy tắc Nghiệp vụ (AST)\nSinh Test Plan & Test Case\nSinh Unit Test JUnit 5 cơ bản\n150 lượt gọi AI mỗi tháng",
                         "Dành cho sinh viên và dự án thử nghiệm cơ bản", true, "MONTHLY"),
-                new TierPackage("PLUS", "Gói Tiêu Chuẩn (PLUS)", 10000L, "MONTHLY", 200, 4,
-                        "Toàn bộ tính năng gói FREE\n200 lượt gọi AI hồi lại hàng tuần\nSinh tối đa 4 batch song song\nƯu tiên xử lý hàng đợi tác vụ",
-                        "Dành cho nhóm phát triển mở rộng / dự án sprint nước rút", true, "WEEKLY"),
-                new TierPackage("PRO", "Gói Chuyên Nghiệp (PRO)", 20000L, "MONTHLY", 300, 8,
-                        "Toàn bộ tính năng gói PLUS\nPhân tích cú pháp AST & Call Graph sâu\nSinh song song tối đa 8 batch\nVòng lặp JaCoCo Refinement tự cải thiện độ bao phủ",
-                        "Toàn bộ tính năng phân tích sâu & JaCoCo Refinement", true, "WEEKLY"));
+                new TierPackage("PLUS", "Gói Tiêu Chuẩn (PLUS)", 40000L, "MONTHLY", 600, 4,
+                        "Toàn bộ tính năng gói FREE\n600 lượt gọi AI mỗi tháng\nSinh tối đa 4 batch song song\nƯu tiên xử lý hàng đợi tác vụ",
+                        "Dành cho nhóm phát triển mở rộng / dự án sprint nước rút", true, "MONTHLY"),
+                new TierPackage("PRO", "Gói Chuyên Nghiệp (PRO)", 80000L, "MONTHLY", 1500, 8,
+                        "Toàn bộ tính năng gói PLUS\n1.500 lượt gọi AI mỗi tháng\nPhân tích cú pháp AST & Call Graph sâu\nSinh song song tối đa 8 batch\nVòng lặp JaCoCo Refinement tự cải thiện độ bao phủ",
+                        "Toàn bộ tính năng phân tích sâu & JaCoCo Refinement", true, "MONTHLY"));
         for (TierPackage p : defaults) {
             if (!tierPackageRepository.existsById(p.getCode())) {
                 tierPackageRepository.save(p);
@@ -1211,38 +1212,38 @@ public class AdminService {
                 "Gói Miễn Phí (FREE)",
                 0L,
                 "MONTHLY",
-                100,
+                150,
                 2,
                 List.of("Trích xuất Quy tắc Nghiệp vụ (AST)", "Sinh Test Plan & Test Case",
-                        "Sinh Unit Test JUnit 5 cơ bản"),
+                        "Sinh Unit Test JUnit 5 cơ bản", "150 lượt gọi AI mỗi tháng"),
                 "Dành cho sinh viên và dự án thử nghiệm cơ bản",
                 true,
                 "MONTHLY"));
         tierPackages.put("PLUS", new TierPackageInternal(
                 "PLUS",
                 "Gói Tiêu Chuẩn (PLUS)",
-                10_000L,
+                40_000L,
                 "MONTHLY",
-                200,
+                600,
                 4,
-                List.of("Toàn bộ tính năng gói FREE", "200 lượt gọi AI hồi lại hàng tuần",
+                List.of("Toàn bộ tính năng gói FREE", "600 lượt gọi AI mỗi tháng",
                         "Sinh tối đa 4 batch song song", "Ưu tiên xử lý hàng đợi tác vụ"),
                 "Dành cho nhóm phát triển mở rộng / dự án sprint nước rút",
                 true,
-                "WEEKLY"));
+                "MONTHLY"));
         tierPackages.put("PRO", new TierPackageInternal(
                 "PRO",
                 "Gói Chuyên Nghiệp (PRO)",
-                20_000L,
+                80_000L,
                 "MONTHLY",
-                300,
+                1500,
                 8,
-                List.of("Toàn bộ tính năng gói PLUS", "Phân tích cú pháp AST & Call Graph sâu",
+                List.of("Toàn bộ tính năng gói PLUS", "1.500 lượt gọi AI mỗi tháng", "Phân tích cú pháp AST & Call Graph sâu",
                         "Sinh song song tối đa 8 batch",
                         "Vòng lặp JaCoCo Refinement tự cải thiện độ bao phủ"),
                 "Toàn bộ tính năng phân tích sâu & JaCoCo Refinement",
                 true,
-                "WEEKLY"));
+                "MONTHLY"));
     }
 
     public List<TierPackageDto> getTierPackages() {

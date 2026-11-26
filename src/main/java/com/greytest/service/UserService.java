@@ -33,7 +33,7 @@ public class UserService {
     }
 
     /**
-     * Nâng cấp tài khoản hiện tại từ FREE lên PRO và tăng quota lên mức gói Pro (300 lượt/tuần).
+     * Nâng cấp tài khoản hiện tại từ FREE lên PRO và tăng quota lên mức gói Pro (1.500 lượt/tháng).
      */
     @Transactional
     public UserQuotaResponse upgradeToPro(AuthUser currentUser) {
@@ -89,7 +89,7 @@ public class UserService {
         Integer remaining = limit == null ? null : Math.max(limit - quota.getQuotaUsed(), 0);
         String resetCycle = quotaService != null ? quotaService.resolveResetCycle(quota.getUserId()) : null;
         if (resetCycle == null) {
-            resetCycle = (tier == UserTier.PRO || tier == UserTier.PLUS) ? "WEEKLY" : "MONTHLY";
+            resetCycle = "MONTHLY";
         }
         LocalDate resetDate = null;
         if (quota.getPeriodStart() != null) {

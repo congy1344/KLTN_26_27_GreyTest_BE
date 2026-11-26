@@ -21,5 +21,7 @@ public record CoverageReportDto(
         Integer coveredBranches,
         LocalDateTime uploadedAt,
         List<CoverageGapDto> gaps,
-        ServiceCoverageDto serviceCoverage) {
+        ServiceCoverageDto serviceCoverage,
+        Integer testsRun,
+        Integer testsFailed) {
 }

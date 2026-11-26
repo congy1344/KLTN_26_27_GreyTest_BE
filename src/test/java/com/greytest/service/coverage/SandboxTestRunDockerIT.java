@@ -147,7 +147,7 @@ class SandboxTestRunDockerIT {
             if (line.startsWith("Sandbox đã sẵn sàng") || line.startsWith("Không chuẩn bị trước được")) warmed.countDown();
         });
         try {
-            service.generateAndVerify(1L, null, () -> {
+            service.generateAndVerify(1L, null, false, () -> {
                 // Giả lập thời gian AI sinh: chờ tới khi sandbox báo đã chuẩn bị xong.
                 try { warmed.await(5, java.util.concurrent.TimeUnit.MINUTES); }
                 catch (InterruptedException interrupted) { throw new IllegalStateException(interrupted); }
@@ -166,6 +166,44 @@ class SandboxTestRunDockerIT {
         assertThat(logs).anyMatch(line -> line.startsWith("Sandbox đã sẵn sàng"));
         assertThat(state.status()).as(state.message() + "\n" + state.logTail()).isEqualTo(Status.SUCCEEDED);
         assertThat(state.message()).contains("AI đã sửa 1 lượt test qua 1 vòng");
+        assertThat(state.tests()).isEqualTo(1);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void runsAProjectStoredInASubdirectoryModule(@org.junit.jupiter.api.io.TempDir Path wrapper) throws Exception {
+        // Project 2113: source nằm trong thư mục con, sandbox phải chép được vào /work/<module> dưới UID 1000.
+        Path source = Path.of(System.getenv("GREYTEST_SANDBOX_SOURCE"));
+        Path module = wrapper.resolve("app");
+        try (var files = java.nio.file.Files.walk(source)) {
+            for (Path file : (Iterable<Path>) files.filter(f -> !source.relativize(f).toString().startsWith("target") && !source.relativize(f).toString().startsWith(".git"))::iterator) {
+                Path target = module.resolve(source.relativize(file).toString());
+                if (java.nio.file.Files.isDirectory(file)) java.nio.file.Files.createDirectories(target);
+                else java.nio.file.Files.copy(file, target);
+            }
+        }
+        byte[] archive = archive(module, "package greytestcheck;\nclass SandboxSmokeTest { @org.junit.jupiter.api.Test void runs() { "
+                + "org.junit.jupiter.api.Assertions.assertEquals(2, 1 + 1); } }\n");
+
+        UnitTestService units = mock(UnitTestService.class);
+        ProjectRepository projects = mock(ProjectRepository.class);
+        CoverageService coverage = mock(CoverageService.class);
+        GenerationJobService jobs = mock(GenerationJobService.class);
+        ProjectJavaVersionDetector javaVersions = mock(ProjectJavaVersionDetector.class);
+        Project project = new Project();
+        project.setId(1L);
+        project.setStoragePath(wrapper.toString());
+        when(projects.findById(1L)).thenReturn(Optional.of(project));
+        when(javaVersions.detect(1L)).thenReturn(Optional.of(new ProjectJavaVersionDetector.JavaVersionInfo("17", "pom.xml")));
+        when(units.exportArchive(eq(1L), any())).thenReturn(new UnitTestService.ExportArchive(archive, List.of()));
+        when(jobs.executeMutation(eq(1L), any(Supplier.class))).thenAnswer(call -> call.<Supplier<?>>getArgument(1).get());
+        var service = new SandboxTestRunService(units, projects, coverage, jobs, javaVersions, Runnable::run,
+                SandboxTestRunService::dockerCli);
+
+        service.start(1L, "app");
+
+        var state = service.state(1L);
+        assertThat(state.status()).as(state.message() + "\n" + state.logTail()).isEqualTo(Status.SUCCEEDED);
         assertThat(state.tests()).isEqualTo(1);
     }
 

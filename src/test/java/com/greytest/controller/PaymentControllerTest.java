@@ -86,12 +86,12 @@ class PaymentControllerTest {
     }
 
     @Test
-    void createPaymentUrl_WithPlusTier_Returns10000VndAndUrl() {
+    void createPaymentUrl_WithPlusTier_Returns40000VndAndUrl() {
         AuthUser user = new AuthUser();
         user.setId(5L);
         user.setEmail("user@test.com");
         when(authService.currentUser("Bearer token")).thenReturn(user);
-        when(vnpayService.createPaymentUrl(anyString(), eq(10000L), anyString(), anyString()))
+        when(vnpayService.createPaymentUrl(anyString(), eq(40000L), anyString(), anyString()))
                 .thenReturn("https://sandbox.vnpayment.vn/test-url");
 
         MockHttpServletRequest servletRequest = new MockHttpServletRequest();
@@ -105,18 +105,18 @@ class PaymentControllerTest {
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(response.getBody()).isNotNull();
-        assertThat(response.getBody().amount()).isEqualTo(10000L);
+        assertThat(response.getBody().amount()).isEqualTo(40000L);
         assertThat(response.getBody().paymentUrl()).isEqualTo("https://sandbox.vnpayment.vn/test-url");
-        verify(paymentRepository).save(argThat(tx -> tx.getAmount() == 10000L && tx.getTier() == UserTier.PLUS));
+        verify(paymentRepository).save(argThat(tx -> tx.getAmount() == 40000L && tx.getTier() == UserTier.PLUS));
     }
 
     @Test
-    void createPaymentUrl_WithProTier_Returns20000VndAndUrl() {
+    void createPaymentUrl_WithProTier_Returns80000VndAndUrl() {
         AuthUser user = new AuthUser();
         user.setId(5L);
         user.setEmail("user@test.com");
         when(authService.currentUser("Bearer token")).thenReturn(user);
-        when(vnpayService.createPaymentUrl(anyString(), eq(20000L), anyString(), anyString()))
+        when(vnpayService.createPaymentUrl(anyString(), eq(80000L), anyString(), anyString()))
                 .thenReturn("https://sandbox.vnpayment.vn/test-url-pro");
 
         MockHttpServletRequest servletRequest = new MockHttpServletRequest();
@@ -130,9 +130,9 @@ class PaymentControllerTest {
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(response.getBody()).isNotNull();
-        assertThat(response.getBody().amount()).isEqualTo(20000L);
+        assertThat(response.getBody().amount()).isEqualTo(80000L);
         assertThat(response.getBody().paymentUrl()).isEqualTo("https://sandbox.vnpayment.vn/test-url-pro");
-        verify(paymentRepository).save(argThat(tx -> tx.getAmount() == 20000L && tx.getTier() == UserTier.PRO));
+        verify(paymentRepository).save(argThat(tx -> tx.getAmount() == 80000L && tx.getTier() == UserTier.PRO));
     }
 
     @Test

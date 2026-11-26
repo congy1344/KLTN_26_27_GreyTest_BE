@@ -173,37 +173,86 @@ class CoverageServiceTest {
     }
 
     @Test
-    void latestKhongRefineLaiGapKhongDoiSauVongTruoc() {
+    void discardXoaReportConTonTaiVaBoQuaReportDaBiXoa() {
+        when(reports.existsById(41L)).thenReturn(true);
+
+        service.discard(41L);
+        service.discard(42L);
+
+        org.mockito.Mockito.verify(reports).deleteById(41L);
+        org.mockito.Mockito.verify(reports, org.mockito.Mockito.never()).deleteById(42L);
+    }
+
+    private static final java.time.LocalDateTime T0 = java.time.LocalDateTime.of(2026, 11, 24, 10, 0);
+
+    @Test
+    void latestKhongRefineLaiGapKhongDoiSauLuotBoSung() {
+        var gap = unchangedGap(List.of(T0, T0.plusMinutes(10)), T0.plusMinutes(5));
+
+        assertThat(gap.refinable()).isFalse();
+        assertThat(gap.suggestion()).contains("Không thể cải thiện tự động");
+    }
+
+    @Test
+    void latestVanChoBoSungKhiChuaTungBoSungDuCoNhieuBaoCaoGiongNhau() {
+        // Sandbox nạp coverage sau mỗi lần chạy (AI sửa test, tự "Tiếp tục sinh") nên báo cáo trước chưa chắc là một vòng bổ sung.
+        assertThat(unchangedGap(List.of(T0, T0.plusMinutes(10)), null).refinable()).isTrue();
+    }
+
+    @Test
+    void latestSoVoiBaoCaoTruocLuotBoSungDuLuotXacMinhNapNhieuBaoCao() {
+        var gap = unchangedGap(List.of(T0, T0.plusMinutes(10), T0.plusMinutes(12)), T0.plusMinutes(5));
+
+        assertThat(gap.refinable()).isFalse();
+    }
+
+    @Test
+    void latestVanChoBoSungKhiLuotBoSungChuaDuocDoLai() {
+        assertThat(unchangedGap(List.of(T0, T0.plusMinutes(10)), T0.plusMinutes(15)).refinable()).isTrue();
+    }
+
+    /** Gap giống hệt nhau ở mọi báo cáo; supplementedAt là lúc tạo Test Case bổ sung cho method, null nếu chưa có. */
+    private com.greytest.dto.CoverageGapDto unchangedGap(
+            List<java.time.LocalDateTime> uploadedAt, java.time.LocalDateTime supplementedAt) {
         Project project = new Project();
         project.setId(5L);
         when(projects.findById(5L)).thenReturn(Optional.of(project));
 
         JavaClass serviceClass = javaClass(1L, "RecipientServiceImpl", ClassType.SERVICE);
         JavaMethod method = javaMethod(11L, 1L, "findReadyToNotify");
-        CoverageDetail previousGap = gap(11L);
-        CoverageDetail currentGap = gap(11L);
-        currentGap.setLineCoverage(new BigDecimal("20.00"));
         BusinessRule rule = rule(20L);
         rule.setMethodId(11L);
         TestPlan plan = new TestPlan();
+        plan.setId(30L);
         plan.setBusinessRuleId(20L);
         plan.setStatus(ReviewStatus.APPROVED);
-        var round1 = report(1L, "79.00");
-        var round2 = report(2L, "79.00");
+        var history = new java.util.ArrayList<com.greytest.entity.CoverageReport>();
+        for (int i = 0; i < uploadedAt.size(); i++) {
+            var stored = report(i + 1L, "79.00");
+            stored.setUploadedAt(uploadedAt.get(i));
+            history.add(stored);
+            org.mockito.Mockito.lenient().when(details.findByReportId(i + 1L)).thenReturn(List.of(gap(11L)));
+        }
+        var original = testCase(30L, "BR-001 -> TP-001", T0.minusHours(1));
+        when(cases.findByProjectId(5L)).thenReturn(supplementedAt == null ? List.of(original)
+                : List.of(original, testCase(30L, "BR-001 -> TP-001 -> JaCoCo round 2", supplementedAt)));
 
-        when(reports.findTopByProjectIdOrderByIdDesc(5L)).thenReturn(Optional.of(round2));
-        when(reports.findByProjectId(5L)).thenReturn(List.of(round1, round2));
-        when(details.findByReportId(2L)).thenReturn(List.of(currentGap));
-        when(details.findByReportId(1L)).thenReturn(List.of(previousGap));
+        when(reports.findTopByProjectIdOrderByIdDesc(5L)).thenReturn(Optional.of(history.get(history.size() - 1)));
+        when(reports.findByProjectId(5L)).thenReturn(history);
         when(classes.findByProjectId(5L)).thenReturn(List.of(serviceClass));
         when(methods.findAllById(List.of(11L))).thenReturn(List.of(method));
         when(plans.findByProjectId(5L)).thenReturn(List.of(plan));
         when(rules.findById(20L)).thenReturn(Optional.of(rule));
 
-        var gap = service.latest(5L).orElseThrow().gaps().get(0);
+        return service.latest(5L).orElseThrow().gaps().get(0);
+    }
 
-        assertThat(gap.refinable()).isFalse();
-        assertThat(gap.suggestion()).contains("Không thể cải thiện tự động");
+    private static com.greytest.entity.TestCase testCase(Long planId, String traceSource, java.time.LocalDateTime createdAt) {
+        var testCase = new com.greytest.entity.TestCase();
+        testCase.setTestPlanId(planId);
+        testCase.setTraceSource(traceSource);
+        testCase.setCreatedAt(createdAt);
+        return testCase;
     }
 
     @Test

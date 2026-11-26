@@ -127,9 +127,9 @@ public class UsageQuotaService {
     public UsageQuotaService(
             UsageQuotaRepository repository,
             UserActivityLogRepository activityRepository,
-            @Value("${greytest.usage.default-monthly-llm-quota:100}") int defaultLimit,
-            @Value("${greytest.usage.plus-weekly-llm-quota:200}") int plusLimit,
-            @Value("${greytest.usage.pro-monthly-llm-quota:300}") int proLimit,
+            @Value("${greytest.usage.default-monthly-llm-quota:150}") int defaultLimit,
+            @Value("${greytest.usage.plus-weekly-llm-quota:600}") int plusLimit,
+            @Value("${greytest.usage.pro-monthly-llm-quota:1500}") int proLimit,
             @Value("${llm.provider:mock}") String llmProvider) {
         this(repository, activityRepository, defaultLimit, plusLimit, proLimit, Clock.systemDefaultZone(), llmProvider);
     }

@@ -66,7 +66,7 @@ class UnitTestExportProvenanceServiceTest {
         UnitTest unit = unit(metadata("1".repeat(64)) + "class ServiceTest { void testValue() {} }");
         String original = unit.getSourceCode();
         assertThatThrownBy(() -> service.prepare(1L, List.of(unit), root)).isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("no valid applied checkpoint");
+                .hasMessageContaining("không xác minh lại được với source hiện tại").hasMessageContaining("Hãy sinh lại Unit Test");
         assertThat(unit.getSourceCode()).isEqualTo(original);
         org.mockito.Mockito.verify(agent).validateExistingUnitTest(1L, unit, root);
         verifyNoInteractions(fingerprints);

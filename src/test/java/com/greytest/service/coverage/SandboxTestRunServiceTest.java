@@ -2,6 +2,7 @@ package com.greytest.service.coverage;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -14,6 +15,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.function.Supplier;
 import java.util.zip.ZipEntry;
@@ -49,6 +51,7 @@ class SandboxTestRunServiceTest {
     /** Kết quả giả của container: exit code của lệnh start và có sinh jacoco.xml hay không. */
     private int startExit;
     private boolean producesReport;
+    private boolean missingJacoco;
     private boolean generatedTestReachedContainer;
     /** Các testcase không đạt của từng lượt chạy (lượt sau cùng lặp lại), và số lượt đầu còn sinh được báo cáo. */
     private List<String> casesPerRun = List.of(errorCase("rejectsEmptyCart"));
@@ -88,7 +91,7 @@ class SandboxTestRunServiceTest {
         try {
             service = new SandboxTestRunService(units, projects, coverage, jobs, javaVersions, executor, this::fakeDocker);
             if (manualFirst) service.start(manualProject, null);
-            var automatic = java.util.concurrent.CompletableFuture.runAsync(() -> service.generateAndVerify(1L, null, () -> {
+            var automatic = java.util.concurrent.CompletableFuture.runAsync(() -> service.generateAndVerify(1L, null, false, () -> {
                 try {assertThat(saveTests.await(5,java.util.concurrent.TimeUnit.SECONDS)).isTrue();}
                 catch(InterruptedException failure){throw new IllegalStateException(failure);}
                 return true;
@@ -156,7 +159,7 @@ class SandboxTestRunServiceTest {
         try {
             service=new SandboxTestRunService(units,projects,coverage,jobs,javaVersions,executor,this::fakeDocker);
             com.greytest.service.GenerationJobContext.bind(7L,progress::add);
-            service.generateAndVerify(1L,null,()->true);
+            service.generateAndVerify(1L, null, false, ()->true);
         } finally {com.greytest.service.GenerationJobContext.clear();executor.shutdownNow();}
         assertThat(progress.get(progress.size()-1)).contains("CHƯA được xác minh", "giữ lại");
         assertThat(service.state(1L).logTail()).contains("COMPILATION ERROR");
@@ -180,7 +183,7 @@ class SandboxTestRunServiceTest {
         var executor=java.util.concurrent.Executors.newSingleThreadExecutor();
         try {
             service=new SandboxTestRunService(units,projects,coverage,jobs,javaVersions,executor,this::fakeDocker);
-            org.assertj.core.api.Assertions.assertThatThrownBy(()->service.generateAndVerify(1L,null,()->{
+            org.assertj.core.api.Assertions.assertThatThrownBy(()->service.generateAndVerify(1L, null, false, ()->{
                 try {assertThat(executionEntered.await(5,java.util.concurrent.TimeUnit.SECONDS)).isTrue();}
                 catch(InterruptedException failure){throw new IllegalStateException(failure);}
                 throw new IllegalStateException("generation failed");
@@ -197,11 +200,125 @@ class SandboxTestRunServiceTest {
                 task->{throw new java.util.concurrent.RejectedExecutionException("executor stopped");},this::fakeDocker);
         var saved=new java.util.concurrent.atomic.AtomicInteger();
         com.greytest.service.GenerationJobContext.bind(7L,progress::add);
-        try {service.generateAndVerify(1L,null,()->{saved.incrementAndGet();return true;});}
+        try {service.generateAndVerify(1L, null, false, ()->{saved.incrementAndGet();return true;});}
         finally {com.greytest.service.GenerationJobContext.clear();}
         assertThat(saved).hasValue(1);
         assertThat(commands).isEmpty();
         assertThat(progress).singleElement().asString().contains("CHƯA được xác minh", "executor stopped");
+    }
+
+    @Test
+    void backgroundVerificationRemovesUncompilableTestsAndUpdatesCoverage() throws Exception {
+        compilationArchive();
+        logsPerRun = List.of(compileError(8, "bad stub"), "ok");
+        producesReport = true;
+        firstReportRun = 2;
+        casesPerRun = List.of("");
+        when(units.removeUncompilable(eq(1L), any())).thenReturn(1);
+
+        service.verifyInBackground(1L, null, 7L);
+
+        verify(units).removeUncompilable(eq(1L), any());
+        verify(coverage).upload(eq(1L), any(), any());
+        assertThat(service.state(1L).status()).isEqualTo(Status.SUCCEEDED);
+        assertThat(service.lastRunServicePath(1L)).isEmpty();
+        assertThat(containers).isEmpty();
+    }
+
+    @Test
+    void keepsOneCoverageReportWhenAiRepairRunsTheTestsAgain() {
+        producesReport = true;
+        casesPerRun = List.of(errorCase("first"), "");
+        when(units.repairFailing(eq(1L), any())).thenReturn(List.of(new UnitTest()));
+        coverageReports(41L, 42L);
+
+        service.verifyInBackground(1L, null, 7L);
+
+        verify(coverage).discard(41L);
+        verify(coverage, never()).discard(42L);
+        // Số test của lượt chạy được lưu cùng báo cáo coverage để không mất khi backend khởi động lại.
+        verify(coverage).recordTestRun(eq(42L), anyInt(), anyInt());
+    }
+
+    @Test
+    void resumedGenerationReplacesTheReportOfTheRunItContinues() {
+        producesReport = true;
+        casesPerRun = List.of("");
+        coverageReports(41L, 42L);
+
+        generateTwice(null, true);
+
+        verify(coverage).discard(41L);
+        verify(coverage, never()).discard(42L);
+        // Số test của lượt chạy được lưu cùng báo cáo coverage để không mất khi backend khởi động lại.
+        verify(coverage).recordTestRun(eq(42L), anyInt(), anyInt());
+    }
+
+    @Test
+    void freshGenerationKeepsTheReportOfTheEarlierRun() {
+        producesReport = true;
+        casesPerRun = List.of("");
+        coverageReports(41L, 42L);
+
+        generateTwice(null, false);
+
+        verify(coverage, never()).discard(any());
+    }
+
+    @Test
+    void resumedGenerationOfAnotherModuleKeepsTheOtherModulesReport() throws IOException {
+        Files.createDirectories(sourceRoot.resolve("orders"));
+        producesReport = true;
+        casesPerRun = List.of("");
+        coverageReports(41L, 42L);
+
+        generateTwice("orders", true);
+
+        verify(coverage, never()).discard(any());
+    }
+
+    /** Sinh cho toàn project, rồi sinh lượt hai (cùng module hoặc module khác) trên cùng service. */
+    private void generateTwice(String secondModule, boolean continuation) {
+        var executor = java.util.concurrent.Executors.newSingleThreadExecutor();
+        try {
+            service = new SandboxTestRunService(units, projects, coverage, jobs, javaVersions, executor, this::fakeDocker);
+            service.generateAndVerify(1L, null, false, () -> true);
+            service.generateAndVerify(1L, secondModule, continuation, () -> true);
+        } finally { executor.shutdownNow(); }
+        verify(coverage, org.mockito.Mockito.times(2)).upload(eq(1L), any(), any());
+    }
+
+    private void coverageReports(Long first, Long second) {
+        var one = mock(com.greytest.dto.CoverageReportDto.class);
+        var two = mock(com.greytest.dto.CoverageReportDto.class);
+        when(one.id()).thenReturn(first);
+        when(two.id()).thenReturn(second);
+        when(coverage.upload(eq(1L), any(), any())).thenReturn(one, two);
+    }
+
+    @Test
+    void backgroundVerificationChargesRepairToTheRequestingUser() {
+        producesReport = true;
+        casesPerRun = List.of(errorCase("first"), "");
+        when(units.repairFailing(eq(1L), any())).thenReturn(List.of(new UnitTest()));
+
+        service.verifyInBackground(1L, null, 7L);
+
+        verify(jobs).executeAiMutation(eq(1L), eq(7L), any(), any(Supplier.class));
+        assertThat(service.state(1L).status()).isEqualTo(Status.SUCCEEDED);
+        assertThat(GenerationJobContext.actorUserId()).isNull();
+    }
+
+    @Test
+    void rejectedBackgroundVerificationKeepsTestsAndReportsTheReason() {
+        service = new SandboxTestRunService(units, projects, coverage, jobs, javaVersions,
+                task -> { throw new java.util.concurrent.RejectedExecutionException("executor stopped"); }, this::fakeDocker);
+
+        service.verifyInBackground(1L, null, 7L);
+
+        assertThat(service.state(1L).status()).isEqualTo(Status.FAILED);
+        assertThat(service.state(1L).message()).contains("CHƯA được xác minh", "executor stopped", "giữ lại");
+        assertThat(commands).isEmpty();
     }
 
     private void automatic(boolean hasTests) throws Exception {
@@ -218,7 +335,7 @@ class SandboxTestRunServiceTest {
                 progress.add(message);
                 if(message.startsWith("Sandbox đã sẵn sàng")||message.startsWith("Không chuẩn bị trước")) warmed.countDown();
             });
-            try { service.generateAndVerify(1L, null, () -> {
+            try { service.generateAndVerify(1L, null, false, () -> {
                 if(hasTests) try {assertThat(warmed.await(5,java.util.concurrent.TimeUnit.SECONDS)).isTrue();}
                 catch(InterruptedException failure){throw new IllegalStateException(failure);}
                 return hasTests;
@@ -252,7 +369,7 @@ class SandboxTestRunServiceTest {
 
         assertThat(warms).isEqualTo(1);
         assertThat(runs).isEqualTo(2);
-        assertThat(commands.stream().filter(command -> command.get(0).equals("exec") && !command.contains("rm")))
+        assertThat(commands.stream().filter(command -> command.get(0).equals("exec") && !command.contains("rm") && !command.contains("cp")))
                 .allSatisfy(command -> assertThat(command).containsSubsequence("-e", "MAVEN_ARGS=" + args));
     }
 
@@ -321,6 +438,7 @@ class SandboxTestRunServiceTest {
         if (failure.equals("project")) logsPerRun = List.of("[ERROR] /work/src/main/java/demo/Shop.java:[1,1] broken\n");
         automatic(true);
         assertThat(progress).filteredOn(line -> line.startsWith("Cảnh báo:")).hasSize(1);
+        assertThat(service.state(1L).compilationError()).isEqualTo(failure.equals("project"));
         assertThat(progress.get(progress.size() - 1)).contains("Unit Test CHƯA được xác minh");
         verify(units, never()).removeUncompilable(any(), any());
         verify(units, never()).repairFailing(any(), any());
@@ -339,7 +457,7 @@ class SandboxTestRunServiceTest {
         try {
             service=new SandboxTestRunService(units,projects,coverage,realJobs,javaVersions,executor,this::fakeDocker);
             realJobs.submit(1L,7L,com.greytest.dto.GenerationProgressStage.UNIT_TEST,()->
-                    com.greytest.service.GenerationProgressService.deferCompletion(()->service.generateAndVerify(1L,null,()->{
+                    com.greytest.service.GenerationProgressService.deferCompletion(()->service.generateAndVerify(1L, null, false, ()->{
                         jobProgress.start(1L,com.greytest.dto.GenerationProgressStage.UNIT_TEST,1,"Đang sinh.");
                         jobProgress.completeAfterCommit(1L,com.greytest.dto.GenerationProgressStage.UNIT_TEST,"Hoàn tất: Đã lưu 2 Unit Test.");
                         return true;
@@ -384,7 +502,7 @@ class SandboxTestRunServiceTest {
             service = new SandboxTestRunService(units, projects, coverage, realJobs, javaVersions,
                     executor, this::fakeDocker);
             realJobs.submit(1L, 7L, stage, () -> GenerationProgressService.deferCompletion(() ->
-                    service.generateAndVerify(1L, null, () -> {
+                    service.generateAndVerify(1L, null, false, () -> {
                         jobProgress.start(1L, stage, 1, "Generating");
                         Runnable finishWait = GenerationJobContext.startLlmWait();
                         try { Thread.sleep(10); }
@@ -410,7 +528,7 @@ class SandboxTestRunServiceTest {
         try {
             service=new SandboxTestRunService(units,projects,coverage,jobs,javaVersions,executor,this::fakeDocker);
             com.greytest.service.GenerationJobContext.bind(7L,message->{if(message.startsWith("Sandbox đã sẵn sàng"))warmed.countDown();});
-            service.generateAndVerify(1L,null,()->{
+            service.generateAndVerify(1L, null, false, ()->{
                 try {assertThat(warmed.await(5,java.util.concurrent.TimeUnit.SECONDS)).isTrue();}
                 catch(InterruptedException failure){throw new IllegalStateException(failure);}
                 return false;
@@ -794,6 +912,51 @@ class SandboxTestRunServiceTest {
     }
 
     @Test
+    void publishesOnlyShortFailuresFromTheLatestRunWithExportedCaseCodes() {
+        producesReport = true;
+        var archive = units.exportArchive(1L, null);
+        when(units.exportArchive(eq(1L), any())).thenReturn(new UnitTestService.ExportArchive(
+                archive.content(), List.of(), Map.of("demo.ShopTest#value", "TC-001")));
+        casesPerRun = List.of(assertionCase("value[1]").replace("message=\"expected", "message=\"&#10;expected")
+                + errorCase("existing").repeat(20), "");
+
+        service.start(1L, null);
+
+        var state = service.state(1L);
+        assertThat(state.status()).isEqualTo(Status.TESTS_FAILED);
+        assertThat(state.compilationError()).isFalse();
+        assertThat(state.failed()).isEqualTo(21);
+        assertThat(state.failures()).hasSize(20);
+        assertThat(state.failures().get(0)).isEqualTo(new SandboxTestRunService.FailedTestDto(
+                "demo.ShopTest", "value", "TC-001", "expected: <100> but was: <90>"));
+        assertThat(state.failures().get(1).testCaseCode()).isNull();
+
+        service.start(1L, null);
+
+        assertThat(service.state(1L).status()).isEqualTo(Status.SUCCEEDED);
+        assertThat(service.state(1L).failures()).isEmpty();
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void retainsSurefireFailuresEvenWhenCoverageIsUnavailable(boolean automatic) {
+        producesReport = true;
+        missingJacoco = true;
+        logsPerRun = List.of("JaCoCo report was not created");
+        casesPerRun = List.of(assertionCase("chargesFullPrice"));
+
+        if (automatic) service.verifyInBackground(1L, null, 7L);
+        else service.start(1L, null);
+
+        var state = service.state(1L);
+        assertThat(state.status()).isEqualTo(Status.FAILED);
+        assertThat(state.compilationError()).isFalse();
+        assertThat(state.failed()).isEqualTo(1);
+        assertThat(state.failures()).singleElement().satisfies(
+                failure -> assertThat(failure.methodName()).isEqualTo("chargesFullPrice"));
+    }
+
+    @Test
     void capsTheListedAssertionFailureNames() {
         startExit = 3;
         producesReport = true;
@@ -878,6 +1041,8 @@ class SandboxTestRunServiceTest {
 
         assertThat(service.state(1L).status()).isEqualTo(Status.FAILED);
         assertThat(service.state(1L).message()).isEqualTo("Source của project không biên dịch được: /work/" + path + ":12: cannot find symbol");
+        assertThat(service.state(1L).compilationError()).isTrue();
+        assertThat(service.state(1L).failures()).isEmpty();
         verify(units, never()).repairFailing(any(), any());
     }
 
@@ -1087,6 +1252,7 @@ class SandboxTestRunServiceTest {
                 } else if (!producesReport || runs > reportRuns || runs < firstReportRun) {
                     return new SandboxTestRunService.Result(1);
                 } else if (from.endsWith("jacoco.xml")) {
+                    if (missingJacoco) return new SandboxTestRunService.Result(1);
                     Files.writeString(Path.of(to), "<report/>");
                 } else {
                     Files.createDirectories(Path.of(to));

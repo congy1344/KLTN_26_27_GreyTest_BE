@@ -66,7 +66,7 @@ class GithubOAuthServiceTest {
                 authService,
                 new SettingsCipher("github-oauth-test-secret"));
 
-        assertThatThrownBy(() -> service.loginWithGithub("test-code", null))
+        assertThatThrownBy(() -> service.loginWithGithub("test-code", "s", null))
                 .isInstanceOf(AuthException.class)
                 .hasMessageContaining("chưa được cấu hình");
     }
@@ -81,7 +81,7 @@ class GithubOAuthServiceTest {
                 authService,
                 new SettingsCipher("github-oauth-test-secret"));
 
-        assertThatThrownBy(() -> service.loginWithGithub("  ", null))
+        assertThatThrownBy(() -> service.loginWithGithub("  ", "s", null))
                 .isInstanceOf(AuthException.class)
                 .hasMessageContaining("không hợp lệ");
     }
@@ -155,5 +155,51 @@ class GithubOAuthServiceTest {
                 userRepository, authService, new SettingsCipher(""));
         String sealed = org.springframework.test.util.ReflectionTestUtils.invokeMethod(service, "seal", "gho_secret_token");
         assertThat(sealed).isNull();
+    }
+
+    private GithubOAuthService configured() {
+        return new GithubOAuthService("client-id", "client-secret", "http://localhost:5173/auth/callback/github",
+                userRepository, authService, new SettingsCipher("github-oauth-test-secret"));
+    }
+
+    @Test
+    void loginWithGithub_rejectsUnknownStateBeforeCallingGithub() {
+        GithubOAuthService service = configured();
+        assertThatThrownBy(() -> service.loginWithGithub("code", "forged-state", null))
+                .isInstanceOf(AuthException.class)
+                .extracting("code").isEqualTo("GITHUB_OAUTH_STATE_INVALID");
+        assertThatThrownBy(() -> service.loginWithGithub("code", null, null))
+                .isInstanceOf(AuthException.class)
+                .extracting("code").isEqualTo("GITHUB_OAUTH_STATE_INVALID");
+    }
+
+    @Test
+    void oauthStateIsSingleUse() {
+        GithubOAuthService service = configured();
+        String state = service.issueState(null);
+        assertThat(state).hasSizeGreaterThanOrEqualTo(32);
+        assertThat(service.issueState(null)).isNotEqualTo(state);
+
+        service.consumeState(state, null);
+        assertThatThrownBy(() -> service.consumeState(state, null))
+                .isInstanceOf(AuthException.class)
+                .extracting("code").isEqualTo("GITHUB_OAUTH_STATE_INVALID");
+    }
+
+    @Test
+    void oauthStateIsBoundToTheUserWhoStartedTheFlow() {
+        GithubOAuthService service = configured();
+        AuthUser victim = new AuthUser();
+        victim.setId(7L);
+        when(authService.currentUser("Bearer victim")).thenReturn(victim);
+
+        // Kẻ tấn công tự xin state khi chưa đăng nhập rồi dụ nạn nhân (đang đăng nhập) dùng nó để liên kết GitHub.
+        String attackerState = service.issueState(null);
+        assertThatThrownBy(() -> service.consumeState(attackerState, 7L))
+                .isInstanceOf(AuthException.class)
+                .extracting("code").isEqualTo("GITHUB_OAUTH_STATE_INVALID");
+
+        String linkState = service.issueState("Bearer victim");
+        service.consumeState(linkState, 7L);
     }
 }

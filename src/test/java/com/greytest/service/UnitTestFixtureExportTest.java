@@ -57,6 +57,9 @@ class UnitTestFixtureExportTest {
         assertThat(file.caseIds()).containsExactlyInAnyOrder(1L, 2L, 3L);
         var unit = com.github.javaparser.StaticJavaParser.parse(file.sourceCode());
         assertThat(unit.getTypes()).hasSize(3);
+        assertThat(file.testNames()).hasSize(3).containsEntry(1L, "UserServiceTest#check");
+        assertThat(file.testNames().get(2L)).isEqualTo(unit.getType(1).getNameAsString() + "#other");
+        assertThat(file.testNames().get(3L)).isEqualTo(unit.getType(2).getNameAsString() + "#third");
         // Chỉ class trùng tên file được public, class còn lại vẫn khớp mẫu tên Surefire.
         assertThat(unit.getTypes().stream().filter(type -> type.isPublic()).map(type -> type.getNameAsString()))
                 .containsExactly("UserServiceTest");

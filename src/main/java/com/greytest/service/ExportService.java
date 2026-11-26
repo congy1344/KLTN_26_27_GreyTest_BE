@@ -45,6 +45,9 @@ public class ExportService {
     private final ServiceScopeResolver scopeResolver;
     private final ServicePipelineStatusService scopedStatuses;
     private final ObjectMapper objectMapper;
+    // ponytail: inject tùy chọn để không đổi constructor; null trong unit test thì report bỏ phần chạy test
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private com.greytest.service.coverage.SandboxTestRunService sandbox;
 
     public ExportService(ProjectRepository projects, TraceabilityService traceability, CoverageService coverage,
             BusinessRuleRepository rules, TestPlanRepository plans, TestCaseRepository cases,
@@ -138,7 +141,26 @@ public class ExportService {
                 projectUnitTests.stream().map(unitTest -> unitTestItem(unitTest, caseCodes)).toList(),
                 matrix.rows(),
                 cov == null ? List.of() : cov.gaps().stream().filter(CoverageGapDto::refinable).toList(),
-                matrix.uncoveredRules().stream().map(TraceabilityRowDto::ruleCode).toList());
+                matrix.uncoveredRules().stream().map(TraceabilityRowDto::ruleCode).toList(),
+                testRun(project.getId(), servicePath, cov));
+    }
+
+    /** Lượt chạy test gần nhất, chỉ khi chạy đúng phạm vi service đang xuất và có test được chạy. */
+    private ExportReportDto.TestRunSummary testRun(Long projectId, String servicePath, CoverageReportDto cov) {
+        var state = sandbox == null ? null : sandbox.state(projectId);
+        var status = state == null ? com.greytest.service.coverage.SandboxTestRunService.Status.IDLE : state.status();
+        if (status == com.greytest.service.coverage.SandboxTestRunService.Status.RUNNING) return null;
+        if (status != com.greytest.service.coverage.SandboxTestRunService.Status.IDLE
+                && Objects.equals(sandbox.lastRunServicePath(projectId), Objects.toString(servicePath, ""))) {
+            return state.tests() == 0 ? null : new ExportReportDto.TestRunSummary(status.name(), state.tests(),
+                    state.tests() - state.failed(), state.failed(), state.message());
+        }
+        // Backend vừa khởi động lại (trạng thái trong bộ nhớ đã mất): dùng số test đã lưu cùng báo cáo coverage của phạm vi này.
+        if (status != com.greytest.service.coverage.SandboxTestRunService.Status.IDLE
+                || cov == null || cov.testsRun() == null || cov.testsRun() == 0) return null;
+        int failed = cov.testsFailed() == null ? 0 : cov.testsFailed();
+        return new ExportReportDto.TestRunSummary(failed > 0 ? "TESTS_FAILED" : "SUCCEEDED", cov.testsRun(),
+                cov.testsRun() - failed, failed, null);
     }
 
     private Set<Long> scopeRuleIds(Long projectId, String servicePath, List<BusinessRule> projectRules) {
@@ -171,6 +193,13 @@ public class ExportService {
         md.append("| Test Plans | ").append(r.totalTestPlans()).append(" |\n");
         md.append("| Test Cases | ").append(r.totalTestCases()).append(" |\n");
         md.append("| Unit Tests | ").append(r.totalUnitTests()).append(" |\n\n");
+        if (r.testRun() != null) {
+            md.append("## Kết quả chạy test\n\n");
+            md.append("| Trạng thái | Tổng | Đạt | Không đạt |\n| --- | ---: | ---: | ---: |\n");
+            md.append("| ").append(cell(r.testRun().status())).append(" | ").append(r.testRun().tests())
+                    .append(" | ").append(r.testRun().passed()).append(" | ").append(r.testRun().failed()).append(" |\n\n");
+            if (r.testRun().message() != null && !r.testRun().message().isBlank()) md.append(r.testRun().message()).append("\n\n");
+        }
         md.append("## Business Rules\n\n");
         md.append("| Code | Status | Description |\n| --- | --- | --- |\n");
         r.businessRules().forEach(rule -> md.append("| ").append(cell(rule.ruleCode()))

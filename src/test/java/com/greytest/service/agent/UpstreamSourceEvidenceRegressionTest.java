@@ -403,7 +403,7 @@ class UpstreamSourceEvidenceRegressionTest {
                 .doesNotContain("Mockito cannot verify toString()");
     }
 
-    @Test void planCorrectionIncludesTheRejectedResponseAndAuthoritativeRuleMapping(@TempDir java.nio.file.Path root) throws Exception {
+    @Test void planCorrectionListsUncoveredRulesWithTheirOwningMethods(@TempDir java.nio.file.Path root) throws Exception {
         var f = fixture("hms-wrong-plan-references");
         var context = json.treeToValue(f.get("context"), TestPlanContextDto.class);
         String invalid = json.writeValueAsString(f.get("response"));
@@ -415,8 +415,10 @@ class UpstreamSourceEvidenceRegressionTest {
                 .isInstanceOf(LlmResponseException.class);
         var prompts = org.mockito.ArgumentCaptor.forClass(String.class);
         verify(client, times(2)).complete(prompts.capture(), any(LlmRequestOptions.class));
-        assertThat(prompts.getAllValues().get(1)).contains("333=[173, 174, 175, 176]", invalid,
-                "Previous invalid response (untrusted repair data)");
+        // Không plan nào hợp lệ: gửi lại mọi rule kèm đúng method sở hữu, không kèm response sai ID để AI khỏi chép lại.
+        assertThat(prompts.getAllValues().get(1))
+                .contains("Missing valid test plans for approved rule IDs", "173 -> 333", "176 -> 333", "179 -> 334")
+                .doesNotContain(invalid);
     }
 
     @Test void acceptsAnExplicitJavaMessageConcatenationFromTheLiveHospitalResponse() throws Exception {

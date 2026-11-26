@@ -114,12 +114,15 @@ public class UnitTestService {
                 String key = resumeContext == null ? null : "resume:" + resumeContext + ":" + existing.getId() + ":" + testCase.getId() + ":"
                         + com.greytest.service.agent.GenerationSourceFingerprint.hash(existing.getPackageName() + "|"
                         + existing.getTestClassName() + "|" + existing.getTestMethodName() + "|" + existing.getSourceCode());
-                if (key != null && validatedTests.containsKey(key)) { validatedIds.add(testCase.getId()); continue; }
                 try {
+                    // Phải qua cả kiểm tra phiên bản source mà bước xuất file dùng (kể cả khi đã có trong cache),
+                    // nếu không test sinh từ source cũ được giữ lại nhưng lúc xuất bị từ chối.
+                    if (exportProvenance != null) exportProvenance.prepareValidated(projectId, List.of(existing), exportSourceRoot(projectId));
+                    if (key != null && validatedTests.containsKey(key)) { validatedIds.add(testCase.getId()); continue; }
                     ai.validateExistingUnitTest(projectId, existing, null);
                     validatedIds.add(testCase.getId());
                     if (key != null) validatedTests.put(key, Boolean.TRUE);
-                } catch (LlmResponseException invalid) {
+                } catch (LlmResponseException | IllegalArgumentException invalid) {
                     generationProgress.log(projectId, GenerationProgressStage.UNIT_TEST,
                             "UT của " + testCase.getCaseCode() + " không còn hợp lệ; cần phục hồi: " + invalid.getMessage());
                 }
@@ -1327,7 +1330,11 @@ public class UnitTestService {
     }
 
     /** Gói export cùng danh sách case bị bỏ để giao diện báo rõ phần thiếu. */
-    public record ExportArchive(byte[] content,List<String> skippedCaseCodes){}
+    public record ExportArchive(byte[] content,List<String> skippedCaseCodes,Map<String,String> caseCodesByTest){
+        public ExportArchive(byte[] content,List<String> skippedCaseCodes){
+            this(content,skippedCaseCodes,Map.of());
+        }
+    }
 
     /** Đóng gói toàn bộ file test đã gộp thành ZIP để user tải về chạy JaCoCo local. */
     @Transactional(readOnly=true) public byte[] zipFiles(Long projectId){
@@ -1431,13 +1438,24 @@ public class UnitTestService {
             exportTests=exportProvenance==null?valid:exportProvenance.prepareValidated(projectId,valid,root);
             if(fingerprint!=null&&skipped.isEmpty()) validatedExports.put(key,new ValidatedExport(fingerprint,exportTests));
         }
-        var fileList=files.mergeByClass(exportTests).stream()
+        return packageArchive(projectId,codeByCaseId,skipped,exportTests);
+    }
+
+    private ExportArchive packageArchive(Long projectId,Map<Long,String> codeByCaseId,Map<String,String> skipped,List<UnitTest> exportTests){
+        var mergedFiles=files.mergeByClass(exportTests);
+        var fileList=mergedFiles.stream()
                 .map(f->new com.greytest.dto.UnitTestFileDto(f.filePath(),f.testClassName(),f.packageName(),f.caseIds().size(),
                         f.caseIds().stream().map(codeByCaseId::get).filter(java.util.Objects::nonNull).toList(),f.sourceCode()))
                 .toList();
         byte[] content=files.createCoverageArchive(fileList,exportSourceRoot(projectId),
                 skipped.entrySet().stream().map(item->item.getKey()+": "+item.getValue()).toList());
-        return new ExportArchive(content,List.copyOf(skipped.keySet()));
+        // Surefire dùng tên class sau khi export tách hoặc gộp fixture.
+        Map<String,String> caseCodesByTest=new LinkedHashMap<>();
+        for(var file:mergedFiles){
+            String prefix=file.packageName()==null||file.packageName().isBlank()?"":file.packageName()+".";
+            file.testNames().forEach((caseId,name)->caseCodesByTest.put(prefix+name,codeByCaseId.get(caseId)));
+        }
+        return new ExportArchive(content,List.copyOf(skipped.keySet()),caseCodesByTest);
     }
 
     // ponytail: pool cố định 4 luồng dùng chung mọi project; tăng hoặc đưa ra cấu hình nếu nhiều người export cùng lúc.

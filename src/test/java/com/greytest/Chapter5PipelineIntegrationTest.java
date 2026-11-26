@@ -211,6 +211,22 @@ class Chapter5PipelineIntegrationTest {
         assertThat(getJson(id, "generation-progress/TEST_PLAN").path("status").asText()).isEqualTo("COMPLETED");
     }
 
+    /** Batch Unit Test chạy ở luồng khác: Test Case bổ sung phải được lưu trước thì luồng đó mới đọc được. */
+    @Test
+    void it05CoverageRefinementGeneratesUnitTestsForNewlySavedCases() throws Exception {
+        long id = analyzedProject();
+        createRule(id);
+        runPipeline(id);
+        uploadCoverage(id, 1, 1);
+        JsonNode refined = json(request(post("/api/projects/" + id + "/coverage/refine")).andExpect(status().isOk()));
+        assertThat(refined.path("round").asInt()).isEqualTo(2);
+        assertThat(refined.path("testCases")).hasSize(1);
+        assertThat(refined.path("unitTests")).hasSize(1);
+        awaitWorkersIdle();
+        assertThat(getJson(id, "test-cases")).hasSize(2);
+        assertThat(getJson(id, "unit-tests")).hasSize(2);
+    }
+
     private String register() throws Exception {
         JsonNode result = json(mvc.perform(post("/api/auth/register").contentType(MediaType.APPLICATION_JSON)
                 .content(mapper.writeValueAsString(Map.of("email", UUID.randomUUID() + "@chapter5.test",
@@ -383,7 +399,7 @@ class Chapter5PipelineIntegrationTest {
             try {
                 String normalized = prompt.toLowerCase(java.util.Locale.ROOT);
                 if (normalized.contains("prompt: test-plan")) {
-                    long method = id(prompt, "id", "classQualifiedName");
+                    long method = id(prompt, "methodId", "ruleCode");
                     long rule = id(prompt, "id", "methodId");
                     return mapper.writeValueAsString(Map.of("plans", List.of(Map.of("method_id", method,
                             "rule_id", rule, "covered_rule_ids", List.of(rule), "title", "Boundary at 100",

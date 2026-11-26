@@ -519,6 +519,13 @@ public class TestPlanService {
                 .orElseThrow(() -> new IllegalArgumentException("Không tìm thấy Test Plan " + planId));
         Project project = ensureProjectExists(plan.getProjectId());
         ensurePlanEditable(project);
+        // Bấm lưu mà nội dung không đổi thì không tính là người dùng đã sửa (giữ trạng thái duyệt).
+        if (request.businessRuleId().equals(plan.getBusinessRuleId())
+                && request.title().trim().equals(plan.getTitle() == null ? null : plan.getTitle().trim())
+                && request.description().trim().equals(plan.getDescription() == null ? null : plan.getDescription().trim())
+                && request.testType() == plan.getTestType()) {
+            return toDto(plan);
+        }
         BusinessRule rule = ensureApprovedRule(plan.getProjectId(), request.businessRuleId());
         boolean anchorChanged = !rule.getId().equals(plan.getBusinessRuleId());
 

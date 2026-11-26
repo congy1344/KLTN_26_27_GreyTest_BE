@@ -291,6 +291,8 @@ class CoverageToolBootstrapTest {
                 : new ProcessBuilder("cmd.exe", "/d", "/c", "run-greytest-coverage.cmd");
         builder.directory(module.toFile()).redirectErrorStream(true);
         builder.environment().remove("GREYTEST_JUNCTION_RUN");
+        // Biến này làm cmd không tìm lệnh ở thư mục hiện tại (Maven viết hoa tên biến); người dùng chạy script thì không có nó.
+        builder.environment().keySet().removeIf("NoDefaultCurrentDirectoryInExePath"::equalsIgnoreCase);
         builder.environment().remove("MAVEN_HOME");
         builder.environment().put("MAVEN_USER_HOME", workspace.resolve("isolated maven cache").toString());
         builder.environment().put("JAVA_HOME", System.getProperty("java.home").replace('\\', '/'));

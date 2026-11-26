@@ -436,7 +436,7 @@ class CrossProjectGenerationRegressionTest {
         assertThat(encoded.toString()).contains("\\u0000").doesNotContain("\u0000");
     }
 
-    @Test void correctionPromptNamesMissingRuleAndAcceptsCompleteRetry(@org.junit.jupiter.api.io.TempDir java.nio.file.Path root) throws Exception {
+    @Test void correctionPromptAsksOnlyForTheMissingRuleAndMergesItWithValidPlans(@org.junit.jupiter.api.io.TempDir java.nio.file.Path root) throws Exception {
         var fixture = fixture("ecommerce-missing-payment-plan");
         var context = json.treeToValue(fixture.get("context"), TestPlanContextDto.class);
         var incomplete = json.treeToValue(fixture.get("response"), TestPlanResponseDto.class);
@@ -449,16 +449,18 @@ class CrossProjectGenerationRegressionTest {
         var client = org.mockito.Mockito.mock(LlmClient.class);
         org.mockito.Mockito.when(client.complete(org.mockito.ArgumentMatchers.anyString(),
                 org.mockito.ArgumentMatchers.any(LlmRequestOptions.class))).thenReturn(
-                        json.writeValueAsString(incomplete), json.writeValueAsString(new TestPlanResponseDto(plans)));
+                        json.writeValueAsString(incomplete),
+                        json.writeValueAsString(new TestPlanResponseDto(List.of(plans.get(plans.size() - 1)))));
         var parser = new GenerationResponseParser(json, jakarta.validation.Validation.buildDefaultValidatorFactory().getValidator());
         var agent = new AIAgentService(contexts, new PromptManager(json), client, parser,
                 new AiContextLogService(json, root.toString(), false, false));
 
-        assertThat(agent.generateTestPlan(1L).plans()).hasSize(plans.size());
+        // Plan hợp lệ của lượt đầu được giữ; lượt sửa chỉ sinh plan cho rule còn thiếu.
+        assertThat(agent.generateTestPlan(1L).plans()).containsExactlyElementsOf(plans);
         var prompts = org.mockito.ArgumentCaptor.forClass(String.class);
         org.mockito.Mockito.verify(client, org.mockito.Mockito.times(2)).complete(prompts.capture(),
                 org.mockito.ArgumentMatchers.any(LlmRequestOptions.class));
-        assertThat(prompts.getAllValues().get(1)).contains("# Generation validation correction", "4565", "complete plans array");
+        assertThat(prompts.getAllValues().get(1)).contains("# Generation validation correction", "approved rule IDs [4565]");
     }
 
     private Optional<String> validate(String name, UnaryOperator<String> transform) throws Exception {

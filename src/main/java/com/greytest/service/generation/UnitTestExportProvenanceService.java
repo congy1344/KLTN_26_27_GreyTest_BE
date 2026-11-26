@@ -127,8 +127,15 @@ public class UnitTestExportProvenanceService {
                 lastFailure = new IllegalArgumentException("Invalid persisted Unit Test provenance", invalid);
             }
         }
-        throw new IllegalArgumentException("Unit Test " + test.getTestCaseId()
-                + " has no valid applied checkpoint for current source; regenerate the affected test", lastFailure);
+        // Test sinh từ source cũ, không có checkpoint của lần cập nhật source đã áp dụng nào khớp với source hiện tại
+        String caseLabel = "#" + test.getTestCaseId();
+        try {
+            List<String> caseCodes = jdbc.queryForList("SELECT case_code FROM test_case WHERE id=?", String.class, test.getTestCaseId());
+            if (caseCodes != null && !caseCodes.isEmpty()) caseLabel = caseCodes.get(0);
+        } catch (RuntimeException lookupFailed) { /* chỉ để hiển thị, giữ lỗi provenance gốc */ }
+        throw new IllegalArgumentException("Unit Test " + test.getTestClassName() + "#" + test.getTestMethodName()
+                + " (Test Case " + caseLabel + ") được sinh từ phiên bản source cũ và không xác minh lại được với source hiện tại."
+                + " Hãy sinh lại Unit Test cho Test Case này.", lastFailure);
     }
 
     private boolean sameIdentity(UnitTest test, GeneratedUnitTestDto recorded) {

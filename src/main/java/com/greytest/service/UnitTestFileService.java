@@ -50,7 +50,7 @@ public class UnitTestFileService {
     private static final String SKIPPED_CASES_NAME = "GREYTEST-SKIPPED-CASES.txt";
 
     public record MergedFile(String filePath, String testClassName, String packageName,
-            List<Long> caseIds, String sourceCode) {
+            List<Long> caseIds, String sourceCode, Map<Long, String> testNames) {
     }
 
     public List<MergedFile> mergeByClass(List<UnitTest> tests) {
@@ -87,6 +87,7 @@ public class UnitTestFileService {
         if (first.getPackageName() != null && !first.getPackageName().isBlank()) merged.setPackageDeclaration(first.getPackageName());
         List<MergedFile> grouped = new ArrayList<>();
         List<MergedFile> separate = new ArrayList<>();
+        Map<Long, String> testNames = new LinkedHashMap<>();
         for (MergedFile variant : variants) {
             CompilationUnit unit = parse(GenerationSourceFingerprint.withoutMetadata(variant.sourceCode()));
             CompilationUnit candidate = jupiterTestClass(unit) ? merged.clone() : null;
@@ -99,6 +100,7 @@ public class UnitTestFileService {
             }
             merged = candidate;
             grouped.add(variant);
+            testNames.putAll(testNamesInClass(variant, name));
         }
         if (grouped.size() < 2) return variants;
         String source = merged.toString();
@@ -106,7 +108,7 @@ public class UnitTestFileService {
         if (metadata.contains(GenerationSourceFingerprint.PREFIX)) source = GenerationSourceFingerprint.attach(source, metadata);
         List<MergedFile> files = new ArrayList<>();
         files.add(new MergedFile(first.getFilePath(), fileClass, first.getPackageName(),
-                grouped.stream().flatMap(file -> file.caseIds().stream()).toList(), source));
+                grouped.stream().flatMap(file -> file.caseIds().stream()).toList(), source, testNames));
         files.addAll(separate);
         return files;
     }
@@ -349,7 +351,13 @@ public class UnitTestFileService {
         if (metadata.contains(GenerationSourceFingerprint.PREFIX)) source = GenerationSourceFingerprint.attach(source, metadata);
         String path = file.filePath().substring(0, file.filePath().length() - oldName.length() - ".java".length())
                 + newName + ".java";
-        return new MergedFile(path, newName, file.packageName(), file.caseIds(), source);
+        return new MergedFile(path, newName, file.packageName(), file.caseIds(), source, testNamesInClass(file, newName));
+    }
+
+    private Map<Long, String> testNamesInClass(MergedFile file, String className) {
+        Map<Long, String> names = new LinkedHashMap<>();
+        file.testNames().forEach((caseId, name) -> names.put(caseId, className + name.substring(name.indexOf('#'))));
+        return names;
     }
 
     private void renameType(CompilationUnit unit, String oldName, String newName) {
@@ -1104,8 +1112,12 @@ public class UnitTestFileService {
         if (metadata.contains(GenerationSourceFingerprint.PREFIX)) {
             mergedSource = GenerationSourceFingerprint.attach(mergedSource, metadata);
         }
+        Map<Long, String> testNames = new LinkedHashMap<>();
+        for (UnitTest test : tests) {
+            testNames.put(test.getTestCaseId(), first.getTestClassName() + "#" + test.getTestMethodName());
+        }
         return new MergedFile(first.getFilePath(), first.getTestClassName(), first.getPackageName(), caseIds,
-                mergedSource);
+                mergedSource, testNames);
     }
 
     private String sourceMetadata(List<String> sources) {

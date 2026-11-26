@@ -128,6 +128,11 @@ public class GenerationJobService {
 
     private GenerationJobAcceptedDto enqueue(
             Long projectId, Long actorUserId, GenerationProgressStage stage, Runnable task) {
+        return enqueue(projectId, actorUserId, stage, task, "Tác vụ đã vào hàng đợi và sẽ tự chạy nền.");
+    }
+
+    private GenerationJobAcceptedDto enqueue(
+            Long projectId, Long actorUserId, GenerationProgressStage stage, Runnable task, String queuedMessage) {
         // Kiểm tra quyền sở hữu project của actor trước khi cho phép chạy background job
         if (projectRepository != null && actorUserId != null) {
             Project project = projectRepository.findById(projectId)
@@ -161,7 +166,7 @@ public class GenerationJobService {
         }
 
         try {
-            progressService.queue(projectId, stage, "Tác vụ đã vào hàng đợi và sẽ tự chạy nền.");
+            progressService.queue(projectId, stage, queuedMessage);
             recordGenerationRequest(projectId, actorUserId, stage);
             Locale locale = LocaleContextHolder.getLocale();
             executor.execute(() -> run(projectId, actorUserId, lock, locale, task));
@@ -286,6 +291,7 @@ public class GenerationJobService {
         GenerationProgressStage stage = lock.stage();
         GenerationRunMetrics measurement = null;
         boolean aiFailure = false;
+        boolean threw = false;
         try {
             LocaleContextHolder.setLocale(locale);
             GenerationJobContext.bind(actorUserId, message -> progressService.log(projectId, stage, message));
@@ -324,6 +330,7 @@ public class GenerationJobService {
                     "Hoàn tất: không có dữ liệu mới cần sinh.");
             }
         } catch (RuntimeException exception) {
+            threw = true;
             aiFailure = !isUsageQuotaExceeded(exception) && hasCause(exception, LlmResponseException.class);
             synchronized (progressService) {
             if (!lock.equals(activeProjects.get(projectId))) return;
@@ -353,34 +360,40 @@ public class GenerationJobService {
             }
             if (released) {
                 startPendingResume(projectId);
-                autoResume(projectId, actorUserId, stage, aiFailure);
+                autoResume(projectId, actorUserId, stage, aiFailure || !threw);
             }
         }
     }
 
     /**
      * Stage kết thúc một phần (còn case bị chặn/chưa sinh được) hoặc lỗi do output/provider AI thì tự chạy "Tiếp tục sinh",
-     * vì AI thường trả kết quả hợp lệ ở lượt sau. Hết quota, tạm dừng, hủy hay lỗi dữ liệu đầu vào thì không tự chạy.
+     * hoặc service tự báo thất bại mà không ném lỗi (còn plan/case chưa sinh được), vì AI thường trả kết quả hợp lệ ở lượt sau.
+     * Hết quota, tạm dừng, hủy (kể cả quản trị viên hủy) hay lỗi dữ liệu đầu vào thì không tự chạy.
      */
-    private void autoResume(Long projectId, Long actorUserId, GenerationProgressStage stage, boolean aiFailure) {
+    private void autoResume(Long projectId, Long actorUserId, GenerationProgressStage stage, boolean resumableFailure) {
         AutoResume chain = autoResumes.get(projectId);
         if (chain == null || chain.stage() != stage || activeProjects.containsKey(projectId)) return;
         GenerationProgressStatus status = progressService.get(projectId, stage).status();
-        boolean retry = status == GenerationProgressStatus.PARTIAL || status == GenerationProgressStatus.FAILED && aiFailure;
+        boolean retry = status == GenerationProgressStatus.PARTIAL || status == GenerationProgressStatus.FAILED && resumableFailure;
         if (!retry || chain.used() >= MAX_AUTO_RESUMES) {
             autoResumes.remove(projectId, chain);
             return;
         }
         AutoResume next = new AutoResume(stage, chain.resumeTask(), chain.used() + 1);
         if (!autoResumes.replace(projectId, chain, next)) return;
-        progressService.log(projectId, stage, "Tự động tiếp tục sinh (lần " + next.used() + "/" + MAX_AUTO_RESUMES
-                + ") cho phần còn thiếu, không cần bấm 'Tiếp tục sinh'.");
         try {
-            enqueue(projectId, actorUserId, stage, chain.resumeTask());
+            // Thông báo đi cùng lệnh xếp hàng: queue() mở lượt mới nên log ghi trước đó không còn hiển thị.
+            enqueue(projectId, actorUserId, stage, chain.resumeTask(), "Tự động tiếp tục sinh (lần " + next.used() + "/"
+                    + MAX_AUTO_RESUMES + ") cho phần còn thiếu, không cần bấm 'Tiếp tục sinh'.");
         } catch (RuntimeException exception) {
             autoResumes.remove(projectId, next);
             log.warn("Could not auto-resume project {} stage {}: {}", projectId, stage, exception.getMessage());
         }
+    }
+
+    /** Dừng chuỗi tự "Tiếp tục sinh" của project (ví dụ quản trị viên hủy tác vụ). */
+    public void stopAutoResume(Long projectId) {
+        autoResumes.remove(projectId);
     }
 
     private static boolean hasCause(Throwable exception, Class<? extends Throwable> type) {

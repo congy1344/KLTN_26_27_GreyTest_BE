@@ -42,6 +42,9 @@ public class CoverageReport {
     private Integer totalBranches;
 
     private Integer coveredBranches;
+    /** Số test của lượt chạy sandbox tạo ra báo cáo này; null khi upload thủ công. */
+    private Integer testsRun;
+    private Integer testsFailed;
 
     @CreationTimestamp
     @Column(updatable = false)

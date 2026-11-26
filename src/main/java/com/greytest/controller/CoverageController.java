@@ -17,6 +17,7 @@ import com.greytest.service.CoverageService;
 import com.greytest.service.CoverageRefinementService;
 import com.greytest.service.GenerationJobService;
 import com.greytest.service.ProjectService;
+import com.greytest.service.coverage.SandboxTestRunService;
 import com.greytest.entity.AuthUser;
 import com.greytest.entity.enums.ActivityAction;
 
@@ -28,14 +29,16 @@ public class CoverageController {
     private final ProjectService projects;
     private final CoverageRefinementService refinement;
     private final GenerationJobService jobs;
+    private final SandboxTestRunService sandbox;
 
     public CoverageController(CoverageService service, AuthService auth, ProjectService projects,
-            CoverageRefinementService refinement, GenerationJobService jobs) {
+            CoverageRefinementService refinement, GenerationJobService jobs, SandboxTestRunService sandbox) {
         this.service = service;
         this.auth = auth;
         this.projects = projects;
         this.refinement = refinement;
         this.jobs = jobs;
+        this.sandbox = sandbox;
     }
 
     @PostMapping("/api/projects/{projectId}/coverage/upload")
@@ -70,9 +73,13 @@ public class CoverageController {
             @RequestParam(required = false) String servicePath,
             @RequestHeader("Authorization") String authorization) {
         AuthUser actor = access(projectId, authorization);
-        return jobs.executeAiMutation(
+        CoverageRefinementDto result = jobs.executeAiMutation(
                 projectId, actor.getId(), ActivityAction.COVERAGE_REFINEMENT,
-                () -> refinement.start(projectId, servicePath));    }
+                () -> refinement.start(projectId, servicePath));
+        // Ngoài khóa project: sandbox cần khóa này để nạp coverage.
+        if (!result.unitTests().isEmpty()) sandbox.verifyInBackground(projectId, servicePath, actor.getId());
+        return result;
+    }
 
     private AuthUser access(Long id, String authorization) {
         AuthUser user = auth.currentUser(authorization);

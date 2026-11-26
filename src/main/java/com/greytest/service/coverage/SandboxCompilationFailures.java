@@ -22,18 +22,20 @@ import com.greytest.service.UnitTestService.TestFailure;
 final class SandboxCompilationFailures {
     private static final Pattern ERROR = Pattern.compile(
             "^(?:\\[ERROR]\\s*)?((?:/|[A-Za-z]:[/\\\\]|(?:\\.\\.?/)?src/).*?\\.java):(?:\\[(\\d+),\\d+]|(\\d+):\\s*error:)\\s*(.*)$");
+    private static final Pattern COMPILATION_HEADER = Pattern.compile("(?m)^\\[ERROR]\\h+COMPILATION ERROR(?:\\h*:)?\\h*$");
     private static final java.util.Set<String> TEST_ANNOTATIONS = java.util.Set.of(
             "Test", "ParameterizedTest", "RepeatedTest", "TestFactory", "TestTemplate");
 
-    record Result(List<TestFailure> failures, String projectError) { }
+    record Result(List<TestFailure> failures, String projectError, boolean compilationError) { }
     private record Diagnostic(String path, int line, String message) { }
 
     static Result parse(String log, byte[] archive, String workdir, int maxDetail) throws IOException {
         Map<String, String> sources = sources(archive, workdir);
-        var errors = diagnostics(log);
+        String plainLog = log.replaceAll("\\x1B\\[[;\\d]*m", "");
+        var errors = diagnostics(plainLog);
         for (Diagnostic error : errors) {
             String path = absolutePath(error.path(), workdir);
-            if (!sources.containsKey(path)) return new Result(List.of(), path + ":" + error.line() + ": " + error.message());
+            if (!sources.containsKey(path)) return new Result(List.of(), path + ":" + error.line() + ": " + error.message(), true);
         }
         Map<String, LinkedHashSet<String>> details = new LinkedHashMap<>();
         Map<String, CompilationUnit> parsedSources = new LinkedHashMap<>();
@@ -43,7 +45,7 @@ final class SandboxCompilationFailures {
                 var parsed = new JavaParser(new ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_21)).parse(sources.get(path));
                 return parsed.isSuccessful() ? parsed.getResult().orElse(null) : null;
             });
-            if (unit == null) return new Result(List.of(), null);
+            if (unit == null) return new Result(List.of(), null, true);
             attribute(error, unit, sources.get(path), details);
         }
         List<TestFailure> failures = new ArrayList<>();
@@ -53,7 +55,7 @@ final class SandboxCompilationFailures {
             failures.add(new TestFailure(key.substring(0, separator), key.substring(separator + 1),
                     detail.substring(0, Math.min(detail.length(), maxDetail)), false));
         });
-        return new Result(failures, null);
+        return new Result(failures, null, !errors.isEmpty() || COMPILATION_HEADER.matcher(plainLog).find());
     }
 
     private static Map<String, String> sources(byte[] archive, String workdir) throws IOException {
@@ -125,7 +127,7 @@ final class SandboxCompilationFailures {
         String path = null;
         int line = 0;
         StringBuilder message = new StringBuilder();
-        for (String raw : log.replaceAll("\\x1B\\[[;\\d]*m", "").split("\\R")) {
+        for (String raw : log.split("\\R")) {
             var match = ERROR.matcher(raw);
             if (match.matches()) {
                 if (path != null) errors.add(new Diagnostic(path, line, message.toString()));
