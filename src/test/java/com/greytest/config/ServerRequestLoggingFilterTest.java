@@ -63,7 +63,7 @@ class ServerRequestLoggingFilterTest {
         MockHttpServletResponse response = new MockHttpServletResponse();
         FilterChain chain = mock(FilterChain.class);
 
-        when(ddosProtectionService.checkRequest(anyString(), eq("/api/projects")))
+        when(ddosProtectionService.checkRequest(anyString(), eq("GET"), eq("/api/projects")))
                 .thenReturn(new CheckResult(CheckStatus.ALLOWED, "OK", 0));
 
         filter.doFilter(request, response, chain);
@@ -80,7 +80,7 @@ class ServerRequestLoggingFilterTest {
         MockHttpServletResponse response = new MockHttpServletResponse();
         FilterChain chain = mock(FilterChain.class);
 
-        when(ddosProtectionService.checkRequest(anyString(), eq("/api/auth/login")))
+        when(ddosProtectionService.checkRequest(anyString(), eq("POST"), eq("/api/auth/login")))
                 .thenReturn(new CheckResult(CheckStatus.RATE_LIMITED, "Rate limit exceeded \"test\"", 60));
 
         filter.doFilter(request, response, chain);
@@ -106,7 +106,7 @@ class ServerRequestLoggingFilterTest {
 
         MockHttpServletRequest request = new MockHttpServletRequest("GET", "/api/projects/123");
         MockHttpServletResponse response = new MockHttpServletResponse();
-        when(ddosProtectionService.checkRequest(anyString(), eq("/api/projects/123")))
+        when(ddosProtectionService.checkRequest(anyString(), eq("GET"), eq("/api/projects/123")))
                 .thenReturn(new CheckResult(CheckStatus.ALLOWED, "OK", 0));
 
         // Simulate nested/forwarded filter invocation on the same request
@@ -129,7 +129,7 @@ class ServerRequestLoggingFilterTest {
         MockHttpServletResponse response = new MockHttpServletResponse();
         FilterChain chain = mock(FilterChain.class);
 
-        when(ddosProtectionService.checkRequest(anyString(), anyString()))
+        when(ddosProtectionService.checkRequest(anyString(), anyString(), anyString()))
                 .thenThrow(new RuntimeException("Simulated WAF failure"));
         org.mockito.Mockito.doThrow(new RuntimeException("Simulated telemetry failure"))
                 .when(telemetryService).recordRequest(anyString(), anyString(), org.mockito.ArgumentMatchers.anyInt(), anyLong(), anyString(), anyString());

@@ -420,7 +420,7 @@ public class AdminService {
 
     @Transactional
     public QuotaDto updateQuota(AuthUser admin, Long userId, Integer limit) {
-        requireUser(userId);
+        AuthUser user = requireUser(userId);
         UsageQuota quota = quotaService.updateLimit(userId, limit);
         // Giữ key null trong audit để frontend phân biệt unlimited với dữ liệu cũ thiếu
         // key.
@@ -428,7 +428,7 @@ public class AdminService {
         metadata.put("targetUserId", userId);
         metadata.put("quotaLimit", limit);
         activityService.record(admin.getId(), ActivityAction.ADMIN_QUOTA_CHANGE, null, metadata);
-        return toQuota(quota);
+        return toQuota(quota, user);
     }
 
     /**
@@ -537,11 +537,11 @@ public class AdminService {
      */
     @Transactional
     public QuotaDto resetQuota(AuthUser admin, Long userId) {
-        requireUser(userId);
+        AuthUser user = requireUser(userId);
         UsageQuota quota = quotaService.resetUsage(userId);
         activityService.record(admin.getId(), ActivityAction.ADMIN_QUOTA_CHANGE, null,
                 Map.of("targetUserId", userId, "action", "RESET_USAGE"));
-        return toQuota(quota);
+        return toQuota(quota, user);
     }
 
     /**
@@ -2152,27 +2152,31 @@ public class AdminService {
                 activities.countByUserIdAndActionTypeIn(user.getId(), GENERATION_ACTIONS),
                 activities.findFirstByUserIdOrderByCreatedAtDesc(user.getId())
                         .map(activity -> toInstant(activity.getCreatedAt())).orElse(null),
-                toQuota(quota));
+                toQuota(quota, user));
     }
 
-    private QuotaDto toQuota(UsageQuota quota) {
+    private QuotaDto toQuota(UsageQuota quota, AuthUser user) {
         if (quota == null) {
             return new QuotaDto(100, 0, 100, java.time.LocalDate.now(), java.time.LocalDate.now().plusMonths(1), false);
         }
         Integer limit = quota.getQuotaLimit();
         Integer remaining = limit == null ? null : Math.max(limit - quota.getQuotaUsed(), 0);
-        java.time.LocalDate periodStart = quota.getPeriodStart();
+        java.time.LocalDate cycleStart = quota.getPeriodStart();
         java.time.LocalDate resetDate = null;
-        if (periodStart != null) {
+        if (cycleStart != null) {
             String resetCycle = quotaService != null ? quotaService.resolveResetCycle(quota) : "MONTHLY";
             if ("DAILY".equals(resetCycle)) {
-                resetDate = periodStart.plusDays(1);
+                resetDate = cycleStart.plusDays(1);
             } else if ("WEEKLY".equals(resetCycle)) {
-                resetDate = periodStart.plusWeeks(1);
+                resetDate = cycleStart.plusWeeks(1);
             } else {
-                resetDate = periodStart.plusMonths(1);
+                resetDate = cycleStart.plusMonths(1);
             }
         }
+        UserTier tier = user != null && user.getTier() != null ? user.getTier() : UserTier.FREE;
+        java.time.LocalDate periodStart = (tier == UserTier.FREE && user != null && user.getCreatedAt() != null)
+                ? user.getCreatedAt().toLocalDate()
+                : cycleStart;
         return new QuotaDto(limit, quota.getQuotaUsed(), remaining,
                 periodStart, resetDate,
                 limit != null && quota.getQuotaUsed() >= limit);

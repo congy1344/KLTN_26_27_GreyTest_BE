@@ -47,6 +47,7 @@ class UserServiceTest {
         user.setEmail("user@example.com");
         user.setRole(UserRole.USER);
         user.setTier(UserTier.FREE);
+        user.setCreatedAt(java.time.LocalDateTime.of(2026, 9, 15, 8, 0));
 
         when(authUserRepository.findById(42L)).thenReturn(Optional.of(user));
 
@@ -66,6 +67,7 @@ class UserServiceTest {
         assertThat(response.limit()).isEqualTo(300);
         assertThat(response.used()).isEqualTo(100);
         assertThat(response.remaining()).isEqualTo(200);
+        assertThat(response.periodStart()).isEqualTo(LocalDate.of(2026, 10, 1));
         assertThat(response.resetDate()).isEqualTo(LocalDate.of(2026, 11, 1)); // mọi gói reset theo tháng
         assertThat(response.exceeded()).isFalse();
 
@@ -127,6 +129,29 @@ class UserServiceTest {
         assertThat(response.used()).isEqualTo(100);
         assertThat(response.remaining()).isEqualTo(0);
         assertThat(response.exceeded()).isTrue();
+    }
+
+    @Test
+    void freeUserPeriodStartUsesAccountRegistrationDate() {
+        AuthUser user = new AuthUser();
+        user.setId(42L);
+        user.setTier(UserTier.FREE);
+        user.setCreatedAt(java.time.LocalDateTime.of(2026, 11, 26, 10, 30));
+
+        when(authUserRepository.findById(42L)).thenReturn(Optional.of(user));
+
+        UsageQuota freeQuota = new UsageQuota();
+        freeQuota.setUserId(42L);
+        freeQuota.setQuotaLimit(100);
+        freeQuota.setQuotaUsed(10);
+        freeQuota.setPeriodStart(LocalDate.of(2026, 11, 1));
+
+        when(usageQuotaService.current(42L)).thenReturn(freeQuota);
+
+        UserQuotaResponse response = userService.currentQuota(user);
+
+        assertThat(response.periodStart()).isEqualTo(LocalDate.of(2026, 11, 26));
+        assertThat(response.resetDate()).isEqualTo(LocalDate.of(2026, 12, 1));
     }
 
     @ParameterizedTest

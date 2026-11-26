@@ -190,6 +190,13 @@ public class DdosProtectionService {
      * 5. Kiểm tra Rate limit cửa sổ trượt 60 giây (nếu > 150% -> progressive auto-ban 10-60 phút).
      */
     public CheckResult checkRequest(String clientIp, String uri) {
+        return checkRequest(clientIp, null, uri);
+    }
+
+    /**
+     * Kiểm tra nhanh một request HTTP kèm HTTP method để phân biệt truy vấn polling GET và thao tác ghi POST.
+     */
+    public CheckResult checkRequest(String clientIp, String method, String uri) {
         if (!wafActive.get() || clientIp == null || clientIp.isBlank()) {
             return new CheckResult(CheckStatus.ALLOWED, "WAF Disabled", 0);
         }
@@ -237,8 +244,8 @@ public class DdosProtectionService {
         // IP còn lại là chính proxy tin cậy nghĩa là proxy không gửi X-Forwarded-For: không biết client nào,
         // khóa IP này sẽ khóa toàn bộ người dùng phía sau proxy. Vẫn giới hạn nhịp với hạn mức rộng, chỉ không auto-ban.
         if (trustedProxyResolver.isTrustedProxy(clientIp)) {
-            int sharedLimit = resolveTierLimit(uri) * SHARED_PROXY_LIMIT_FACTOR;
-            if (!rateLimitStore.recordAndCheck(clientIp + ":" + resolveTierName(uri), 60, sharedLimit)) {
+            int sharedLimit = resolveTierLimit(method, uri) * SHARED_PROXY_LIMIT_FACTOR;
+            if (!rateLimitStore.recordAndCheck(clientIp + ":" + resolveTierName(method, uri), 60, sharedLimit)) {
                 totalBlockedRequests.incrementAndGet();
                 totalRateLimitExceeded.incrementAndGet();
                 return new CheckResult(CheckStatus.RATE_LIMITED, "Vượt quá giới hạn tần suất WAF (" + sharedLimit + " req/phút)", 60);
@@ -267,8 +274,8 @@ public class DdosProtectionService {
         }
 
         // 3. Phân loại Endpoint (Multi-Dimensional Tier) và kiểm tra Rate Limit
-        int effectiveLimit = resolveTierLimit(uri);
-        String tier = resolveTierName(uri);
+        int effectiveLimit = resolveTierLimit(method, uri);
+        String tier = resolveTierName(method, uri);
         String rateKey = clientIp + ":" + tier;
 
         // Bounded Memory: dọn dẹp nếu kích thước request hoặc burst vượt ngưỡng MAX_TRACKED_IPS
@@ -325,10 +332,14 @@ public class DdosProtectionService {
      * Phân loại endpoint và xác định tên tier tương ứng (Workstream D).
      */
     public String resolveTierName(String uri) {
+        return resolveTierName(null, uri);
+    }
+
+    public String resolveTierName(String method, String uri) {
         if (uri == null || uri.isBlank()) return "standard";
         String path = uri.toLowerCase();
         if (path.startsWith("/api/auth/")) return "auth";
-        if (path.contains("/generation-progress")) return "polling";
+        if (isPollingEndpoint(method, path)) return "polling";
         if (path.equals("/api/projects/upload") || path.startsWith("/api/projects/upload/")) return "upload";
         if (path.contains("/generate") || path.startsWith("/api/generation/")) return "generation";
         if (path.contains("/export") || path.contains("/download")) return "export";
@@ -340,7 +351,11 @@ public class DdosProtectionService {
      * Phân loại endpoint và xác định hạn mức requests/phút tương ứng (Workstream D).
      */
     public int resolveTierLimit(String uri) {
-        // Chế độ Under Attack siêt chặt toàn bộ endpoint xuống ngưỡng khẩn cáº¥p (30 req/phút)
+        return resolveTierLimit(null, uri);
+    }
+
+    public int resolveTierLimit(String method, String uri) {
+        // Chế độ Under Attack siết chặt toàn bộ endpoint xuống ngưỡng khẩn cấp (30 req/phút)
         if (underAttackMode.get()) {
             return underAttackRateLimit.get();
         }
@@ -351,8 +366,8 @@ public class DdosProtectionService {
             if (path.startsWith("/api/auth/")) {
                 return authTierLimit.get();
             }
-            // Theo dõi tiến trình AI được gọi định kỳ khi đang sinh; nhiều tab mở cùng lúc vẫn không bị chặn nhầm.
-            if (path.contains("/generation-progress")) {
+            // Theo dõi tiến trình AI / sandbox / cập nhật source được gọi định kỳ; vượt chỉ trả 429, không tự khóa IP.
+            if (isPollingEndpoint(method, path)) {
                 return POLLING_TIER_LIMIT;
             }
             if (path.equals("/api/projects/upload") || path.startsWith("/api/projects/upload/")) {
@@ -374,6 +389,16 @@ public class DdosProtectionService {
             return 500;
         }
         return standardRateLimit.get();
+    }
+
+    private static boolean isPollingEndpoint(String method, String path) {
+        if (path.contains("/generation-progress")) {
+            return true;
+        }
+        if ("GET".equalsIgnoreCase(method)) {
+            return path.endsWith("/coverage/run") || path.contains("/source-updates");
+        }
+        return false;
     }
 
     /**
