@@ -2,6 +2,7 @@ package com.greytest.performance;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import java.io.File;
 import java.io.IOException;
@@ -337,6 +338,12 @@ public class GenerationPipelinePerformanceBenchmarkTest {
     @Test
     @DisplayName("Workstream G: Benchmark trực tiếp vòng đời Docker Sandbox Container thật (create, cp, start, exec, rm)")
     void benchmarkDockerSandboxLifecycle() throws Exception {
+        try {
+            assumeTrue(runProcess("docker", "image", "inspect", "--format", "{{.Id}}", "greytest-sandbox:17") == 0,
+                    "Benchmark cần Docker daemon và image greytest-sandbox:17 trên máy chạy test");
+        } catch (IOException e) {
+            org.junit.jupiter.api.Assumptions.abort("Không thể chạy Docker CLI: " + e.getMessage());
+        }
         String containerName = "greytest-perf-sandbox-" + UUID.randomUUID().toString().substring(0, 8);
         Path testWorkDir = tempDir.resolve("sandbox-work");
         Files.createDirectories(testWorkDir);
