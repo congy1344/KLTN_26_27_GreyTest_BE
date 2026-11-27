@@ -634,18 +634,22 @@ class AdminServiceTest {
     void resetQuotaResetsUsageAndAudits() {
         AuthUser target = new AuthUser();
         target.setId(40L);
+        target.setTier(UserTier.FREE);
+        target.setCreatedAt(LocalDateTime.of(2026, 11, 26, 9, 0));
         when(users.findById(40L)).thenReturn(Optional.of(target));
 
         UsageQuota q = new UsageQuota();
         q.setUserId(40L);
         q.setQuotaLimit(100);
         q.setQuotaUsed(0);
-        q.setPeriodStart(LocalDate.now());
+        q.setPeriodStart(LocalDate.of(2026, 11, 1));
         when(quotaService.resetUsage(40L)).thenReturn(q);
 
         AdminDtos.QuotaDto result = service.resetQuota(actor(), 40L);
 
         assertThat(result.used()).isZero();
+        assertThat(result.periodStart()).isEqualTo(LocalDate.of(2026, 11, 26));
+        assertThat(result.resetDate()).isEqualTo(LocalDate.of(2026, 12, 1));
         verify(quotaService).resetUsage(40L);
     }
 

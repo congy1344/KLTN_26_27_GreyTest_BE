@@ -55,7 +55,7 @@ public class UserService {
         activityService.record(user.getId(), ActivityAction.USER_UPGRADE_TIER, null,
                 Map.of("previousTier", previousTier.name(), "newTier", targetTier.name()));
 
-        return toQuotaResponse(user.getTier(), quota);
+        return toQuotaResponse(user, quota);
     }
 
     /**
@@ -65,7 +65,7 @@ public class UserService {
     public UserQuotaResponse currentQuota(AuthUser currentUser) {
         AuthUser user = users.findById(currentUser.getId()).orElse(currentUser);
         UsageQuota quota = quotaService.current(user.getId());
-        return toQuotaResponse(user.getTier(), quota);
+        return toQuotaResponse(user, quota);
     }
 
     /** Hủy Plus/Pro về Free; yêu cầu lặp lại không cấp lại quota hoặc ghi thêm thay đổi. */
@@ -74,17 +74,18 @@ public class UserService {
         AuthUser user = users.findById(currentUser.getId()).orElse(currentUser);
         UserTier previousTier = user.getTier() != null ? user.getTier() : UserTier.FREE;
         if (previousTier == UserTier.FREE) {
-            return toQuotaResponse(UserTier.FREE, quotaService.current(user.getId()));
+            return toQuotaResponse(user, quotaService.current(user.getId()));
         }
         user.setTier(UserTier.FREE);
         users.save(user);
         UsageQuota quota = quotaService.downgradeToFree(user.getId());
         activityService.record(user.getId(), ActivityAction.USER_CANCEL_TIER, null,
                 Map.of("previousTier", previousTier.name(), "newTier", UserTier.FREE.name()));
-        return toQuotaResponse(UserTier.FREE, quota);
+        return toQuotaResponse(user, quota);
     }
 
-    private UserQuotaResponse toQuotaResponse(UserTier tier, UsageQuota quota) {
+    private UserQuotaResponse toQuotaResponse(AuthUser user, UsageQuota quota) {
+        UserTier tier = user != null && user.getTier() != null ? user.getTier() : UserTier.FREE;
         Integer limit = quota.getQuotaLimit();
         Integer remaining = limit == null ? null : Math.max(limit - quota.getQuotaUsed(), 0);
         String resetCycle = quotaService != null ? quotaService.resolveResetCycle(quota.getUserId()) : null;
@@ -101,12 +102,16 @@ public class UserService {
                 resetDate = quota.getPeriodStart().plusMonths(1);
             }
         }
+        // Thời hạn bắt đầu của gói FREE tính theo ngày đăng ký tài khoản
+        LocalDate periodStart = (tier == UserTier.FREE && user != null && user.getCreatedAt() != null)
+                ? user.getCreatedAt().toLocalDate()
+                : quota.getPeriodStart();
         return new UserQuotaResponse(
-                tier != null ? tier : UserTier.FREE,
+                tier,
                 limit,
                 quota.getQuotaUsed(),
                 remaining,
-                quota.getPeriodStart(),
+                periodStart,
                 resetDate,
                 limit != null && quota.getQuotaUsed() >= limit
         );

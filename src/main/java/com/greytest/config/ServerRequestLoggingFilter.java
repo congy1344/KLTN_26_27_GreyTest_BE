@@ -105,7 +105,10 @@ public class ServerRequestLoggingFilter extends OncePerRequestFilter {
             if (!isSecurityMgmt || ddosProtectionService.isIpBlocked(clientIp)) {
                 DdosProtectionService.CheckResult checkResult = null;
                 try {
-                    checkResult = ddosProtectionService.checkRequest(clientIp, path);
+                    checkResult = ddosProtectionService.checkRequest(clientIp, request.getMethod(), path);
+                    if (checkResult == null) {
+                        checkResult = ddosProtectionService.checkRequest(clientIp, path);
+                    }
                 } catch (Exception ignored) {
                     // Không để lỗi bộ kiểm tra WAF làm gián đoạn request
                 }

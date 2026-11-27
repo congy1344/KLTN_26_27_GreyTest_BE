@@ -43,6 +43,22 @@ class DdosProtectionServiceTest {
     }
 
     @Test
+    void sandboxAndSourceUpdateGetPollingDoesNotAutoBanIpWhilePostStaysProtected() {
+        org.springframework.test.util.ReflectionTestUtils.setField(service, "burstPerSecondLimit",
+                new java.util.concurrent.atomic.AtomicInteger(10_000));
+        String ip = "10.0.0.43";
+        assertEquals("polling", service.resolveTierName("GET", "/api/projects/7/coverage/run"));
+        assertEquals("polling", service.resolveTierName("GET", "/api/projects/7/source-updates"));
+        assertEquals("standard", service.resolveTierName("POST", "/api/projects/7/coverage/run"));
+
+        for (int i = 0; i < 500; i++) {
+            service.checkRequest(ip, "GET", "/api/projects/7/coverage/run");
+        }
+        assertFalse(service.isIpBlocked(ip));
+        assertFalse(service.checkRequest(ip, "GET", "/api/projects").isBlocked());
+    }
+
+    @Test
     void blocksTrafficWhenRateLimitExceeded() {
         service.setStandardRateLimit(5);
         String ip = "10.0.0.99";
