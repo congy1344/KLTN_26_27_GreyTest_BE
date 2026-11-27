@@ -378,6 +378,20 @@ class Chapter5PipelineIntegrationTest {
     @TestConfiguration
     static class ProviderConfig {
         @Bean @Primary FixtureProvider fixtureProvider(ObjectMapper mapper) { return new FixtureProvider(mapper); }
+
+        /** CI có Docker nhưng không có image sandbox: tự build mất vài phút. Coi Docker là ranh giới ngoài như LLM. */
+        @Bean @Primary com.greytest.service.coverage.SandboxTestRunService sandboxWithoutDocker(
+                com.greytest.service.UnitTestService units, ProjectRepository projects,
+                com.greytest.service.CoverageService coverage, com.greytest.service.GenerationJobService jobs,
+                com.greytest.service.agent.ProjectJavaVersionDetector javaVersions) {
+            return new com.greytest.service.coverage.SandboxTestRunService(units, projects, coverage, jobs, javaVersions,
+                    java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+                        Thread thread = new Thread(r, "chapter5-sandbox");
+                        thread.setDaemon(true);
+                        return thread;
+                    }),
+                    (args, log) -> { throw new java.io.IOException("Docker không khả dụng trong kiểm thử tích hợp."); });
+        }
     }
 
     /** Provider fixture trả JSON theo ID thật trong prompt, không thay gateway/parser/service. */
