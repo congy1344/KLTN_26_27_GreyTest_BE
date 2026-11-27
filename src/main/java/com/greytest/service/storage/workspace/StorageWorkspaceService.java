@@ -142,6 +142,11 @@ public class StorageWorkspaceService {
      * Nếu isEncrypted=true, giải mã vào thư mục tạm thời.
      */
     public StorageWorkspace acquireDirectoryWorkspace(Project project, Path sourceDir, boolean isEncrypted) {
+        return acquireDirectoryWorkspace(project, sourceDir, isEncrypted, true);
+    }
+
+    /** Revision lịch sử chỉ dùng để so sánh, không được lộ như source active cho validator. */
+    public StorageWorkspace acquireDirectoryWorkspace(Project project, Path sourceDir, boolean isEncrypted, boolean active) {
         if (!isEncrypted || !Boolean.TRUE.equals(project.getStorageEncrypted())) {
             return new StorageWorkspace(sourceDir, false, null);
         }
@@ -151,9 +156,9 @@ public class StorageWorkspaceService {
             setOwnerOnlyPermissions(ephemeralDir);
             SecretKey dek = encryptionService.unwrapDek(project.getEncryptedDek());
             encryptionService.decryptDirectory(sourceDir, ephemeralDir, dek, project.getId());
-            activeWorkspaces.computeIfAbsent(project.getId(), k -> ConcurrentHashMap.newKeySet()).add(ephemeralDir);
+            if (active) activeWorkspaces.computeIfAbsent(project.getId(), k -> ConcurrentHashMap.newKeySet()).add(ephemeralDir);
             return new StorageWorkspace(ephemeralDir, true, path -> {
-                activeWorkspaces.computeIfPresent(project.getId(), (k, set) -> {
+                if (active) activeWorkspaces.computeIfPresent(project.getId(), (k, set) -> {
                     set.remove(path);
                     return set.isEmpty() ? null : set;
                 });

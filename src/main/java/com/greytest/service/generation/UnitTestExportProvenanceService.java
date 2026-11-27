@@ -25,8 +25,7 @@ import com.greytest.service.agent.AIAgentService;
 import com.greytest.service.agent.GenerationSourceFingerprint;
 
 /**
- * Xác minh lại provenance chỉ cho bản export khi checkpoint chứng minh dependency còn nguyên.
- * Metadata mới ghi nhận lần xác minh hiện tại; lịch sử generation và entity trong CSDL không bị sửa.
+ * Xác minh provenance khi áp dụng source và khi xuất Unit Test.
  */
 @Service
 public class UnitTestExportProvenanceService {
@@ -110,13 +109,8 @@ public class UnitTestExportProvenanceService {
                 var currentOutput = fingerprints.outputFingerprint(output, sourceRoot, context);
                 if (!currentOutput.reusable() || !currentOutput.value().equals(envelope.path("outputFingerprint").asText())) continue;
                 agent.validateSnapshotOutput(GenerationProgressStage.UNIT_TEST, projectId, context, output, sourceRoot);
-                String metadata = GenerationSourceFingerprint.capture(sourceRoot, context.classes());
-                String audit = historicalMetadata.replace(GenerationSourceFingerprint.PREFIX, ORIGINAL_PREFIX)
-                        + "// GREYTEST_REVALIDATED_V1 applied_update=" + checkpoint.updateId()
-                        + " input=" + currentInput.value() + " output=" + currentOutput.value() + "\n";
-                String prepared = GenerationSourceFingerprint.attach(withMethodAudit(source, test, audit), metadata);
-                if (!ast(prepared).equals(ast(source))) throw new IllegalArgumentException("Export revalidation changed test code");
-                GenerationSourceFingerprint.alignToSourceRoot(List.of(prepared), sourceRoot);
+                String prepared = stamp(test, sourceRoot, context, historicalMetadata, checkpoint.updateId(),
+                        currentInput.value(), currentOutput.value());
                 UnitTest copy = new UnitTest();
                 BeanUtils.copyProperties(test, copy);
                 copy.setSourceCode(prepared);
@@ -136,6 +130,69 @@ public class UnitTestExportProvenanceService {
         throw new IllegalArgumentException("Unit Test " + test.getTestClassName() + "#" + test.getTestMethodName()
                 + " (Test Case " + caseLabel + ") được sinh từ phiên bản source cũ và không xác minh lại được với source hiện tại."
                 + " Hãy sinh lại Unit Test cho Test Case này.", lastFailure);
+    }
+
+    /** Chỉ cập nhật entity sau khi đối chiếu nguồn cũ, dependency hai revision và validator tĩnh. */
+    void revalidateRetained(Long projectId, long updateId, UnitTest test, Path base, Path active, Path activeWorkspace) {
+        String source = test.getSourceCode();
+        if (source == null || !source.contains(GenerationSourceFingerprint.PREFIX)) return;
+        String history = GenerationSourceFingerprint.aggregate(List.of(source));
+        if (history.contains(GenerationSourceFingerprint.UNVERIFIED)) return;
+        try {
+            GenerationSourceFingerprint.alignToSourceRoot(List.of(source), activeWorkspace);
+            return;
+        } catch (IllegalArgumentException changed) {
+            // Không nối lịch sử qua một revision trung gian chưa từng được xác minh.
+            GenerationSourceFingerprint.alignToSourceRoot(List.of(source), base);
+        }
+        var ids = Set.of(test.getTestCaseId());
+        var before = (UnitTestContextDto) agent.snapshotContext(GenerationProgressStage.UNIT_TEST, projectId, ids, base);
+        var after = (UnitTestContextDto) agent.snapshotContext(GenerationProgressStage.UNIT_TEST, projectId, ids, active);
+        var oldInput = fingerprints.fingerprint("unit-test", before, base);
+        var input = fingerprints.fingerprint("unit-test", after, active);
+        if (!input.value().equals(oldInput.value()) || !comparableInput(input)) return;
+
+        var output = new UnitTestResponseDto(List.of(new GeneratedUnitTestDto(test.getTestCaseId(),
+                test.getTestClassName(), test.getTestMethodName(), test.getPackageName(), test.getGenerationType(), source)));
+        var oldOutput = fingerprints.outputFingerprint(output, base, before);
+        var newOutput = fingerprints.outputFingerprint(output, active, after);
+        if (!newOutput.reusable() || !oldOutput.reusable() || !newOutput.value().equals(oldOutput.value())) return;
+        if (after.classes().isEmpty()) throw new IllegalArgumentException("Missing target classes");
+        // Context của validator dùng đường dẫn từ gốc lưu trữ, kể cả lớp thư mục bọc ngoài ZIP.
+        agent.validateExistingUnitTest(projectId, test, activeWorkspace);
+        String prepared = stamp(test, active, after, history, updateId, input.value(), newOutput.value());
+        if (!active.equals(activeWorkspace)) {
+            prepared = GenerationSourceFingerprint.alignToSourceRoot(List.of(prepared), activeWorkspace).get(0);
+        }
+        test.setSourceCode(prepared);
+    }
+
+    /** Resolver ghi digest từng implementation ứng viên; chỉ dung nạp cảnh báo dispatch khi toàn bộ digest khớp. */
+    private boolean comparableInput(GenerationFingerprintService.Fingerprint input) {
+        if (input.reusable()) return true;
+        try {
+            var problems = json.readTree(input.provenance()).path("problems");
+            if (!problems.isArray() || problems.isEmpty()) return false;
+            for (var problem : problems) {
+                if (!problem.asText().startsWith("unresolved dynamic dispatch: ")) return false;
+            }
+            return true;
+        } catch (java.io.IOException invalid) {
+            return false;
+        }
+    }
+
+    /** Ghi dấu cũ ngay trên method để export nhiều case vẫn giữ đủ lịch sử. */
+    private String stamp(UnitTest test, Path root, UnitTestContextDto context, String history,
+            long updateId, String input, String output) {
+        String metadata = GenerationSourceFingerprint.capture(root, context.classes());
+        String audit = history.replace(GenerationSourceFingerprint.PREFIX, ORIGINAL_PREFIX)
+                + "// GREYTEST_REVALIDATED_V1 applied_update=" + updateId + " input=" + input + " output=" + output + "\n";
+        String source = test.getSourceCode();
+        String prepared = GenerationSourceFingerprint.attach(withMethodAudit(source, test, audit), metadata);
+        if (!ast(prepared).equals(ast(source))) throw new IllegalArgumentException("Export revalidation changed test code");
+        GenerationSourceFingerprint.alignToSourceRoot(List.of(prepared), root);
+        return prepared;
     }
 
     private boolean sameIdentity(UnitTest test, GeneratedUnitTestDto recorded) {

@@ -87,6 +87,8 @@ import com.greytest.service.diff.ImpactAnalysisService;
 import com.greytest.service.diff.SourceDiffService;
 import com.greytest.entity.MethodParam;
 import com.greytest.service.generation.IncrementalCheckpointCoordinator;
+import com.greytest.service.generation.RetainedUnitTestRevalidation.SourceApplied;
+import org.springframework.context.ApplicationEventPublisher;
 
 import lombok.extern.slf4j.Slf4j;
 
@@ -119,6 +121,7 @@ public class SourceUpdateService {
     private final JavaMethodRepository javaMethodRepository;
     private ObjectMapper objectMapper;
     private JdbcTemplate generationJdbc;
+    private ApplicationEventPublisher events;
     private IncrementalCheckpointCoordinator generationCoordinator;
     @Autowired(required = false)
     private BreakGlassAccessService breakGlassAccessService;
@@ -179,10 +182,11 @@ public class SourceUpdateService {
             TestPlanRepository plans, TestCaseRepository cases, UnitTestRepository tests,
             JavaClassRepository classes, JavaMethodRepository methods, ObjectMapper json,
             TestPlanCoveredRuleRepository coverage, JdbcTemplate jdbc, IncrementalCheckpointCoordinator coordinator,
-            @Autowired(required = false) BreakGlassAccessService breakGlassAccessService) {
+            @Autowired(required = false) BreakGlassAccessService breakGlassAccessService, ApplicationEventPublisher events) {
         this(projects, revisions, updates, items, storage, mapper, diffs, impacts, rules, plans, cases, tests,
                 classes, methods, json, coverage);
         this.generationJdbc = jdbc;
+        this.events = events;
         this.generationCoordinator = coordinator;
         this.breakGlassAccessService = breakGlassAccessService;
     }
@@ -950,6 +954,7 @@ public class SourceUpdateService {
         sourceUpdateItemRepository.saveAll(items);
         update.setStatus(SourceUpdateStatus.APPLIED);
         update = sourceUpdateRepository.save(update);
+        publishSourceApplied(project, update, candidate, Set.of());
         log.info("Đã áp dụng source mới cho project {} (update {}): xóa {} BR, {} Plan, {} Case, {} Unit Test để sinh lại",
                 projectId, updateId, ruleIds.size(), planIds.size(), caseIds.size(), unitTestIds.size());
         return sourceUpdateMapper.toUpdateDto(update, items);
@@ -1141,6 +1146,7 @@ public class SourceUpdateService {
         }
         synchronizeChangedSource(projectId, items, reviewedSources);
 
+        Set<Long> writtenTests = new HashSet<>();
         for (SourceUpdateItem item : items) {
             if (item.getReviewStatus() == SourceUpdateReviewStatus.REJECTED
                     || item.getAction() == SourceUpdateAction.REMOVE
@@ -1334,6 +1340,7 @@ public class SourceUpdateService {
                             ut.setGenerationType(genType);
                             ut.setFilePath(unitTestFilePath(dto.packageName(), dto.testClassName()));
                             unitTestRepository.save(ut);
+                            writtenTests.add(ut.getId());
                         } else {
                             UnitTest ut = new UnitTest();
                             ut.setTestCaseId(targetCaseId);
@@ -1344,6 +1351,7 @@ public class SourceUpdateService {
                             ut.setSourceCode(normalizeUnitTestSource(dto));
                             ut.setFilePath(unitTestFilePath(dto.packageName(), dto.testClassName()));
                             unitTestRepository.save(ut);
+                            writtenTests.add(ut.getId());
                         }
                     } catch (Exception e) {
                         throw new IllegalStateException("Không thể áp dụng UnitTest item " + item.getId(), e);
@@ -1376,9 +1384,17 @@ public class SourceUpdateService {
             projectRepository.save(project);
         }
 
+        publishSourceApplied(project, update, candidate, writtenTests);
         log.info("Đã áp dụng thành công bản cập nhật {} cho project {}: {} classes, {} methods",
                 updateId, projectId, currentClasses.size(), totalMethods);
         return sourceUpdateMapper.toUpdateDto(update, items);
+    }
+
+    /** Xác minh các test giữ lại sau khi giao dịch apply đã commit. */
+    private void publishSourceApplied(Project project, SourceUpdate update, SourceRevision candidate, Set<Long> writtenTests) {
+        if (events != null && update.getBaseRevisionId() != null) {
+            events.publishEvent(new SourceApplied(project, update.getId(), update.getBaseRevisionId(), candidate, writtenTests));
+        }
     }
 
     /**

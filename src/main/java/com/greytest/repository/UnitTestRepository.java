@@ -1,6 +1,7 @@
 package com.greytest.repository;
 
 import java.util.List;
+import java.util.Optional;
 
 import org.springframework.data.jpa.repository.JpaRepository;
 
@@ -13,6 +14,19 @@ public interface UnitTestRepository extends JpaRepository<UnitTest, Long> {
     }
 
     List<UnitTest> findByTestCaseIdIn(List<Long> testCaseIds);
+
+    /** Chỉ lấy ID của test có metadata thuộc project vừa áp dụng source. */
+    @org.springframework.data.jpa.repository.Query("""
+            SELECT ut.id FROM UnitTest ut JOIN TestCase tc ON tc.id = ut.testCaseId
+            JOIN TestPlan tp ON tp.id = tc.testPlanId WHERE tp.projectId = :projectId
+            AND locate('// GREYTEST_SOURCE_V1 ', ut.sourceCode) > 0 ORDER BY ut.id
+            """)
+    List<Long> findStampedIdsByProjectId(Long projectId);
+
+    /** Khóa test trong lúc đối chiếu để không ghi đè lần sinh lại đồng thời. */
+    @org.springframework.data.jpa.repository.Lock(jakarta.persistence.LockModeType.PESSIMISTIC_WRITE)
+    @org.springframework.data.jpa.repository.Query("SELECT ut FROM UnitTest ut WHERE ut.id = :id")
+    Optional<UnitTest> findByIdForUpdate(Long id);
 
     @org.springframework.data.jpa.repository.Query(value = """
             SELECT COUNT(ut.id)
