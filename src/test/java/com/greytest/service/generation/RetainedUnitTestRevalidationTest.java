@@ -10,6 +10,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -107,6 +108,55 @@ class RetainedUnitTestRevalidationTest {
             assertThatThrownBy(() -> provenance.prepareValidated(1L, List.of(stale), newRoot))
                     .hasMessageContaining("được sinh từ phiên bản source cũ");
         }
+    }
+
+    @Test
+    void revalidatesEachCaseInMergedTestClass(@TempDir Path root) throws Exception {
+        Path base = root.resolve("base");
+        Path active = root.resolve("active");
+        String service = """
+                package demo;
+                public final class Service {
+                    public int create() { return 7; }
+                    public Integer findById(Integer id) { return id + 1; }
+                }
+                """;
+        Files.createDirectories(base.resolve(FILE).getParent());
+        Files.createDirectories(active.resolve(FILE).getParent());
+        Files.writeString(base.resolve(FILE), service);
+        Files.writeString(active.resolve(FILE), service.replace("return id + 1;", "if (id == null) return null; return id + 1;"));
+        var agent = mock(AIAgentService.class);
+        var prompts = mock(PromptManager.class);
+        when(prompts.load(anyString())).thenReturn("prompt");
+        var json = new ObjectMapper();
+        var fingerprints = new GenerationFingerprintService(json, prompts, LlmStageTokenLimits.defaults(), new MockEnvironment());
+        var provenance = new UnitTestExportProvenanceService(mock(JdbcTemplate.class), agent, fingerprints, json);
+        var tests = mock(UnitTestRepository.class);
+        // Cùng input ổn định để chỉ dependency của output quyết định dấu của từng case.
+        var create = test(33L, "create", "create", base, agent, tests);
+        var find = test(34L, "create", "create", base, agent, tests);
+        String merged = GenerationSourceFingerprint.aggregate(List.of(create.getSourceCode())) + """
+                package demo;
+                class ServiceTest {
+                    Service service = new Service();
+                    @org.junit.jupiter.api.Test void createsUser() { service.create(); }
+                    @org.junit.jupiter.api.Test void findsUser() { lookup(); }
+                    void lookup() { lookupById(); }
+                    void lookupById() { service.findById(1); }
+                }
+                """;
+        create.setTestMethodName("createsUser");
+        find.setTestMethodName("findsUser");
+        create.setSourceCode(merged);
+        find.setSourceCode(merged);
+
+        provenance.revalidateRetained(1L, 9L, create, base, active, active);
+        provenance.revalidateRetained(1L, 9L, find, base, active, active);
+
+        assertThat(create.getSourceCode()).startsWith(GenerationSourceFingerprint.PREFIX
+                + GenerationSourceFingerprint.hash(Files.readString(active.resolve(FILE))))
+                .contains("GREYTEST_REVALIDATED_V1 applied_update=9", "void findsUser()", "service.findById(1)");
+        assertThat(find.getSourceCode()).isEqualTo(merged);
     }
 
     /** Hai revision chỉ khác nhau ở thân method a. */

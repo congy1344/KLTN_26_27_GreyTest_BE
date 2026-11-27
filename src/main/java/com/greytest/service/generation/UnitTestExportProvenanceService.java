@@ -1,7 +1,10 @@
 package com.greytest.service.generation;
 
 import java.nio.file.Path;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
@@ -15,6 +18,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.javaparser.JavaParser;
 import com.github.javaparser.ParserConfiguration;
 import com.github.javaparser.ast.CompilationUnit;
+import com.github.javaparser.ast.Node;
+import com.github.javaparser.ast.body.MethodDeclaration;
+import com.github.javaparser.ast.expr.MethodCallExpr;
+import com.github.javaparser.ast.expr.MethodReferenceExpr;
 import com.greytest.dto.GenerationProgressStage;
 import com.greytest.dto.agent.GenerationContextDtos.UnitTestContextDto;
 import com.greytest.dto.agent.GenerationResponseDtos.GeneratedUnitTestDto;
@@ -153,7 +160,7 @@ public class UnitTestExportProvenanceService {
         if (!input.value().equals(oldInput.value()) || !comparableInput(input)) return;
 
         var output = new UnitTestResponseDto(List.of(new GeneratedUnitTestDto(test.getTestCaseId(),
-                test.getTestClassName(), test.getTestMethodName(), test.getPackageName(), test.getGenerationType(), source)));
+                test.getTestClassName(), test.getTestMethodName(), test.getPackageName(), test.getGenerationType(), retainedFingerprintSource(test))));
         var oldOutput = fingerprints.outputFingerprint(output, base, before);
         var newOutput = fingerprints.outputFingerprint(output, active, after);
         if (!newOutput.reusable() || !oldOutput.reusable() || !newOutput.value().equals(oldOutput.value())) return;
@@ -165,6 +172,58 @@ public class UnitTestExportProvenanceService {
             prepared = GenerationSourceFingerprint.alignToSourceRoot(List.of(prepared), activeWorkspace).get(0);
         }
         test.setSourceCode(prepared);
+    }
+
+    /** Chỉ thu gọn bản dùng để so fingerprint; validator và bước gắn dấu vẫn đọc nguyên file. */
+    private String retainedFingerprintSource(UnitTest test) {
+        String source = test.getSourceCode();
+        CompilationUnit unit;
+        try {
+            unit = parse(source);
+        } catch (IllegalArgumentException invalid) {
+            return source;
+        }
+        var owners = unit.getTypes().stream().filter(type -> type.getNameAsString().equals(test.getTestClassName())).toList();
+        if (owners.size() != 1) return source;
+        var owner = owners.get(0);
+        var targets = owner.getMethodsByName(test.getTestMethodName());
+        if (targets.size() != 1) return source;
+
+        var lifecycle = Set.of("BeforeEach", "BeforeAll", "AfterEach", "AfterAll", "Before", "After");
+        var testAnnotations = Set.of("Test", "ParameterizedTest", "RepeatedTest");
+        Set<MethodDeclaration> retained = Collections.newSetFromMap(new IdentityHashMap<>());
+        var pending = new ArrayDeque<Node>();
+        for (var member : owner.getMembers()) {
+            if (!(member instanceof MethodDeclaration method)) {
+                pending.add(member);
+            } else if (method == targets.get(0) || hasAnnotation(method, lifecycle)) {
+                retained.add(method);
+                pending.add(method);
+            }
+        }
+        // Lần theo cả helper của fixture; giữ mọi overload có thể khớp khi chưa biết kiểu đối số.
+        while (!pending.isEmpty()) {
+            var member = pending.remove();
+            for (var call : member.findAll(MethodCallExpr.class)) {
+                int count = call.getArguments().size();
+                for (var helper : owner.getMethodsByName(call.getNameAsString())) {
+                    var params = helper.getParameters();
+                    if ((params.size() == count || !params.isEmpty() && params.getLast().orElseThrow().isVarArgs() && count >= params.size() - 1)
+                            && !hasAnnotation(helper, testAnnotations) && retained.add(helper)) pending.add(helper);
+                }
+            }
+            for (var reference : member.findAll(MethodReferenceExpr.class)) {
+                for (var helper : owner.getMethodsByName(reference.getIdentifier())) {
+                    if (!hasAnnotation(helper, testAnnotations) && retained.add(helper)) pending.add(helper);
+                }
+            }
+        }
+        owner.getMembers().removeIf(member -> member instanceof MethodDeclaration method && !retained.contains(method));
+        return unit.toString();
+    }
+
+    private boolean hasAnnotation(MethodDeclaration method, Set<String> names) {
+        return method.getAnnotations().stream().anyMatch(annotation -> names.contains(annotation.getName().getIdentifier()));
     }
 
     /** Resolver ghi digest từng implementation ứng viên; chỉ dung nạp cảnh báo dispatch khi toàn bộ digest khớp. */
